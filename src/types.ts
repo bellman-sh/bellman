@@ -1,0 +1,100 @@
+export type Plan = "free" | "pro" | "team";
+export type Role = "member" | "admin";
+export type SessionMode = "pair" | "swarm";
+export type Capability = "read_context" | "receive_messages" | "request_actions";
+
+export interface Identity {
+  userId: string;
+  orgId: string | null;
+  plan: Plan;
+  role: Role;
+  label: string; // display name, e.g. "jesse@codenerd"
+}
+
+/** Provider-neutral description of the agent on this side of the wire. */
+export interface AgentInfo {
+  provider: string; // "anthropic" | "openai" | "google" | ...
+  model: string;    // "claude-fable-5", "gpt-5", ...
+  client: string;   // "claude-code", "chatgpt", "gemini-cli", "cursor", ...
+}
+
+export interface Brief {
+  goal: string;
+  state: string;
+  constraints: string[];
+  open_questions: string[];
+  agent: AgentInfo;
+}
+
+export interface Member {
+  memberId: string; // unique per CONNECTION — same user can join from two machines
+  userId: string;
+  label: string;
+  orgId: string | null;
+  capabilities: Capability[];
+  brief: Brief;
+  joinedAt: number;
+  leftAt: number | null;
+}
+
+export type EventType =
+  | "member_joined"
+  | "member_left"
+  | "message"
+  | "artifact"
+  | "action_request"
+  | "action_response"
+  | "brief_update"
+  | "session_expired";
+
+export interface SessionEvent {
+  cursor: number;
+  type: EventType;
+  fromMemberId: string; // "system" for server-originated events
+  fromUserId: string;
+  fromLabel: string;
+  payload: unknown;
+  refId: string | null;
+  at: number;
+}
+
+export interface Session {
+  id: string;
+  mode: SessionMode;
+  createdBy: string;
+  orgId: string | null;
+  orgOnly: boolean;
+  joinCode: string | null;      // null once consumed (pair) or session closed
+  joinCodeExpiresAt: number;    // unused-code TTL
+  expiresAt: number;            // whole-session TTL
+  maxMembers: number;
+  members: Member[];
+  events: SessionEvent[];
+  closed: boolean;
+}
+
+export interface PendingConnect {
+  token: string;
+  sessionId: string;
+  userId: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AuditEntry {
+  at: number;
+  orgId: string | null;
+  sessionId: string;
+  actorUserId: string;
+  action: string;
+  detail: Record<string, unknown>;
+}
+
+export interface Entitlements {
+  modes: SessionMode[];
+  maxMembers: number;
+  sessionTtlMs: number;
+  monthlyCreates: number;
+  orgScoping: boolean;
+  audit: boolean;
+}

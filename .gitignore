@@ -16,3 +16,4 @@ data/
 .dual-graph/run/
 .dual-graph/info_graph.json
 .dual-graph/symbol_index.json
+.dual-graph/

@@ -106,7 +106,7 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
   it("does not grant request_actions by default", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
-    const session = h.store.getSession(String(started.data.session_id))!;
+    const session = (await h.store.getSession(String(started.data.session_id)))!;
 
     expect(session.members[0].capabilities).toEqual(["read_context", "receive_messages"]);
     expect(session.members[0].capabilities).not.toContain("request_actions");
@@ -214,7 +214,7 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
 describe("INVARIANT 8 — message-passing only, no shared mutable state", () => {
   it("lets a member update only their own brief", async () => {
     const p = await pairUp(h);
-    const before = h.store.getSession(p.sessionId)!;
+    const before = (await h.store.getSession(p.sessionId))!;
     const creatorGoalBefore = before.members[0].brief.goal;
 
     const updated = brief({ goal: "Narrowed to the webhook retry path", agent: openaiAgent });
@@ -224,7 +224,7 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
     });
     expect(res.isError, res.text).toBe(false);
 
-    const after = h.store.getSession(p.sessionId)!;
+    const after = (await h.store.getSession(p.sessionId))!;
     const creator = after.members.find((m) => m.memberId === p.creatorMemberId)!;
     const joiner = after.members.find((m) => m.memberId === p.joinerMemberId)!;
 
@@ -251,13 +251,13 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
       });
     }
 
-    const events = h.store.getSession(p.sessionId)!.events;
+    const events = (await h.store.getSession(p.sessionId))!.events;
     const cursors = events.map((e) => e.cursor);
     expect(cursors).toEqual([...cursors].sort((a, b) => a - b));
     expect(new Set(cursors).size).toBe(cursors.length);
 
     // Replaying from cursor 0 returns the same history, unchanged.
-    const replay = h.store.eventsAfter(p.sessionId, 0);
+    const replay = (await h.store.eventsAfter(p.sessionId, 0));
     expect(replay.map((e) => e.payload)).toEqual(events.map((e) => e.payload));
   });
 
@@ -395,7 +395,7 @@ describe("send / sync / leave mechanics", () => {
       session_id: p.sessionId, member_id: p.creatorMemberId,
     });
     expect(last.data.session_status).toBe("closed");
-    expect(h.store.getSession(p.sessionId)!.closed).toBe(true);
+    expect((await h.store.getSession(p.sessionId))!.closed).toBe(true);
   });
 
   it("treats a repeated leave as a no-op", async () => {

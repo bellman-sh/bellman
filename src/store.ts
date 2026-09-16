@@ -15,42 +15,48 @@ export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftA
  * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
  * without touching tool logic.
  *
+ * EVERY METHOD IS ASYNC, including ones an in-memory store answers instantly.
+ * That is not incidental. A Durable Objects port resolves a join code in one
+ * DO and the session it names in another, and every cross-DO hop is RPC. A
+ * synchronous signature here would be implementable only by MemoryStore, which
+ * would make this interface a comment rather than a seam.
+ *
  * Read methods return DETACHED copies. Callers must never mutate what they read
  * back and expect it to stick — every write has an explicit method here. That
  * rule is what makes the interface portable: a database-backed store cannot
  * hand out live references, so relying on them would silently break the port.
  */
 export interface BellmanStore {
-  createSession(s: Session): void;
-  getSession(id: string): Session | undefined;
-  getSessionByJoinCode(code: string): Session | undefined;
+  createSession(s: Session): Promise<void>;
+  getSession(id: string): Promise<Session | undefined>;
+  getSessionByJoinCode(code: string): Promise<Session | undefined>;
 
   /** Consume a session's single-use join code. Idempotent. */
-  consumeJoinCode(sessionId: string): void;
+  consumeJoinCode(sessionId: string): Promise<void>;
   /** Append a member to a session. */
-  addMember(sessionId: string, member: Member): void;
+  addMember(sessionId: string, member: Member): Promise<void>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
-  updateMember(sessionId: string, memberId: string, patch: MemberPatch): void;
+  updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /** Mark a session closed. Idempotent. */
-  closeSession(sessionId: string): void;
+  closeSession(sessionId: string): Promise<void>;
 
   appendEvent(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">
-  ): SessionEvent;
-  eventsAfter(sessionId: string, cursor: number): SessionEvent[];
+  ): Promise<SessionEvent>;
+  eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
-  putPendingConnect(p: PendingConnect): void;
-  takePendingConnect(token: string): PendingConnect | undefined;
+  putPendingConnect(p: PendingConnect): Promise<void>;
+  takePendingConnect(token: string): Promise<PendingConnect | undefined>;
 
-  countCreatesThisMonth(userId: string): number;
-  recordCreate(userId: string): void;
+  countCreatesThisMonth(userId: string): Promise<number>;
+  recordCreate(userId: string): Promise<void>;
 
-  appendAudit(a: AuditEntry): void;
-  auditForOrg(orgId: string, limit: number): AuditEntry[];
+  appendAudit(a: AuditEntry): Promise<void>;
+  auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
 
-  sweep(now: number): void;
+  sweep(now: number): Promise<void>;
 }
 
 function detach<T>(value: T): T {
@@ -65,43 +71,47 @@ export class MemoryStore implements BellmanStore {
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
 
-  createSession(s: Session): void {
+  async createSession(s: Session): Promise<void> {
     const stored = detach(s);
     this.sessions.set(stored.id, stored);
     if (stored.joinCode) this.byJoinCode.set(stored.joinCode, stored.id);
   }
 
-  getSession(id: string): Session | undefined {
+  async getSession(id: string): Promise<Session | undefined> {
     const s = this.sessions.get(id);
     if (!s) return undefined;
     this.expireIfDue(s, Date.now());
     return detach(s);
   }
 
-  getSessionByJoinCode(code: string): Session | undefined {
+  async getSessionByJoinCode(code: string): Promise<Session | undefined> {
     const id = this.byJoinCode.get(code);
     if (!id) return undefined;
-    const s = this.getSession(id);
+    const s = await this.getSession(id);
     if (!s || s.closed) return undefined;
     if (s.joinCode !== code) return undefined; // consumed or rotated
     if (Date.now() > s.joinCodeExpiresAt) return undefined;
     return s;
   }
 
-  consumeJoinCode(sessionId: string): void {
+  async consumeJoinCode(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s || !s.joinCode) return;
     this.byJoinCode.delete(s.joinCode);
     s.joinCode = null;
   }
 
-  addMember(sessionId: string, member: Member): void {
+  async addMember(sessionId: string, member: Member): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.members.push(detach(member));
   }
 
-  updateMember(sessionId: string, memberId: string, patch: MemberPatch): void {
+  async updateMember(
+    sessionId: string,
+    memberId: string,
+    patch: MemberPatch
+  ): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     const m = s.members.find((mm) => mm.memberId === memberId);
@@ -111,13 +121,16 @@ export class MemoryStore implements BellmanStore {
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
   }
 
-  closeSession(sessionId: string): void {
+  async closeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.closed = true;
   }
 
-  appendEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">): SessionEvent {
+  async appendEvent(
+    sessionId: string,
+    e: Omit<SessionEvent, "cursor" | "at">
+  ): Promise<SessionEvent> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     const event: SessionEvent = { ...detach(e), cursor: s.events.length + 1, at: Date.now() };
@@ -126,14 +139,29 @@ export class MemoryStore implements BellmanStore {
     return detach(event);
   }
 
-  eventsAfter(sessionId: string, cursor: number): SessionEvent[] {
+  async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
     if (!s) return [];
     return detach(s.events.filter((e) => e.cursor > cursor));
   }
 
-  waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]> {
-    const immediate = this.eventsAfter(sessionId, cursor);
+  /**
+   * Deliberately NOT declared `async`. The read and the waiter registration
+   * must happen in the same synchronous turn: an `await` between them yields,
+   * and an event appended in that gap calls wake() against an empty waiter
+   * list, so this poll hangs until its own timeout — a lost wakeup. Callers
+   * still get a Promise, so the interface is unchanged.
+   *
+   * A Durable Objects port gets this atomicity from the DO's single-threaded
+   * execution, but the same rule applies: read and register without yielding.
+   */
+  waitForEvents(
+    sessionId: string,
+    cursor: number,
+    waitMs: number
+  ): Promise<SessionEvent[]> {
+    const s = this.sessions.get(sessionId);
+    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor)) : [];
     if (immediate.length > 0 || waitMs <= 0) return Promise.resolve(immediate);
     return new Promise((resolve) => {
       const w: Waiter = { after: cursor, resolve };
@@ -151,11 +179,11 @@ export class MemoryStore implements BellmanStore {
     });
   }
 
-  putPendingConnect(p: PendingConnect): void {
+  async putPendingConnect(p: PendingConnect): Promise<void> {
     this.pending.set(p.token, detach(p));
   }
 
-  takePendingConnect(token: string): PendingConnect | undefined {
+  async takePendingConnect(token: string): Promise<PendingConnect | undefined> {
     const p = this.pending.get(token);
     if (!p) return undefined;
     this.pending.delete(token); // single use
@@ -163,27 +191,27 @@ export class MemoryStore implements BellmanStore {
     return p;
   }
 
-  countCreatesThisMonth(userId: string): number {
+  async countCreatesThisMonth(userId: string): Promise<number> {
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
     return (this.creates.get(userId) ?? []).filter((t) => t >= monthStart).length;
   }
 
-  recordCreate(userId: string): void {
+  async recordCreate(userId: string): Promise<void> {
     const list = this.creates.get(userId) ?? [];
     list.push(Date.now());
     this.creates.set(userId, list);
   }
 
-  appendAudit(a: AuditEntry): void {
+  async appendAudit(a: AuditEntry): Promise<void> {
     this.audit.push(detach(a));
   }
 
-  auditForOrg(orgId: string, limit: number): AuditEntry[] {
+  async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return detach(this.audit.filter((a) => a.orgId === orgId).slice(-limit));
   }
 
-  sweep(now: number): void {
+  async sweep(now: number): Promise<void> {
     for (const s of this.sessions.values()) this.expireIfDue(s, now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);

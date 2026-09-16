@@ -8,6 +8,15 @@ compatibility_flags = ["nodejs_compat"]
 
 account_id = "f483aaf74f1ab48e4c64e2170102282a"
 
+# The zone is on Cloudflare, so the Worker binds its own hostname directly and
+# Cloudflare manages the DNS record for it. This also sidesteps needing a
+# workers.dev subdomain at all, which is why that is switched off.
+workers_dev = false
+
+[[routes]]
+pattern = "mcp.bellman.sh"
+custom_domain = true
+
 # One DO per session, a singleton registry, one audit object per org.
 # See the topology comment at the top of src/store-do.ts.
 [[durable_objects.bindings]]

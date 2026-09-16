@@ -66,15 +66,26 @@ const DEV_KEYS: Record<string, Identity> = {
 export function resolveIdentity(authHeader: string | undefined): Identity | null {
   if (!authHeader) return null;
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  const fromEnv = process.env.BELLMAN_KEYS; // JSON blob to seed real keys
+
+  /**
+   * BELLMAN_KEYS is AUTHORITATIVE wherever it is set: once real keys are
+   * configured the dev table is out of play entirely. Falling through to it
+   * would leave `qk_dev_jesse` — team plan, admin role, and printed in the
+   * README — valid on a deployed server. Any deployment must set this.
+   */
+  const fromEnv = process.env.BELLMAN_KEYS; // JSON map of key -> identity
   if (fromEnv) {
     try {
       const parsed = JSON.parse(fromEnv) as Record<string, Identity>;
-      if (parsed[token]) return parsed[token];
+      return parsed[token] ?? null;
     } catch {
-      // fall through to dev keys
+      // Fail closed. A malformed key map must reject every request rather
+      // than silently downgrade the server to the dev identities.
+      console.error("BELLMAN_KEYS is set but is not valid JSON — rejecting all requests");
+      return null;
     }
   }
+
   return DEV_KEYS[token] ?? null;
 }
 

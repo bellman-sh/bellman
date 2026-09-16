@@ -85,7 +85,7 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
 
     // Exhaust the free plan's monthly create quota for u_peer.
     for (let i = 0; i < ENTITLEMENTS.free.monthlyCreates; i++) {
-      h.store.recordCreate("u_peer");
+      (await h.store.recordCreate("u_peer"));
     }
 
     const blocked = await peer.call("bellman_start", { mode: "pair", brief: brief() });
@@ -176,8 +176,8 @@ describe("INVARIANT 2 — two-phase connect", () => {
       session_id: sessionId, member_id: creatorMemberId, since_cursor: 0,
     });
     expect(sync.data.events).toEqual([]);
-    expect(h.store.getSession(sessionId)!.members).toHaveLength(1);
-    expect(h.store.getSession(sessionId)!.events).toHaveLength(0);
+    expect((await h.store.getSession(sessionId))!.members).toHaveLength(1);
+    expect((await h.store.getSession(sessionId))!.events).toHaveLength(0);
   });
 
   it("ships the joiner's brief only on confirm", async () => {
@@ -369,7 +369,7 @@ describe("INVARIANT 7 — member handles are per-connection", () => {
     expect(confirmed.isError, confirmed.text).toBe(false);
     expect(confirmed.data.member_id).not.toBe(started.data.member_id);
 
-    const session = h.store.getSession(String(started.data.session_id))!;
+    const session = (await h.store.getSession(String(started.data.session_id)))!;
     expect(session.members).toHaveLength(2);
     expect(session.members.every((m) => m.userId === "u_jesse")).toBe(true);
     expect(new Set(session.members.map((m) => m.memberId)).size).toBe(2);

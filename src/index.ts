@@ -5,7 +5,10 @@ const store: BellmanStore = new MemoryStore();
 const app = createApp(store);
 
 // Periodic expiry of sessions and pending connect tokens.
-setInterval(() => store.sweep(Date.now()), 60_000).unref();
+setInterval(() => {
+  // sweep is async now; a rejection here must not take down the process.
+  store.sweep(Date.now()).catch((err) => console.error("sweep failed:", err));
+}, 60_000).unref();
 
 const port = parseInt(process.env.PORT || "3900", 10);
 app.listen(port, () => {

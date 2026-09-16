@@ -112,13 +112,13 @@ function publicEvent(e: SessionEvent) {
  * so each org's admins see the crossings that touched THEIR boundary —
  * without being able to read the other org's unrelated activity.
  */
-function audit(
+async function audit(
   store: BellmanStore,
   session: Session,
   actor: Identity,
   action: string,
   detail: Record<string, unknown>
-): void {
+): Promise<void> {
   const orgs = new Set<string | null>([session.orgId, actor.orgId]);
   for (const orgId of orgs) {
     if (orgId === null) continue;
@@ -130,7 +130,7 @@ function audit(
       action,
       detail,
     };
-    store.appendAudit(entry);
+    await store.appendAudit(entry);
   }
 }
 
@@ -182,7 +182,7 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
       if (org_only && !identity.orgId) {
         return fail("org_only was set but your identity has no org.");
       }
-      const used = s.countCreatesThisMonth(identity.userId);
+      const used = await s.countCreatesThisMonth(identity.userId);
       if (used >= ent.monthlyCreates) {
         return fail(`monthly session limit reached (${ent.monthlyCreates} on the "${identity.plan}" plan).`);
       }
@@ -213,9 +213,9 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
         events: [],
         closed: false,
       };
-      s.createSession(session);
-      s.recordCreate(identity.userId);
-      audit(s, session, identity, "session_created", { mode, org_only });
+      await s.createSession(session);
+      await s.recordCreate(identity.userId);
+      await audit(s, session, identity, "session_created", { mode, org_only });
 
       return ok({
         session_id: session.id,
@@ -250,7 +250,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       },
     },
     async ({ join_code }): Promise<ToolResult> => {
-      const session = s.getSessionByJoinCode(normalizeJoinCode(join_code));
+      const session = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
       if (!session) {
         return fail("join code not found or expired. Codes expire 15 minutes after creation if unused, and are consumed when a pair session fills. Ask the creator to start a new session.");
       }
@@ -262,14 +262,14 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       }
       const creator = session.members[0];
       const token = generateConnectToken();
-      s.putPendingConnect({
+      await s.putPendingConnect({
         token,
         sessionId: session.id,
         userId: identity.userId,
         createdAt: Date.now(),
         expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       });
-      audit(s, session, identity, "connect_previewed", {});
+      await audit(s, session, identity, "connect_previewed", {});
 
       return ok(
         {
@@ -317,11 +317,11 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       },
     },
     async ({ connect_token, brief, capabilities }): Promise<ToolResult> => {
-      const pending = s.takePendingConnect(connect_token);
+      const pending = await s.takePendingConnect(connect_token);
       if (!pending || pending.userId !== identity.userId) {
         return fail("connect token invalid or expired. Re-run bellman_connect with the join code.");
       }
-      const session = s.getSession(pending.sessionId);
+      const session = await s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
       if (activeMembers(session).length >= session.maxMembers) return fail("session filled while you were confirming.");
 
@@ -336,17 +336,17 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         joinedAt: Date.now(),
         leftAt: null,
       };
-      s.addMember(session.id, member);
+      await s.addMember(session.id, member);
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
-      const joined = s.getSession(session.id) ?? session;
+      const joined = (await s.getSession(session.id)) ?? session;
 
       // Pair sessions consume the code when full; swarm codes live until expiry/capacity.
       if (activeMembers(joined).length >= joined.maxMembers) {
-        s.consumeJoinCode(joined.id);
+        await s.consumeJoinCode(joined.id);
       }
 
-      const joinEvent = s.appendEvent(session.id, {
+      const joinEvent = await s.appendEvent(session.id, {
         type: "member_joined",
         fromMemberId: memberId,
         fromUserId: identity.userId,
@@ -354,7 +354,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         payload: { member: publicMember(member), brief },
         refId: null,
       });
-      audit(s, session, identity, "brief_exchanged", {
+      await audit(s, session, identity, "brief_exchanged", {
         joiner: identity.userId,
         agent: brief.agent,
       });
@@ -406,7 +406,7 @@ Errors: capability errors name the member lacking the grant.`,
       },
     },
     async ({ session_id, member_id, type, payload, ref_id }): Promise<ToolResult> => {
-      const session = s.getSession(session_id);
+      const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
@@ -440,10 +440,10 @@ Errors: capability errors name the member lacking the grant.`,
       if (type === "brief_update") {
         const parsed = BriefShape.safeParse(payload);
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
-        s.updateMember(session.id, member_id, { brief: parsed.data as Brief });
+        await s.updateMember(session.id, member_id, { brief: parsed.data as Brief });
       }
 
-      const event = s.appendEvent(session.id, {
+      const event = await s.appendEvent(session.id, {
         type,
         fromMemberId: member_id,
         fromUserId: identity.userId,
@@ -451,7 +451,7 @@ Errors: capability errors name the member lacking the grant.`,
         payload,
         refId: ref_id ?? null,
       });
-      audit(s, session, identity, `sent_${type}`, {
+      await audit(s, session, identity, `sent_${type}`, {
         chars: serialized.length,
         ...(ref_id ? { ref_id } : {}),
       });
@@ -491,7 +491,7 @@ Always pass the returned cursor next time — even an empty events list can adva
       },
     },
     async ({ session_id, member_id, since_cursor, wait_seconds }): Promise<ToolResult> => {
-      const session = s.getSession(session_id);
+      const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
@@ -528,14 +528,14 @@ Returns: { left: true, session_status }`,
       },
     },
     async ({ session_id, member_id }): Promise<ToolResult> => {
-      const session = s.getSession(session_id);
+      const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
       if (me.leftAt !== null) return ok({ left: true, session_status: session.closed ? "closed" : "active" });
 
-      s.updateMember(session.id, member_id, { leftAt: Date.now() });
-      s.appendEvent(session.id, {
+      await s.updateMember(session.id, member_id, { leftAt: Date.now() });
+      await s.appendEvent(session.id, {
         type: "member_left",
         fromMemberId: member_id,
         fromUserId: identity.userId,
@@ -545,9 +545,9 @@ Returns: { left: true, session_status }`,
       });
 
       // Re-read: `session` predates the departure.
-      const after = s.getSession(session_id) ?? session;
-      if (activeMembers(after).length === 0) s.closeSession(session_id);
-      audit(s, session, identity, "member_left", {});
+      const after = (await s.getSession(session_id)) ?? session;
+      if (activeMembers(after).length === 0) await s.closeSession(session_id);
+      await audit(s, session, identity, "member_left", {});
 
       const closed = after.closed || activeMembers(after).length === 0;
       return ok({ left: true, session_status: closed ? "closed" : "active" });
@@ -574,7 +574,7 @@ Returns: { entries: [{ at, session_id, actor, action, detail }] }`,
       if (identity.role !== "admin") return fail("the audit log requires the admin role.");
       if (!identity.orgId) return fail("your identity has no org.");
 
-      const entries = s.auditForOrg(identity.orgId, limit).map((a) => ({
+      const entries = (await s.auditForOrg(identity.orgId, limit)).map((a) => ({
         at: new Date(a.at).toISOString(),
         session_id: a.sessionId,
         actor: a.actorUserId,

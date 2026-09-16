@@ -13,7 +13,5 @@ coverage/
 data/
 
 # dual-graph local tooling: keep the context store, drop generated/runtime state
-.dual-graph/run/
-.dual-graph/info_graph.json
-.dual-graph/symbol_index.json
-.dual-graph/
+.dual-graph/*
+!.dual-graph/context-store.json

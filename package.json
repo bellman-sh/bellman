@@ -11,7 +11,10 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.test.json",
     "smoke": "tsx scripts/smoke.ts",
-    "verify": "npm run typecheck && npm run build && npm test"
+    "verify": "npm run typecheck && npm run build && npm test",
+    "typecheck:worker": "tsc -p tsconfig.worker.json",
+    "dev:worker": "wrangler dev",
+    "deploy": "wrangler deploy"
   },
   "keywords": [],
   "author": "",
@@ -22,11 +25,13 @@
     "zod": "^4.5.4"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260916.1",
     "@types/express": "^5.0.6",
     "@types/node": "^26.5.0",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "wrangler": "^4.132.0"
   },
   "type": "module"
 }

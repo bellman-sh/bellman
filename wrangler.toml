@@ -1,0 +1,32 @@
+name = "bellman"
+main = "src/worker.ts"
+compatibility_date = "2026-09-01"
+
+# src/codes.ts uses randomUUID from node:crypto, and the MCP SDK reaches for a
+# few node builtins. nodejs_compat covers both.
+compatibility_flags = ["nodejs_compat"]
+
+account_id = "f483aaf74f1ab48e4c64e2170102282a"
+
+# One DO per session, a singleton registry, one audit object per org.
+# See the topology comment at the top of src/store-do.ts.
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "SessionDO"
+
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "RegistryDO"
+
+[[durable_objects.bindings]]
+name = "AUDIT"
+class_name = "AuditDO"
+
+# SQLite-backed Durable Objects. Required on the Workers Free plan, and the
+# storage API is identical to the KV-backed flavour.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO"]
+
+# BELLMAN_KEYS is a secret, never a var:
+#   npx wrangler secret put BELLMAN_KEYS

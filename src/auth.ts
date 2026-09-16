@@ -63,7 +63,21 @@ const DEV_KEYS: Record<string, Identity> = {
   },
 };
 
-export function resolveIdentity(authHeader: string | undefined): Identity | null {
+/**
+ * Workers has no `process.env` — the key map arrives on the fetch handler's
+ * `env` instead. Callers there pass it explicitly; the Node path falls back to
+ * the environment, so existing call sites and tests are unchanged.
+ */
+function envKeys(): string | undefined {
+  return typeof process !== "undefined" && process.env
+    ? process.env.BELLMAN_KEYS
+    : undefined;
+}
+
+export function resolveIdentity(
+  authHeader: string | undefined,
+  keysJson?: string
+): Identity | null {
   if (!authHeader) return null;
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
 
@@ -73,7 +87,7 @@ export function resolveIdentity(authHeader: string | undefined): Identity | null
    * would leave `qk_dev_jesse` — team plan, admin role, and printed in the
    * README — valid on a deployed server. Any deployment must set this.
    */
-  const fromEnv = process.env.BELLMAN_KEYS; // JSON map of key -> identity
+  const fromEnv = keysJson ?? envKeys(); // JSON map of key -> identity
   if (fromEnv) {
     try {
       const parsed = JSON.parse(fromEnv) as Record<string, Identity>;

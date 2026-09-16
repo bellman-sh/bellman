@@ -11,5 +11,6 @@
     "declaration": false,
     "sourceMap": false
   },
+  "exclude": ["src/worker.ts", "src/store-do.ts"],
   "include": ["src"]
 }

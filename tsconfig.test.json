@@ -5,5 +5,6 @@
     "rootDir": ".",
     "types": ["node"]
   },
+  "exclude": ["src/worker.ts", "src/store-do.ts"],
   "include": ["src", "tests", "scripts", "vitest.config.ts"]
 }

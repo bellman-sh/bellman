@@ -7,7 +7,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const URL_ = new URL("http://localhost:3900/mcp");
+// Defaults to the local Node server; point BELLMAN_URL at a wrangler dev
+// instance or the deployed Worker to run the same proof against those.
+const URL_ = new URL(process.env.BELLMAN_URL ?? "http://localhost:3900/mcp");
 
 function makeClient(key: string): Client {
   return new Client({ name: `smoke-${key}`, version: "0.0.1" });

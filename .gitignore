@@ -15,3 +15,6 @@ data/
 # dual-graph local tooling: keep the context store, drop generated/runtime state
 .dual-graph/*
 !.dual-graph/context-store.json
+
+# wrangler local secrets
+.dev.vars

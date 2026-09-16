@@ -1,7 +1,7 @@
 # Context
 
 ## Current Task
-M1 test suite is merged. Next is M0 room core on the renamed Bellman codebase.
+M1 test suite is merged. The backlog now lives in GitHub issues #1–#7 (labels `M0`, `M2`, `chore`). Next up is M0 room core.
 
 ## Key Decisions
 - Name is Bellman (bellman.sh). Join codes use the `BELL-` prefix. The full search, with collision evidence, is in `naming/domain-sweep.md`.
@@ -9,6 +9,6 @@ M1 test suite is merged. Next is M0 room core on the renamed Bellman codebase.
 - `main` moves only through merges; feature work happens on branches.
 
 ## Next Steps
-- M0 room core: YAML room manifests, roles with server-enforced permission verbs, join codes that carry a role.
-- M2 local membership: keep the Stop hook plus a long-poll wait tool as the portable base. A Claude Code channel plugin is the optional fast path, but it is Claude-only and in research preview.
-- Cosmetic leftovers of the old name: id prefixes `qs_` and `qct_`, and the dev key prefix `qk_` in `src/auth.ts`.
+- M0 room core, in dependency order: #1 YAML manifests → #2 server-enforced role verbs → #3 role-carrying join codes. #1 blocks the other two.
+- #5 rename leftovers (`qs_`, `qct_`, `qk_`, ~30 call sites) — mechanical, and cheapest before M0 code lands on top of it.
+- M2 local membership (#4): Stop hook plus a long-poll wait tool is the portable base. Claude Code channels are the Claude-only fast path, still research preview.

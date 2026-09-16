@@ -1,0 +1,140 @@
+[
+  {
+    "id": "mem:1789533612816",
+    "kind": "fact",
+    "content": "Issues #1-7 seeded on bellman-sh/bellman; labels M0, M2, chore added.",
+    "tags": [
+      "github",
+      "backlog"
+    ],
+    "files": [],
+    "file_path": "",
+    "symbol_id": "",
+    "symbol_hash": "",
+    "created_at": "2026-09-16T04:40:12.815892+00:00",
+    "created_epoch": 1789533612,
+    "updated_at": "2026-09-16T04:40:12.815892+00:00",
+    "stale": false,
+    "stale_reason": "",
+    "observed_queries": [],
+    "evidence": {}
+  },
+  {
+    "id": "mem:1789533613963",
+    "kind": "next",
+    "content": "Port CONTEXT.md from old quorai dir; new repo has none.",
+    "tags": [
+      "handoff"
+    ],
+    "files": [
+      "CONTEXT.md"
+    ],
+    "file_path": "CONTEXT.md",
+    "symbol_id": "",
+    "symbol_hash": "",
+    "created_at": "2026-09-16T04:40:13.963072+00:00",
+    "created_epoch": 1789533613,
+    "updated_at": "2026-09-16T04:40:13.963072+00:00",
+    "stale": false,
+    "stale_reason": "",
+    "observed_queries": [],
+    "evidence": {}
+  },
+  {
+    "id": "mem:1789533713748",
+    "kind": "edit_observation",
+    "content": "Edited during active session",
+    "tags": [
+      "ported",
+      "context",
+      "from",
+      "old",
+      "quorai",
+      "dir",
+      "next",
+      "steps"
+    ],
+    "files": [
+      "CONTEXT.md"
+    ],
+    "file_path": "CONTEXT.md",
+    "symbol_id": "",
+    "symbol_hash": "",
+    "created_at": "2026-09-16T04:41:53.748038+00:00",
+    "created_epoch": 1789533713,
+    "updated_at": "2026-09-16T04:41:53.748041+00:00",
+    "stale": false,
+    "stale_reason": "",
+    "observed_queries": [],
+    "evidence": {
+      "source": "graph_register_edit",
+      "recent_action_kinds": [],
+      "recent_queries": [],
+      "edited": true
+    }
+  },
+  {
+    "id": "mem:1789533713747",
+    "kind": "decision",
+    "content": "Ported CONTEXT.md from old quorai dir; Next Steps now point at issues #1-#7.",
+    "tags": [
+      "ported",
+      "context",
+      "from",
+      "old",
+      "quorai",
+      "dir",
+      "next",
+      "steps"
+    ],
+    "files": [
+      "CONTEXT.md"
+    ],
+    "file_path": "CONTEXT.md",
+    "symbol_id": "",
+    "symbol_hash": "",
+    "created_at": "2026-09-16T04:41:53.747747+00:00",
+    "created_epoch": 1789533713,
+    "updated_at": "2026-09-16T04:41:53.747751+00:00",
+    "stale": false,
+    "stale_reason": "",
+    "observed_queries": [],
+    "evidence": {
+      "window_sec": 120,
+      "recent_action_kinds": [],
+      "recent_queries": []
+    }
+  },
+  {
+    "id": "mem:1789534008556",
+    "kind": "fact",
+    "content": "Repo uses jj (colocated); detached git HEAD is normal, use jj not git.",
+    "tags": [
+      "vcs",
+      "jj"
+    ],
+    "files": [],
+    "file_path": "",
+    "symbol_id": "",
+    "symbol_hash": "",
+    "created_at": "2026-09-16T04:46:48.555905+00:00",
+    "created_epoch": 1789534008,
+    "updated_at": "2026-09-16T04:46:48.555905+00:00",
+    "stale": false,
+    "stale_reason": "",
+    "observed_queries": [],
+    "evidence": {}
+  },
+  {
+    "kind": "decision",
+    "content": ".gitignore now uses .dual-graph/* plus negation so context-store.json persists.",
+    "tags": [
+      "config"
+    ],
+    "files": [
+      ".gitignore"
+    ],
+    "created_at": "2026-09-16T04:46:49.605643+00:00",
+    "created_epoch": 1789534009
+  }
+]

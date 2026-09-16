@@ -66,7 +66,7 @@ const DEV_KEYS: Record<string, Identity> = {
 export function resolveIdentity(authHeader: string | undefined): Identity | null {
   if (!authHeader) return null;
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
-  const fromEnv = process.env.QUORAI_KEYS; // JSON blob to seed real keys
+  const fromEnv = process.env.BELLMAN_KEYS; // JSON blob to seed real keys
   if (fromEnv) {
     try {
       const parsed = JSON.parse(fromEnv) as Record<string, Identity>;

@@ -10,9 +10,9 @@ function chunk(len: number): string {
   return out;
 }
 
-/** Human-relayable join code, e.g. QRA-7F3K-92 */
+/** Human-relayable join code, e.g. BELL-7F3K-92 */
 export function generateJoinCode(): string {
-  return `QRA-${chunk(4)}-${chunk(2)}`;
+  return `BELL-${chunk(4)}-${chunk(2)}`;
 }
 
 export function generateSessionId(): string {

@@ -44,7 +44,9 @@ npm start                  # http://localhost:3900/mcp
 npm run smoke              # end-to-end two-provider simulation (server must be running)
 ```
 
-Dev bearer keys: `qk_dev_jesse` (team admin, org_codenerd), `qk_dev_peer` (free, org_codenerd), `qk_dev_outsider` (free, no org). Real keys via `BELLMAN_KEYS` env (JSON map of key → identity).
+**Local-dev bearer keys**, live only while `BELLMAN_KEYS` is unset: `qk_dev_jesse` (team admin, org_codenerd), `qk_dev_peer` (free, org_codenerd), `qk_dev_outsider` (free, no org).
+
+Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** source of truth — the dev table stops resolving, and a malformed map rejects every request rather than falling back. **Every deployment must set it.**
 
 Connect from Claude: Settings → Connectors → Add custom connector → `http://<host>:3900/mcp` with an Authorization header.
 

@@ -1,5 +1,5 @@
 /**
- * Quorai end-to-end smoke test.
+ * Bellman end-to-end smoke test.
  * Simulates a Claude Code session (jesse, team admin) pairing with a
  * ChatGPT session (peer, free plan) — the cross-provider case — plus the
  * failure paths: org-restricted join, plan gating, capability gating.
@@ -63,7 +63,7 @@ async function main(): Promise<void> {
   assert(tools.tools.length === 7, `7 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
 
   console.log("\n— session creation + entitlements —");
-  const started = await call(jesse, "quorai_start", {
+  const started = await call(jesse, "bellman_start", {
     mode: "pair", brief: jesseBrief, org_only: true,
     capabilities: ["read_context", "receive_messages", "request_actions"],
   });
@@ -73,20 +73,20 @@ async function main(): Promise<void> {
   const jMember = String(started.data.member_id);
   console.log(`   join code: ${joinCode}`);
 
-  const gated = await call(peer, "quorai_start", { mode: "swarm", brief: peerBrief });
+  const gated = await call(peer, "bellman_start", { mode: "swarm", brief: peerBrief });
   assert(gated.isError && gated.text.includes("pro or team"), "free plan blocked from swarm (create-side gating)");
 
   console.log("\n— join flow: preview → confirm —");
-  const blocked = await call(outsider, "quorai_connect", { join_code: joinCode });
+  const blocked = await call(outsider, "bellman_connect", { join_code: joinCode });
   assert(blocked.isError && blocked.text.includes("org-restricted"), "outsider blocked by org_only");
 
-  const preview = await call(peer, "quorai_connect", { join_code: joinCode });
+  const preview = await call(peer, "bellman_connect", { join_code: joinCode });
   assert(!preview.isError, "peer previews session (free plan CAN join — the asymmetry)");
   assert(preview.text.includes("UNTRUSTED"), "preview wraps creator brief in untrusted envelope");
   const previewBrief = preview.data.creator_brief as { data: { goal: string } };
   assert(previewBrief.data.goal === jesseBrief.goal, "preview shows creator goal before peer ships anything");
 
-  const confirmed = await call(peer, "quorai_confirm", {
+  const confirmed = await call(peer, "bellman_confirm", {
     connect_token: String(preview.data.connect_token),
     brief: peerBrief,
     capabilities: ["read_context", "receive_messages", "request_actions"],
@@ -95,11 +95,11 @@ async function main(): Promise<void> {
   const pMember = String(confirmed.data.member_id);
   let pCursor = Number(confirmed.data.cursor);
 
-  const reused = await call(outsider, "quorai_connect", { join_code: joinCode });
+  const reused = await call(outsider, "bellman_connect", { join_code: joinCode });
   assert(reused.isError, "join code consumed once pair fills (single-use)");
 
   console.log("\n— brief exchange visible to creator —");
-  const jSync1 = await call(jesse, "quorai_sync", {
+  const jSync1 = await call(jesse, "bellman_sync", {
     session_id: jSession, member_id: jMember, since_cursor: 0,
   });
   let jCursor = Number(jSync1.data.cursor);
@@ -107,12 +107,12 @@ async function main(): Promise<void> {
   assert(joinEvents.some((e) => e.data.type === "member_joined"), "creator sees member_joined with peer brief");
 
   console.log("\n— long-poll message delivery —");
-  const syncPromise = call(jesse, "quorai_sync", {
+  const syncPromise = call(jesse, "bellman_sync", {
     session_id: jSession, member_id: jMember, since_cursor: jCursor, wait_seconds: 10,
   });
   await new Promise((r) => setTimeout(r, 1200)); // prove the request is held open
   const t0 = Date.now();
-  await call(peer, "quorai_send", {
+  await call(peer, "bellman_send", {
     session_id: jSession, member_id: pMember, type: "message",
     payload: { text: "Dashboard shows retry storms cluster at 02:00 UTC — matches your 5%" },
   });
@@ -123,20 +123,20 @@ async function main(): Promise<void> {
   jCursor = Number(jSync2.data.cursor);
 
   console.log("\n— action request / human-approval loop —");
-  const actionReq = await call(jesse, "quorai_send", {
+  const actionReq = await call(jesse, "bellman_send", {
     session_id: jSession, member_id: jMember, type: "action_request",
     payload: { ask: "Pull the last 50 failed webhook deliveries and share the idempotency keys" },
   });
   assert(!actionReq.isError, "action_request allowed (peer granted request_actions)");
   const reqCursor = String(actionReq.data.cursor);
 
-  const pSync = await call(peer, "quorai_sync", {
+  const pSync = await call(peer, "bellman_sync", {
     session_id: jSession, member_id: pMember, since_cursor: pCursor,
   });
   pCursor = Number(pSync.data.cursor);
   assert((pSync.data.events as unknown[]).length > 0, "peer sees action_request via sync");
 
-  const actionRes = await call(peer, "quorai_send", {
+  const actionRes = await call(peer, "bellman_send", {
     session_id: jSession, member_id: pMember, type: "action_response",
     ref_id: reqCursor,
     payload: { approved: true, result: "Keys attached — 12 duplicates found" },
@@ -144,9 +144,9 @@ async function main(): Promise<void> {
   assert(!actionRes.isError, "action_response with ref_id accepted");
 
   console.log("\n— enterprise audit —");
-  const auditDenied = await call(peer, "quorai_audit", {});
+  const auditDenied = await call(peer, "bellman_audit", {});
   assert(auditDenied.isError, "free member denied audit access");
-  const auditOk = await call(jesse, "quorai_audit", { limit: 100 });
+  const auditOk = await call(jesse, "bellman_audit", { limit: 100 });
   const entries = (auditOk.data.entries as { action: string }[]);
   const actions = new Set(entries.map((e) => e.action));
   assert(!auditOk.isError && entries.length >= 6, `org admin reads audit log (${entries.length} entries)`);
@@ -156,9 +156,9 @@ async function main(): Promise<void> {
   );
 
   console.log("\n— leave —");
-  const left = await call(peer, "quorai_leave", { session_id: jSession, member_id: pMember });
+  const left = await call(peer, "bellman_leave", { session_id: jSession, member_id: pMember });
   assert(!left.isError, "peer leaves cleanly");
-  const jSync3 = await call(jesse, "quorai_sync", {
+  const jSync3 = await call(jesse, "bellman_sync", {
     session_id: jSession, member_id: jMember, since_cursor: jCursor,
   });
   assert(

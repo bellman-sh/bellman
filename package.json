@@ -1,17 +1,21 @@
 {
-  "name": "quorai-mcp-server",
-  "version": "1.0.0",
-  "description": "",
+  "name": "bellman-mcp-server",
+  "version": "0.1.0",
+  "description": "Cross-session, cross-provider agent collaboration over MCP",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "smoke": "tsx scripts/smoke.ts",
+    "verify": "npm run typecheck && npm run build && npm test"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.2.1",
@@ -21,7 +25,8 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.5.0",
     "tsx": "^4.23.13",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
   },
   "type": "module"
 }

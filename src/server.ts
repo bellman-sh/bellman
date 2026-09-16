@@ -8,9 +8,9 @@ import { entitlementsFor } from "./auth.js";
 import {
   generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
 } from "./codes.js";
-import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type QuoraiStore, MemoryStore } from "./store.js";
+import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
-const SERVER_NAME = "quorai-mcp-server";
+const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeouts
 const MAX_PAYLOAD_CHARS = 20_000;
@@ -113,7 +113,7 @@ function publicEvent(e: SessionEvent) {
  * without being able to read the other org's unrelated activity.
  */
 function audit(
-  store: QuoraiStore,
+  store: BellmanStore,
   session: Session,
   actor: Identity,
   action: string,
@@ -138,19 +138,17 @@ function audit(
 // Server factory — one McpServer per request, bound to the caller's identity
 // ---------------------------------------------------------------------------
 
-export const store: QuoraiStore = new MemoryStore();
-
-export function buildServer(identity: Identity, s: QuoraiStore = store): McpServer {
+export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
-  // -------------------------------------------------------------- quorai_start
+  // -------------------------------------------------------------- bellman_start
   server.registerTool(
-    "quorai_start",
+    "bellman_start",
     {
-      title: "Start a Quorai session",
+      title: "Start a Bellman session",
       description: `Create a collaboration room and get a join code to share with the other session.
 
-The join code (e.g. QRA-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Quorai connected, and that session runs quorai_connect with it. Works across users, machines, surfaces, and model providers.
+The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
 
 Args:
   - mode ("pair" | "swarm"): pair = exactly 2 members; swarm = up to your plan's member limit
@@ -227,22 +225,22 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
         session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,
         share_instructions:
-          `Give the join code to the other session's user. In that session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run quorai_connect with the code, review your brief, then quorai_confirm with their own brief.`,
+          `Give the join code to the other session's user. In that session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own brief.`,
       });
     }
   );
 
-  // ------------------------------------------------------------ quorai_connect
+  // ------------------------------------------------------------ bellman_connect
   server.registerTool(
-    "quorai_connect",
+    "bellman_connect",
     {
-      title: "Preview a Quorai session by join code",
+      title: "Preview a Bellman session by join code",
       description: `Phase 1 of joining: look up a join code and PREVIEW the creator's brief WITHOUT sharing any of your own context yet.
 
-Show the returned preview to your human. If they want to proceed, call quorai_confirm with the connect_token and your own brief. Nothing about your session crosses the wire until quorai_confirm.
+Show the returned preview to your human. If they want to proceed, call bellman_confirm with the connect_token and your own brief. Nothing about your session crosses the wire until bellman_confirm.
 
 Args:
-  - join_code (string): e.g. "QRA-7F3K-92" (case/whitespace insensitive)
+  - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, members, org_only}, creator_brief (untrusted envelope) }
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
@@ -289,26 +287,26 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
           ),
         },
         UNTRUSTED_PREAMBLE +
-          "\n\nShow this preview to your human before calling quorai_confirm — confirming ships YOUR brief to the peer."
+          "\n\nShow this preview to your human before calling bellman_confirm — confirming ships YOUR brief to the peer."
       );
     }
   );
 
-  // ------------------------------------------------------------ quorai_confirm
+  // ------------------------------------------------------------ bellman_confirm
   server.registerTool(
-    "quorai_confirm",
+    "bellman_confirm",
     {
-      title: "Confirm joining a Quorai session",
-      description: `Phase 2 of joining: after your human has reviewed the preview from quorai_connect, ship your brief and become a session member.
+      title: "Confirm joining a Bellman session",
+      description: `Phase 2 of joining: after your human has reviewed the preview from bellman_connect, ship your brief and become a session member.
 
 Args:
-  - connect_token: from quorai_connect (single-use, 10 minute TTL)
+  - connect_token: from bellman_connect (single-use, 10 minute TTL)
   - brief: YOUR structured context summary — this is what crosses to the peer
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
 
 Returns: { session_id, member_id, members[], briefs (untrusted envelopes), cursor }
-Keep member_id and cursor — quorai_sync and quorai_send need them.
-Errors: "connect token invalid or expired" — re-run quorai_connect.`,
+Keep member_id and cursor — bellman_sync and bellman_send need them.
+Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       inputSchema: {
         connect_token: z.string().min(8).max(60),
         brief: BriefShape,
@@ -321,7 +319,7 @@ Errors: "connect token invalid or expired" — re-run quorai_connect.`,
     async ({ connect_token, brief, capabilities }): Promise<ToolResult> => {
       const pending = s.takePendingConnect(connect_token);
       if (!pending || pending.userId !== identity.userId) {
-        return fail("connect token invalid or expired. Re-run quorai_connect with the join code.");
+        return fail("connect token invalid or expired. Re-run bellman_connect with the join code.");
       }
       const session = s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
@@ -338,14 +336,17 @@ Errors: "connect token invalid or expired" — re-run quorai_connect.`,
         joinedAt: Date.now(),
         leftAt: null,
       };
-      session.members.push(member);
+      s.addMember(session.id, member);
+
+      // Re-read: the store hands back detached copies, so `session` is now stale.
+      const joined = s.getSession(session.id) ?? session;
 
       // Pair sessions consume the code when full; swarm codes live until expiry/capacity.
-      if (activeMembers(session).length >= session.maxMembers) {
-        (s as MemoryStore).consumeJoinCode?.(session);
+      if (activeMembers(joined).length >= joined.maxMembers) {
+        s.consumeJoinCode(joined.id);
       }
 
-      s.appendEvent(session.id, {
+      const joinEvent = s.appendEvent(session.id, {
         type: "member_joined",
         fromMemberId: memberId,
         fromUserId: identity.userId,
@@ -358,14 +359,13 @@ Errors: "connect token invalid or expired" — re-run quorai_connect.`,
         agent: brief.agent,
       });
 
-      const cursor = session.events.length;
       return ok(
         {
           session_id: session.id,
           member_id: memberId,
-          cursor,
-          members: session.members.map(publicMember),
-          briefs: session.members
+          cursor: joinEvent.cursor,
+          members: joined.members.map(publicMember),
+          briefs: joined.members
             .filter((m) => m.memberId !== memberId)
             .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),
         },
@@ -374,11 +374,11 @@ Errors: "connect token invalid or expired" — re-run quorai_connect.`,
     }
   );
 
-  // --------------------------------------------------------------- quorai_send
+  // --------------------------------------------------------------- bellman_send
   server.registerTool(
-    "quorai_send",
+    "bellman_send",
     {
-      title: "Send to Quorai session members",
+      title: "Send to Bellman session members",
       description: `Send a message, artifact, action request, action response, or brief update to the other member(s).
 
 Args:
@@ -417,7 +417,7 @@ Errors: capability errors name the member lacking the grant.`,
       }
 
       const others = activeMembers(session).filter((m) => m.memberId !== member_id);
-      if (others.length === 0) return fail("no other active members yet — share the join code and wait for a quorai_confirm (watch via quorai_sync).");
+      if (others.length === 0) return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
 
       if (type === "message" || type === "artifact") {
         const deaf = others.filter((m) => !m.capabilities.includes("receive_messages"));
@@ -440,7 +440,7 @@ Errors: capability errors name the member lacking the grant.`,
       if (type === "brief_update") {
         const parsed = BriefShape.safeParse(payload);
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
-        me.brief = parsed.data as Brief;
+        s.updateMember(session.id, member_id, { brief: parsed.data as Brief });
       }
 
       const event = s.appendEvent(session.id, {
@@ -466,16 +466,16 @@ Errors: capability errors name the member lacking the grant.`,
     }
   );
 
-  // --------------------------------------------------------------- quorai_sync
+  // --------------------------------------------------------------- bellman_sync
   server.registerTool(
-    "quorai_sync",
+    "bellman_sync",
     {
-      title: "Sync Quorai session events",
+      title: "Sync Bellman session events",
       description: `Fetch events since your cursor. This is how peer messages reach you — MCP has no push, so call this when you finish a thought, after sending something that expects a reply, or when your human goes quiet.
 
 Args:
   - session_id, member_id: your handles
-  - since_cursor: last cursor you processed (0 on first call after start; the cursor from quorai_confirm after joining)
+  - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
 
 Returns: { events[] (untrusted envelopes, your own events excluded), cursor }
@@ -513,11 +513,11 @@ Always pass the returned cursor next time — even an empty events list can adva
     }
   );
 
-  // -------------------------------------------------------------- quorai_leave
+  // -------------------------------------------------------------- bellman_leave
   server.registerTool(
-    "quorai_leave",
+    "bellman_leave",
     {
-      title: "Leave a Quorai session",
+      title: "Leave a Bellman session",
       description: `Leave the session, broadcasting a departure event so peers aren't talking into a void. The session closes when the last member leaves.
 
 Args: session_id, member_id
@@ -534,7 +534,7 @@ Returns: { left: true, session_status }`,
       if (!me) return fail("member_id is not yours.");
       if (me.leftAt !== null) return ok({ left: true, session_status: session.closed ? "closed" : "active" });
 
-      me.leftAt = Date.now();
+      s.updateMember(session.id, member_id, { leftAt: Date.now() });
       s.appendEvent(session.id, {
         type: "member_left",
         fromMemberId: member_id,
@@ -543,18 +543,22 @@ Returns: { left: true, session_status }`,
         payload: { label: identity.label },
         refId: null,
       });
-      if (activeMembers(session).length === 0) session.closed = true;
+
+      // Re-read: `session` predates the departure.
+      const after = s.getSession(session_id) ?? session;
+      if (activeMembers(after).length === 0) s.closeSession(session_id);
       audit(s, session, identity, "member_left", {});
 
-      return ok({ left: true, session_status: session.closed ? "closed" : "active" });
+      const closed = after.closed || activeMembers(after).length === 0;
+      return ok({ left: true, session_status: closed ? "closed" : "active" });
     }
   );
 
-  // -------------------------------------------------------------- quorai_audit
+  // -------------------------------------------------------------- bellman_audit
   server.registerTool(
-    "quorai_audit",
+    "bellman_audit",
     {
-      title: "Quorai org audit log",
+      title: "Bellman org audit log",
       description: `Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving. Cross-org sessions appear in BOTH orgs' logs.
 
 Requires: team plan + admin role. Args: limit (default 50).

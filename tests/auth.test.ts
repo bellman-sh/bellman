@@ -1,8 +1,15 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { ENTITLEMENTS, entitlementsFor, resolveIdentity } from "../src/auth.js";
 import type { Identity, Plan } from "../src/types.js";
 
 const ORIGINAL_KEYS = process.env.BELLMAN_KEYS;
+
+// Hermetic: dev-key cases assume BELLMAN_KEYS is unset, which is no longer
+// merely the default but load-bearing. A developer with it exported in their
+// shell would otherwise see confusing failures.
+beforeEach(() => {
+  delete process.env.BELLMAN_KEYS;
+});
 
 afterEach(() => {
   if (ORIGINAL_KEYS === undefined) delete process.env.BELLMAN_KEYS;
@@ -50,12 +57,24 @@ describe("resolveIdentity", () => {
     expect(resolveIdentity("Bearer qk_dev_jesse")).toMatchObject({ userId: "u_prod" });
   });
 
-  it("falls back to dev keys when BELLMAN_KEYS misses or is malformed", () => {
+  /**
+   * The deploy gate. `qk_dev_jesse` is team plan + admin role and is published
+   * in the README, so it must stop resolving the moment real keys exist.
+   */
+  it("takes dev keys out of play entirely once BELLMAN_KEYS is set", () => {
     process.env.BELLMAN_KEYS = JSON.stringify({ qk_other: { userId: "u_other" } });
-    expect(resolveIdentity("Bearer qk_dev_jesse")?.userId).toBe("u_jesse");
 
+    expect(resolveIdentity("Bearer qk_dev_jesse")).toBeNull();
+    expect(resolveIdentity("Bearer qk_dev_peer")).toBeNull();
+    expect(resolveIdentity("Bearer qk_dev_outsider")).toBeNull();
+    expect(resolveIdentity("Bearer qk_other")?.userId).toBe("u_other");
+  });
+
+  it("fails closed when BELLMAN_KEYS is malformed", () => {
     process.env.BELLMAN_KEYS = "{ not json";
-    expect(resolveIdentity("Bearer qk_dev_jesse")?.userId).toBe("u_jesse");
+
+    expect(resolveIdentity("Bearer qk_dev_jesse")).toBeNull();
+    expect(resolveIdentity("Bearer qk_other")).toBeNull();
   });
 });
 

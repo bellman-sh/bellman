@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Cross-session, cross-provider agent collaboration over MCP",
   "main": "dist/index.js",
+  "bin": {
+    "bellman-channel": "dist/channel.js",
+    "bellman-stop-hook": "dist/stop-hook.js"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",

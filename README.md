@@ -60,10 +60,13 @@ npm install && npm run build
 
 ```bash
 claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- node "$PWD/dist/channel.js"
-claude --dangerously-load-development-channels server:bellman
+npm link                      # puts bellman-claude on your PATH
+bellman-claude                # start Claude Code with the channel loaded
 ```
 
-Channels are a Claude Code research preview: a custom channel needs that flag on every launch, and Team/Enterprise orgs must turn on `channelsEnabled`.
+Channels are a Claude Code research preview: a custom channel is not on Anthropic's allowlist, so every launch needs `claude --dangerously-load-development-channels server:bellman`. Miss the flag and the session starts normally but nothing is ever pushed into it, which reads as Bellman being broken — `bellman-claude` exists so you can't forget. It passes your other arguments straight through (`bellman-claude --resume`), and `BELLMAN_CHANNEL_SERVER` / `BELLMAN_CHANNEL_FLAG` override the entry and the flag once the channel reaches an org allowlist.
+
+Team and Enterprise orgs must also turn on `channelsEnabled`.
 
 **Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
 

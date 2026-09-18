@@ -19,7 +19,8 @@
     "verify": "npm run typecheck && npm run build && npm test",
     "typecheck:worker": "tsc -p tsconfig.worker.json",
     "dev:worker": "wrangler dev",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "rotate-key": "tsx scripts/rotate-key.ts"
   },
   "keywords": [],
   "author": "",

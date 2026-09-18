@@ -1,0 +1,37 @@
+#!/bin/sh
+# Launch Claude Code with the Bellman channel enabled.
+#
+# Channels are a research preview and a custom channel is not on Anthropic's
+# allowlist, so it needs --dangerously-load-development-channels on EVERY
+# launch. Forget the flag and the session starts fine but nothing is pushed
+# into it, which looks like Bellman being broken. This wrapper adds the flag
+# and passes every other argument through untouched.
+#
+#   bellman-claude                 # claude --dangerously-load-development-channels server:bellman
+#   bellman-claude --resume        # flags pass through
+#
+# Environment:
+#   BELLMAN_CHANNEL_SERVER  channel entry to load (default: server:bellman).
+#                           Use plugin:<name>@<marketplace> for a plugin channel.
+#   BELLMAN_CHANNEL_FLAG    default --dangerously-load-development-channels.
+#                           Switch to --channels once the channel is on your
+#                           organization's allowedChannelPlugins list.
+#   BELLMAN_DELIVERY=hook   Stop-hook delivery needs no channel flag, so this
+#                           launches Claude Code unchanged.
+set -eu
+
+server="${BELLMAN_CHANNEL_SERVER:-server:bellman}"
+flag="${BELLMAN_CHANNEL_FLAG:---dangerously-load-development-channels}"
+
+# Warn, never block: this path is only the default, and the MCP entry may point
+# somewhere else on purpose.
+bridge="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/dist/channel.js"
+if [ ! -f "$bridge" ]; then
+  echo "bellman-claude: $bridge is missing — run 'npm run build' in the bellman repo." >&2
+fi
+
+if [ "${BELLMAN_DELIVERY:-channel}" = "hook" ]; then
+  exec claude "$@"
+fi
+
+exec claude "$flag" "$server" "$@"

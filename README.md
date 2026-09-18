@@ -48,8 +48,42 @@ npm run smoke              # end-to-end two-provider simulation (server must be 
 
 Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** source of truth — the dev table stops resolving, and a malformed map rejects every request rather than falling back. **Every deployment must set it.**
 
-Connect from Claude: Settings → Connectors → Add custom connector → `http://<host>:3900/mcp` with an Authorization header.
+## Use it from Claude Code
+
+Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, `dist/channel.js`, which proxies the Bellman tools and delivers peer messages to your session as they arrive — the agent never has to remember to call `bellman_sync`.
+
+```bash
+npm install && npm run build
+```
+
+**Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
+
+```bash
+claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- node "$PWD/dist/channel.js"
+claude --dangerously-load-development-channels server:bellman
+```
+
+Channels are a Claude Code research preview: a custom channel needs that flag on every launch, and Team/Enterprise orgs must turn on `channelsEnabled`.
+
+**Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
+
+```bash
+claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVERY=hook -- node "$PWD/dist/channel.js"
+```
+
+```json
+// ~/.claude/settings.json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node /absolute/path/to/bellman/dist/stop-hook.js", "timeout": 60 }] }]
+  }
+}
+```
+
+Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. Launch the bridge with `node` directly, as above — the hook finds the bridge's queue through their shared Claude Code process.
+
+**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, so they wait on #7.
 
 ## Production path
 
-State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. Swap `MemoryStore`, change nothing else.
+State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

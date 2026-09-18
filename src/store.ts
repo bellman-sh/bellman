@@ -33,6 +33,8 @@ export interface BellmanStore {
 
   /** Consume a session's single-use join code. Idempotent. */
   consumeJoinCode(sessionId: string): Promise<void>;
+  /** Issue a join code, retiring whatever code the session had. */
+  setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void>;
   /** Append a member to a session. */
   addMember(sessionId: string, member: Member): Promise<void>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
@@ -99,6 +101,15 @@ export class MemoryStore implements BellmanStore {
     if (!s || !s.joinCode) return;
     this.byJoinCode.delete(s.joinCode);
     s.joinCode = null;
+  }
+
+  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    if (s.joinCode) this.byJoinCode.delete(s.joinCode); // the old code stops resolving
+    s.joinCode = code;
+    s.joinCodeExpiresAt = expiresAt;
+    this.byJoinCode.set(code, sessionId);
   }
 
   async addMember(sessionId: string, member: Member): Promise<void> {

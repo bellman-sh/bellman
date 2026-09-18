@@ -89,6 +89,15 @@ export class SessionDO extends DurableObject {
     await this.ctx.storage.put("session", { ...s, joinCode: null });
   }
 
+  /** Returns the code being replaced, so the caller can drop it from the registry. */
+  async setJoinCode(code: string, expiresAt: number): Promise<string | null> {
+    const s = await this.stored();
+    if (!s) return null;
+    const previous = s.joinCode;
+    await this.ctx.storage.put("session", { ...s, joinCode: code, joinCodeExpiresAt: expiresAt });
+    return previous;
+  }
+
   async addMember(member: Member): Promise<void> {
     const s = await this.stored();
     if (!s) return;
@@ -303,6 +312,12 @@ export class DurableObjectStore implements BellmanStore {
     const code = s?.joinCode;
     await this.session(sessionId).consumeJoinCode();
     if (code) await this.registry.dropJoinCode(code);
+  }
+
+  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void> {
+    const previous = await this.session(sessionId).setJoinCode(code, expiresAt);
+    if (previous) await this.registry.dropJoinCode(previous);
+    await this.registry.putJoinCode(code, sessionId);
   }
 
   async addMember(sessionId: string, member: Member): Promise<void> {

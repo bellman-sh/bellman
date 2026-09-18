@@ -15,6 +15,7 @@ const EXPECTED_TOOLS = [
   "bellman_sync",
   "bellman_leave",
   "bellman_audit",
+  "bellman_invite",
 ].sort();
 
 describe("tool surface", () => {

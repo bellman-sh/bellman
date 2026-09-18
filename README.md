@@ -23,6 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
+| `bellman_invite` | Issue a fresh join code at any time, or revoke the current one. Creator only. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
 ## Trust model

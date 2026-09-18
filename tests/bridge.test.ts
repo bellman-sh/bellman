@@ -136,8 +136,8 @@ describe("channel delivery", () => {
 
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_leave",
-      "bellman_send", "bellman_start", "bellman_sync",
+      "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_invite",
+      "bellman_leave", "bellman_send", "bellman_start", "bellman_sync",
     ]);
   });
 

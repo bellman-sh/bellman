@@ -374,6 +374,82 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
     }
   );
 
+  // ------------------------------------------------------------- bellman_invite
+  server.registerTool(
+    "bellman_invite",
+    {
+      title: "Issue a new Bellman join code",
+      description: `Mint a fresh join code for a session you created — at any time, for as long as the session lives.
+
+A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
+
+Issuing RETIRES the previous code immediately — anyone still holding it can no longer join. That is also how you revoke: pass revoke=true to kill the current code without minting another.
+
+Args: session_id, member_id (yours), revoke (default false)
+Returns: { join_code, join_code_expires_at, replaced_previous } or { revoked: true }
+Members see an invite_issued / invite_revoked event, so reopening the door is never silent.
+Errors: only the creator can issue; a full session refuses (the code could not be used).`,
+      inputSchema: {
+        session_id: z.string().min(4),
+        member_id: z.string().min(4),
+        revoke: z.boolean().default(false),
+      },
+      annotations: {
+        readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+      },
+    },
+    async ({ session_id, member_id, revoke }): Promise<ToolResult> => {
+      const session = await s.getSession(session_id);
+      if (!session || session.closed) return fail("session not found or closed.");
+      const me = findMember(session, member_id, identity);
+      if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
+      // Roles land in M0; until then the creator is the only one who can reopen the door.
+      if (session.createdBy !== identity.userId) {
+        return fail("only the session creator can issue join codes.");
+      }
+
+      if (revoke) {
+        if (!session.joinCode) return ok({ revoked: true, join_code: null });
+        await s.consumeJoinCode(session_id);
+        await s.appendEvent(session.id, {
+          type: "invite_revoked",
+          fromMemberId: member_id,
+          fromUserId: identity.userId,
+          fromLabel: identity.label,
+          payload: {},
+          refId: null,
+        });
+        await audit(s, session, identity, "invite_revoked", {});
+        return ok({ revoked: true, join_code: null });
+      }
+
+      if (activeMembers(session).length >= session.maxMembers) {
+        return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
+      }
+
+      const code = generateJoinCode();
+      const expiresAt = Date.now() + JOIN_CODE_TTL;
+      await s.setJoinCode(session_id, code, expiresAt);
+      await s.appendEvent(session.id, {
+        type: "invite_issued",
+        fromMemberId: member_id,
+        fromUserId: identity.userId,
+        fromLabel: identity.label,
+        payload: { expires_at: new Date(expiresAt).toISOString() },
+        refId: null,
+      });
+      await audit(s, session, identity, "invite_issued", { replaced_previous: Boolean(session.joinCode) });
+
+      return ok({
+        join_code: code,
+        join_code_expires_at: new Date(expiresAt).toISOString(),
+        replaced_previous: Boolean(session.joinCode),
+        share_instructions:
+          "Give this code to the joining session. Any code issued earlier has stopped working.",
+      });
+    }
+  );
+
   // --------------------------------------------------------------- bellman_send
   server.registerTool(
     "bellman_send",

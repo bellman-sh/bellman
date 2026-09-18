@@ -256,6 +256,27 @@ export function describeStoreContract(
 
     // ------------------------------------------------------- pending connects
     /** INVARIANT 2: connect tokens are single-use with their own TTL. */
+    it("issues a new join code and retires the old one", async () => {
+      const a = session({ joinCode: "BELL-AAAA-01" });
+      (await store.createSession(a));
+
+      (await store.setJoinCode(a.id, "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL));
+
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect((await store.getSessionByJoinCode("BELL-BBBB-02"))?.id).toBe(a.id);
+      expect((await store.getSession(a.id))?.joinCode).toBe("BELL-BBBB-02");
+    });
+
+    it("issues a code after the previous one was consumed", async () => {
+      const a = session({ joinCode: "BELL-AAAA-01" });
+      (await store.createSession(a));
+      (await store.consumeJoinCode(a.id));
+
+      (await store.setJoinCode(a.id, "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.id).toBe(a.id);
+    });
+
     it("takePendingConnect is single-use", async () => {
       (await store.putPendingConnect({
         token: "qct_1", sessionId: "qs_test", userId: "u_peer",

@@ -45,6 +45,8 @@ export type EventType =
   | "action_request"
   | "action_response"
   | "brief_update"
+  | "invite_issued"
+  | "invite_revoked"
   | "session_expired";
 
 export interface SessionEvent {

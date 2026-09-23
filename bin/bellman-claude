@@ -23,11 +23,21 @@ set -eu
 server="${BELLMAN_CHANNEL_SERVER:-server:bellman}"
 flag="${BELLMAN_CHANNEL_FLAG:---dangerously-load-development-channels}"
 
-# Warn, never block: this path is only the default, and the MCP entry may point
+# npm installs this as a symlink in its bin directory, so $0 is not inside the
+# package. Resolve the link before looking for the bridge next to it.
+self="$0"
+while [ -L "$self" ]; do
+  link="$(readlink "$self")"
+  case "$link" in
+    /*) self="$link" ;;
+    *) self="$(dirname -- "$self")/$link" ;;
+  esac
+done
+# Warn, never block: this path is only a default, and the MCP entry may point
 # somewhere else on purpose.
-bridge="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/dist/channel.js"
+bridge="$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd)/dist/channel.js"
 if [ ! -f "$bridge" ]; then
-  echo "bellman-claude: $bridge is missing — run 'npm run build' in the bellman repo." >&2
+  echo "bellman-claude: no bridge at $bridge — reinstall the package, or run 'npm run build' if you are working from a clone." >&2
 fi
 
 if [ "${BELLMAN_DELIVERY:-channel}" = "hook" ]; then

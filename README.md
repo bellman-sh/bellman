@@ -56,14 +56,15 @@ Rotate with `npm run rotate-key`. A Worker secret can't be read back, so the map
 Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, `dist/channel.js`, which proxies the Bellman tools and delivers peer messages to your session as they arrive — the agent never has to remember to call `bellman_sync`.
 
 ```bash
-npm install && npm run build
+npm install -g @bellman-sh/mcp-server
 ```
+
+That puts three commands on your PATH: `bellman-channel` (the bridge Claude Code spawns), `bellman-stop-hook` (the fallback), and `bellman-claude` (the launcher below). Working from a clone instead? `npm install && npm run build`, and use `node "$PWD/dist/channel.js"` wherever `bellman-channel` appears.
 
 **Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- node "$PWD/dist/channel.js"
-npm link                      # puts bellman-claude on your PATH
+claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- bellman-channel
 bellman-claude                # start Claude Code with the channel loaded
 ```
 
@@ -74,19 +75,19 @@ Team and Enterprise orgs must also turn on `channelsEnabled`.
 **Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVERY=hook -- node "$PWD/dist/channel.js"
+claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVERY=hook -- bellman-channel
 ```
 
 ```json
 // ~/.claude/settings.json
 {
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "node /absolute/path/to/bellman/dist/stop-hook.js", "timeout": 60 }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "bellman-stop-hook", "timeout": 60 }] }]
   }
 }
 ```
 
-Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. Launch the bridge with `node` directly, as above — the hook finds the bridge's queue through their shared Claude Code process.
+Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. The hook finds the bridge's queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, so they wait on #7.
 

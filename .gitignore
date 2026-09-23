@@ -12,10 +12,12 @@ coverage/
 *.sqlite-shm
 data/
 
-# dual-graph local tooling: keep the context store, drop generated/runtime state
-.dual-graph/*
-!.dual-graph/context-store.json
+# dual-graph local tooling: session memory, never project content
+.dual-graph/
 
 # wrangler local secrets
 .dev.vars
 .dual-graph/
+
+# Personal, per-project instructions (not committed)
+CLAUDE.local.md

@@ -51,6 +51,23 @@ Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** so
 
 Rotate with `npm run rotate-key`. A Worker secret can't be read back, so the map is rebuilt from `~/.config/bellman/identities.json` (identities, no keys) and every key is reminted — which is what you want after a leak anyway. The script backs up the old map, uploads, checks the new key is accepted and the old one is refused, updates the Claude Code MCP entry, and leaves the keys in `~/.config/bellman/keys.json` (mode 600). `--dry-run` shows the plan without touching the server.
 
+**Signing in.** GitHub and Google authenticate the human; Bellman issues its own token. Everyone who signs in gets the default identity — free plan, member role, no org — which is the monetization asymmetry working as designed: they can be invited into a room immediately, they just can't create one.
+
+`BELLMAN_USERS` (JSON map of upstream key → identity) names who gets more. `identityFor` tries four keys **in this order**, first match wins:
+
+| Key | Example | Notes |
+| --- | --- | --- |
+| `<provider>:<subject>` | `github:4308278`, `google:1078…` | The stable upstream id. Survives a rename — **prefer this.** |
+| `<provider>:<label>` | `github:mcfearsome` | GitHub login, or Google display name. Convenient, but a freed login can be re-registered by someone else. |
+| `<provider>:<email>` | `github:me@x.com` | Only if the provider reports the address; Google must have it verified. |
+| `email:<address>` | `email:me@x.com` | Provider-neutral — matches the same human through either sign-in. |
+
+Grant with `npm run grant-plan -- --github <login> --plan team --role admin --org org_x`. It resolves the login to its numeric id, merges into `~/.config/bellman/users.json`, and uploads the whole map — same read-back constraint as `BELLMAN_KEYS`, same backup-then-upload order. Google has no public handle lookup, so those go in as `--key google:<sub>` or `--email <address>`. Also `--list`, `--revoke`, `--dry-run`.
+
+The granted `userId` defaults to `u_<provider>_<subject>`, byte-identical to what the default path mints — a grant that invents a new one orphans every session that human created before it.
+
+Unlike `BELLMAN_KEYS`, a malformed `BELLMAN_USERS` is **ignored rather than fatal**: `parseOverrides` logs and returns `{}`, silently dropping every granted human back to free. That's why the map is validated locally before upload.
+
 ## Use it from Claude Code
 
 Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, `dist/channel.js`, which proxies the Bellman tools and delivers peer messages to your session as they arrive — the agent never has to remember to call `bellman_sync`.
@@ -89,7 +106,7 @@ claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVER
 
 Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. The hook finds the bridge's queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
-**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, so they wait on #7.
+**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors: point them at the same URL and sign in with GitHub or Google.
 
 ## Production path
 

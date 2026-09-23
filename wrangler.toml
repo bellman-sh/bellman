@@ -31,11 +31,19 @@ class_name = "RegistryDO"
 name = "AUDIT"
 class_name = "AuditDO"
 
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "AuthDO"
+
 # SQLite-backed Durable Objects. Required on the Workers Free plan, and the
 # storage API is identical to the KV-backed flavour.
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["AuthDO"]
 
 [observability.logs]
 enabled = true

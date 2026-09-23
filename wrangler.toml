@@ -6,7 +6,8 @@ compatibility_date = "2026-09-01"
 # few node builtins. nodejs_compat covers both.
 compatibility_flags = ["nodejs_compat"]
 
-account_id = "f483aaf74f1ab48e4c64e2170102282a"
+# account_id comes from CLOUDFLARE_ACCOUNT_ID in the environment, so this
+# file carries no account identifiers.
 
 # The zone is on Cloudflare, so the Worker binds its own hostname directly and
 # Cloudflare manages the DNS record for it. This also sidesteps needing a

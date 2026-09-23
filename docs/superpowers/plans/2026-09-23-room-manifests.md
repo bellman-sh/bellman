@@ -879,17 +879,28 @@ describe("INVARIANT 9 — a joiner reads the rules before committing", () => {
   });
 
   it("publishes each member's room_role", async () => {
-    const { creator, sessionId, creatorMemberId } = await pairUp(h);
-    const synced = await creator.call("bellman_sync", {
-      session_id: sessionId, member_id: creatorMemberId, cursor: 0, wait_seconds: 0,
+    // bellman_confirm is the tool that returns members[]; bellman_sync
+    // returns only { events, cursor }. publicMember() is shared, so this
+    // covers the same code.
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: { room: "r", preset: "swarm" }, brief: brief(),
     });
-    const members = synced.data.members as { room_role: string }[];
-    expect(members.every((m) => typeof m.room_role === "string")).toBe(true);
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    const confirmed = await peer.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief({ agent: openaiAgent }),
+    });
+
+    const members = confirmed.data.members as { room_role: string }[];
+    expect(members).toHaveLength(2);
+    expect(members.map((m) => m.room_role).sort()).toEqual(["helper", "lead"]);
   });
 });
 ```
-
-Add `import { pairUp } from "../helpers/flows.js";` to the file if it is not already imported.
 
 - [ ] **Step 2: Run to verify they fail**
 

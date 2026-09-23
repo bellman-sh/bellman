@@ -310,7 +310,8 @@ non-interactive path.
 - **`bellman login` / `logout` as commands.** Lazy sign-in covers the install
   path. If deliberate re-authentication turns out to be wanted, it is a small
   follow-up on top of `credentials.ts`.
-- **`tsconfig.worker.json` inheriting `exclude`.** It overrides `include` but
-  not `exclude`, so `npm run typecheck:worker` skips `src/worker.ts` and
-  `src/store-do.ts` — the two files it exists to check. Real, unrelated, its own
-  issue.
+- **#40, the Workers program is typechecked by nothing.**
+  `tsconfig.worker.json` overrides `include` but inherits `exclude`, so
+  `npm run typecheck:worker` skips `src/worker.ts`, `src/store-do.ts` and
+  `src/oauth/store.ts` — everything it exists to check. Found while writing this
+  design, filed separately, and it blocks nothing here.

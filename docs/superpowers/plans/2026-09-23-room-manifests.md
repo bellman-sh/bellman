@@ -14,7 +14,7 @@
 
 - Verb enum is exactly: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `audit`, `close_room`. No others.
 - Preset enum is exactly: `pair`, `swarm`, `review`. `observer` is a role, never a preset.
-- Role keys match `/^[a-z][a-z0-9_]{0,30}$/`. This regex is load-bearing security, not cosmetics — it is what rejects `__proto__` and `constructor` as role keys.
+- Role keys match `/^[a-z][a-z0-9_]{0,30}$/` **and** are rejected outright if they are `__proto__`, `constructor`, or `prototype`. The regex alone is NOT sufficient, verified against zod 4.5.4: `constructor` matches it, and `z.record` silently DROPS an own `__proto__` key before the key schema ever runs, so the regex never sees it. Reserved keys must be guarded on the raw input object, ahead of Zod.
 - Limits: `roles` ≤ 16 entries; `room` ≤ 80 chars; `purpose` ≤ 300 chars; role `description` ≤ 300 chars.
 - A manifest is immutable after `createSession`. No store method may mutate it.
 - `Member.roomRole`, never `Member.role` — `Identity.role` already means `"member" | "admin"`.
@@ -27,7 +27,7 @@
 
 Five things the spec implies that no task's happy path exercises. Each has its test pinned to the task that owns the code.
 
-1. **Prototype-pollution role keys.** `roles: { "__proto__": { can: [] } }` must be rejected as an invalid role key, not merged into `Object.prototype`. → Task 1.
+1. **Prototype-pollution role keys.** A manifest carrying an own `__proto__`, `constructor`, or `prototype` role key must be REJECTED, not silently dropped or silently accepted. Test with `JSON.parse`-built input — an object literal with `__proto__:` sets the prototype and creates no own key, so a literal-based test is vacuous and proves nothing. → Task 1.
 2. **Both arms at once.** `{ room, preset: "pair", roles: {...} }` must fail as an unrecognized key, not silently pick one. → Task 1.
 3. **Plan rejection must not create a room.** A free-plan identity authoring `mode: "swarm"` must get the entitlement error *and* leave zero sessions in the store — the manifest resolved fine, the plan check is what failed, and ordering must still protect the store. → Task 2.
 4. **Durable Object round-trip.** `RoomManifest` must survive serialization into and out of `DurableObjectStore`; it is the only store serving production. → Task 4.
@@ -165,12 +165,21 @@ describe("cross-field validation", () => {
 });
 
 describe("hostile input", () => {
-  it("rejects __proto__ as a role key without polluting Object.prototype", () => {
+  it("rejects an own __proto__ role key arriving over the wire", () => {
+    // MUST be built with JSON.parse. An object literal's `__proto__:` sets the
+    // prototype and creates no own key, so a literal-based test is vacuous.
+    const roles = JSON.parse('{"__proto__":{"can":[]},"helper":{"can":["send"]}}');
+    expect(() => resolveManifest(authored({ roles, creator_role: "helper" })))
+      .toThrow(ManifestError);
+    expect(({} as Record<string, unknown>).can).toBeUndefined();
+  });
+
+  it("rejects constructor as a role key", () => {
+    // `constructor` matches the key regex, so the regex alone cannot catch it.
     expect(() => resolveManifest(authored({
-      roles: { __proto__: { can: [] }, helper: { can: ["send"] } },
+      roles: { constructor: { can: [] }, helper: { can: ["send"] } },
       creator_role: "helper",
     }))).toThrow(ManifestError);
-    expect(({} as Record<string, unknown>).can).toBeUndefined();
   });
 
   it("rejects an uppercase role key", () => {

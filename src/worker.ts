@@ -3,6 +3,10 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { buildServer } from "./server.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
+import { AuthDO, AuthStore } from "./oauth/store.js";
+import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
+import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
+import { canonicalResource } from "./oauth/tokens.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -17,20 +21,67 @@ import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
  * runtime to bind them.
  */
 export { SessionDO, RegistryDO, AuditDO } from "./store-do.js";
+export { AuthDO } from "./oauth/store.js";
 
-const unauthorized = () =>
+/** Worker bindings: the session stores, plus the authorization server's. */
+export interface WorkerEnv extends BellmanEnv {
+  AUTH: DurableObjectNamespace<AuthDO>;
+  /** Signs access tokens. Absent means OAuth sign-in is switched off. */
+  BELLMAN_TOKEN_SECRET?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
+  BELLMAN_USERS?: string;
+}
+
+/**
+ * OAuth is configured per request because issuer and resource come from the
+ * hostname actually being used, so a token minted for mcp.bellman.sh is not
+ * accepted on any other hostname this Worker answers.
+ */
+function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined {
+  if (!env.BELLMAN_TOKEN_SECRET || !env.AUTH) return undefined;
+  const origin = new URL(request.url).origin;
+  const credentials: Partial<Record<ProviderName, ProviderCredentials>> = {};
+  if (env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET) {
+    credentials.github = { clientId: env.GITHUB_CLIENT_ID, clientSecret: env.GITHUB_CLIENT_SECRET };
+  }
+  if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
+    credentials.google = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
+  }
+  return {
+    issuer: origin,
+    resource: canonicalResource(`${origin}/mcp`),
+    secret: env.BELLMAN_TOKEN_SECRET,
+    store: new AuthStore(env.AUTH),
+    credentials,
+    overrides: parseOverrides(env.BELLMAN_USERS),
+  };
+}
+
+const unauthorized = (oauth?: OAuthConfig) =>
   Response.json(
     {
       jsonrpc: "2.0",
-      error: { code: -32001, message: "Unauthorized: missing or unknown bearer key" },
+      error: { code: -32001, message: "Unauthorized: missing or invalid credentials" },
       id: null,
     },
-    { status: 401 }
+    // With OAuth on, the 401 has to say where discovery starts, or a client
+    // has no way to begin the flow (RFC 9728 section 5.1).
+    { status: 401, headers: oauth ? unauthorizedHeaders(oauth) : undefined }
   );
 
 export default {
-  async fetch(request: Request, env: BellmanEnv): Promise<Response> {
+  async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+    const oauth = oauthConfig(request, env);
+
+    if (oauth) {
+      const handled = await handleOAuth(request, oauth);
+      if (handled) return handled;
+    }
 
     if (request.method === "GET" && url.pathname === "/healthz") {
       return Response.json({
@@ -49,13 +100,14 @@ export default {
     }
 
     /**
-     * Fail closed with no key map. resolveIdentity falls back to the dev table
-     * when handed nothing, and nodejs_compat means `process` exists here — so
-     * without this guard a deploy that forgot the secret would serve
-     * qk_dev_jesse (team plan, admin role) on a public URL. Local runs supply
-     * this through .dev.vars, so dev exercises the same path as production.
+     * Fail closed with neither a key map nor OAuth. resolveIdentity falls back
+     * to the dev table when handed nothing, and nodejs_compat means `process`
+     * exists here — so without this guard a deploy that forgot the secret would
+     * serve qk_dev_jesse (team plan, admin role) on a public URL. Local runs
+     * supply this through .dev.vars, so dev exercises the same path production
+     * does.
      */
-    if (!env.BELLMAN_KEYS) {
+    if (!env.BELLMAN_KEYS && !oauth) {
       console.error("BELLMAN_KEYS is unset — refusing to serve. Set it with: wrangler secret put BELLMAN_KEYS");
       return Response.json(
         {
@@ -67,13 +119,14 @@ export default {
       );
     }
 
-    // Passed explicitly: there is no process.env here, and this keeps the dev
-    // key table unreachable on a deployed server.
-    const identity = resolveIdentity(
-      request.headers.get("authorization") ?? undefined,
-      env.BELLMAN_KEYS
-    );
-    if (!identity) return unauthorized();
+    // An OAuth access token first, then the static key map. The bearer key path
+    // stays for stdio clients and scripts, which the spec says should take
+    // credentials from the environment rather than run an OAuth flow.
+    const header = request.headers.get("authorization") ?? undefined;
+    const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
+    let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
+    if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+    if (!identity) return unauthorized(oauth);
 
     try {
       const server = buildServer(identity, new DurableObjectStore(env));
@@ -91,4 +144,4 @@ export default {
       );
     }
   },
-} satisfies ExportedHandler<BellmanEnv>;
+} satisfies ExportedHandler<WorkerEnv>;

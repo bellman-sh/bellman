@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # mints the OIDC token npm provenance is built from
+  id-token: write # mints the OIDC token that authenticates the publish
 
 jobs:
   publish:
@@ -22,6 +22,9 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
+
+      # Node 22 bundles npm 10.x; trusted publishing needs 11.5.1 or later.
+      - run: npm install -g npm@latest
 
       - run: npm ci
 
@@ -47,6 +50,7 @@ jobs:
       - run: npm run verify
       - run: npm run typecheck:worker
 
-      - run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # No NODE_AUTH_TOKEN: the OIDC token minted by id-token: write is the
+      # credential. Provenance is generated automatically under trusted
+      # publishing, so --provenance is not passed either.
+      - run: npm publish --access public

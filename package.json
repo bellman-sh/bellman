@@ -52,6 +52,7 @@
     "dev:worker": "wrangler dev",
     "deploy": "wrangler deploy",
     "rotate-key": "tsx scripts/rotate-key.ts",
+    "grant-plan": "tsx scripts/grant-plan.ts",
     "prepublishOnly": "npm run verify && npm run typecheck:worker"
   },
   "dependencies": {

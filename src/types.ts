@@ -100,3 +100,29 @@ export interface Entitlements {
   orgScoping: boolean;
   audit: boolean;
 }
+
+export type Verb =
+  | "send"
+  | "invite"
+  | "revoke"
+  | "request_actions"
+  | "respond_actions"
+  | "audit"
+  | "close_room";
+
+export type PresetName = "pair" | "swarm" | "review";
+
+export interface RoleDef {
+  can: Verb[];
+  description: string | null;
+}
+
+export interface RoomManifest {
+  room: string;
+  purpose: string | null;
+  mode: SessionMode;
+  roles: Record<string, RoleDef>;
+  defaultRole: string;
+  creatorRole: string;
+  preset: PresetName | null;
+}

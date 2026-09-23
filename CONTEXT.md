@@ -1,14 +1,14 @@
 # Context
 
 ## Current Task
-M1 test suite is merged. The backlog now lives in GitHub issues #1–#7 (labels `M0`, `M2`, `chore`). Next up is M0 room core.
+Bellman is live at `https://mcp.bellman.sh/mcp` on Workers + Durable Objects, with bearer keys and GitHub/Google sign-in. Backlog: #1–#3, #5, #12, #18, #20.
 
 ## Key Decisions
-- Name is Bellman (bellman.sh). Join codes use the `BELL-` prefix. The full search, with collision evidence, is in `naming/domain-sweep.md`.
-- Tools are `bellman_*`, the store interface is `BellmanStore`, the package is `bellman-mcp-server`.
-- `main` moves only through merges; feature work happens on branches.
+- The repo is colocated jj: a detached git HEAD is normal, drive it with `jj`. `main` moves only through merges, so even a doc change goes via a branch and PR.
+- Workers + Durable Objects is production (`SessionDO` per session, a singleton `RegistryDO`, one `AuditDO` per org). The Node server with `MemoryStore` is local development only.
+- Claude Code talks to Bellman through the local bridge (`dist/channel.js`), which pushes peer events as channel notifications, or queues them for the Stop hook under `BELLMAN_DELIVERY=hook`. Peer content keeps its untrusted wrapper the whole way.
 
 ## Next Steps
-- M0 room core, in dependency order: #1 YAML manifests → #2 server-enforced role verbs → #3 role-carrying join codes. #1 blocks the other two.
-- #5 rename leftovers (`qs_`, `qct_`, `qk_`, ~30 call sites) — mechanical, and cheapest before M0 code lands on top of it.
-- M2 local membership (#4): Stop hook plus a long-poll wait tool is the portable base. Claude Code channels are the Claude-only fast path, still research preview.
+- #12: run the store contract suite against `DurableObjectStore`. It is the only store serving production and is verified solely by the smoke run.
+- M0 room core in order — #1 manifests, then #2 permission verbs, then #3 role-carrying codes. #18 and #20 both wait on those.
+- Try the Claude Desktop connector now OAuth is live. A signed-in identity gets the free plan unless `BELLMAN_USERS` grants it a plan, role and org.

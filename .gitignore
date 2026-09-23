@@ -19,5 +19,6 @@ data/
 .dev.vars
 .dual-graph/
 
-# Personal, per-project instructions (not committed)
+# Personal, per-project instructions and session handoff (not committed)
 CLAUDE.local.md
+CONTEXT.md

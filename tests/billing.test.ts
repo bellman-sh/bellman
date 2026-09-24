@@ -25,8 +25,32 @@ async function sign(payload: string, secret = SECRET, t = NOW): Promise<string> 
 let billing: MemoryBillingStore;
 let seq = 0;
 
+/** What Stripe's API answers for each subscription right now. */
+let stripeNow: Map<string, Record<string, unknown>>;
+let stripeDown: boolean;
+let stripeReads: { url: string; auth: string | null }[];
+let clock: number;
+
+const fakeStripe = (async (input: RequestInfo | URL, init?: RequestInit) => {
+  const url = String(input);
+  stripeReads.push({ url, auth: new Headers(init?.headers).get("authorization") });
+  if (stripeDown) return new Response("unavailable", { status: 500 });
+  const id = decodeURIComponent(url.replace("https://api.stripe.com/v1/subscriptions/", ""));
+  const sub = stripeNow.get(id);
+  return sub ? Response.json(sub) : Response.json({ error: { code: "resource_missing" } }, { status: 404 });
+}) as typeof fetch;
+
+/** Each read happens a millisecond after the last, near NOW so signatures stay fresh. */
+const webhookConfig = () => ({
+  secret: SECRET, billing, apiKey: "rk_test", fetchImpl: fakeStripe, now: () => ++clock,
+});
+
 beforeEach(() => {
   billing = new MemoryBillingStore();
+  stripeNow = new Map();
+  stripeDown = false;
+  stripeReads = [];
+  clock = NOW * 1000;
 });
 
 async function deliver(type: string, object: Record<string, unknown>, created = NOW, header?: string) {
@@ -36,27 +60,31 @@ async function deliver(type: string, object: Record<string, unknown>, created = 
     headers: { "stripe-signature": header ?? (await sign(payload)) },
     body: payload,
   });
-  return handleStripeWebhook(request, { secret: SECRET, billing, now: () => NOW * 1000 });
+  return handleStripeWebhook(request, webhookConfig());
 }
 
 const checkout = (customer: string, userId: string | null) =>
   deliver("checkout.session.completed", { object: "checkout.session", mode: "subscription", customer, client_reference_id: userId });
 
+/**
+ * A subscription event. By default Stripe's current state becomes what the
+ * event describes, as it would when the change happens. `stale` delivers the
+ * event without touching Stripe's state: a late or duplicate delivery.
+ */
 const subscription = (
   type: "created" | "updated" | "deleted",
-  opts: { id?: string; customer?: string; status?: string; lookup?: string; created?: number } = {}
-) =>
-  deliver(
-    `customer.subscription.${type}`,
-    {
-      id: opts.id ?? "sub_1",
-      object: "subscription",
-      customer: opts.customer ?? "cus_A",
-      status: opts.status ?? "active",
-      items: { data: [{ price: { lookup_key: opts.lookup ?? "pro_monthly", metadata: {} } }] },
-    },
-    opts.created ?? NOW
-  );
+  opts: { id?: string; customer?: string; status?: string; lookup?: string; created?: number; stale?: boolean } = {}
+) => {
+  const snapshot = {
+    id: opts.id ?? "sub_1",
+    object: "subscription",
+    customer: opts.customer ?? "cus_A",
+    status: opts.status ?? (type === "deleted" ? "canceled" : "active"),
+    items: { data: [{ price: { lookup_key: opts.lookup ?? "pro_monthly", metadata: {} } }] },
+  };
+  if (!opts.stale) stripeNow.set(snapshot.id, snapshot);
+  return deliver(`customer.subscription.${type}`, snapshot, opts.created ?? NOW);
+};
 
 describe("signature verification", () => {
   it("accepts what Stripe signed", async () => {
@@ -88,7 +116,7 @@ describe("signature verification", () => {
   });
 
   it("only takes POST", async () => {
-    const res = await handleStripeWebhook(new Request("https://x/stripe/webhook"), { secret: SECRET, billing });
+    const res = await handleStripeWebhook(new Request("https://x/stripe/webhook"), webhookConfig());
     expect(res.status).toBe(405);
   });
 });
@@ -120,23 +148,23 @@ describe("subscriptions to plans", () => {
   it("keeps a cancelled subscription cancelled, whatever arrives late", async () => {
     await checkout("cus_A", "u_github_1");
     await subscription("deleted", { status: "canceled", created: NOW + 60 });
-    await subscription("created", { created: NOW });
-    await subscription("updated", { created: NOW + 120 });
+    await subscription("created", { created: NOW, stale: true });
+    await subscription("updated", { created: NOW + 120, stale: true });
 
     expect(await billing.paidPlan("u_github_1")).toBeUndefined();
   });
 
-  it("drops an update older than the one on record", async () => {
+  it("records what Stripe says now, not what a late event says", async () => {
     await checkout("cus_A", "u_github_1");
     await subscription("updated", { lookup: "team_seat_monthly", created: NOW + 60 });
-    await subscription("updated", { lookup: "pro_monthly", created: NOW + 30 });
+    await subscription("updated", { lookup: "pro_monthly", created: NOW + 30, stale: true });
 
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
   });
 
   it("keeps the plan through past_due retries and drops it at unpaid", async () => {
     await checkout("cus_A", "u_github_1");
-    await subscription("updated", { status: "past_due" });
+    await subscription("updated", { status: "past_due", created: NOW + 30 });
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
 
     await subscription("updated", { status: "unpaid", created: NOW + 60 });
@@ -253,6 +281,7 @@ describe("payment links", () => {
 describe("the BELLMAN_BILLING switch", () => {
   const secrets = {
     STRIPE_WEBHOOK_SECRET: "whsec_x",
+    STRIPE_API_KEY: "rk_x",
     STRIPE_PAYMENT_LINKS: JSON.stringify({ pro_monthly: "https://buy.stripe.com/abc" }),
   };
 
@@ -279,6 +308,11 @@ describe("the BELLMAN_BILLING switch", () => {
     expect(billingSettings({ ...secrets, BELLMAN_BILLING: "on" })).toMatchObject({ mode: "on", applyPlans: true });
   });
 
+  it("stays off when switched on without the API key it reads subscriptions with", () => {
+    const { STRIPE_API_KEY: _, ...noKey } = secrets;
+    expect(billingSettings({ ...noKey, BELLMAN_BILLING: "on" })).toEqual({ mode: "off", applyPlans: false, paymentLinks: {} });
+  });
+
   it("stays off when switched on without a webhook secret", () => {
     const half = billingSettings({ BELLMAN_BILLING: "on", STRIPE_PAYMENT_LINKS: secrets.STRIPE_PAYMENT_LINKS });
     expect(half).toEqual({ mode: "off", applyPlans: false, paymentLinks: {} });
@@ -292,7 +326,7 @@ describe("signed bodies of an unexpected shape", () => {
       headers: { "stripe-signature": await sign(payload) },
       body: payload,
     });
-    return handleStripeWebhook(request, { secret: SECRET, billing, now: () => NOW * 1000 });
+    return handleStripeWebhook(request, webhookConfig());
   }
 
   it("answers 400, not a crash, for anything that is not an event", async () => {
@@ -311,12 +345,14 @@ describe("signed bodies of an unexpected shape", () => {
 
   it("skips items that are not items and keys that are not strings", async () => {
     await checkout("cus_A", "u_github_1");
-    const res = await deliver("customer.subscription.created", {
+    const junk = {
       id: "sub_1",
       customer: "cus_A",
       status: "active",
       items: { data: [null, "junk", { price: { lookup_key: 42 } }, { price: { lookup_key: "pro_monthly" } }] },
-    });
+    };
+    stripeNow.set("sub_1", junk);
+    const res = await deliver("customer.subscription.created", junk);
 
     expect(res.status).toBe(200);
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
@@ -324,30 +360,66 @@ describe("signed bodies of an unexpected shape", () => {
 
   it("records no plan, without crashing, when items is not a list", async () => {
     await checkout("cus_A", "u_github_1");
-    const res = await deliver("customer.subscription.created", {
-      id: "sub_1", customer: "cus_A", status: "active", items: { data: "nope" },
-    });
+    const odd = { id: "sub_1", customer: "cus_A", status: "active", items: { data: "nope" } };
+    stripeNow.set("sub_1", odd);
+    const res = await deliver("customer.subscription.created", odd);
 
     expect(res.status).toBe(200);
     expect(await billing.paidPlan("u_github_1")).toBeUndefined();
   });
 });
 
-describe("events from the same second", () => {
+describe("events Stripe delivers out of order", () => {
+  it("keeps an upgrade when the older same-second event arrives after it", async () => {
+    await checkout("cus_A", "u_github_1");
+    // pro → team within one second; Stripe delivers the team event first.
+    stripeNow.set("sub_1", { id: "sub_1", customer: "cus_A", status: "active", items: { data: [{ price: { lookup_key: "team_seat_monthly" } }] } });
+    await subscription("updated", { lookup: "team_seat_monthly", created: NOW, stale: true });
+    await subscription("created", { lookup: "pro_monthly", created: NOW, stale: true });
+
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
+  });
+
+  it("keeps a resumed subscription resumed when the pause arrives late", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("updated", { status: "paused" });
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+
+    await subscription("updated", { status: "active" });
+    await subscription("updated", { status: "paused", stale: true });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+
   it("keeps active when a same-second created: incomplete arrives after it", async () => {
     await checkout("cus_A", "u_github_1");
     await subscription("updated", { status: "active", created: NOW });
-    await subscription("created", { status: "incomplete", created: NOW });
+    await subscription("created", { status: "incomplete", created: NOW, stale: true });
 
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
   });
 
-  it("still moves forward within a second, incomplete to active", async () => {
+  it("treats a subscription Stripe no longer has as over", async () => {
     await checkout("cus_A", "u_github_1");
-    await subscription("created", { status: "incomplete", created: NOW });
-    await subscription("updated", { status: "active", created: NOW });
+    await subscription("created");
+    stripeNow.delete("sub_1");
+    await subscription("updated", { stale: true });
 
-    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+  });
+
+  it("answers 502 and records nothing when Stripe cannot be read, so Stripe retries", async () => {
+    await checkout("cus_A", "u_github_1");
+    stripeDown = true;
+    const res = await subscription("created");
+
+    expect(res.status).toBe(502);
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+  });
+
+  it("reads the subscription the event names, with the restricted key", async () => {
+    await subscription("created", { id: "sub_9" });
+
+    expect(stripeReads).toEqual([{ url: "https://api.stripe.com/v1/subscriptions/sub_9", auth: "Bearer rk_test" }]);
   });
 });
 
@@ -371,9 +443,7 @@ describe("which org a team buyer is in", () => {
 
 describe("body size", () => {
   const post = (init: RequestInit & { duplex?: string }) =>
-    handleStripeWebhook(new Request("https://mcp.example.test/stripe/webhook", { method: "POST", ...init } as RequestInit), {
-      secret: SECRET, billing, now: () => NOW * 1000,
-    });
+    handleStripeWebhook(new Request("https://mcp.example.test/stripe/webhook", { method: "POST", ...init } as RequestInit), webhookConfig());
 
   it("refuses a body declared larger than the limit before reading it", async () => {
     const res = await post({ headers: { "content-length": String(MAX_WEBHOOK_BYTES + 1) }, body: "{}" });

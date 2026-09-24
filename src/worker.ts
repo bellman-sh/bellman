@@ -40,6 +40,8 @@ export interface WorkerEnv extends BellmanEnv {
   BELLMAN_BILLING?: string;
   /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
   STRIPE_WEBHOOK_SECRET?: string;
+  /** Restricted key (rk_…) with read access to subscriptions only. */
+  STRIPE_API_KEY?: string;
   /** Optional JSON: link name -> Stripe Payment Link URL, served at /upgrade/<name>. */
   STRIPE_PAYMENT_LINKS?: string;
 }
@@ -91,11 +93,11 @@ export default {
     const oauth = oauthConfig(request, env);
 
     if (url.pathname === "/stripe/webhook") {
-      const { webhookSecret } = billingSettings(env);
-      if (!webhookSecret || !env.AUTH) {
+      const { webhookSecret, apiKey } = billingSettings(env);
+      if (!webhookSecret || !apiKey || !env.AUTH) {
         return new Response("Billing is off", { status: 503 });
       }
-      return handleStripeWebhook(request, { secret: webhookSecret, billing: new AuthStore(env.AUTH) });
+      return handleStripeWebhook(request, { secret: webhookSecret, apiKey, billing: new AuthStore(env.AUTH) });
     }
 
     if (oauth) {

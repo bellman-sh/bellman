@@ -61,6 +61,7 @@ persist = true
 # Billing: off | shadow | on (src/billing/config.ts). A var, not a secret, so
 # switching it is a reviewed commit. The Stripe values stay secrets:
 #   npx wrangler secret put STRIPE_WEBHOOK_SECRET
+#   npx wrangler secret put STRIPE_API_KEY        (restricted: Subscriptions read)
 #   npx wrangler secret put STRIPE_PAYMENT_LINKS
 [vars]
 BELLMAN_BILLING = "off"

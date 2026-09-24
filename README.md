@@ -78,11 +78,12 @@ Billing is switched by `BELLMAN_BILLING` in `wrangler.toml`. It's a var, not a s
 | `shadow` | yes | yes | no |
 | `on` | yes | yes | yes |
 
-Use `shadow` to take real purchases end to end before anyone's plan depends on them. `shadow` or `on` without `STRIPE_WEBHOOK_SECRET` stays off and logs why.
+Use `shadow` to take real purchases end to end before anyone's plan depends on them. `shadow` or `on` without both Stripe secrets below stays off and logs why.
 
 | Secret | What it is |
 | --- | --- |
 | `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
+| `STRIPE_API_KEY` | A restricted key (`rk_…`) with **read** access to Subscriptions and nothing else. Stripe delivers events out of order and timestamps them only to the second, so the webhook reads each subscription's current state from Stripe instead of trusting the event. |
 | `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served. |
 
 Subscribe the endpoint to `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`. A price grants the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` grants `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`). Adding other people to that org isn't built yet.

@@ -16,30 +16,17 @@ const GRANTING = new Set(["active", "trialing", "past_due"]);
 /** Statuses Stripe never moves a subscription out of. */
 const TERMINAL = new Set(["canceled", "incomplete_expired"]);
 
-/**
- * How far along its lifecycle a status is. Stripe's `created` has one-second
- * precision, so two events about one subscription can carry the same time;
- * between those, the later stage wins. That is what keeps a same-second
- * "created: incomplete" arriving after "updated: active" from erasing the
- * plan. A subscription does not step backwards within one second.
- */
-const LIFECYCLE: Record<string, number> = {
-  incomplete: 0,
-  trialing: 1,
-  active: 2,
-  past_due: 3,
-  paused: 4,
-  unpaid: 4,
-  canceled: 5,
-  incomplete_expired: 5,
-};
-const stage = (status: string) => LIFECYCLE[status] ?? -1;
 
 export interface SubscriptionState {
   /** null when the price names no plan this server knows. */
   plan: Plan | null;
   status: string;
-  /** The Stripe event's `created`, in seconds. Older events never overwrite newer ones. */
+  /**
+   * When this state was read from Stripe, in milliseconds. The webhook
+   * records the subscription as Stripe reports it at that moment rather than
+   * as the event describes it, so a later reading always supersedes an
+   * earlier one, whatever order the events arrived in.
+   */
   eventAt: number;
 }
 
@@ -103,12 +90,11 @@ export class BillingLedger implements BillingStorage {
   async recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
     const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
     const previous = record.subscriptions[subscriptionId];
-    // Stripe does not promise delivery order. A cancelled subscription stays
-    // cancelled, an older event never overwrites a newer one, and between
-    // events from the same second the later lifecycle stage wins.
+    // Two webhook calls can read Stripe and then write here in either order.
+    // A cancelled subscription stays cancelled, and an earlier reading never
+    // overwrites a later one.
     if (previous && TERMINAL.has(previous.status)) return;
     if (previous && previous.eventAt > state.eventAt) return;
-    if (previous && previous.eventAt === state.eventAt && stage(previous.status) > stage(state.status)) return;
     record.subscriptions[subscriptionId] = state;
     await this.kv.put(`${CUSTOMER}${customerId}`, record);
   }

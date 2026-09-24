@@ -10,9 +10,12 @@ import type { Plan } from "../types.js";
  * stripe package, because it is one HMAC and it keeps the Worker free of an
  * SDK it would otherwise only use for this.
  *
- * Handling is idempotent, so Stripe's retries and redeliveries are harmless:
- * a link is set-once, and a subscription update older than the one on record
- * is dropped (see BillingLedger).
+ * An event says a subscription changed; it is not trusted to say what the
+ * subscription now is. Stripe delivers events out of order, with `created`
+ * only to the second, and nothing in them orders two changes made within
+ * one. So every subscription event is answered by reading the subscription
+ * from Stripe and recording that, stamped with when it was read. A late or
+ * duplicate event then just records the current state again.
  */
 
 /** Stripe's own default: reject signatures more than five minutes old. */
@@ -167,7 +170,27 @@ function pricesOf(items: unknown): (StripePrice | undefined)[] {
 export interface StripeWebhookConfig {
   secret: string;
   billing: BillingStorage;
+  /** A restricted key that can read subscriptions, and nothing else. */
+  apiKey: string;
+  fetchImpl?: typeof fetch;
   now?: () => number;
+}
+
+/**
+ * The subscription as Stripe has it now, or null when Stripe no longer knows
+ * it. Anything else Stripe answers throws, so the webhook replies 5xx and
+ * Stripe delivers the event again later.
+ */
+async function currentSubscription(id: string, config: StripeWebhookConfig): Promise<Record<string, unknown> | null> {
+  const get = config.fetchImpl ?? fetch;
+  const res = await get(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${config.apiKey}` },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Stripe answered ${res.status} reading subscription ${id}`);
+  const body: unknown = await res.json();
+  if (!isRecord(body)) throw new Error(`Stripe returned a non-object for subscription ${id}`);
+  return body;
 }
 
 const reply = (status: number, body: Record<string, unknown>) => Response.json(body, { status });
@@ -211,16 +234,28 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
       const subscriptionId = idOf(object);
       const customerId = idOf(object.customer);
       if (!subscriptionId || !customerId) return reply(400, { error: "subscription without an id or customer" });
-      const prices = pricesOf(object.items);
+
+      let current: Record<string, unknown> | null;
+      try {
+        current = await currentSubscription(subscriptionId, config);
+      } catch (err) {
+        console.error(`stripe ${event.id}: could not read subscription ${subscriptionId}:`, err);
+        return reply(502, { error: "could not read the subscription from Stripe" });
+      }
+      // Read the clock after Stripe answers: that is the moment this state was true.
+      const readAt = config.now?.() ?? Date.now();
+
+      // Gone from Stripe means over. Otherwise Stripe's answer is the state.
+      const source = current ?? object;
+      const prices = pricesOf(source.items);
       const plans = prices.map(planForPrice).filter((p): p is Plan => p !== null);
       if (prices.length > 0 && plans.length === 0) {
         console.warn(`stripe ${event.id}: subscription ${subscriptionId} has no price naming a known plan`);
       }
       await config.billing.recordSubscription(customerId, subscriptionId, {
         plan: plans[0] ?? null,
-        status: event.type === "customer.subscription.deleted" ? "canceled"
-          : typeof object.status === "string" ? object.status : "",
-        eventAt: event.created,
+        status: current === null ? "canceled" : typeof current.status === "string" ? current.status : "",
+        eventAt: readAt,
       });
       return reply(200, { received: true, applied: true });
     }

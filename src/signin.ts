@@ -40,8 +40,12 @@ function bind(port: number): Promise<Server | undefined> {
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (char) => ENTITIES[char]!);
 
-/** Both arguments are text: one of them can be the authorization server's error message. */
-const page = (title: string, body: string) =>
+/**
+ * Both arguments are text: one of them can be the authorization server's error
+ * message. Exported so a test can put a payload in the title too, where only
+ * string literals go today.
+ */
+export const page = (title: string, body: string) =>
   `<!doctype html><meta charset="utf-8"><title>Bellman</title>` +
   `<body style="font:16px/1.6 ui-sans-serif,system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1.25rem">` +
   `<h1 style="font-size:1.35rem">${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p>`;

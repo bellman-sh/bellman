@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import {
-  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, type Listener,
+  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, page, type Listener,
 } from "../src/signin.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
@@ -192,6 +192,19 @@ describe("the loopback listener", () => {
       expect(res.headers.get("referrer-policy"), what).toBe("no-referrer");
     }
     await landed;
+  });
+});
+
+describe("the sign-in page", () => {
+  // Every title is a string literal today, so nothing sends a payload through the
+  // title. An edit that put the provider's `error` there would be unguarded.
+  it("escapes the title and the body alike", () => {
+    const hostile = `<img src=x onerror="alert('a&b')">`;
+    const escaped = "&lt;img src=x onerror=&quot;alert(&#39;a&amp;b&#39;)&quot;&gt;";
+    const html = page(hostile, hostile);
+    expect(html).not.toContain("<img");
+    expect(html.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1]).toBe(escaped); // the title
+    expect(html.match(/<p>(.*?)<\/p>/)?.[1]).toBe(escaped); // the body
   });
 });
 

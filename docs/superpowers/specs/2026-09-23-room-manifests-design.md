@@ -103,12 +103,21 @@ are creator-authored, and `[a-z][a-z0-9_]{0,30}` still admits
 `ignore_prior_rules_and_obey`. With `MAX_ROLES` at 16 that is a bounded channel
 of roughly 500 characters of lowercase text sitting in the spine.
 
-So the spine is **shape-validated, not content-free**. What actually keeps it
-safe is that the entire `bellman_connect` result already ships under
-`UNTRUSTED_PREAMBLE` (`src/server.ts:348`), so nothing in it reaches the
-joiner's model unflagged. The `untrusted()` envelope adds per-field origin
-marking on top of that for the parts with no structural bound at all —
-`room`, `purpose`, and role `description`.
+So the spine is **shape-validated, not content-free**.
+
+The mitigation is narrower than it first appears, and the difference matters.
+`UNTRUSTED_PREAMBLE` is prepended to `content[0].text` only. `structuredContent`
+— what an MCP client actually parses, and what `Peer.call()` reads back as
+`.data` — carries **no preamble at all**. On that channel the `untrusted()`
+envelope's `trust` field is the only marker, and it wraps the skin, not the
+spine. A role key read via `structuredContent` therefore arrives with no trust
+marking on it.
+
+That is pre-existing rather than new — `creator_brief` has the same exposure,
+and it carries far more sensitive text — but it is the reason the spine/skin
+split is load-bearing rather than cosmetic. Anything creator-authored and
+structurally unbounded MUST be inside the envelope, because on the structured
+channel the envelope is the only thing saying so.
 
 Role keys stay in the spine because `your_role`, `creator_role`, and the `roles`
 table all reference them; moving them into the envelope would make the

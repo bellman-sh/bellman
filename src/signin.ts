@@ -239,6 +239,14 @@ function launcherFor(platform: NodeJS.Platform, target: string): [string, string
  * Open the platform browser, detached, with its output discarded — a child
  * writing to our stdout would corrupt the MCP transport. The platform is a
  * parameter so every platform's argv can be checked from any one of them.
+ *
+ * Only http and https URLs are opened. The URL comes from the SDK's
+ * redirectToAuthorization, built from authorization_endpoint in the server's own
+ * discovery document, so the server picks the scheme, and open, xdg-open and
+ * rundll32 url.dll,FileProtocolHandler each launch whatever application is
+ * registered for one: a file: URL, a protocol handler. An authorization endpoint
+ * is always http(s), so anything else is refused before any process exists, and
+ * logged so the user can see what was attempted.
  */
 export function openBrowser(
   url: URL,
@@ -246,6 +254,10 @@ export function openBrowser(
   platform: NodeJS.Platform = process.platform,
 ): void {
   const target = url.toString();
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    log(`refusing to open ${target}: only http and https URLs are opened in a browser`);
+    return;
+  }
   const [command, args] = launcherFor(platform, target);
   const fallback = () => log(`could not open a browser. Sign in here: ${target}`);
   try {

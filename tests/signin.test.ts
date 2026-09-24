@@ -409,6 +409,47 @@ describe("openBrowser", () => {
 
   afterEach(() => { vi.unstubAllEnvs(); });
 
+  // The URL reaches openBrowser from the SDK's redirectToAuthorization, built from
+  // authorization_endpoint in the SERVER's own discovery document, so the server
+  // picks the scheme. Every launcher runs whatever application is registered for
+  // one: a file: URL, a protocol handler. A sign-in URL is always http(s).
+  describe("refuses a URL that is not http or https", () => {
+    beforeEach(() => {
+      // A broken guard must never start a real process on the machine running the tests.
+      vi.mocked(spawn).mockImplementation(() => { throw new Error("spawn was called for a non-web URL"); });
+    });
+    afterEach(async () => {
+      const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      vi.mocked(spawn).mockImplementation(actual.spawn); // back to the real spawn
+    });
+
+    it.each([
+      "file:///System/Applications/Calculator.app",
+      "javascript:alert(document.cookie)",
+      "data:text/html,<script>alert(1)</script>",
+      "ms-msdt:/id PCWDiagnostic /skip force",
+      "smb://attacker.example/share",
+      "vscode://vscode.git/clone?url=https://attacker.example/x.git",
+      "httpfoo://mcp.bellman.sh/authorize", // starts with "http" and is not http
+    ])("%s, on every platform, and spawns nothing", (target) => {
+      const refused = new URL(target);
+      for (const platform of ["darwin", "linux", "win32", "freebsd"] as const) {
+        const logged: string[] = [];
+        openBrowser(refused, (message) => logged.push(message), platform);
+        // One line, and it carries the URL, so the user can see what was attempted.
+        expect(logged, platform).toEqual([expect.stringContaining(refused.toString())]);
+        expect(logged[0], platform).toMatch(/refus/i);
+      }
+      expect(spawn, "no child process may exist").not.toHaveBeenCalled();
+    });
+  });
+
+  it("still opens an http URL, for a local development server", () => {
+    fakeChild();
+    openBrowser(new URL("http://127.0.0.1:3900/authorize"), () => {}, "linux");
+    expect(spawn).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["darwin", "open"],
     ["linux", "xdg-open"],

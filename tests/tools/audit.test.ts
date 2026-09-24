@@ -18,7 +18,7 @@ const teamAdmin = (userId: string, orgId: string): Identity => ({
   userId, orgId, plan: "team", role: "admin", label: `${userId}@${orgId}`,
 });
 
-interface AuditRow { action: string; session_id: string; actor: string }
+interface AuditRow { action: string; session_id: string; actor: string; detail: Record<string, unknown> }
 
 function rows(data: Record<string, unknown>): AuditRow[] {
   return (data.entries ?? []) as AuditRow[];
@@ -119,6 +119,28 @@ describe("what the audit trail records", () => {
     expect(rows(otherLog.data).every((e) => e.actor === "u_other")).toBe(true);
     expect(rows(acmeLog.data)).toHaveLength(1);
     expect(rows(otherLog.data)).toHaveLength(1);
+  });
+
+  it("records the mode and preset a room was created with", async () => {
+    const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
+    const cited = await acme.call("bellman_start", {
+      manifest: manifestFixture({ preset: "review" }), brief: brief(),
+    });
+    const authored = await acme.call("bellman_start", {
+      manifest: {
+        room: "authored", mode: "swarm",
+        roles: { boss: { can: ["send"] } }, default_role: "boss", creator_role: "boss",
+      },
+      brief: brief(),
+    });
+
+    const log = rows((await acme.call("bellman_audit", { limit: 100 })).data);
+    const createdDetail = (started: { data: Record<string, unknown> }) =>
+      log.find((e) => e.action === "session_created" && e.session_id === String(started.data.session_id))?.detail;
+
+    expect(createdDetail(cited)).toMatchObject({ mode: "pair", preset: "review" });
+    // A room built from authored roles cites no preset.
+    expect(createdDetail(authored)).toMatchObject({ mode: "swarm", preset: null });
   });
 
   /** The enterprise promise: a crossing shows up on both sides of the boundary. */

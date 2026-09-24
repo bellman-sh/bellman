@@ -432,6 +432,25 @@ describe("INVARIANT 8 — every room is declared", () => {
     expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(0);
   });
 
+  // Cross-field errors (a role the manifest never defines, a repeated verb) pass
+  // the shape and are the ones the handler itself reports, under this prefix.
+  it("prefixes a cross-field manifest error so the caller knows which argument failed", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: {
+        room: "dup",
+        mode: "pair",
+        roles: { lead: { can: ["send", "send"] } },
+        default_role: "lead",
+        creator_role: "lead",
+      },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('invalid manifest — role "lead" lists duplicate verb "send"');
+    expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(0);
+  });
+
   // A shape error never reaches the handler: the MCP SDK validates the tool's
   // inputSchema first, so this message carries no "invalid manifest — " prefix.
   // What the caller must still get is the offending field.
@@ -479,5 +498,68 @@ describe("INVARIANT 8 — every room is declared", () => {
     const session = await h.store.getSession(String(res.data.session_id));
     expect(session?.manifest.mode).toBe("swarm");
     expect(session?.maxMembers).toBeGreaterThan(2);
+  });
+
+  it("reports the manifest's mode in the connect preview", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "r", preset: "swarm" },
+    });
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+    expect((preview.data.session as { mode: string }).mode).toBe("swarm");
+  });
+
+  // The other tests here cite a preset. This is the only one that authors roles
+  // and gets past the tool, so it also pins the exact shape the store holds.
+  it("stores an authored manifest expanded, and seats the creator and the joiner by its roles", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: {
+        room: "authored",
+        purpose: "Pair on the flaky job",
+        mode: "pair",
+        roles: {
+          driver: { can: ["send", "invite"], description: "Drives." },
+          navigator: { can: ["send"] },
+        },
+        default_role: "navigator",
+        creator_role: "driver",
+      },
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    const confirmed = await peer.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief({ agent: openaiAgent }),
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+
+    const session = await h.store.getSession(String(started.data.session_id));
+    expect(session?.manifest).toEqual({
+      room: "authored",
+      purpose: "Pair on the flaky job",
+      preset: null,
+      mode: "pair",
+      roles: {
+        driver: { can: ["send", "invite"], description: "Drives." },
+        navigator: { can: ["send"], description: null },
+      },
+      defaultRole: "navigator",
+      creatorRole: "driver",
+    });
+    expect(session?.maxMembers).toBe(2);
+    const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;
+    expect(roleOf("u_jesse")).toBe("driver");
+    expect(roleOf("u_peer")).toBe("navigator");
   });
 });

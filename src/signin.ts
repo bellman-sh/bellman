@@ -41,7 +41,13 @@ export interface Listener {
    * closed first.
    */
   waitForCode(state: string, timeoutMs: number): Promise<string>;
-  /** Stops listening and ends a pending wait with SignInCancelled. Safe to call twice. */
+  /**
+   * Stops listening and ends a pending wait with SignInCancelled. Safe to call
+   * twice. The wait's promise rejects, so whoever holds it must already have a
+   * handler on it (an await, a .catch): closing while a wait exists that nobody is
+   * handling yet is an unhandled rejection, which ends a Node process by default.
+   * Attach the handler first, then close.
+   */
   close(): void;
 }
 

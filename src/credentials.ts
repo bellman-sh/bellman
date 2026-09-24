@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { Identity } from "./types.js";
@@ -81,10 +81,17 @@ export function readServer(dir: string, serverUrl: string): ServerCredential {
  * a `wrangler dev` server share the file and must never clobber each other.
  */
 export function writeServer(dir: string, serverUrl: string, cred: ServerCredential): void {
+  // Modes are set twice on purpose: the `mode` option covers creation (a fresh
+  // file is never on disk at the default mode), the chmod covers a directory or
+  // file that already existed, where the option is ignored. Directory first, so
+  // an old loose file is already out of reach by the time it is rewritten.
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
   const file = readFile(dir);
   file.servers[serverUrl] = cred;
-  writeFileSync(join(dir, FILE), `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+  const path = join(dir, FILE);
+  writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
 }
 
 /**

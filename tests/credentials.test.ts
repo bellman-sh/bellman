@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -37,6 +37,25 @@ describe("the credential file", () => {
     writeServer(nested, PROD, { client: { client_id: "c1" } });
     expect(statSync(join(nested, "credentials.json")).mode & 0o777).toBe(0o600);
     expect(statSync(nested).mode & 0o777).toBe(0o700);
+  });
+
+  it("tightens the mode of a credential file that already exists", () => {
+    // mkdirSync and writeFileSync apply `mode` only when they create the path, so
+    // a directory and file that were already there (restored from a backup, or
+    // synced by a dotfile tool) keep the mode they arrived with unless
+    // writeServer enforces it.
+    const file = join(dir, "credentials.json");
+    writeFileSync(file, JSON.stringify({ version: 1, servers: {} }));
+    chmodSync(file, 0o644);
+    chmodSync(dir, 0o755);
+    // Guard against a vacuous pass: the loose modes must really be in place.
+    expect(statSync(file).mode & 0o777).toBe(0o644);
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+
+    writeServer(dir, PROD, { client: { client_id: "c1" } });
+
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
   });
 
   it("keeps two server URLs apart", () => {

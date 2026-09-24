@@ -1,4 +1,6 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync,
+} from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { Identity } from "./types.js";
@@ -162,4 +164,123 @@ export function tokensUsable(tokens: StoredTokens | undefined, now = Date.now())
   // access token expires.
   if (tokens.expires_at === undefined) return true;
   return tokens.expires_at - EXPIRY_SKEW_MS > now;
+}
+
+export const LOCK_FILE = "credentials.lock";
+
+const HEARTBEAT_MS = 15_000;
+const STALE_MS = 60_000;
+const WAIT_MS = 360_000; // the 5 minute browser cap, plus slack
+const POLL_MS = 100;
+
+interface LockBody { pid: number; heartbeat_at: number }
+
+export interface LockHandle { release(): void }
+
+export interface LockOptions {
+  waitMs?: number;
+  heartbeatMs?: number;
+  staleMs?: number;
+  pidAlive?: (pid: number) => boolean;
+}
+
+function livePid(pid: number): boolean {
+  try {
+    process.kill(pid, 0); // signal 0 tests for existence without signalling
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * One advisory lock over the credential directory, so concurrent bridges open
+ * ONE browser tab and do ONE refresh.
+ *
+ * The holder heartbeats rather than racing a fixed deadline. A plain age
+ * threshold cannot work: a human finishing a browser sign-in may hold this for
+ * minutes, and any threshold short enough to reclaim a crashed process promptly
+ * is short enough to evict a live one mid-sign-in — which produces exactly the
+ * second browser tab the lock exists to prevent.
+ *
+ * Resolves undefined when waitMs elapses. The caller re-reads the credential
+ * file at that point: someone else's sign-in may be all it needed.
+ *
+ * Throws on a filesystem error that is not contention (an unwritable directory,
+ * a full disk): there is nothing to wait for, and waiting would only hide it.
+ */
+export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<LockHandle | undefined> {
+  const waitMs = opts.waitMs ?? WAIT_MS;
+  const heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
+  const staleMs = opts.staleMs ?? STALE_MS;
+  const pidAlive = opts.pidAlive ?? livePid;
+
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, LOCK_FILE);
+  const deadline = Date.now() + waitMs;
+
+  for (;;) {
+    let fd: number;
+    try {
+      fd = openSync(path, "wx", 0o600); // O_EXCL: fails if it already exists
+    } catch (err) {
+      // Only "already exists" is contention. Anything else — EACCES on a directory
+      // that cannot be written, ENOSPC, EROFS — is not a corpse to reclaim: the
+      // loop below would remove nothing, retry at once, and (no await on that
+      // path) never yield to the event loop.
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (reclaimable(path, staleMs, pidAlive)) {
+        rmSync(path, { force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) return undefined;
+      await sleep(POLL_MS);
+      continue;
+    }
+
+    const handle = fd;
+    const beat = () => {
+      try {
+        const body: LockBody = { pid: process.pid, heartbeat_at: Date.now() };
+        ftruncateSync(handle, 0);
+        writeSync(handle, JSON.stringify(body), 0);
+      } catch {
+        // A vanished lock file is someone else's business; release is still
+        // correct and the next acquire sorts it out.
+      }
+    };
+    beat();
+    const timer = setInterval(beat, heartbeatMs);
+    // Never hold the event loop open for a heartbeat — the bridge must be able
+    // to exit while a lock is held.
+    timer.unref?.();
+
+    let released = false;
+    return {
+      release() {
+        if (released) return;
+        released = true;
+        clearInterval(timer);
+        try { closeSync(handle); } catch { /* already closed */ }
+        rmSync(path, { force: true });
+      },
+    };
+  }
+}
+
+function reclaimable(path: string, staleMs: number, pidAlive: (pid: number) => boolean): boolean {
+  let body: LockBody;
+  try {
+    body = JSON.parse(readFileSync(path, "utf8")) as LockBody;
+  } catch {
+    // Unreadable, empty, or half-written: a corpse, not a holder.
+    return true;
+  }
+  // Valid JSON that is not a lock body is the same corpse. `null` most of all:
+  // it parses, and the property reads below would throw on it.
+  if (!body || typeof body.pid !== "number" || typeof body.heartbeat_at !== "number") return true;
+  if (!pidAlive(body.pid)) return true;
+  return Date.now() - body.heartbeat_at > staleMs;
 }

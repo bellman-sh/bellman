@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
-  chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
+  chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, utimesSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -490,7 +491,6 @@ describe("the lock", () => {
   it.each<[string, string]>([
     ["JSON null", "null"],
     ["a bare number", "42"],
-    ["an empty file", ""],
     ["an array", "[]"],
     ["no pid", JSON.stringify({ heartbeat_at: forever })],
     ["no heartbeat", JSON.stringify({ pid: process.pid })],
@@ -500,6 +500,66 @@ describe("the lock", () => {
     const lock = await acquireLock(dir, { ...fast, pidAlive: () => true });
     expect(lock).toBeDefined();
     lock!.release();
+  });
+
+  // Creating the lock (open, then write) and every heartbeat (truncate, then write)
+  // leave a live holder's file empty for a moment. A waiter that reads it then and
+  // calls it a corpse evicts the holder: two bridges, two browser tabs. Under real
+  // concurrency this happened in about a quarter of rounds when six bridges started
+  // together, and up to 2% at 5ms of spread.
+  it("does not reclaim an empty lock file that was written to just now", async () => {
+    const path = join(dir, LOCK_FILE);
+    writeFileSync(path, "");
+    const contender = await acquireLock(dir, { ...fast, waitMs: 0, staleMs: 60_000 });
+    expect(contender).toBeUndefined();
+    expect(existsSync(path)).toBe(true);
+  });
+
+  it("reclaims an empty lock file that nothing has touched for staleMs", async () => {
+    // A holder that died between creating the file and writing to it.
+    const path = join(dir, LOCK_FILE);
+    writeFileSync(path, "");
+    const longAgo = new Date(Date.now() - 10_000);
+    utimesSync(path, longAgo, longAgo);
+    const lock = await acquireLock(dir, { ...fast, waitMs: 0, staleMs: 200 });
+    expect(lock).toBeDefined();
+    lock!.release();
+  });
+
+  // The lock on disk is live throughout; only the read is made to fail, the way it
+  // would in the gap after a failed open. ENOENT there means the holder released and
+  // a third bridge may already have created a new lock in its place, so calling
+  // "gone" a corpse and removing it would take that one out: removing anything at
+  // all is the bug. Any other failure is a lock nobody can read: a corpse.
+  it.each<[string, string, boolean]>([
+    ["ENOENT: it vanished, so leave it alone", "ENOENT", false],
+    ["EACCES: it cannot be read, so reclaim it", "EACCES", true],
+  ])("a failed read of the lock, %s", async (_what, code, reclaimed) => {
+    const path = join(dir, LOCK_FILE);
+    writeFileSync(path, JSON.stringify({ pid: process.pid, heartbeat_at: forever }));
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        readFileSync: (...args: Parameters<typeof real.readFileSync>) => {
+          if (String(args[0]).endsWith(LOCK_FILE)) {
+            throw Object.assign(new Error(`${code}: read failed`), { code });
+          }
+          return real.readFileSync(...args);
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/credentials.js");
+      const lock = await mocked.acquireLock(dir, { ...fast, waitMs: 0, pidAlive: () => true });
+      expect(lock === undefined).toBe(!reclaimed);
+      lock?.release();
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+    if (!reclaimed) expect(existsSync(path)).toBe(true);
   });
 
   it("surfaces an error that is not contention instead of retrying it forever", async () => {

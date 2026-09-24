@@ -1,5 +1,6 @@
 import {
-  chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync,
+  chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
+  writeSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -271,11 +272,33 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
 }
 
 function reclaimable(path: string, staleMs: number, pidAlive: (pid: number) => boolean): boolean {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    // Gone between the failed open and this read: the holder released. There is
+    // nothing to reclaim, and removing "it" now could take out the lock a third
+    // bridge has just created in its place — a second holder.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    return true; // unreadable: a corpse, not a holder
+  }
+  if (raw === "") {
+    // Not a corpse yet. Creating the lock (open, then write) and every heartbeat
+    // (truncate, then write) are separate syscalls, so a live holder is empty for
+    // a moment, and a waiter that called that a corpse would evict it. Judge it by
+    // mtime, which those very writes refresh, like any other heartbeat: only an
+    // empty file nothing has touched for staleMs is a holder that died mid-write.
+    try {
+      return Date.now() - statSync(path).mtimeMs > staleMs;
+    } catch {
+      return false; // released between the read and the stat: as above, not ours to remove
+    }
+  }
   let body: LockBody;
   try {
-    body = JSON.parse(readFileSync(path, "utf8")) as LockBody;
+    body = JSON.parse(raw) as LockBody;
   } catch {
-    // Unreadable, empty, or half-written: a corpse, not a holder.
+    // Garbled or half-written: a corpse, not a holder.
     return true;
   }
   // Valid JSON that is not a lock body is the same corpse. `null` most of all:

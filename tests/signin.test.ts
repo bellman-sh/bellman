@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import {
-  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, page, type Listener,
+  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, page, SignInCancelled, type Listener,
 } from "../src/signin.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
@@ -223,6 +223,106 @@ describe("the loopback listener", () => {
     const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
     await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     await landed;
+  });
+});
+
+describe("closing the listener", () => {
+  /** Ref'd timers alive right now: what keeps a process from exiting on its own. */
+  const timers = () => process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
+  /** How a wait ended, without an unhandled rejection in between. */
+  const outcomeOf = (waiting: Promise<string>) =>
+    waiting.then((code) => `code:${code}`, (error: Error) => `error:${error.message}`);
+
+  // The caller is shutting down. The wait must end now, as something a caller can
+  // tell from a failure, and nothing of it may be left to keep the process alive:
+  // a pending 300 s timer held the event loop open for five minutes after close().
+  it("ends a pending wait with SignInCancelled, and leaves no timer running", async () => {
+    const listener = track((await listen())!);
+    const before = timers();
+    const waiting = listener.waitForCode("state-abc", 300_000);
+    const ended = waiting.catch((error: unknown) => error); // subscribe first
+    expect(timers()).toBe(before + 1); // the wait's timer is what would pin the process
+    listener.close();
+    expect(timers()).toBe(before);
+    const error = await ended;
+    expect(error).toBeInstanceOf(SignInCancelled);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).toBe("SignInCancelled");
+  });
+
+  it("is safe to close twice", async () => {
+    const listener = track((await listen())!);
+    const ended = listener.waitForCode("state-abc", 300_000).catch((error: unknown) => error);
+    expect(() => { listener.close(); listener.close(); }).not.toThrow();
+    expect(await ended).toBeInstanceOf(SignInCancelled);
+  });
+
+  it("refuses a wait on a closed listener at once, and starts no timer", async () => {
+    const listener = track((await listen())!);
+    listener.close();
+    const before = timers();
+    const waiting = listener.waitForCode("state-abc", 300_000);
+    const ended = waiting.catch((error: unknown) => error); // subscribe first
+    expect(timers()).toBe(before);
+    expect(await ended).toBeInstanceOf(SignInCancelled);
+  });
+
+  // Task 7 swallows a shutdown cancel and lets a real failure reach the user, so
+  // the two must not be the same class.
+  it("keeps a timeout and a refusal apart from a cancellation", async () => {
+    const listener = track((await listen())!);
+    const timedOut = await listener.waitForCode("state-abc", 50).catch((error: unknown) => error);
+    expect(timedOut).toBeInstanceOf(Error);
+    expect(timedOut).not.toBeInstanceOf(SignInCancelled);
+
+    const refused = listener.waitForCode("state-abc", 5_000).catch((error: unknown) => error); // subscribe first
+    await get(`${listener.redirectUri}?error=access_denied&state=state-abc`);
+    expect(await refused).toBeInstanceOf(Error);
+    expect(await refused).not.toBeInstanceOf(SignInCancelled);
+  });
+
+  // Two waits on one listener would each answer the same request, and the second
+  // writeHead throws ERR_HTTP_HEADERS_SENT, uncaught. So there is only ever one.
+  it("refuses a second wait while one is pending, and the first still completes", async () => {
+    const listener = track((await listen())!);
+    const first = listener.waitForCode("state-abc", 5_000);
+    const landed = expect(first).resolves.toBe("the-code"); // subscribe first
+    const second = listener.waitForCode("state-abc", 300);
+    const refused = expect(second).rejects.toThrow(/already waiting/);
+    const res = await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
+    expect(res.status).toBe(200);
+    await landed;
+    await refused;
+  });
+
+  // Whatever ends a wait takes its request handler with it. Left behind, it would
+  // answer a late callback with "Signed in" after the bridge has already given up.
+  it("does not acknowledge a callback that arrives after the wait has ended", async () => {
+    const listener = track((await listen())!);
+    await expect(listener.waitForCode("state-abc", 50)).rejects.toThrow(/timed out/);
+    const late = await get(`${listener.redirectUri}?code=late&state=state-abc`, {
+      signal: AbortSignal.timeout(300),
+    }).then((res) => `status:${res.status}`, () => "no answer");
+    expect(late).not.toBe("status:200");
+  });
+
+  // The one slot has to free up however the last wait ended.
+  it("takes a new wait once the last has ended, however it ended", async () => {
+    const listener = track((await listen())!);
+
+    const byCode = outcomeOf(listener.waitForCode("state-1", 5_000));
+    await get(`${listener.redirectUri}?code=c1&state=state-1`);
+    expect(await byCode).toBe("code:c1");
+
+    const byRefusal = outcomeOf(listener.waitForCode("state-2", 5_000));
+    await get(`${listener.redirectUri}?error=access_denied&state=state-2`);
+    expect(await byRefusal).toBe("error:access_denied");
+
+    expect(await outcomeOf(listener.waitForCode("state-3", 50))).toMatch(/^error:timed out/);
+
+    const last = outcomeOf(listener.waitForCode("state-4", 5_000));
+    await get(`${listener.redirectUri}?code=c4&state=state-4`);
+    expect(await last).toBe("code:c4");
   });
 });
 

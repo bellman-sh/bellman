@@ -19,9 +19,28 @@ export function loopbackRedirects(ports: number[] = CALLBACK_PORTS): string[] {
   return ports.map((port) => `http://127.0.0.1:${port}/callback`);
 }
 
+/**
+ * A wait that ended because the listener was closed, not because the sign-in
+ * failed. A caller that is shutting down closes the listener and ignores this; a
+ * refusal or a timeout is a plain Error and must still reach the user. A class
+ * rather than a message to match: instanceof survives a rewording.
+ */
+export class SignInCancelled extends Error {
+  constructor(message = "the sign-in was cancelled") {
+    super(message);
+    this.name = "SignInCancelled";
+  }
+}
+
 export interface Listener {
   redirectUri: string;
+  /**
+   * One wait at a time. Resolves with the authorization code; rejects with a plain
+   * Error on a refusal or a timeout, and with SignInCancelled if the listener is
+   * closed first.
+   */
   waitForCode(state: string, timeoutMs: number): Promise<string>;
+  /** Stops listening and ends a pending wait with SignInCancelled. Safe to call twice. */
   close(): void;
 }
 
@@ -67,6 +86,9 @@ export async function listenForCallback(
 
 function makeListener(server: Server, redirectUri: string, log: (message: string) => void): Listener {
   const path = new URL(redirectUri).pathname;
+  let closed = false;
+  /** Ends the wait in progress with SignInCancelled. Set for exactly as long as there is one. */
+  let cancelPending: (() => void) | undefined;
   /**
    * An accept error after a successful bind (EMFILE, say) is an 'error' event on
    * the server, and an 'error' event nobody listens for is an uncaught exception
@@ -84,17 +106,26 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
       if (!state) {
         return Promise.reject(new Error("waitForCode needs a non-empty state to check the callback against"));
       }
+      // Nothing will ever arrive on a closed listener, and a timer started here
+      // would hold the event loop open for the whole wait, for nothing.
+      if (closed) return Promise.reject(new SignInCancelled("the sign-in listener is closed"));
+      // One wait at a time. Two would each answer the same request; the second
+      // writeHead throws ERR_HTTP_HEADERS_SENT, uncaught, and it ends the bridge.
+      if (cancelPending) return Promise.reject(new Error("waitForCode is already waiting on this listener"));
       return new Promise<string>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          server.removeListener("request", onRequest);
-          reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for the sign-in to finish`));
-        }, timeoutMs);
+        const timer = setTimeout(
+          () => settle(() => reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for the sign-in to finish`))),
+          timeoutMs,
+        );
 
+        // However the wait ends, its timer, its request handler and its slot go.
         const settle = (fn: () => void) => {
           clearTimeout(timer);
           server.removeListener("request", onRequest);
+          cancelPending = undefined;
           fn();
         };
+        cancelPending = () => settle(() => reject(new SignInCancelled("the sign-in listener was closed while waiting")));
 
         function onRequest(req: IncomingMessage, res: ServerResponse): void {
           /**
@@ -162,7 +193,14 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
         server.on("request", onRequest);
       });
     },
-    close() { server.close(); },
+    close() {
+      if (closed) return;
+      closed = true;
+      // The timer is what would keep the process alive: server.close() alone
+      // leaves a pending wait's timer running until it fires.
+      cancelPending?.();
+      server.close();
+    },
   };
 }
 

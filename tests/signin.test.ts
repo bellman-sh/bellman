@@ -104,6 +104,14 @@ describe("the loopback listener", () => {
     await timedOut; // none of them settled the wait
   });
 
+  // Expecting an empty state is a bug in the caller (the SDK sends no state when
+  // state() returns nothing), and it must be loud. Waited on, it fails open:
+  // "?code=attacker-code&state=" equals the empty state and the wait resolves.
+  it("refuses to wait on an empty state, which nothing could be checked against", async () => {
+    const listener = track((await listenForCallback(TEST_PORTS))!);
+    await expect(listener.waitForCode("", 400)).rejects.toThrow(/non-empty state/);
+  });
+
   // Review Focus 2 — the human clicked Cancel.
   it("fails fast when the callback carries an error instead of a code", async () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);

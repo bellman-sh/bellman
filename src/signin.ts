@@ -56,6 +56,12 @@ function makeListener(server: Server, redirectUri: string): Listener {
   return {
     redirectUri,
     waitForCode(state, timeoutMs) {
+      // Fail closed. An empty state matches "state=", so waiting on one would
+      // accept a callback from anyone who sends that; a caller that has no state
+      // to check against has a bug, and it should be loud.
+      if (!state) {
+        return Promise.reject(new Error("waitForCode needs a non-empty state to check the callback against"));
+      }
       return new Promise<string>((resolve, reject) => {
         const timer = setTimeout(() => {
           server.removeListener("request", onRequest);

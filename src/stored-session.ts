@@ -20,6 +20,6 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   const m = (raw as { manifest?: unknown }).manifest;
   if (!m || typeof m !== "object") return undefined;
   const roles = (m as { roles?: unknown }).roles;
-  if (!roles || typeof roles !== "object") return undefined;
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
   return raw as StoredSession;
 }

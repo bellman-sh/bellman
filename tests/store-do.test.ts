@@ -23,6 +23,16 @@ describe("legacy Durable Object rows", () => {
       .toBeUndefined();
   });
 
+  it("treats a row whose roles is an array as gone", () => {
+    // An array is an object too, so `typeof roles === "object"` alone lets it through.
+    // The rest of the manifest is valid, so only the array-ness can trigger the rejection.
+    const s = session();
+    expect(hydrateStoredSession({ ...s, manifest: { ...s.manifest, roles: [] } }))
+      .toBeUndefined();
+    expect(hydrateStoredSession({ ...s, manifest: { ...s.manifest, roles: [{ can: [] }] } }))
+      .toBeUndefined();
+  });
+
   it("treats undefined and null as gone", () => {
     expect(hydrateStoredSession(undefined)).toBeUndefined();
     expect(hydrateStoredSession(null)).toBeUndefined();

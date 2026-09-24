@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
+import { MemoryStore } from "../src/store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
 
@@ -49,6 +50,7 @@ beforeEach(() => {
       google: { clientId: "g-id", clientSecret: "g-secret" },
     },
     overrides: {},
+    plans: new MemoryStore(),
     fetchImpl: fakeFetch,
   };
 });
@@ -316,5 +318,342 @@ describe("the full flow", () => {
     });
 
     expect(((await res.json()) as Record<string, string>).error).toBe("unsupported_grant_type");
+  });
+});
+
+
+/**
+ * Plans are runtime data now: a stored grant decides what a signed-in human
+ * gets, and the operator's BELLMAN_USERS still outranks it.
+ */
+describe("plan resolution", () => {
+  const grant = (over: Record<string, unknown> = {}) => ({
+    key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+    source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null, ...over,
+  });
+
+  async function signedInIdentity(): Promise<Identity | null> {
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const { body } = await exchange(clientId, code);
+    return identityFromAccessToken(body.access_token, config);
+  }
+
+  it("gives the default free identity when nothing grants anything", async () => {
+    expect(await signedInIdentity()).toMatchObject({ plan: "free", role: "member", orgId: null });
+  });
+
+  it("applies a stored grant without changing who the person is", async () => {
+    await config.plans!.putGrant(grant({ plan: "team", role: "admin", orgId: "org_example" }));
+
+    const identity = await signedInIdentity();
+
+    expect(identity).toMatchObject({ plan: "team", role: "admin", orgId: "org_example" });
+    // The property that matters: a grant must not orphan existing sessions.
+    expect(identity?.userId).toBe("u_github_4242");
+  });
+
+  it("lets the operator override outrank a stored grant", async () => {
+    await config.plans!.putGrant(grant({ plan: "pro" }));
+    config.overrides = {
+      "github:4242": {
+        userId: "u_jesse", orgId: "org_codenerd", plan: "team", role: "admin", label: "jesse@codenerd",
+      },
+    };
+
+    expect(await signedInIdentity()).toMatchObject({ plan: "team", label: "jesse@codenerd" });
+  });
+
+  it("ignores a grant that has lapsed", async () => {
+    await config.plans!.putGrant(grant({ plan: "team", orgId: "org_x", expiresAt: Date.now() - 1 }));
+
+    expect(await signedInIdentity()).toMatchObject({ plan: "free" });
+  });
+});
+
+describe("the account surface", () => {
+  async function tokenFor(identity?: Identity): Promise<string> {
+    if (identity) config.overrides = { "github:4242": identity };
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    return (await exchange(clientId, code)).body.access_token;
+  }
+  const admin: Identity = {
+    userId: "u_admin", orgId: "org_example", plan: "team", role: "admin", label: "admin@example",
+  };
+
+  it("refuses an anonymous request and says where to start", async () => {
+    const res = await call("/account");
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toContain("resource_metadata");
+  });
+
+  it("shows plan, where it came from, and the quota", async () => {
+    const token = await tokenFor();
+    const res = await call("/account", { headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+    const body = (await res.json()) as Record<string, any>;
+
+    expect(body).toMatchObject({ plan: "free", plan_source: "default", user_id: "u_github_4242" });
+    expect(body.usage).toMatchObject({ sessions_created_this_month: 0, monthly_limit: 20, remaining: 20 });
+  });
+
+  it("names the operator when a plan was granted by the secret", async () => {
+    const token = await tokenFor(admin);
+    const res = await call("/account", { headers: { authorization: `Bearer ${token}`, accept: "application/json" } });
+
+    expect((await res.json() as Record<string, unknown>).plan_source).toBe("operator");
+  });
+});
+
+describe("granting plans at runtime", () => {
+  const admin: Identity = {
+    userId: "u_admin", orgId: "org_example", plan: "team", role: "admin", label: "admin@example",
+  };
+
+  async function tokenFor(identity: Identity): Promise<string> {
+    config.overrides = { "github:4242": identity };
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    return (await exchange(clientId, code)).body.access_token;
+  }
+  const as = (token: string, init: RequestInit = {}) => ({
+    ...init,
+    headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` },
+  });
+
+  it("is closed to anonymous callers and to people who are not team admins", async () => {
+    expect((await call("/admin/grants")).status).toBe(401);
+
+    const free = await tokenFor({
+      userId: "u_free", orgId: null, plan: "free", role: "member", label: "free@example",
+    });
+    expect((await call("/admin/grants", as(free))).status).toBe(403);
+  });
+
+  it("grants, lists and revokes", async () => {
+    const token = await tokenFor(admin);
+
+    const granted = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:99", plan: "pro", role: "member", orgId: "org_example" }),
+    }));
+    expect(granted.status).toBe(201);
+
+    const listed = (await (await call("/admin/grants", as(token))).json()) as { grants: { key: string }[] };
+    expect(listed.grants.map((g) => g.key)).toContain("github:99");
+
+    const revoked = await call("/admin/grants?key=github:99", as(token, { method: "DELETE" }));
+    expect(revoked.status).toBe(200);
+    expect(await config.plans!.getGrant("github:99")).toBeUndefined();
+  });
+
+  it("refuses a team or admin grant with no org, which would be inert", async () => {
+    const token = await tokenFor(admin);
+
+    const res = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:98", plan: "team", role: "admin" }),
+    }));
+
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Record<string, string>).error_description).toContain("orgId");
+  });
+
+  it("writes plan changes to the org audit log", async () => {
+    const token = await tokenFor(admin);
+    await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:97", plan: "pro", role: "member", orgId: "org_example" }),
+    }));
+    await call("/admin/grants?key=github:97", as(token, { method: "DELETE" }));
+
+    const entries = await (config.plans as MemoryStore).auditForOrg("org_example", 50);
+    expect(entries.map((e) => e.action)).toEqual(["plan_granted", "plan_revoked"]);
+  });
+});
+
+
+/**
+ * Grants are org-tenanted. A team admin administers their own org and nobody
+ * else's — which only becomes reachable once buying `team` mints an org and
+ * makes the buyer its admin, so it is worth pinning before that ships.
+ */
+describe("grants do not cross org boundaries", () => {
+  const admin = (orgId: string, userId: string): Identity => ({
+    userId, orgId, plan: "team", role: "admin", label: `${userId}@example`,
+  });
+
+  async function tokenFor(identity: Identity): Promise<string> {
+    config.overrides = { "github:4242": identity };
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    return (await exchange(clientId, code)).body.access_token;
+  }
+  const as = (token: string, init: RequestInit = {}) => ({
+    ...init,
+    headers: { ...(init.headers ?? {}), authorization: `Bearer ${token}` },
+  });
+
+  it("refuses a grant aimed at another org", async () => {
+    const token = await tokenFor(admin("org_mine", "u_mine"));
+
+    const res = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:victim", plan: "team", role: "admin", orgId: "org_theirs" }),
+    }));
+
+    expect(res.status).toBe(403);
+    expect(await config.plans!.getGrant("github:victim")).toBeUndefined();
+  });
+
+  it("refuses an org-less grant, which would escape org scoping entirely", async () => {
+    const token = await tokenFor(admin("org_mine", "u_mine"));
+
+    const res = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:anyone", plan: "pro", role: "member" }),
+    }));
+
+    expect(res.status).toBe(403);
+  });
+
+  it("lists only your own org's grants", async () => {
+    await config.plans!.putGrant({
+      key: "github:theirs", plan: "team", role: "member", orgId: "org_theirs",
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+    await config.plans!.putGrant({
+      key: "github:mine", plan: "team", role: "member", orgId: "org_mine",
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+    const token = await tokenFor(admin("org_mine", "u_mine"));
+
+    const body = (await (await call("/admin/grants", as(token))).json()) as { grants: { key: string }[] };
+
+    expect(body.grants.map((g) => g.key)).toEqual(["github:mine"]);
+  });
+
+  it("refuses to revoke another org's grant, and leaves it standing", async () => {
+    await config.plans!.putGrant({
+      key: "github:theirs", plan: "team", role: "admin", orgId: "org_theirs",
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+    const token = await tokenFor(admin("org_mine", "u_mine"));
+
+    const res = await call("/admin/grants?key=github:theirs", as(token, { method: "DELETE" }));
+
+    expect(res.status).toBe(403);
+    expect(await config.plans!.getGrant("github:theirs")).toBeDefined();
+  });
+});
+
+
+/** Review found each of these; each one is a way a grant outlives its revocation. */
+describe("a revoked grant cannot be kept alive", () => {
+  const key = "github:4242";
+  const liveGrant = {
+    key, plan: "team" as const, role: "admin" as const, orgId: "org_example",
+    source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+  };
+
+  it("re-resolves the plan on refresh instead of replaying the one from sign-in", async () => {
+    await config.plans!.putGrant(liveGrant);
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    expect((await identityFromAccessToken(first.access_token, config))?.plan).toBe("team");
+
+    // The subscription lapses. Rotation would otherwise hand out a fresh
+    // 30-day refresh window carrying the old plan, forever.
+    await config.plans!.deleteGrant(key);
+
+    const refreshed = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: clientId,
+      }).toString(),
+    });
+    const second = (await refreshed.json()) as Record<string, string>;
+    const identity = await identityFromAccessToken(second.access_token, config);
+
+    expect(identity?.plan).toBe("free");
+    expect(identity?.role).toBe("member");
+    expect(identity?.orgId).toBeNull();
+    // Still the same human: revoking a plan must not orphan their sessions.
+    expect(identity?.userId).toBe("u_github_4242");
+  });
+
+  it("picks up an upgrade on refresh too", async () => {
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    expect((await identityFromAccessToken(first.access_token, config))?.plan).toBe("free");
+
+    await config.plans!.putGrant({ ...liveGrant, plan: "pro", role: "member", orgId: null });
+
+    const refreshed = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: clientId,
+      }).toString(),
+    });
+    const second = (await refreshed.json()) as Record<string, string>;
+
+    expect((await identityFromAccessToken(second.access_token, config))?.plan).toBe("pro");
+  });
+});
+
+describe("the grant endpoint validates what it is given", () => {
+  const admin: Identity = {
+    userId: "u_admin", orgId: "org_mine", plan: "team", role: "admin", label: "admin@example",
+  };
+  async function adminToken(): Promise<string> {
+    config.overrides = { "github:4242": admin };
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    return (await exchange(clientId, code)).body.access_token;
+  }
+  const post = async (token: string, body: unknown) =>
+    call("/admin/grants", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+
+  it("rejects a key that could never match a signed-in human", async () => {
+    const token = await adminToken();
+
+    for (const key of [42, {}, "", "nonsense:1", "github:"]) {
+      const res = await post(token, { key, plan: "pro", role: "member", orgId: "org_mine" });
+      expect(res.status, `key ${JSON.stringify(key)}`).toBe(400);
+    }
+  });
+
+  /** Date.now() > "soon" is false, so a bad value means "never lapses". */
+  it("rejects an expiresAt that would silently never expire", async () => {
+    const token = await adminToken();
+
+    const res = await post(token, {
+      key: "github:99", plan: "pro", role: "member", orgId: "org_mine", expiresAt: "next tuesday",
+    });
+
+    expect(res.status).toBe(400);
+    expect(await config.plans!.getGrant("github:99")).toBeUndefined();
+  });
+
+  it("will not overwrite a grant that belongs to another org", async () => {
+    await config.plans!.putGrant({
+      key: "github:contested", plan: "team", role: "admin", orgId: "org_theirs",
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+    const token = await adminToken();
+
+    const res = await post(token, {
+      key: "github:contested", plan: "pro", role: "member", orgId: "org_mine",
+    });
+
+    expect(res.status).toBe(403);
+    expect((await config.plans!.getGrant("github:contested"))?.orgId).toBe("org_theirs");
   });
 });

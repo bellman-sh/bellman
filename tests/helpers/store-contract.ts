@@ -277,6 +277,71 @@ export function describeStoreContract(
       expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.id).toBe(a.id);
     });
 
+    // ----------------------------------------------------------- plan grants
+    it("round-trips a grant and deletes it", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const,
+        orgId: "org_example", source: "purchase", grantedAt: Date.now(),
+        grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant(grant));
+
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team", orgId: "org_example" });
+      expect(await store.getGrant("github:nobody")).toBeUndefined();
+
+      (await store.deleteGrant("github:4242"));
+      expect(await store.getGrant("github:4242")).toBeUndefined();
+    });
+
+    /** A lapsed subscription must stop granting, without anyone sweeping it. */
+    it("stops honouring a grant once it has expired", async () => {
+      (await store.putGrant({
+        key: "google:lapsed", plan: "pro" as const, role: "member" as const,
+        orgId: null, source: "purchase", grantedAt: Date.now() - 1000,
+        grantedBy: "stripe", expiresAt: Date.now() - 1,
+      }));
+
+      expect(await store.getGrant("google:lapsed")).toBeUndefined();
+    });
+
+    it("does not list a grant that has expired", async () => {
+      (await store.putGrant({
+        key: "github:lapsed", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now() - 1000, grantedBy: "stripe", expiresAt: Date.now() - 1,
+      }));
+      (await store.putGrant({
+        key: "github:live", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:live"]);
+    });
+
+    it("lists grants scoped to one org", async () => {
+      (await store.putGrant({
+        key: "github:mine", plan: "team" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+      (await store.putGrant({
+        key: "github:theirs", plan: "team" as const, role: "member" as const, orgId: "org_theirs",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:mine"]);
+      expect((await store.listGrants(50)).length).toBe(2);
+    });
+
+    it("lists grants", async () => {
+      for (const key of ["github:1", "github:2"]) {
+        (await store.putGrant({
+          key, plan: "pro" as const, role: "member" as const, orgId: null,
+          source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+        }));
+      }
+
+      expect((await store.listGrants(10)).map((g) => g.key).sort()).toEqual(["github:1", "github:2"]);
+    });
+
     it("takePendingConnect is single-use", async () => {
       (await store.putPendingConnect({
         token: "qct_1", sessionId: "qs_test", userId: "u_peer",

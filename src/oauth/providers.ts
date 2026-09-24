@@ -144,27 +144,23 @@ export function isProviderName(value: string): value is ProviderName {
   return value === "github" || value === "google";
 }
 
-/**
- * Map an authenticated human onto a Bellman identity.
- *
- * BELLMAN_USERS names the people who get more than the default: a plan, a
- * role, an org. Everyone else signs in and gets a free identity, which is the
- * monetization model working as designed — creating sessions is gated, joining
- * never is, so a new signer-in can be invited into a room immediately.
- */
-export function identityFor(
-  profile: ProviderProfile,
-  overrides: Record<string, Identity> = {}
-): Identity {
-  const keys = [
+/** Every key a grant or override may be filed under, most specific first. */
+export function identityKeys(profile: ProviderProfile): string[] {
+  return [
     `${profile.provider}:${profile.subject}`,
     `${profile.provider}:${profile.label}`,
     ...(profile.email ? [`${profile.provider}:${profile.email}`, `email:${profile.email}`] : []),
   ];
-  for (const key of keys) {
-    const match = overrides[key];
-    if (match) return match;
-  }
+}
+
+/**
+ * Who this human is before any plan is applied.
+ *
+ * userId is derived from the provider subject and nothing else. That is what
+ * lets a plan be granted, changed or revoked without orphaning the sessions
+ * they already created.
+ */
+export function defaultIdentity(profile: ProviderProfile): Identity {
   return {
     userId: `u_${profile.provider}_${profile.subject}`,
     orgId: null,
@@ -172,6 +168,22 @@ export function identityFor(
     role: "member",
     label: profile.email ?? `${profile.label}@${profile.provider}`,
   };
+}
+
+/**
+ * Map an authenticated human onto a Bellman identity using the operator's
+ * BELLMAN_USERS map alone. Runtime grants are resolved in routes.ts, which has
+ * the store; this is the secret-only path and the one the tests pin.
+ */
+export function identityFor(
+  profile: ProviderProfile,
+  overrides: Record<string, Identity> = {}
+): Identity {
+  for (const key of identityKeys(profile)) {
+    const match = overrides[key];
+    if (match) return match;
+  }
+  return defaultIdentity(profile);
 }
 
 export function parseOverrides(raw: string | undefined): Record<string, Identity> {

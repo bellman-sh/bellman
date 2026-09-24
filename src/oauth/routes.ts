@@ -1,6 +1,9 @@
-import type { Identity } from "../types.js";
+import { entitlementsFor } from "../auth.js";
+import type { BellmanStore } from "../store.js";
+import type { Identity, PlanGrant } from "../types.js";
 import {
-  PROVIDERS, identityFor, isProviderName, type ProviderCredentials, type ProviderName,
+  PROVIDERS, defaultIdentity, identityKeys, isProviderName,
+  type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
 import type { AuthStorage } from "./storage.js";
 import {
@@ -27,7 +30,87 @@ export interface OAuthConfig {
   store: AuthStorage;
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
+  /** Runtime plan grants. Absent means only BELLMAN_USERS decides a plan. */
+  plans?: PlanStore;
   fetchImpl?: typeof fetch;
+}
+
+/** The slice of BellmanStore the authorization server needs. */
+export type PlanStore = Pick<
+  BellmanStore,
+  "getGrant" | "putGrant" | "deleteGrant" | "listGrants" | "countCreatesThisMonth" | "appendAudit"
+>;
+
+export type PlanSource = "operator" | "grant" | "default";
+
+/**
+ * Which identity a signed-in human gets, and why.
+ *
+ * Precedence is deliberate: the operator's BELLMAN_USERS wins over a stored
+ * grant. That is the escape hatch — comping an account, fixing a botched
+ * webhook, granting yourself team — and it has to outrank automation or it
+ * cannot do that job.
+ *
+ * A grant contributes plan, role and org ONLY. userId and label come from the
+ * provider profile, so granting, changing or revoking a plan never orphans the
+ * sessions that human already created.
+ */
+export async function resolvePlan(
+  profile: ProviderProfile,
+  config: Pick<OAuthConfig, "overrides" | "plans">
+): Promise<{ identity: Identity; source: PlanSource; keys: string[] }> {
+  const keys = identityKeys(profile);
+  for (const key of keys) {
+    const override = config.overrides?.[key];
+    if (override) return { identity: override, source: "operator", keys };
+  }
+  if (config.plans) {
+    for (const key of keys) {
+      const grant = await config.plans.getGrant(key);
+      if (grant) {
+        return {
+          identity: { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId },
+          source: "grant",
+          keys,
+        };
+      }
+    }
+  }
+  return { identity: defaultIdentity(profile), source: "default", keys };
+}
+
+/**
+ * Re-resolve a plan at refresh time, from the keys captured at sign-in.
+ *
+ * Without this a token refresh reissues whatever plan was captured when the
+ * human first signed in, and because every rotation grants a fresh 30-day
+ * refresh window, a revoked grant would survive for as long as the client kept
+ * refreshing. userId and label are kept from the original identity: those come
+ * from the provider and do not change, and re-deriving them here would need a
+ * profile this code no longer has.
+ */
+export async function replanOnRefresh(
+  stored: Identity,
+  keys: string[],
+  config: Pick<OAuthConfig, "overrides" | "plans">
+): Promise<{ identity: Identity; source: PlanSource }> {
+  const base: Identity = { ...stored, plan: "free", role: "member", orgId: null };
+  for (const key of keys) {
+    const override = config.overrides?.[key];
+    if (override) return { identity: override, source: "operator" };
+  }
+  if (config.plans) {
+    for (const key of keys) {
+      const grant = await config.plans.getGrant(key);
+      if (grant) {
+        return {
+          identity: { ...base, plan: grant.plan, role: grant.role, orgId: grant.orgId },
+          source: "grant",
+        };
+      }
+    }
+  }
+  return { identity: base, source: "default" };
 }
 
 const STATE_AUDIENCE = "bellman:authorize-state";
@@ -262,11 +345,16 @@ export async function handleOAuth(
     }
 
     let identity: Identity;
+    let planSource: PlanSource = "default";
+    let keys: string[] = [];
     try {
       const profile = await PROVIDERS[name].exchange(
         creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl
       );
-      identity = identityFor(profile, config.overrides);
+      const resolved = await resolvePlan(profile, config);
+      identity = resolved.identity;
+      planSource = resolved.source;
+      keys = resolved.keys;
     } catch (err) {
       console.error(`${name} sign-in failed:`, err);
       target.searchParams.set("error", "access_denied");
@@ -281,6 +369,8 @@ export async function handleOAuth(
       code_challenge: pending.code_challenge,
       resource: pending.resource,
       identity,
+      plan_source: planSource,
+      identity_keys: keys,
       expires_at: Date.now() + AUTH_CODE_TTL_MS,
     });
     target.searchParams.set("code", authCode);
@@ -309,7 +399,10 @@ export async function handleOAuth(
       if (requested && canonicalResource(requested) !== stored.resource) {
         return oauthError("invalid_target", "resource does not match the authorization request");
       }
-      return issueTokens(config, stored.client_id, stored.resource, stored.identity);
+      return issueTokens(
+        config, stored.client_id, stored.resource, stored.identity,
+        stored.plan_source, stored.identity_keys
+      );
     }
 
     if (grant === "refresh_token") {
@@ -320,23 +413,224 @@ export async function handleOAuth(
       if (clientId && stored.client_id !== clientId) {
         return oauthError("invalid_grant", "refresh token was issued to another client");
       }
-      return issueTokens(config, stored.client_id, stored.resource, stored.identity);
+      // Re-resolved, not replayed: a grant revoked since sign-in must not
+      // survive because the client kept refreshing.
+      const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+      return issueTokens(
+        config, stored.client_id, stored.resource, current.identity,
+        current.source, stored.identity_keys
+      );
     }
 
     return oauthError("unsupported_grant_type", "use authorization_code or refresh_token");
   }
 
+  // -------------------------------------------------------------- /account
+  // What a signed-in human can see about themselves: who they are, what plan,
+  // where that plan came from, and how much of the monthly quota is left.
+  if (method === "GET" && path === "/account") {
+    const who = await caller(request, config);
+    if (!who) {
+      return new Response("Sign in to see your account.", {
+        status: 401,
+        headers: { ...unauthorizedHeaders(config), "content-type": "text/plain" },
+      });
+    }
+    const { identity, planSource } = who;
+    const limits = entitlementsFor(identity);
+    const used = (await config.plans?.countCreatesThisMonth(identity.userId)) ?? 0;
+    const account = {
+      user_id: identity.userId,
+      label: identity.label,
+      plan: identity.plan,
+      role: identity.role,
+      org_id: identity.orgId,
+      plan_source: planSource,
+      entitlements: limits,
+      usage: {
+        sessions_created_this_month: used,
+        monthly_limit: limits.monthlyCreates,
+        remaining: Math.max(limits.monthlyCreates - used, 0),
+      },
+    };
+    if ((request.headers.get("accept") ?? "").includes("application/json")) return json(account);
+
+    const row = (k: string, v: string) => `<tr><th>${escape(k)}</th><td>${escape(v)}</td></tr>`;
+    return html(
+      `<h1>Your Bellman account</h1>` +
+        `<p>${escape(identity.label)}</p>` +
+        `<table>` +
+        row("Plan", `${identity.plan} (${planSource === "operator" ? "granted by the operator" : planSource === "grant" ? "granted" : "default"})`) +
+        row("Role", identity.role) +
+        row("Org", identity.orgId ?? "none") +
+        row("Sessions this month", `${used} of ${limits.monthlyCreates}`) +
+        row("Modes", limits.modes.join(", ")) +
+        row("Members per session", String(limits.maxMembers)) +
+        row("Session lifetime", `${Math.round(limits.sessionTtlMs / 3_600_000)} hours`) +
+        `</table>` +
+        `<p>Joining a session is free on every plan. Only creating one is limited.</p>`
+    );
+  }
+
+  // ------------------------------------------------------- /admin/grants
+  // Plans as runtime data. Same bar as the audit log: team plan, admin role,
+  // and an org — the three things that make someone an operator here.
+  if (path === "/admin/grants") {
+    const who = await caller(request, config);
+    if (!who) return oauthError("invalid_token", "sign in first", 401);
+    const { identity } = who;
+    if (!entitlementsFor(identity).audit || identity.role !== "admin" || !identity.orgId) {
+      return oauthError("insufficient_scope", "granting plans requires a team admin", 403);
+    }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+
+    if (method === "GET") {
+      // Scoped to the caller's org: a listing of every grant on the platform
+      // would leak other orgs' customers and their plans.
+      return json({ grants: await config.plans.listGrants(200, identity.orgId) });
+    }
+
+    if (method === "POST") {
+      let body: Partial<PlanGrant> & { note?: string };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return oauthError("invalid_request", "body must be JSON");
+      }
+      // The body is untrusted JSON. A cast is not validation: an unusable key
+      // or a non-numeric expiresAt would otherwise be accepted and stored.
+      const KEY_PREFIXES = ["github:", "google:", "email:"];
+      if (typeof body.key !== "string" || !KEY_PREFIXES.some((p) => body.key!.startsWith(p)) ||
+          body.key.length <= Math.max(...KEY_PREFIXES.map((p) => p.length))) {
+        return oauthError(
+          "invalid_request",
+          `key must be one of ${KEY_PREFIXES.map((p) => `${p}<id>`).join(", ")}`
+        );
+      }
+      if (body.expiresAt !== undefined && body.expiresAt !== null &&
+          !Number.isFinite(body.expiresAt)) {
+        // Date.now() > "soon" is false, so a bad value would silently mean
+        // "never lapses" — the opposite of what the caller asked for.
+        return oauthError("invalid_request", "expiresAt must be a number of milliseconds, or null");
+      }
+      if (!body.plan || !["free", "pro", "team"].includes(body.plan)) {
+        return oauthError("invalid_request", "plan must be free, pro or team");
+      }
+      if (!body.role || !["member", "admin"].includes(body.role)) {
+        return oauthError("invalid_request", "role must be member or admin");
+      }
+      // Same rule grant-plan enforces locally: org scoping and the audit log
+      // both key off orgId, so a team or admin grant without one is inert.
+      const orgId = body.orgId ?? null;
+      if ((body.plan === "team" || body.role === "admin") && !orgId) {
+        return oauthError("invalid_request", "a team or admin grant needs an orgId");
+      }
+      // An admin administers their own org and no other. Without this, every
+      // team admin could grant themselves admin inside anyone else's org —
+      // which becomes reachable the moment a purchase creates an org and makes
+      // the buyer its admin. Org-less grants come from billing, not from here;
+      // the operator's BELLMAN_USERS remains the way to grant outside an org.
+      if (orgId !== identity.orgId) {
+        return oauthError("insufficient_scope", "grants must target your own org", 403);
+      }
+
+      // The org check above validates what the caller CLAIMS. This checks what
+      // is stored: without it, an admin could overwrite another org's grant for
+      // the same key simply by naming their own org.
+      const existingForKey = await config.plans.getGrant(body.key);
+      if (existingForKey && existingForKey.orgId !== identity.orgId) {
+        return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
+      }
+
+      const grant: PlanGrant = {
+        key: body.key,
+        plan: body.plan,
+        role: body.role,
+        orgId,
+        source: body.source ?? "operator",
+        grantedAt: Date.now(),
+        grantedBy: identity.userId,
+        expiresAt: body.expiresAt ?? null,
+      };
+      await config.plans.putGrant(grant);
+      await recordGrantAudit(config, identity, grant.orgId, "plan_granted", grant.key, {
+        plan: grant.plan, role: grant.role, org_id: grant.orgId, source: grant.source,
+      });
+      return json({ granted: grant }, 201);
+    }
+
+    if (method === "DELETE") {
+      const key = url.searchParams.get("key") ?? "";
+      if (!key) return oauthError("invalid_request", "key is required");
+      const existing = await config.plans.getGrant(key);
+      // Same rule as granting, and checked against what is stored rather than
+      // what the caller claims: revoking another org's customer is not yours.
+      if (!existing || existing.orgId !== identity.orgId) {
+        return oauthError("insufficient_scope", "no such grant in your org", 403);
+      }
+      await config.plans.deleteGrant(key);
+      await recordGrantAudit(config, identity, existing.orgId, "plan_revoked", key, {});
+      return json({ revoked: key });
+    }
+
+    return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST, DELETE" } });
+  }
+
   return undefined;
+}
+
+/** Identify the caller from an access token. Bearer keys are for /mcp, not here. */
+async function caller(
+  request: Request,
+  config: OAuthConfig
+): Promise<{ identity: Identity; planSource: string } | null> {
+  const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
+  if (!bearer) return null;
+  const claims = await verifyJwt(bearer, config.secret, {
+    issuer: config.issuer,
+    audience: config.resource,
+  });
+  if (!claims) return null;
+  return {
+    identity: claims.bellman,
+    planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
+  };
+}
+
+/**
+ * A plan change is exactly the kind of crossing the org audit log is for.
+ * It is written to the AFFECTED org, not the actor's, so the record lands where
+ * the consequence does even if the two ever diverge.
+ */
+async function recordGrantAudit(
+  config: OAuthConfig,
+  actor: Identity,
+  affectedOrgId: string | null,
+  action: string,
+  key: string,
+  detail: Record<string, unknown>
+): Promise<void> {
+  if (!config.plans || !affectedOrgId) return;
+  await config.plans.appendAudit({
+    at: Date.now(),
+    orgId: affectedOrgId,
+    sessionId: `grant:${key}`,
+    actorUserId: actor.userId,
+    action,
+    detail: { key, ...detail },
+  });
 }
 
 async function issueTokens(
   config: OAuthConfig,
   clientId: string,
   resource: string,
-  identity: Identity
+  identity: Identity,
+  planSource = "default",
+  identityKeysForRefresh: string[] = []
 ): Promise<Response> {
   const accessToken = await signJwt(
-    { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity },
+    { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity, plan_source: planSource },
     config.secret,
     ACCESS_TOKEN_TTL_SECONDS
   );
@@ -346,6 +640,8 @@ async function issueTokens(
     client_id: clientId,
     resource,
     identity,
+    plan_source: planSource,
+    identity_keys: identityKeysForRefresh,
     expires_at: Date.now() + REFRESH_TOKEN_TTL_MS,
   });
   return json({

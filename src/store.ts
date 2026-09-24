@@ -1,5 +1,5 @@
 import type {
-  AuditEntry, Member, PendingConnect, Session, SessionEvent, EventType,
+  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -55,6 +55,13 @@ export interface BellmanStore {
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
 
+  /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
+  getGrant(key: string): Promise<PlanGrant | undefined>;
+  putGrant(grant: PlanGrant): Promise<void>;
+  deleteGrant(key: string): Promise<void>;
+  /** Scoped to one org when given: grants are org-tenanted data. */
+  listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
+
   appendAudit(a: AuditEntry): Promise<void>;
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
 
@@ -70,6 +77,7 @@ export class MemoryStore implements BellmanStore {
   private byJoinCode = new Map<string, string>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
+  private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
 
@@ -212,6 +220,40 @@ export class MemoryStore implements BellmanStore {
     const list = this.creates.get(userId) ?? [];
     list.push(Date.now());
     this.creates.set(userId, list);
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    const grant = this.grants.get(key);
+    if (!grant) return undefined;
+    // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
+    if (grant.expiresAt !== null && Date.now() > grant.expiresAt) {
+      this.grants.delete(key);
+      return undefined;
+    }
+    return detach(grant);
+  }
+
+  async putGrant(grant: PlanGrant): Promise<void> {
+    this.grants.set(grant.key, detach(grant));
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    this.grants.delete(key);
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    // Same rule as getGrant: an expired grant is not a grant. Returning them
+    // would let stale records fill the caller's window and hide live ones.
+    const now = Date.now();
+    const live: PlanGrant[] = [];
+    for (const [key, grant] of this.grants) {
+      if (grant.expiresAt !== null && now > grant.expiresAt) {
+        this.grants.delete(key);
+        continue;
+      }
+      if (orgId === undefined || grant.orgId === orgId) live.push(grant);
+    }
+    return detach(live.slice(0, limit));
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

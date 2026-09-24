@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, Session, SessionEvent,
+  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, MemberPatch } from "./store.js";
 
@@ -223,6 +223,43 @@ export class RegistryDO extends DurableObject {
     return p;
   }
 
+  async putGrant(grant: PlanGrant): Promise<void> {
+    await this.ctx.storage.put(`gr:${grant.key}`, grant);
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    const grant = await this.ctx.storage.get<PlanGrant>(`gr:${key}`);
+    if (!grant) return undefined;
+    // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
+    if (grant.expiresAt !== null && Date.now() > grant.expiresAt) {
+      await this.ctx.storage.delete(`gr:${key}`);
+      return undefined;
+    }
+    return grant;
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    await this.ctx.storage.delete(`gr:${key}`);
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    // Read everything, then scope: a caller must not be able to page past
+    // their own org by exhausting the limit with other orgs' grants. Expired
+    // records are dropped here too, matching getGrant, so stale subscriptions
+    // neither linger in storage nor hide live grants.
+    const map = await this.ctx.storage.list<PlanGrant>({ prefix: "gr:" });
+    const now = Date.now();
+    const live: PlanGrant[] = [];
+    for (const [storageKey, grant] of map) {
+      if (grant.expiresAt !== null && now > grant.expiresAt) {
+        await this.ctx.storage.delete(storageKey);
+        continue;
+      }
+      if (orgId === undefined || grant.orgId === orgId) live.push(grant);
+    }
+    return live.slice(0, limit);
+  }
+
   async countCreatesThisMonth(userId: string): Promise<number> {
     const list = (await this.ctx.storage.get<number[]>(`cr:${userId}`)) ?? [];
     const now = new Date();
@@ -365,6 +402,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async recordCreate(userId: string): Promise<void> {
     await this.registry.recordCreate(userId);
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    return this.registry.getGrant(key);
+  }
+
+  async putGrant(grant: PlanGrant): Promise<void> {
+    await this.registry.putGrant(grant);
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    await this.registry.deleteGrant(key);
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    return this.registry.listGrants(limit, orgId);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

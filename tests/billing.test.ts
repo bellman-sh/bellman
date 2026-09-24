@@ -579,3 +579,24 @@ describe("concurrent writes to one customer or one user", () => {
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
   });
 });
+
+describe("pausing and resuming", () => {
+  const deliverPauseEvent = (type: "paused" | "resumed", status: string) => {
+    const snapshot = { id: "sub_1", object: "subscription", customer: "cus_A", status, items: { data: [{ price: { lookup_key: "pro_monthly" } }] } };
+    stripeNow.set("sub_1", snapshot);
+    return deliver(`customer.subscription.${type}`, snapshot);
+  };
+
+  it("takes the plan away on customer.subscription.paused and gives it back on .resumed", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created");
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+
+    const paused = await deliverPauseEvent("paused", "paused");
+    expect(((await paused.json()) as { applied: boolean }).applied).toBe(true);
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+
+    await deliverPauseEvent("resumed", "active");
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+});

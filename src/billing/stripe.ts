@@ -199,7 +199,11 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
 
     case "customer.subscription.created":
     case "customer.subscription.updated":
-    case "customer.subscription.deleted": {
+    case "customer.subscription.deleted":
+    // Pausing and resuming arrive as their own events. Stripe's state after
+    // either is read the same way as after any other change.
+    case "customer.subscription.paused":
+    case "customer.subscription.resumed": {
       const subscriptionId = idOf(object);
       const customerId = idOf(object.customer);
       if (!subscriptionId || !customerId) return reply(400, { error: "subscription without an id or customer" });

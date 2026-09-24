@@ -14,8 +14,21 @@ vi.mock("node:child_process", async (importOriginal) => {
   return { ...actual, spawn: vi.fn(actual.spawn) };
 });
 
+// The server a listener creates is not exposed, and a real accept error (EMFILE)
+// cannot be provoked from a test. createServer stays the real one, but is spied
+// on, so a test can get at the server the listener made and emit an error on it.
+vi.mock("node:http", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:http")>();
+  return { ...actual, createServer: vi.fn(actual.createServer) };
+});
+
 /** Ports well away from the real range, so a developer's live bridge is untouched. */
 const TEST_PORTS = [53411, 53412, 53413];
+
+/** What the listeners under test said. A listener that is not in trouble says nothing. */
+const diagnostics: string[] = [];
+beforeEach(() => { diagnostics.length = 0; });
+const listen = () => listenForCallback(TEST_PORTS, (message) => diagnostics.push(message));
 
 const open: { close(): void }[] = [];
 afterEach(() => { for (const item of open.splice(0)) item.close(); });
@@ -51,23 +64,23 @@ describe("loopbackRedirects", () => {
 
 describe("the loopback listener", () => {
   it("binds the first free port in ascending order", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     expect(listener.redirectUri).toBe(`http://127.0.0.1:${TEST_PORTS[0]}/callback`);
   });
 
   it("skips a busy port and takes the next", async () => {
     await block(TEST_PORTS[0]);
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     expect(listener.redirectUri).toBe(`http://127.0.0.1:${TEST_PORTS[1]}/callback`);
   });
 
   it("gives up when every port is busy", async () => {
     for (const port of TEST_PORTS) await block(port);
-    expect(await listenForCallback(TEST_PORTS)).toBeUndefined();
+    expect(await listen()).toBeUndefined();
   });
 
   it("captures the code from a matching callback", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
     const res = await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     expect(res.status).toBe(200);
@@ -77,7 +90,7 @@ describe("the loopback listener", () => {
 
   // Review Focus 1 — the SDK does not check state for us.
   it("rejects a callback whose state does not match", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 400);
     const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
     const res = await get(`${listener.redirectUri}?code=forged&state=state-xyz`);
@@ -89,7 +102,7 @@ describe("the loopback listener", () => {
   // Review Focus 1, from the attacker's side. The forgery that costs nothing is
   // a callback with no state at all; a wrong state is the one that takes effort.
   it("refuses every way of not knowing the state, and keeps waiting", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 400);
     const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
     for (const [what, query] of [
@@ -108,13 +121,13 @@ describe("the loopback listener", () => {
   // state() returns nothing), and it must be loud. Waited on, it fails open:
   // "?code=attacker-code&state=" equals the empty state and the wait resolves.
   it("refuses to wait on an empty state, which nothing could be checked against", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     await expect(listener.waitForCode("", 400)).rejects.toThrow(/non-empty state/);
   });
 
   // Review Focus 2 — the human clicked Cancel.
   it("fails fast when the callback carries an error instead of a code", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 60_000);
     // Subscribe BEFORE the request. The listener rejects inside the request
     // handler, while fetch() is still resolving; a rejection nobody is handling
@@ -128,7 +141,7 @@ describe("the loopback listener", () => {
   // from whatever provider refused. It only gets here past the state check, but it
   // is still someone else's text.
   it("shows the server's error text as text, not as markup", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
     const payload = '<script>alert("a&b")</script>';
     const refused = expect(waiting).rejects.toThrow(`access_denied: ${payload}`); // subscribe first
@@ -142,12 +155,12 @@ describe("the loopback listener", () => {
   });
 
   it("times out rather than waiting forever", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     await expect(listener.waitForCode("state-abc", 200)).rejects.toThrow(/timed out/i);
   });
 
   it("ignores a request to another path", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 400);
     const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
     const res = await get(`http://127.0.0.1:${TEST_PORTS[0]}/favicon.ico`);
@@ -158,7 +171,7 @@ describe("the loopback listener", () => {
   // The handler must never throw: an exception out of it is uncaught, and it
   // ends the bridge. A web page can send this request while a sign-in is pending.
   it("answers a request target it cannot parse, and keeps waiting", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
     const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
     // A valid URL to a browser; to `new URL(target, base)` it is a scheme-relative
@@ -175,7 +188,7 @@ describe("the loopback listener", () => {
   // The page a successful sign-in ends on has the authorization code in its own
   // URL, so nothing the listener says should be cached or handed on in a Referer.
   it("marks every response uncacheable and referrer-free", async () => {
-    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const listener = track((await listen())!);
     const waiting = listener.waitForCode("state-abc", 5_000);
     const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
     // The request that settles the wait goes last: after it there is no handler.
@@ -191,6 +204,24 @@ describe("the loopback listener", () => {
       expect(res.headers.get("cache-control"), what).toBe("no-store");
       expect(res.headers.get("referrer-policy"), what).toBe("no-referrer");
     }
+    await landed;
+  });
+
+  // An accept error after a successful bind (EMFILE, say) is an 'error' event on
+  // the server, and an 'error' event nobody listens for is an uncaught exception.
+  // It is logged rather than swallowed: a listener that has quietly stopped taking
+  // connections would otherwise look like a sign-in that never finishes.
+  it("logs an error on its server instead of crashing, and keeps listening", async () => {
+    const listener = track((await listen())!);
+    const server = vi.mocked(createServer).mock.results.at(-1)!.value as Server;
+    const accept = Object.assign(new Error("accept EMFILE"), { code: "EMFILE" });
+    expect(() => server.emit("error", accept)).not.toThrow();
+    expect(diagnostics).toEqual([expect.stringContaining("accept EMFILE")]);
+    expect(diagnostics[0]).toContain(listener.redirectUri); // which listener, so which port
+    // It is still a working listener.
+    const waiting = listener.waitForCode("state-abc", 5_000);
+    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     await landed;
   });
 });

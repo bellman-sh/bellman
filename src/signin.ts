@@ -50,17 +50,31 @@ export const page = (title: string, body: string) =>
   `<body style="font:16px/1.6 ui-sans-serif,system-ui,sans-serif;max-width:28rem;margin:4rem auto;padding:0 1.25rem">` +
   `<h1 style="font-size:1.35rem">${escapeHtml(title)}</h1><p>${escapeHtml(body)}</p>`;
 
-/** Bind the first free port, ascending. Undefined when every one is taken. */
-export async function listenForCallback(ports: number[] = CALLBACK_PORTS): Promise<Listener | undefined> {
+/**
+ * Bind the first free port, ascending. Undefined when every one is taken. `log`
+ * is required, not defaulted: it is where a listener in trouble says so.
+ */
+export async function listenForCallback(
+  ports: number[] = CALLBACK_PORTS,
+  log: (message: string) => void,
+): Promise<Listener | undefined> {
   for (const port of ports) {
     const server = await bind(port);
-    if (server) return makeListener(server, `http://127.0.0.1:${port}/callback`);
+    if (server) return makeListener(server, `http://127.0.0.1:${port}/callback`, log);
   }
   return undefined;
 }
 
-function makeListener(server: Server, redirectUri: string): Listener {
+function makeListener(server: Server, redirectUri: string, log: (message: string) => void): Listener {
   const path = new URL(redirectUri).pathname;
+  /**
+   * An accept error after a successful bind (EMFILE, say) is an 'error' event on
+   * the server, and an 'error' event nobody listens for is an uncaught exception
+   * that ends the bridge. It is logged, not swallowed: a listener that has quietly
+   * stopped taking connections would otherwise look like a sign-in that never
+   * finishes.
+   */
+  server.on("error", (error) => log(`the sign-in listener at ${redirectUri} reported an error: ${error.message}`));
   return {
     redirectUri,
     waitForCode(state, timeoutMs) {

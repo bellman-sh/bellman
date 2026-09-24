@@ -79,7 +79,8 @@ interface StripePrice {
  * knows grants nothing, rather than guessing.
  */
 export function planForPrice(price: StripePrice | null | undefined): Plan | null {
-  const named = price?.metadata?.plan ?? price?.lookup_key?.split("_")[0];
+  const lookup = typeof price?.lookup_key === "string" ? price.lookup_key.split("_")[0] : undefined;
+  const named = price?.metadata?.plan ?? lookup;
   return isPaidPlan(named) ? named : null;
 }
 
@@ -94,6 +95,36 @@ interface StripeEvent {
   type: string;
   created: number;
   data: { object: Record<string, unknown> };
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * The event envelope, checked rather than cast. A signed body is Stripe's, but
+ * a shape this code did not expect must end in a clean 400, not a TypeError:
+ * that would be a 500, which Stripe retries for days. `created` is required
+ * because the ledger orders subscription updates by it.
+ */
+function parseEvent(payload: string): StripeEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.data) || !isRecord(parsed.data.object)) return null;
+  const { id, type, created } = parsed;
+  if (typeof id !== "string" || typeof type !== "string") return null;
+  if (typeof created !== "number" || !Number.isFinite(created)) return null;
+  return { id, type, created, data: { object: parsed.data.object } };
+}
+
+/** Prices on a subscription's items, skipping anything that is not an item. */
+function pricesOf(items: unknown): (StripePrice | undefined)[] {
+  const data = isRecord(items) ? items.data : undefined;
+  if (!Array.isArray(data)) return [];
+  return data.filter(isRecord).map((item) => (isRecord(item.price) ? (item.price as StripePrice) : undefined));
 }
 
 export interface StripeWebhookConfig {
@@ -114,13 +145,12 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
     return reply(400, { error: "signature verification failed" });
   }
 
-  let event: StripeEvent;
-  try {
-    event = JSON.parse(payload) as StripeEvent;
-  } catch {
-    return reply(400, { error: "body is not JSON" });
+  const event = parseEvent(payload);
+  if (!event) {
+    console.error("stripe webhook: signed body is not an event this handler understands");
+    return reply(400, { error: "not a Stripe event" });
   }
-  const object = event.data?.object ?? {};
+  const object = event.data.object;
 
   // Errors past this point are ours, so they surface as 5xx and Stripe retries.
   switch (event.type) {
@@ -143,14 +173,15 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
       const subscriptionId = idOf(object);
       const customerId = idOf(object.customer);
       if (!subscriptionId || !customerId) return reply(400, { error: "subscription without an id or customer" });
-      const items = (object.items as { data?: { price?: StripePrice }[] } | undefined)?.data ?? [];
-      const plans = items.map((item) => planForPrice(item.price)).filter((p): p is Plan => p !== null);
-      if (items.length > 0 && plans.length === 0) {
+      const prices = pricesOf(object.items);
+      const plans = prices.map(planForPrice).filter((p): p is Plan => p !== null);
+      if (prices.length > 0 && plans.length === 0) {
         console.warn(`stripe ${event.id}: subscription ${subscriptionId} has no price naming a known plan`);
       }
       await config.billing.recordSubscription(customerId, subscriptionId, {
         plan: plans[0] ?? null,
-        status: event.type === "customer.subscription.deleted" ? "canceled" : String(object.status ?? ""),
+        status: event.type === "customer.subscription.deleted" ? "canceled"
+          : typeof object.status === "string" ? object.status : "",
         eventAt: event.created,
       });
       return reply(200, { received: true, applied: true });

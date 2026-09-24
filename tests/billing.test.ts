@@ -284,3 +284,51 @@ describe("the BELLMAN_BILLING switch", () => {
     expect(half).toEqual({ mode: "off", applyPlans: false, paymentLinks: {} });
   });
 });
+
+describe("signed bodies of an unexpected shape", () => {
+  async function deliverRaw(payload: string) {
+    const request = new Request("https://mcp.example.test/stripe/webhook", {
+      method: "POST",
+      headers: { "stripe-signature": await sign(payload) },
+      body: payload,
+    });
+    return handleStripeWebhook(request, { secret: SECRET, billing, now: () => NOW * 1000 });
+  }
+
+  it("answers 400, not a crash, for anything that is not an event", async () => {
+    for (const payload of ["null", '"text"', "[]", "{}", "not json"]) {
+      expect((await deliverRaw(payload)).status, payload).toBe(400);
+    }
+  });
+
+  it("answers 400 for an event with no data object or no created time", async () => {
+    const base = { id: "evt_x", type: "customer.subscription.created", created: NOW, data: { object: { id: "sub_1", customer: "cus_A" } } };
+    expect((await deliverRaw(JSON.stringify({ ...base, data: null }))).status).toBe(400);
+    expect((await deliverRaw(JSON.stringify({ ...base, data: { object: "sub_1" } }))).status).toBe(400);
+    expect((await deliverRaw(JSON.stringify({ ...base, created: undefined }))).status).toBe(400);
+    expect((await deliverRaw(JSON.stringify({ ...base, created: "yesterday" }))).status).toBe(400);
+  });
+
+  it("skips items that are not items and keys that are not strings", async () => {
+    await checkout("cus_A", "u_github_1");
+    const res = await deliver("customer.subscription.created", {
+      id: "sub_1",
+      customer: "cus_A",
+      status: "active",
+      items: { data: [null, "junk", { price: { lookup_key: 42 } }, { price: { lookup_key: "pro_monthly" } }] },
+    });
+
+    expect(res.status).toBe(200);
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+
+  it("records no plan, without crashing, when items is not a list", async () => {
+    await checkout("cus_A", "u_github_1");
+    const res = await deliver("customer.subscription.created", {
+      id: "sub_1", customer: "cus_A", status: "active", items: { data: "nope" },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+  });
+});

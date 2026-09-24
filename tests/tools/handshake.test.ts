@@ -714,10 +714,23 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     expect(members.map((m) => m.room_role).sort()).toEqual(["helper", "lead"]);
   });
 
-  // The test above pins one field of the skin on the inside. This one pins the
-  // whole line, from both sides: every key that sits outside the envelope, the
-  // exact shape inside it, and that no creator-authored string — a role's
-  // description included — has leaked out into the part the joiner reads as fact.
+  // TRUST-BOUNDARY GUARD — do not delete this as surplus coverage.
+  //
+  // The tests above show the spine is right and that `room` sits inside the
+  // envelope. None of them shows that nothing ELSE crossed the line. Two leaks
+  // pass every one of them:
+  //   1. `purpose` copied into the room block, outside the envelope;
+  //   2. every role's description copied into the room block as an extra key.
+  // Either puts creator-authored prose where the joiner's model reads it as
+  // fact before its human has approved anything. `structuredContent`, which is
+  // what clients parse, carries no preamble, so there the envelope's `trust`
+  // field is the only marker. This test is the only one that fails on either
+  // leak, so deleting it reopens the leak with the suite still green. It pins
+  // the exact key set outside the envelope, the exact shape inside it, and that
+  // no authored string appears anywhere outside it.
+  // (Privilege inflation — `your_verbs` computed from another role — is a
+  // different failure; "shows the joiner their own role and verbs, hoisted"
+  // catches that one.)
   it("splits the block exactly: spine outside the envelope, prose inside it", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);

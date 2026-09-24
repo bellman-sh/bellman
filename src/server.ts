@@ -112,6 +112,11 @@ function publicMember(m: Member) {
  * that is the fact the joiner's human is deciding on. Every role still ships in
  * `roles`, because the decision also depends on what the OTHER seats may do.
  *
+ * The envelope's `origin` is the room's creator, not necessarily the author of
+ * every string inside it: a preset's role descriptions are written by the
+ * server (PRESETS in manifest.ts) and still ship under that origin, marked
+ * untrusted. That errs toward distrust, the safe direction, so it stays.
+ *
  * `viewerRole` must be a role the manifest defines. Both callers pass
  * `manifest.defaultRole`, which resolveManifest checked against `roles`; do not
  * pass a name that has not been validated that way.
@@ -300,7 +305,7 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
       annotations: {

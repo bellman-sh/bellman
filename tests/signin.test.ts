@@ -86,6 +86,24 @@ describe("the loopback listener", () => {
     await timedOut;
   });
 
+  // Review Focus 1, from the attacker's side. The forgery that costs nothing is
+  // a callback with no state at all; a wrong state is the one that takes effort.
+  it("refuses every way of not knowing the state, and keeps waiting", async () => {
+    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const waiting = listener.waitForCode("state-abc", 400);
+    const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
+    for (const [what, query] of [
+      ["no state at all", "code=forged"],
+      ["an empty state", "code=forged&state="],
+      ["the state with more after it", "code=forged&state=state-abc-and-more"],
+      ["the state in another case", "code=forged&state=STATE-ABC"],
+    ]) {
+      const res = await get(`${listener.redirectUri}?${query}`);
+      expect(res.status, what).toBe(400);
+    }
+    await timedOut; // none of them settled the wait
+  });
+
   // Review Focus 2 — the human clicked Cancel.
   it("fails fast when the callback carries an error instead of a code", async () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);

@@ -4,6 +4,9 @@
  *              Join codes are single-use with a 15-minute unused TTL.
  * INVARIANT 7: member_id is per-connection, and a handle is drivable only by
  *              the identity that minted it.
+ * INVARIANT 10: every room is declared. bellman_start needs a manifest and
+ *               resolves it before any plan, org or quota check, so a
+ *               malformed one creates nothing.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
@@ -406,7 +409,7 @@ describe("INVARIANT 7 — member handles are per-connection", () => {
 });
 
 // ---------------------------------------------------------------------------
-describe("INVARIANT 8 — every room is declared", () => {
+describe("INVARIANT 10 — every room is declared", () => {
   it("refuses to start a room with no manifest", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const res = await jesse.call("bellman_start", { brief: brief() });

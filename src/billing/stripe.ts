@@ -68,6 +68,11 @@ async function readLimited(request: Request, limit: number): Promise<string | nu
  */
 const USER_ID = /^u_[A-Za-z0-9_-]{1,198}$/;
 
+/** Whether a user id can travel as a client_reference_id and be linked back. */
+export function isLinkableUserId(userId: string): boolean {
+  return USER_ID.test(userId);
+}
+
 const encoder = new TextEncoder();
 
 async function hmacHex(secret: string, message: string): Promise<string> {

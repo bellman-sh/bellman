@@ -1,5 +1,6 @@
 import type { Identity } from "../types.js";
 import { withPaidPlan, type BillingStorage } from "../billing/ledger.js";
+import { isLinkableUserId } from "../billing/stripe.js";
 import {
   PROVIDERS, grantFor, identityFor, isProviderName, type ProviderCredentials, type ProviderName,
 } from "./providers.js";
@@ -122,13 +123,28 @@ async function finishUpgrade(
   }
   let identity: Identity;
   let email: string | undefined;
+  let granted: boolean;
   try {
     const profile = await PROVIDERS[name].exchange(creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl);
+    granted = grantFor(profile, config.overrides) !== undefined;
     identity = identityFor(profile, config.overrides);
     email = profile.email;
   } catch (err) {
     console.error(`${name} sign-in for upgrade failed:`, err);
     return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
+  }
+  // An operator grant outranks anything paid for, so a purchase would change
+  // nothing for this account. Stop before Stripe rather than take the money.
+  if (granted) {
+    return html(
+      `<h1>Your plan is set by the operator</h1>` +
+        `<p>This account is on <strong>${escape(identity.plan)}</strong>, assigned directly. ` +
+        `Paying wouldn't change it, so nothing was charged. Ask whoever runs this Bellman server to change your plan.</p>`
+    );
+  }
+  if (!isLinkableUserId(identity.userId)) {
+    console.error(`upgrade: user id ${identity.userId} cannot be sent to Stripe as a reference`);
+    return html(`<h1>This account can't be upgraded here</h1><p>Nothing was charged. Contact the operator.</p>`, 409);
   }
   const checkout = new URL(target);
   checkout.searchParams.set("client_reference_id", identity.userId);

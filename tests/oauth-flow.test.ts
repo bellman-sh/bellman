@@ -419,6 +419,19 @@ describe("plans from billing", () => {
     expect(new URL(back.headers.get("location")!).searchParams.get("code")).toBeNull();
   });
 
+  it("stops an operator-granted account before Stripe, since paying would change nothing", async () => {
+    config.overrides = {
+      "github:4242": { userId: "u_email_jesse@example.dev", orgId: "org_x", plan: "team", role: "admin", label: "jesse" },
+    };
+    const chooser = await call("/upgrade/pro_monthly");
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+    const back = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+
+    expect(back.status).toBe(200);
+    expect(back.headers.get("location")).toBeNull();
+    expect(await back.text()).toContain("set by the operator");
+  });
+
   it("refuses a plan it has no link for", async () => {
     expect((await call("/upgrade/platinum")).status).toBe(404);
   });

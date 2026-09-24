@@ -451,6 +451,31 @@ describe("INVARIANT 8 — every room is declared", () => {
     expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(0);
   });
 
+  // The plan check reads the manifest's mode, so it cannot come first. The org
+  // and quota checks could, and nothing but this test would notice: it hands the
+  // handler a caller who fails ALL of them and expects the manifest's error.
+  it("resolves the manifest before it consults org scope or the monthly quota", async () => {
+    const peer = await h.connect(DEV_KEY.peer); // free plan: no org_only, capped quota
+    for (let i = 0; i < ENTITLEMENTS.free.monthlyCreates; i++) {
+      await h.store.recordCreate("u_peer");
+    }
+    const res = await peer.call("bellman_start", {
+      brief: brief(),
+      org_only: true,
+      manifest: {
+        room: "broken",
+        mode: "pair",
+        roles: { lead: { can: ["send"] } },
+        default_role: "ghost",
+        creator_role: "lead",
+      },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("invalid manifest");
+    expect(res.text).not.toContain("team plan");
+    expect(res.text).not.toContain("monthly session limit");
+  });
+
   // A shape error never reaches the handler: the MCP SDK validates the tool's
   // inputSchema first, so this message carries no "invalid manifest — " prefix.
   // What the caller must still get is the offending field.

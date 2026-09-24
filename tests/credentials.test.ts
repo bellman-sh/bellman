@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync, closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, utimesSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, tokensUsable, writeServer,
 } from "../src/credentials.js";
@@ -442,6 +443,185 @@ describe("the lock", () => {
     second!.release();
   });
 
+  it("does not remove a lock it no longer owns", async () => {
+    // A is reclaimed (B's pid check says it is gone) and only then releases. Removing
+    // "the lock" at that point deletes B's, and a third bridge walks in beside a live
+    // holder. The test above passes on the `released` flag alone; this one needs the
+    // ownership check.
+    const path = join(dir, LOCK_FILE);
+    const a = await acquireLock(dir, fast);
+    const b = await acquireLock(dir, { ...fast, waitMs: 0, pidAlive: () => false });
+    expect(b).toBeDefined(); // B reclaimed A's lock
+    a!.release();
+    expect(existsSync(path)).toBe(true); // A's late release left B's lock alone
+    const third = await acquireLock(dir, { ...fast, waitMs: 150 });
+    expect(third).toBeUndefined();
+    b!.release();
+    expect(existsSync(path)).toBe(false); // and the owner's release still removes it
+  });
+
+  // release() decides ownership from two stats taken while its descriptor is still
+  // open. Made to misreport, they must leave the file: an inode number on another
+  // device is not ours; an inode number a JS number cannot tell from ours is not
+  // ours either (64-bit ids, NFS); and a stat that fails leaves us unable to tell,
+  // where a leftover of our own goes stale in staleMs and a live holder's lock
+  // deleted does not come back.
+  it.each<[string, string]>([
+    ["names the same inode number on another device", "other-device"],
+    ["names an inode one above ours, beyond 2^53", "beyond-2^53"],
+    ["cannot be stat'ed by path (EACCES)", "path-stat-fails"],
+    ["cannot be stat'ed by descriptor (EIO)", "handle-stat-fails"],
+  ])("release() leaves the lock file when it %s", async (_what, fault) => {
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      const failure = (code: string) => Object.assign(new Error(`${code}: stat failed`), { code });
+      const wantsBigint = (args: unknown[]) => (args[1] as { bigint?: boolean } | undefined)?.bigint === true;
+      return {
+        ...real,
+        // What release() learns about the descriptor it holds.
+        fstatSync: (...args: Parameters<typeof real.fstatSync>) => {
+          if (fault === "handle-stat-fails") throw failure("EIO");
+          const stats = real.fstatSync(...args) as import("node:fs").BigIntStats;
+          if (fault === "other-device") return { ...stats, dev: stats.dev + 1n };
+          if (fault === "beyond-2^53") {
+            return wantsBigint(args) ? { ...stats, ino: 2n ** 53n } : { ...stats, ino: 2 ** 53 };
+          }
+          return stats;
+        },
+        // ...and about whatever is at the path.
+        statSync: (...args: Parameters<typeof real.statSync>) => {
+          if (!String(args[0]).endsWith(LOCK_FILE)) return real.statSync(...args);
+          if (fault === "path-stat-fails") throw failure("EACCES");
+          const stats = real.statSync(...args) as import("node:fs").BigIntStats;
+          if (fault === "beyond-2^53") {
+            // One above: exact as a bigint, the same double as 2^53 as a number.
+            return wantsBigint(args)
+              ? { ...stats, ino: 2n ** 53n + 1n }
+              : { ...stats, ino: Number(2n ** 53n + 1n) };
+          }
+          return stats;
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/credentials.js");
+      const lock = await mocked.acquireLock(dir, fast);
+      lock!.release(); // and it must not throw
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+    expect(existsSync(join(dir, LOCK_FILE))).toBe(true);
+  });
+
+  // The bridge quits through process.exit (its SIGTERM, SIGINT and stdin-close
+  // handlers all end there) and Node runs 'exit' listeners on the way out. Nothing
+  // else can release the lock of a process that is quit mid-sign-in.
+  it("releases the lock when the process exits", async () => {
+    const path = join(dir, LOCK_FILE);
+    const before = new Set(process.listeners("exit"));
+    const lock = await acquireLock(dir, fast);
+    const added = process.listeners("exit").filter((listener) => !before.has(listener));
+    expect(added).toHaveLength(1);
+    (added[0] as () => void)(); // what Node does at exit
+    expect(existsSync(path)).toBe(false);
+    expect(process.listenerCount("exit")).toBe(before.size); // and it took itself off
+    lock!.release(); // still idempotent
+  });
+
+  it("does not accumulate exit listeners across locks", async () => {
+    // Node warns at 11 listeners on one event.
+    const before = process.listenerCount("exit");
+    for (let i = 0; i < 20; i++) (await acquireLock(dir, fast))!.release();
+    expect(process.listenerCount("exit")).toBe(before);
+  });
+
+  it("installs no signal listeners, which would stop Ctrl-C killing the process", async () => {
+    // A listener for SIGINT or SIGTERM replaces Node's default of terminating, so
+    // every handler would have to re-raise. src/channel.ts already ends in
+    // process.exit, which is all 'exit' needs.
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    const before = signals.map((signal) => process.listenerCount(signal));
+    const lock = await acquireLock(dir, fast);
+    expect(signals.map((signal) => process.listenerCount(signal))).toEqual(before);
+    lock!.release();
+  });
+
+  it("does not let an evicted holder's exit remove the new holder's lock", async () => {
+    // The descriptor is still open at exit, so the ownership check runs and declines.
+    const path = join(dir, LOCK_FILE);
+    const before = new Set(process.listeners("exit"));
+    const a = await acquireLock(dir, fast);
+    const exitA = process.listeners("exit").find((listener) => !before.has(listener)) as () => void;
+    const b = await acquireLock(dir, { ...fast, waitMs: 0, pidAlive: () => false });
+    expect(b).toBeDefined(); // B reclaimed A's lock
+    exitA();
+    expect(existsSync(path)).toBe(true);
+    b!.release();
+    a!.release();
+  });
+
+  it("keeps an exit that cannot remove the file quiet", async () => {
+    // A listener that throws makes Node print a stack trace and change the exit status.
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        rmSync: (...args: Parameters<typeof real.rmSync>) => {
+          if (String(args[0]).endsWith(LOCK_FILE)) {
+            throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+          }
+          return real.rmSync(...args);
+        },
+      };
+    });
+    const before = new Set(process.listeners("exit"));
+    try {
+      const mocked = await import("../src/credentials.js");
+      await mocked.acquireLock(dir, fast);
+      const onExit = process.listeners("exit").find((listener) => !before.has(listener)) as () => void;
+      expect(() => onExit()).not.toThrow();
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+  });
+
+  it("leaves no lock behind when the bridge is told to quit while holding it", async () => {
+    // Not a stand-in: a real process, and a real SIGTERM handled the way
+    // src/channel.ts handles it, by calling process.exit, which is what runs 'exit'
+    // listeners. The child never calls release().
+    const path = join(dir, LOCK_FILE);
+    const script = join(dir, "holder.mjs");
+    writeFileSync(script, [
+      `import { acquireLock } from ${JSON.stringify(new URL("../src/credentials.ts", import.meta.url).href)};`,
+      `process.on("SIGTERM", () => process.exit(0));`,
+      `const lock = await acquireLock(${JSON.stringify(dir)}, { waitMs: 0 });`,
+      `if (!lock) process.exit(3);`,
+      `console.log("held");`,
+      `setInterval(() => {}, 1000); // stay alive until told to stop, as the bridge does`,
+    ].join("\n"));
+    const child = spawn(process.execPath, ["--import", "tsx", script], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on("data", (chunk) => { if (String(chunk).includes("held")) resolve(); });
+        child.once("close", (code) => reject(new Error(`the holder exited before holding (${code})`)));
+      });
+      expect(existsSync(path)).toBe(true); // it really is holding the lock
+      const closed = new Promise<number | null>((resolve) => child.once("close", resolve));
+      child.kill("SIGTERM");
+      expect(await closed).toBe(0);
+      expect(existsSync(path)).toBe(false); // and left nothing behind
+    } finally {
+      child.kill("SIGKILL"); // never leave a stray process, whatever failed
+    }
+  });
+
   it("writes its pid and a heartbeat that keeps advancing, at mode 0600", async () => {
     // This file is the whole protocol between bridges: what one writes is what the
     // next reads to decide whether it may take over.
@@ -524,6 +704,31 @@ describe("the lock", () => {
     const lock = await acquireLock(dir, { ...fast, waitMs: 0, staleMs: 200 });
     expect(lock).toBeDefined();
     lock!.release();
+  });
+
+  // The window is symmetric. An empty file has no pid to fall back on, so an mtime in
+  // the future (NFS skew, a backward clock step) that was never called stale would
+  // hold the lock until the wall clock caught up. Beyond staleMs it is a corpse
+  // whichever way it points; within it, it is still a holder mid-write.
+  it("reclaims an empty lock file whose mtime is further in the future than staleMs", async () => {
+    const path = join(dir, LOCK_FILE);
+    writeFileSync(path, "");
+    const later = new Date(Date.now() + 10_000);
+    utimesSync(path, later, later);
+    const lock = await acquireLock(dir, { ...fast, waitMs: 0, staleMs: 200 });
+    expect(lock).toBeDefined();
+    lock!.release();
+  });
+
+  it("does not reclaim an empty lock file whose mtime is only a little in the future", async () => {
+    // Clock granularity alone can put a just-written file's mtime a millisecond ahead.
+    const path = join(dir, LOCK_FILE);
+    writeFileSync(path, "");
+    const soon = new Date(Date.now() + 1_000);
+    utimesSync(path, soon, soon);
+    const contender = await acquireLock(dir, { ...fast, waitMs: 0, staleMs: 60_000 });
+    expect(contender).toBeUndefined();
+    expect(existsSync(path)).toBe(true);
   });
 
   // The lock on disk is live throughout; only the read is made to fail, the way it

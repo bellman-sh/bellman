@@ -1,6 +1,6 @@
 import {
-  chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync,
-  writeSync,
+  chmodSync, closeSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, statSync,
+  writeFileSync, writeSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -176,7 +176,10 @@ const POLL_MS = 100;
 
 interface LockBody { pid: number; heartbeat_at: number }
 
-export interface LockHandle { release(): void }
+export interface LockHandle {
+  /** Idempotent. Removes the lock file only if it is still the one this handle created. */
+  release(): void;
+}
 
 export interface LockOptions {
   waitMs?: number;
@@ -211,6 +214,10 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
  *
  * Throws on a filesystem error that is not contention (an unwritable directory,
  * a full disk): there is nothing to wait for, and waiting would only hide it.
+ *
+ * The lock is released when the process exits, so quitting mid-sign-in leaves
+ * nothing behind. A SIGKILL, a crash or a power cut still does, and staleness
+ * reclaims that.
  */
 export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<LockHandle | undefined> {
   const waitMs = opts.waitMs ?? WAIT_MS;
@@ -259,15 +266,54 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
     timer.unref?.();
 
     let released = false;
-    return {
-      release() {
-        if (released) return;
-        released = true;
-        clearInterval(timer);
-        try { closeSync(handle); } catch { /* already closed */ }
-        rmSync(path, { force: true });
-      },
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      process.off("exit", onExit);
+      clearInterval(timer);
+      // Ask before closing, not after: fstat on a closed descriptor is EBADF, and
+      // while ours is open nothing else can be handed the inode number it names.
+      const ours = stillOurs(handle, path);
+      try { closeSync(handle); } catch { /* already closed */ }
+      if (ours) rmSync(path, { force: true });
     };
+    // Quitting Claude Code mid-sign-in must not leave a stale lock. The bridge quits
+    // through process.exit (its SIGTERM, SIGINT and stdin-close handlers in
+    // src/channel.ts all end there), and Node runs 'exit' listeners on the way out.
+    // 'exit' only, and deliberately no SIGINT or SIGTERM listener of our own:
+    // registering one replaces Node's default of terminating, so Ctrl-C would stop
+    // killing the process unless every handler re-raised. Taken off again by
+    // release(), so concurrent locks cannot trip MaxListenersExceededWarning.
+    const onExit = (): void => {
+      try { release(); } catch { /* going away: a failure here has nowhere useful to go */ }
+    };
+    process.on("exit", onExit);
+    return { release };
+  }
+}
+
+/**
+ * Is the file at `path` still the one `handle` created? A holder whose lock was
+ * reclaimed (a laptop that slept past staleMs, a pid check that said gone) has had
+ * its file unlinked and replaced by the next holder's. Removing "the lock" then
+ * would delete theirs, and a third bridge could walk in beside a live holder.
+ *
+ * Same device and inode number, read as bigints so a 64-bit id (NFS, NTFS) is exact.
+ * Inode reuse cannot fool this: while our descriptor is open the filesystem cannot
+ * hand the number of an unlinked inode to a new file, so equality means the very
+ * same file. That is why release() must ask BEFORE it closes the descriptor.
+ *
+ * Any error means we cannot tell, and the file is left. ENOENT is nothing to
+ * remove; for the rest, a leftover of our own goes stale in staleMs and is
+ * reclaimed, where a live holder's lock deleted does not come back.
+ */
+function stillOurs(handle: number, path: string): boolean {
+  try {
+    const mine = fstatSync(handle, { bigint: true });
+    const there = statSync(path, { bigint: true });
+    return there.dev === mine.dev && there.ino === mine.ino;
+  } catch {
+    return false;
   }
 }
 
@@ -288,8 +334,16 @@ function reclaimable(path: string, staleMs: number, pidAlive: (pid: number) => b
     // a moment, and a waiter that called that a corpse would evict it. Judge it by
     // mtime, which those very writes refresh, like any other heartbeat: only an
     // empty file nothing has touched for staleMs is a holder that died mid-write.
+    //
+    // The window is symmetric. An empty file has no pid to fall back on, so a mtime
+    // in the future (NFS skew, a backward clock step) that was never called stale
+    // would hold the lock until the wall clock caught up, with the user told that
+    // another sign-in has it. Beyond staleMs a future mtime means a clock is wrong,
+    // and bounded eviction beats unbounded deadlock. Within staleMs it may be clock
+    // granularity alone, and it stays a holder.
     try {
-      return Date.now() - statSync(path).mtimeMs > staleMs;
+      const age = Date.now() - statSync(path).mtimeMs;
+      return age > staleMs || age < -staleMs;
     } catch {
       return false; // released between the read and the stat: as above, not ours to remove
     }

@@ -534,7 +534,7 @@ Append to `tests/tools/handshake.test.ts`:
 
 ```ts
 // ---------------------------------------------------------------------------
-describe("INVARIANT 8 — every room is declared", () => {
+describe("INVARIANT 10 — every room is declared", () => {
   it("refuses to start a room with no manifest", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const res = await jesse.call("bellman_start", { brief: brief() });
@@ -599,7 +599,7 @@ describe("INVARIANT 8 — every room is declared", () => {
 
 - [ ] **Step 3: Run to verify they fail**
 
-Run: `npx vitest run tests/tools/handshake.test.ts -t "INVARIANT 8"`
+Run: `npx vitest run tests/tools/handshake.test.ts -t "INVARIANT 10"`
 Expected: FAIL — `bellman_start` still accepts a manifest-less call.
 
 - [ ] **Step 4: Change `bellman_start`**
@@ -756,7 +756,9 @@ Expected: typecheck, build, and the full suite all PASS.
 - [ ] **Step 10: Commit**
 
 ```bash
-git add -A
+# Stage by path — never `git add -A`. The controller keeps uncommitted doc
+# edits in this tree, and .dual-graph/context-store.json is modified.
+git add <the files this task changed>
 git commit -m "feat!: bellman_start requires a room manifest
 
 mode moves into the manifest, so a room's shape and its declared mode
@@ -791,7 +793,7 @@ Append to `tests/tools/handshake.test.ts`:
 
 ```ts
 // ---------------------------------------------------------------------------
-describe("INVARIANT 9 — a joiner reads the rules before committing", () => {
+describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
   it("shows the joiner their own role and verbs, hoisted", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
@@ -913,7 +915,7 @@ describe("INVARIANT 9 — a joiner reads the rules before committing", () => {
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `npx vitest run tests/tools/handshake.test.ts -t "INVARIANT 9"`
+Run: `npx vitest run tests/tools/handshake.test.ts -t "INVARIANT 11"`
 Expected: FAIL — `preview.data.room` is undefined.
 
 - [ ] **Step 3: Add the preview helper**
@@ -998,7 +1000,9 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add -A
+# Stage by path — never `git add -A`. The controller keeps uncommitted doc
+# edits in this tree, and .dual-graph/context-store.json is modified.
+git add <the files this task changed>
 git commit -m "feat: show the room manifest in the connect preview
 
 Split by trust: the spine (mode, roles, verbs) is server-validated and
@@ -1077,14 +1081,104 @@ Expected: PASS.
 Run: `npm run typecheck:worker`
 Expected: PASS. `src/store-do.ts` serializes `Session` whole, so no code change is expected — but this is the check that proves it.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write the failing guard test**
+
+Sessions already persisted in Durable Objects predate `Session.manifest`. After
+deploy, any read of `session.manifest.mode` on one of them is a `TypeError`
+until it expires — up to 30 days on the team plan. `expireIfDue`/`sweep` never
+read `mode`, so expiry itself is safe; the crash is on `bellman_connect`-style
+reads.
+
+`src/store-do.ts` has **no test coverage at all** and the repo cannot run
+workerd under vitest, so the guard must be a pure exported function that the
+DO read path calls. That is what makes it testable.
+
+Create `tests/store-do.test.ts`:
+
+```ts
+/**
+ * Durable Objects hold sessions written before Session.manifest existed.
+ * A row without a manifest is treated as gone rather than crashing a read.
+ */
+import { describe, it, expect } from "vitest";
+import { hydrateStoredSession } from "../src/store-do.js";
+import { session } from "./helpers/fixtures.js";
+
+describe("legacy Durable Object rows", () => {
+  it("passes through a session that has a manifest", () => {
+    const s = session();
+    expect(hydrateStoredSession(s)?.id).toBe(s.id);
+  });
+
+  it("treats a pre-manifest row as gone", () => {
+    const { manifest, ...legacy } = session();
+    expect(hydrateStoredSession(legacy)).toBeUndefined();
+  });
+
+  it("treats a row whose manifest lost its roles as gone", () => {
+    const s = session();
+    expect(hydrateStoredSession({ ...s, manifest: { room: "r", mode: "pair" } }))
+      .toBeUndefined();
+  });
+
+  it("treats undefined and null as gone", () => {
+    expect(hydrateStoredSession(undefined)).toBeUndefined();
+    expect(hydrateStoredSession(null)).toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 6: Run it to verify it fails**
+
+Run: `npx vitest run tests/store-do.test.ts`
+Expected: FAIL — `hydrateStoredSession` is not exported.
+
+- [ ] **Step 7: Implement the guard**
+
+In `src/store-do.ts`:
+
+```ts
+/**
+ * Gate every session read out of Durable Object storage.
+ *
+ * Rows written before Session.manifest existed have no manifest, and a read
+ * of `session.manifest.mode` on one is a TypeError. They cannot be migrated
+ * — a manifest is a declaration, and inventing one would put words in the
+ * creator's mouth — so they are treated as gone and age out on their own TTL.
+ */
+export function hydrateStoredSession(raw: unknown): Session | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const m = (raw as { manifest?: unknown }).manifest;
+  if (!m || typeof m !== "object") return undefined;
+  const roles = (m as { roles?: unknown }).roles;
+  if (!roles || typeof roles !== "object") return undefined;
+  return raw as Session;
+}
+```
+
+Call it at the single raw read site — `this.ctx.storage.get<StoredSession>("session")`
+around `src/store-do.ts:48` — so BOTH `getSession` paths (the DO method at
+~line 77 and the store facade at ~line 296) inherit it, and
+`getSessionByJoinCode` cannot resurrect a legacy row either.
+
+Do not add a migration that synthesizes a manifest. Read the comment above.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add -A
-git commit -m "test: pin manifest persistence and detachment
+# Stage by path — never `git add -A`. The controller keeps uncommitted doc
+# edits in this tree, and .dual-graph/context-store.json is modified.
+git add <the files this task changed>
+git commit -m "feat: drop pre-manifest Durable Object sessions
 
-DurableObjectStore is the only store serving production (see #12) and
-a manifest that failed to serialize would break every room.
+DurableObjectStore is the only store serving production (see #12),
+had no test coverage at all, and a manifest that failed to serialize
+would break every room.
+
+Rows written before Session.manifest existed are treated as gone
+rather than crashing a read. They are not migrated: a manifest is a
+declaration, and synthesizing one would put words in the creator's
+mouth. They age out on their own TTL.
 
 Refs #1"
 ```
@@ -1310,7 +1404,9 @@ Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`,
 - [ ] **Step 8: Commit**
 
 ```bash
-git add -A
+# Stage by path — never `git add -A`. The controller keeps uncommitted doc
+# edits in this tree, and .dual-graph/context-store.json is modified.
+git add <the files this task changed>
 git commit -m "feat: load a room manifest from .bellman/room.yaml
 
 The bridge parses YAML and sends the object form, so the server keeps

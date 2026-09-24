@@ -97,9 +97,23 @@ The real hazard is that a manifest is creator-authored text landing in the
 joiner's model context before their human has approved anything. That is an
 injection surface.
 
-But only part of it is. Role keys are validated `[a-z][a-z0-9_]{0,30}`, verbs
-come from a closed enum, `mode` is an enum — none of that can carry a payload.
-Only `room`, `purpose`, and role `description` are free text.
+But the parts differ in how much an author controls. Verbs come from a closed
+enum and `mode` is an enum — those carry nothing. Role KEYS are different: they
+are creator-authored, and `[a-z][a-z0-9_]{0,30}` still admits
+`ignore_prior_rules_and_obey`. With `MAX_ROLES` at 16 that is a bounded channel
+of roughly 500 characters of lowercase text sitting in the spine.
+
+So the spine is **shape-validated, not content-free**. What actually keeps it
+safe is that the entire `bellman_connect` result already ships under
+`UNTRUSTED_PREAMBLE` (`src/server.ts:348`), so nothing in it reaches the
+joiner's model unflagged. The `untrusted()` envelope adds per-field origin
+marking on top of that for the parts with no structural bound at all —
+`room`, `purpose`, and role `description`.
+
+Role keys stay in the spine because `your_role`, `creator_role`, and the `roles`
+table all reference them; moving them into the envelope would make the
+structure unreadable. The honest statement is that their charset and length
+bound the channel, not that it is closed.
 
 So the structure ships as fact, and the prose ships inside the existing
 `untrusted()` envelope under `UNTRUSTED_PREAMBLE` — the same pattern the

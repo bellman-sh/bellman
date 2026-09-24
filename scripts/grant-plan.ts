@@ -28,6 +28,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Identity, Plan, Role } from "../src/types.js";
+import { isStableIdentityKey } from "../src/oauth/providers.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const CONFIG_DIR = process.env.BELLMAN_CONFIG_DIR ?? join(homedir(), ".config", "bellman");
@@ -39,8 +40,14 @@ const PLANS: Plan[] = ["free", "pro", "team"];
 const ROLES: Role[] = ["member", "admin"];
 
 /**
- * The prefixes identityFor tries, in its order. `github:<login>` resolves too,
- * so a hand-written file stays valid — this script just prefers the numeric id.
+ * A prefix the server recognises at all. Anything else is a typo, not a key.
+ *
+ * Whether a key can actually *resolve* is a stricter question, and the answer
+ * lives in the server's own isStableIdentityKey rather than being restated
+ * here. This used to say `github:<login>` resolved too; it no longer does, and
+ * a CLI still accepting one would write an override that can never apply —
+ * exactly the silent failure this area exists to prevent. Sharing the validator
+ * is what stops the two drifting apart again.
  */
 const KEY_PREFIXES = ["github:", "google:", "email:"];
 
@@ -137,6 +144,16 @@ export function parseUsers(raw: string | undefined): Record<string, Identity> {
     if (!KEY_PREFIXES.some((p) => key.startsWith(p))) {
       throw new Error(`${key}: key must start with ${KEY_PREFIXES.join(", ")}`);
     }
+    // A recognised prefix but an unresolvable key warns rather than throws: an
+    // existing file may hold label keys written before those stopped working,
+    // and refusing to load it would leave the operator unable to list or repair
+    // the very entries that are broken. The write path rejects them outright.
+    if (!isStableIdentityKey(key)) {
+      console.warn(
+        `${key}: this key can never match a signed-in human and is ignored by the server. ` +
+          `Re-file it under github:<numeric id>, google:<numeric id>, or an email address.`
+      );
+    }
     const e = value as Partial<Identity>;
     if (!e.userId) throw new Error(`${key}: userId is required`);
     if (!e.label) throw new Error(`${key}: label is required`);
@@ -161,8 +178,13 @@ export function parseUsers(raw: string | undefined): Record<string, Identity> {
 export async function resolveSubjectKey(subject: Subject, fetchImpl: typeof fetch = fetch): Promise<string> {
   const { literal, handle } = subject;
   if (literal !== undefined) {
-    if (!KEY_PREFIXES.some((p) => literal.startsWith(p))) {
-      throw new Error(`${literal}: key must start with ${KEY_PREFIXES.join(", ")}`);
+    if (!isStableIdentityKey(literal)) {
+      throw new Error(
+        `${literal}: key must be github:<numeric id>, google:<numeric id>, ` +
+          `or an email address (github:, google: or email:). A login or display ` +
+          `name is not a key — it can be renamed and reclaimed. Use --github <handle> ` +
+          `to look the numeric id up.`
+      );
     }
     return literal;
   }

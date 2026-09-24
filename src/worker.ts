@@ -41,7 +41,11 @@ export interface WorkerEnv extends BellmanEnv {
  * hostname actually being used, so a token minted for mcp.bellman.sh is not
  * accepted on any other hostname this Worker answers.
  */
-function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined {
+function oauthConfig(
+  request: Request,
+  env: WorkerEnv,
+  plans: DurableObjectStore
+): OAuthConfig | undefined {
   if (!env.BELLMAN_TOKEN_SECRET || !env.AUTH) return undefined;
   const origin = new URL(request.url).origin;
   const credentials: Partial<Record<ProviderName, ProviderCredentials>> = {};
@@ -58,6 +62,7 @@ function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined 
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
+    plans,
   };
 }
 
@@ -76,7 +81,8 @@ const unauthorized = (oauth?: OAuthConfig) =>
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
-    const oauth = oauthConfig(request, env);
+    const store = new DurableObjectStore(env);
+    const oauth = oauthConfig(request, env, store);
 
     if (oauth) {
       const handled = await handleOAuth(request, oauth);
@@ -129,7 +135,7 @@ export default {
     if (!identity) return unauthorized(oauth);
 
     try {
-      const server = buildServer(identity, new DurableObjectStore(env));
+      const server = buildServer(identity, store);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

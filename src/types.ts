@@ -92,6 +92,26 @@ export interface AuditEntry {
   detail: Record<string, unknown>;
 }
 
+/**
+ * A plan granted to an upstream identity at runtime.
+ *
+ * It carries plan, role and org only — never a userId or label. Those are
+ * derived from the provider profile at sign-in, so a grant can never orphan the
+ * sessions a human already created under u_<provider>_<subject>.
+ */
+export interface PlanGrant {
+  key: string; // upstream identity key, e.g. "github:4242"
+  plan: Plan;
+  role: Role;
+  orgId: string | null;
+  /** Where it came from: "purchase", "operator", ... */
+  source: string;
+  grantedAt: number;
+  grantedBy: string;
+  /** Epoch ms after which it stops applying. null means it does not lapse. */
+  expiresAt: number | null;
+}
+
 export interface Entitlements {
   modes: SessionMode[];
   maxMembers: number;

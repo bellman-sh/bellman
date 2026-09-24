@@ -100,6 +100,21 @@ describe("key resolution", () => {
     await expect(resolveKey(grant)).resolves.toMatchObject({ key: "email:me@x.com" });
   });
 
+  /**
+   * The CLI and the server have to agree on what a key is. They drifted once:
+   * labels stopped resolving server-side while this script still accepted them,
+   * so `--key github:mcfearsome` wrote an override that could never apply — the
+   * silent failure this whole area exists to prevent. Same validator now.
+   */
+  it("refuses a literal key the server could never resolve", async () => {
+    const literal = (key: string) =>
+      parseGrant(["--key", key, "--plan", "pro", "--role", "member", "--org", "none"]);
+
+    for (const key of ["github:mcfearsome", "google:Jesse", "email:not-an-address"]) {
+      await expect(resolveKey(literal(key)), key).rejects.toThrow(/numeric id/);
+    }
+  });
+
   it("rejects a literal key that names no known prefix", async () => {
     const grant = parseGrant(["--key", "slack:U123", "--plan", "pro", "--role", "member", "--org", "none"]);
 

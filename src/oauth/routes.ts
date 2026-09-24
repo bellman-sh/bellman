@@ -2,7 +2,10 @@ import type { Identity } from "../types.js";
 import {
   PROVIDERS, identityFor, isProviderName, type ProviderCredentials, type ProviderName,
 } from "./providers.js";
-import type { AuthStorage } from "./storage.js";
+import {
+  CLIENT_CAP, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, UNUSED_CLIENT_TTL_MS,
+  type AuthStorage,
+} from "./storage.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
   canonicalResource, randomId, signJwt, verifyJwt, verifyPkce,
@@ -124,6 +127,17 @@ export async function handleOAuth(
     } catch {
       return oauthError("invalid_client_metadata", "body must be JSON");
     }
+    // Cloudflare sets this; the Node server is local development and has no
+    // proxy in front of it. Unknown IP means no limiting rather than a shared
+    // bucket, which would rate-limit a developer against themself.
+    const ip = request.headers.get("cf-connecting-ip");
+    if (ip) {
+      const recent = await config.store.countRecentRegistrations(ip, Date.now() - REGISTRATION_WINDOW_MS);
+      if (recent >= REGISTRATIONS_PER_HOUR) {
+        return oauthError("too_many_requests", "too many registrations from this address — try later", 429);
+      }
+    }
+
     const redirects = Array.isArray(body.redirect_uris) ? (body.redirect_uris as string[]) : [];
     if (redirects.length === 0) {
       return oauthError("invalid_redirect_uri", "redirect_uris is required");
@@ -132,13 +146,24 @@ export async function handleOAuth(
       return oauthError("invalid_redirect_uri", "every redirect_uri must be https, or http on loopback");
     }
 
+    // Evict lapsed registrations before testing the cap. Refusing outright
+    // would let anyone who fills the table with clients they never signed in
+    // with block every real client until the next purge.
+    await config.store.purgeExpiredClients(Date.now());
+    if ((await config.store.countClients()) >= CLIENT_CAP) {
+      return oauthError("too_many_requests", "the client registry is full — try later", 429);
+    }
+
     const client = {
       client_id: randomId(16),
       client_name: typeof body.client_name === "string" ? body.client_name.slice(0, 120) : undefined,
       redirect_uris: redirects,
       created_at: Date.now(),
+      // Disposable until a token is issued for it.
+      expires_at: Date.now() + UNUSED_CLIENT_TTL_MS,
     };
     await config.store.registerClient(client);
+    if (ip) await config.store.recordRegistration(ip);
     return json(
       {
         client_id: client.client_id,
@@ -340,6 +365,10 @@ async function issueTokens(
     config.secret,
     ACCESS_TOKEN_TTL_SECONDS
   );
+  // A token was issued, so this client is no longer a disposable registration.
+  // This is the only place that mints one, and reaching it needed a human to
+  // complete a GitHub or Google sign-in.
+  await config.store.markClientUsed(clientId);
   // Rotated on every use: the previous one was deleted when it was taken.
   const refreshToken = randomId();
   await config.store.putRefresh(refreshToken, {

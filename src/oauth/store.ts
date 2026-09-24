@@ -1,6 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./storage.js";
+import {
+  REGISTRATION_WINDOW_MS,
+  type AuthCode, type AuthStorage, type RefreshToken, type RegisteredClient,
+} from "./storage.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -15,14 +18,60 @@ import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./st
 
 const CODE = "code:";
 const REFRESH = "refresh:";
+const CLIENT = "client:";
+const REG = "reg:";
 
 export class AuthDO extends DurableObject {
   async registerClient(client: RegisteredClient): Promise<void> {
-    await this.ctx.storage.put(`client:${client.client_id}`, client);
+    await this.ctx.storage.put(`${CLIENT}${client.client_id}`, client);
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
-    return this.ctx.storage.get<RegisteredClient>(`client:${clientId}`);
+    const client = await this.ctx.storage.get<RegisteredClient>(`${CLIENT}${clientId}`);
+    if (!client) return undefined;
+    // Checked on read as well as purged in bulk, so a lapsed registration is
+    // never usable just because no purge has run yet.
+    if (client.expires_at !== null && Date.now() > client.expires_at) return undefined;
+    return client;
+  }
+
+  /** A token was issued for this client, so it stops being disposable. */
+  async markClientUsed(clientId: string): Promise<void> {
+    const key = `${CLIENT}${clientId}`;
+    const client = await this.ctx.storage.get<RegisteredClient>(key);
+    if (!client) return;
+    await this.ctx.storage.put(key, { ...client, expires_at: null, used_at: Date.now() });
+  }
+
+  async purgeExpiredClients(now: number): Promise<number> {
+    const entries = await this.ctx.storage.list<RegisteredClient>({ prefix: CLIENT });
+    let removed = 0;
+    for (const [key, client] of entries) {
+      if (client.expires_at !== null && now > client.expires_at) {
+        await this.ctx.storage.delete(key);
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  async countClients(): Promise<number> {
+    return (await this.ctx.storage.list({ prefix: CLIENT })).size;
+  }
+
+  async countRecentRegistrations(ip: string, since: number): Promise<number> {
+    const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+    return stamps.filter((at) => at >= since).length;
+  }
+
+  async recordRegistration(ip: string): Promise<void> {
+    const key = `${REG}${ip}`;
+    const stamps = (await this.ctx.storage.get<number[]>(key)) ?? [];
+    // Pruned on write, or this key grows for as long as the address keeps
+    // registering — the same reason RegistryDO.recordCreate trims on write.
+    const recent = stamps.filter((at) => at >= Date.now() - REGISTRATION_WINDOW_MS);
+    recent.push(Date.now());
+    await this.ctx.storage.put(key, recent);
   }
 
   async putCode(code: string, value: AuthCode): Promise<void> {
@@ -76,6 +125,21 @@ export class AuthStore implements AuthStorage {
   }
   getClient(clientId: string): Promise<RegisteredClient | undefined> {
     return this.object.getClient(clientId);
+  }
+  markClientUsed(clientId: string): Promise<void> {
+    return this.object.markClientUsed(clientId);
+  }
+  purgeExpiredClients(now: number): Promise<number> {
+    return this.object.purgeExpiredClients(now);
+  }
+  countClients(): Promise<number> {
+    return this.object.countClients();
+  }
+  countRecentRegistrations(ip: string, since: number): Promise<number> {
+    return this.object.countRecentRegistrations(ip, since);
+  }
+  recordRegistration(ip: string): Promise<void> {
+    return this.object.recordRegistration(ip);
   }
   putCode(code: string, value: AuthCode): Promise<void> {
     return this.object.putCode(code, value);

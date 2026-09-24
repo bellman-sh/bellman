@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type {
-  AuditEntry, Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent,
+  AuditEntry, Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent, Verb,
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
@@ -93,7 +93,49 @@ function publicMember(m: Member) {
     org_id: m.orgId,
     agent: m.brief.agent,
     capabilities: m.capabilities,
+    room_role: m.roomRole,
     active: m.leftAt === null,
+  };
+}
+
+/**
+ * The manifest as a joiner sees it, split by trust.
+ *
+ * The spine (preset, mode, role keys, verbs) is server-validated — role keys
+ * match a short snake_case regex and verbs come from a closed enum — so it
+ * ships as fact, and all it can carry is identifiers and enum values. The skin
+ * (room, purpose, descriptions) is creator-authored prose and goes inside the
+ * same untrusted envelope as a brief, because it reaches the joiner's model
+ * before their human has approved anything.
+ *
+ * `your_role` and `your_verbs` are hoisted out of the role table deliberately:
+ * that is the fact the joiner's human is deciding on. Every role still ships in
+ * `roles`, because the decision also depends on what the OTHER seats may do.
+ *
+ * `viewerRole` must be a role the manifest defines. Both callers pass
+ * `manifest.defaultRole`, which resolveManifest checked against `roles`; do not
+ * pass a name that has not been validated that way.
+ */
+function roomPreview(session: Session, viewerRole: string) {
+  const m = session.manifest;
+  const creator = session.members[0];
+  const roles: Record<string, Verb[]> = {};
+  const descriptions: Record<string, string | null> = {};
+  for (const [key, def] of Object.entries(m.roles)) {
+    roles[key] = def.can;
+    descriptions[key] = def.description;
+  }
+  return {
+    preset: m.preset,
+    mode: m.mode,
+    your_role: viewerRole,
+    your_verbs: m.roles[viewerRole]?.can ?? [],
+    creator_role: m.creatorRole,
+    roles,
+    text: untrusted(
+      { memberId: creator.memberId, label: creator.label },
+      { room: m.room, purpose: m.purpose, descriptions },
+    ),
   };
 }
 
@@ -258,7 +300,7 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, members, org_only}, creator_brief (untrusted envelope) }
+Returns: { connect_token, connect_token_expires_at, session: {mode, members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
       annotations: {
@@ -297,6 +339,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
             max_members: session.maxMembers,
             org_only: session.orgOnly,
           },
+          room: roomPreview(session, session.manifest.defaultRole),
           creator_brief: untrusted(
             { memberId: creator.memberId, label: creator.label },
             creator.brief
@@ -320,7 +363,7 @@ Args:
   - brief: YOUR structured context summary — this is what crosses to the peer
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
 
-Returns: { session_id, member_id, members[], briefs (untrusted envelopes), cursor }
+Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       inputSchema: {
@@ -382,6 +425,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           member_id: memberId,
           cursor: joinEvent.cursor,
           members: joined.members.map(publicMember),
+          room: roomPreview(joined, joined.manifest.defaultRole),
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)
             .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),

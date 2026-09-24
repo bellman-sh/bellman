@@ -278,6 +278,29 @@ export function describeStoreContract(
     });
 
     // ----------------------------------------------------------- plan grants
+    it("freezes and thaws a session without closing it", async () => {
+      const a = session();
+      (await store.createSession(a));
+
+      (await store.freezeSession(a.id, Date.now()));
+      const frozen = await store.getSession(a.id);
+      expect(frozen?.frozenAt).not.toBeNull();
+      expect(frozen?.closed).toBe(false); // frozen is not closed
+
+      (await store.freezeSession(a.id, null));
+      expect((await store.getSession(a.id))?.frozenAt).toBeNull();
+    });
+
+    /** A lapsed plan has to find the rooms it pays for. */
+    it("finds the sessions a user created", async () => {
+      (await store.createSession(session({ id: "qs_one", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_two", createdBy: "u_jesse", joinCode: "BELL-TWO-02" })));
+      (await store.createSession(session({ id: "qs_other", createdBy: "u_someone", joinCode: "BELL-OTH-03" })));
+
+      expect((await store.sessionsCreatedBy("u_jesse", 50)).sort()).toEqual(["qs_one", "qs_two"]);
+      expect(await store.sessionsCreatedBy("u_nobody", 50)).toEqual([]);
+    });
+
     it("round-trips a grant and deletes it", async () => {
       const grant = {
         key: "github:4242", plan: "team" as const, role: "admin" as const,

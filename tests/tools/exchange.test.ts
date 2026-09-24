@@ -435,3 +435,65 @@ describe("send / sync / leave mechanics", () => {
     }
   });
 });
+
+
+/**
+ * Freezing is what a lapsed plan does to a running room. It has to stop the
+ * meter without destroying the context, so reads survive and writes do not.
+ */
+describe("a frozen session", () => {
+  it("refuses sends but still serves history, and thaws", async () => {
+    const h = new Harness();
+    const s = await pairUp(h);
+    await s.joiner.call("bellman_send", {
+      session_id: s.sessionId, member_id: s.joinerMemberId, type: "message", payload: { text: "before" },
+    });
+
+    await h.store.freezeSession(s.sessionId, Date.now());
+
+    const blocked = await s.joiner.call("bellman_send", {
+      session_id: s.sessionId, member_id: s.joinerMemberId, type: "message", payload: { text: "after" },
+    });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.text).toContain("frozen");
+
+    // The room is still there: members, history, and an honest status.
+    const seen = await s.creator.call("bellman_sync", {
+      session_id: s.sessionId, member_id: s.creatorMemberId, since_cursor: 0,
+    });
+    expect(seen.isError).toBe(false);
+    expect(seen.text).toContain("before");
+    expect(seen.data.session_status).toBe("frozen");
+
+    await h.store.freezeSession(s.sessionId, null);
+    expect((await s.creator.call("bellman_send", {
+      session_id: s.sessionId, member_id: s.creatorMemberId, type: "message", payload: { text: "thawed" },
+    })).isError).toBe(false);
+
+    // Leaving works while frozen too — nobody is trapped in a room they
+    // cannot use. Checked last, because leaving empties the room.
+    await h.store.freezeSession(s.sessionId, Date.now());
+    expect((await s.joiner.call("bellman_leave", {
+      session_id: s.sessionId, member_id: s.joinerMemberId,
+    })).isError).toBe(false);
+    await h.close();
+  });
+
+  it("cannot be joined or re-invited while frozen", async () => {
+    const h = new Harness();
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { mode: "swarm", brief: brief() });
+    await h.store.freezeSession(String(started.data.session_id), Date.now());
+
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.isError).toBe(true);
+    expect(preview.text).toContain("frozen");
+
+    const reissue = await creator.call("bellman_invite", {
+      session_id: started.data.session_id, member_id: started.data.member_id,
+    });
+    expect(reissue.isError).toBe(true);
+    await h.close();
+  });
+});

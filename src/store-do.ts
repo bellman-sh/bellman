@@ -124,6 +124,12 @@ export class SessionDO extends DurableObject {
     await this.ctx.storage.put("session", { ...s, closed: true });
   }
 
+  async freezeSession(frozenAt: number | null): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    await this.ctx.storage.put("session", { ...s, frozenAt });
+  }
+
   async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent> {
     const s = await this.stored();
     if (!s) throw new Error("Unknown session");
@@ -267,6 +273,15 @@ export class RegistryDO extends DurableObject {
     return list.filter((t) => t >= monthStart).length;
   }
 
+  async indexSession(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    const map = await this.ctx.storage.list<number>({ prefix: `us:${userId}:`, limit });
+    return [...map.keys()].map((k) => k.slice(`us:${userId}:`.length));
+  }
+
   async recordCreate(userId: string): Promise<void> {
     const key = `cr:${userId}`;
     const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
@@ -328,6 +343,8 @@ export class DurableObjectStore implements BellmanStore {
   async createSession(s: Session): Promise<void> {
     await this.session(s.id).createSession(s);
     if (s.joinCode) await this.registry.putJoinCode(s.joinCode, s.id);
+    // A lapsed plan has to find this user's rooms; bare create counts cannot.
+    await this.registry.indexSession(s.createdBy, s.id);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -367,6 +384,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async closeSession(sessionId: string): Promise<void> {
     await this.session(sessionId).closeSession();
+  }
+
+  async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
+    await this.session(sessionId).freezeSession(frozenAt);
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsCreatedBy(userId, limit);
   }
 
   async appendEvent(

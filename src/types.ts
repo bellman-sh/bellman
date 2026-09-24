@@ -73,6 +73,12 @@ export interface Session {
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
+  /**
+   * Set when the creator's plan lapsed. Frozen is not closed: members stay,
+   * history stays readable, and only writes are refused, until the plan is
+   * restored. Losing the room would be the wrong punishment for a failed card.
+   */
+  frozenAt: number | null;
 }
 
 export interface PendingConnect {

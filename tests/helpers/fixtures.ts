@@ -52,6 +52,7 @@ export function session(over: Partial<Session> = {}): Session {
     members: [member()],
     events: [],
     closed: false,
+    frozenAt: null,
     ...over,
   };
 }

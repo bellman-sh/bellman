@@ -41,6 +41,10 @@ export interface BellmanStore {
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /** Mark a session closed. Idempotent. */
   closeSession(sessionId: string): Promise<void>;
+  /** Freeze or thaw a session. null thaws. */
+  freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
+  /** Sessions this user created — how a lapsed plan finds the rooms to freeze. */
+  sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
 
   appendEvent(
     sessionId: string,
@@ -75,6 +79,7 @@ function detach<T>(value: T): T {
 export class MemoryStore implements BellmanStore {
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
+  private byCreator = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -85,6 +90,9 @@ export class MemoryStore implements BellmanStore {
     const stored = detach(s);
     this.sessions.set(stored.id, stored);
     if (stored.joinCode) this.byJoinCode.set(stored.joinCode, stored.id);
+    const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
+    mine.add(stored.id);
+    this.byCreator.set(stored.createdBy, mine);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -144,6 +152,16 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.closed = true;
+  }
+
+  async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.frozenAt = frozenAt;
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
   }
 
   async appendEvent(

@@ -16,9 +16,10 @@ import type { SubscriptionSource } from "../billing/subscription.js";
  *
  * Billing lives here too: what Stripe says each user has paid for is read on
  * the same token-issuing path. Its logic is BillingLedger, shared with the
- * in-memory store; this object only supplies the storage. Each method is a
- * run of storage calls with no other await between them, so the input gate
- * keeps a webhook and a refresh from interleaving.
+ * in-memory store; this object only supplies the storage. The input gate is
+ * not enough on its own here, because a sync awaits a fetch to Stripe and
+ * other calls run meanwhile, so the ledger queues every write per customer
+ * and per user itself.
  */
 
 const CODE = "code:";

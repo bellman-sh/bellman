@@ -72,52 +72,70 @@ const RANK = Object.keys(ENTITLEMENTS) as Plan[];
 
 export class BillingLedger implements BillingStorage {
   /**
-   * The sync in flight for each subscription. This only serializes anything
-   * because there is exactly one ledger: one Durable Object in production,
-   * one process in tests. It is memory, not storage, and needs to be: when the
-   * object is evicted, nothing is in flight.
+   * One queue per record. Every change to a customer record runs in that
+   * customer's queue and every change to a user's customer list in that
+   * user's, so no two read-modify-writes of one record overlap. When both are
+   * needed, the customer's is taken first, always, so queues cannot deadlock.
+   *
+   * This only serializes anything because there is exactly one ledger: one
+   * Durable Object in production, one process in tests. It is memory, not
+   * storage, and needs to be: when the object is evicted, nothing is queued.
    */
-  private inFlight = new Map<string, Promise<void>>();
+  private queues = new Map<string, Promise<unknown>>();
 
   constructor(private kv: LedgerKV) {}
 
-  async syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
-    const before = this.inFlight.get(subscriptionId) ?? Promise.resolve();
-    const run = before.catch(() => undefined).then(async () => {
-      // Read inside the queue: a read that started earlier finishes, and is
-      // written, before a later one begins.
+  private serial<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const before = this.queues.get(key) ?? Promise.resolve();
+    const run = before.catch(() => undefined).then(work);
+    this.queues.set(key, run);
+    const settle = () => {
+      if (this.queues.get(key) === run) this.queues.delete(key);
+    };
+    run.then(settle, settle);
+    return run;
+  }
+
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    return this.serial(`${CUSTOMER}${customerId}`, async () => {
+      // The read happens inside the customer's queue: a read that started
+      // earlier finishes, and is written, before a later one begins.
       const reading = await readSubscription(subscriptionId, source);
       const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
       const previous = record.subscriptions[subscriptionId];
       const eventAt = Math.max(Date.now(), (previous?.eventAt ?? 0) + 1);
-      await this.recordSubscription(customerId, subscriptionId, { ...reading, eventAt });
+      await this.writeSubscription(customerId, subscriptionId, { ...reading, eventAt });
     });
-    this.inFlight.set(subscriptionId, run);
-    try {
-      await run;
-    } finally {
-      if (this.inFlight.get(subscriptionId) === run) this.inFlight.delete(subscriptionId);
-    }
   }
 
-  async linkCustomer(customerId: string, userId: string): Promise<boolean> {
-    const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
-    if (record.userId && record.userId !== userId) return false;
-    if (!record.userId) {
-      record.userId = userId;
-      await this.kv.put(`${CUSTOMER}${customerId}`, record);
-    }
-    // Users collect customers rather than swapping one for another. Anyone can
-    // pay with any user's id attached, so a link may only ever add a plan to
-    // that user, never replace the one they are already paying for.
-    const customers = (await this.kv.get<string[]>(`${USER}${userId}`)) ?? [];
-    if (!customers.includes(customerId)) {
-      await this.kv.put(`${USER}${userId}`, [...customers, customerId]);
-    }
-    return true;
+  linkCustomer(customerId: string, userId: string): Promise<boolean> {
+    return this.serial(`${CUSTOMER}${customerId}`, async () => {
+      const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
+      if (record.userId && record.userId !== userId) return false;
+      if (!record.userId) {
+        record.userId = userId;
+        await this.kv.put(`${CUSTOMER}${customerId}`, record);
+      }
+      // Users collect customers rather than swapping one for another. Anyone
+      // can pay with any user's id attached, so a link may only ever add a
+      // plan to that user, never replace the one they are already paying for.
+      await this.serial(`${USER}${userId}`, async () => {
+        const customers = (await this.kv.get<string[]>(`${USER}${userId}`)) ?? [];
+        if (!customers.includes(customerId)) {
+          await this.kv.put(`${USER}${userId}`, [...customers, customerId]);
+        }
+      });
+      return true;
+    });
   }
 
-  async recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
+  /** Record a subscription state directly, in the customer's queue. For tests and repair. */
+  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
+    return this.serial(`${CUSTOMER}${customerId}`, () => this.writeSubscription(customerId, subscriptionId, state));
+  }
+
+  /** The write itself. Callers must already hold the customer's queue. */
+  private async writeSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
     const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
     const previous = record.subscriptions[subscriptionId];
     // A cancelled subscription stays cancelled, and a lower eventAt never

@@ -526,3 +526,56 @@ describe("which checkouts may link a customer", () => {
     expect(((await res.json()) as { applied: boolean }).applied).toBe(false);
   });
 });
+
+describe("concurrent writes to one customer or one user", () => {
+  const sub = (id: string, lookup: string) =>
+    ({ id, status: "active", items: { data: [{ price: { lookup_key: lookup } }] } });
+
+  it("keeps both subscriptions when two of one customer's sync at once", async () => {
+    await billing.linkCustomer("cus_A", "u_github_1");
+    let release!: () => void;
+    const together = new Promise<void>((resolve) => { release = resolve; });
+    const answers: Record<string, unknown> = { sub_pro: sub("sub_pro", "pro_monthly"), sub_team: sub("sub_team", "team_seat_monthly") };
+    const slow = (async (input: RequestInfo | URL) => {
+      await together;
+      return Response.json(answers[String(input).split("/").pop()!]);
+    }) as typeof fetch;
+
+    const a = billing.syncSubscription("cus_A", "sub_pro", { apiKey: "rk", fetchImpl: slow });
+    const b = billing.syncSubscription("cus_A", "sub_team", { apiKey: "rk", fetchImpl: slow });
+    release();
+    await Promise.all([a, b]);
+
+    // Cancel team: if pro was lost, the user drops to free instead of pro.
+    stripeNow.set("sub_team", { ...sub("sub_team", "team_seat_monthly"), status: "canceled" });
+    await billing.syncSubscription("cus_A", "sub_team", { apiKey: "rk", fetchImpl: fakeStripe });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+
+  it("keeps every customer when several link to one user at once", async () => {
+    await Promise.all(["cus_1", "cus_2", "cus_3"].map((c) => billing.linkCustomer(c, "u_github_1")));
+
+    // Give one customer at a time the only active subscription: each must still count for the user.
+    for (const c of ["cus_1", "cus_2", "cus_3"]) {
+      const id = `sub_${c}`;
+      stripeNow.set(id, sub(id, "pro_monthly"));
+      await billing.syncSubscription(c, id, { apiKey: "rk", fetchImpl: fakeStripe });
+      expect((await billing.paidPlan("u_github_1"))?.customerId, c).toBe(c);
+      stripeNow.set(id, { ...sub(id, "pro_monthly"), status: "canceled" });
+      await billing.syncSubscription(c, id, { apiKey: "rk", fetchImpl: fakeStripe });
+    }
+  });
+
+  it("keeps a link made while a subscription for that customer syncs", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const slow = (async () => { await held; return Response.json(sub("sub_1", "pro_monthly")); }) as typeof fetch;
+
+    const syncing = billing.syncSubscription("cus_A", "sub_1", { apiKey: "rk", fetchImpl: slow });
+    const linking = billing.linkCustomer("cus_A", "u_github_1");
+    release();
+    await Promise.all([syncing, linking]);
+
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+});

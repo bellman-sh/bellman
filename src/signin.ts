@@ -69,7 +69,20 @@ function makeListener(server: Server, redirectUri: string): Listener {
         };
 
         function onRequest(req: IncomingMessage, res: ServerResponse): void {
-          const url = new URL(req.url ?? "/", redirectUri);
+          /**
+           * req.url is whatever a stranger sent. "//host:99999999/x" is a valid
+           * request target that URL reads as a scheme-relative reference with an
+           * impossible port, and throws; an exception out of this handler is
+           * uncaught, and it ends the bridge. Like a mismatched state, it must
+           * not settle the wait either.
+           */
+          let url: URL;
+          try {
+            url = new URL(req.url ?? "/", redirectUri);
+          } catch {
+            res.writeHead(400).end();
+            return;
+          }
           const html = (status: number, title: string, body: string) =>
             res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(page(title, body));
 

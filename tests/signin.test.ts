@@ -101,4 +101,21 @@ describe("the loopback listener", () => {
     expect(res.status).toBe(404);
     await timedOut;
   });
+
+  // The handler must never throw: an exception out of it is uncaught, and it
+  // ends the bridge. A web page can send this request while a sign-in is pending.
+  it("answers a request target it cannot parse, and keeps waiting", async () => {
+    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const waiting = listener.waitForCode("state-abc", 5_000);
+    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    // A valid URL to a browser; to `new URL(target, base)` it is a scheme-relative
+    // reference with an impossible port.
+    const res = await get(`http://127.0.0.1:${TEST_PORTS[0]}//evil.com:99999999/callback`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    expect(res.status).toBe(400);
+    // It neither crashed the listener nor cancelled the pending sign-in.
+    await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
+    await landed;
+  });
 });

@@ -7,7 +7,8 @@ import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { canonicalResource } from "./oauth/tokens.js";
-import { handleStripeWebhook, parsePaymentLinks } from "./billing/stripe.js";
+import { handleStripeWebhook } from "./billing/stripe.js";
+import { billingSettings } from "./billing/config.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -35,7 +36,9 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
-  /** Signing secret (whsec_…) of the Stripe webhook endpoint. Absent means billing is off. */
+  /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
+  BELLMAN_BILLING?: string;
+  /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
   STRIPE_WEBHOOK_SECRET?: string;
   /** Optional JSON: link name -> Stripe Payment Link URL, served at /upgrade/<name>. */
   STRIPE_PAYMENT_LINKS?: string;
@@ -57,6 +60,7 @@ function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined 
     credentials.google = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
   }
   const store = new AuthStore(env.AUTH);
+  const billing = billingSettings(env);
   return {
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
@@ -64,9 +68,8 @@ function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined 
     store,
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
-    // Plans are read from billing only once Stripe can write to it.
-    billing: env.STRIPE_WEBHOOK_SECRET ? store : undefined,
-    paymentLinks: parsePaymentLinks(env.STRIPE_PAYMENT_LINKS),
+    billing: billing.applyPlans ? store : undefined,
+    paymentLinks: billing.paymentLinks,
   };
 }
 
@@ -88,10 +91,11 @@ export default {
     const oauth = oauthConfig(request, env);
 
     if (url.pathname === "/stripe/webhook") {
-      if (!env.STRIPE_WEBHOOK_SECRET || !env.AUTH) {
-        return new Response("Billing is not configured", { status: 503 });
+      const { webhookSecret } = billingSettings(env);
+      if (!webhookSecret || !env.AUTH) {
+        return new Response("Billing is off", { status: 503 });
       }
-      return handleStripeWebhook(request, { secret: env.STRIPE_WEBHOOK_SECRET, billing: new AuthStore(env.AUTH) });
+      return handleStripeWebhook(request, { secret: webhookSecret, billing: new AuthStore(env.AUTH) });
     }
 
     if (oauth) {

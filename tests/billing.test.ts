@@ -3,6 +3,7 @@ import { MemoryBillingStore, withPaidPlan } from "../src/billing/ledger.js";
 import {
   handleStripeWebhook, parsePaymentLinks, planForPrice, verifyStripeSignature,
 } from "../src/billing/stripe.js";
+import { billingMode, billingSettings } from "../src/billing/config.js";
 import type { Identity } from "../src/types.js";
 
 /**
@@ -239,5 +240,40 @@ describe("payment links", () => {
   it("serves no links from malformed JSON", () => {
     expect(parsePaymentLinks("{nope")).toEqual({});
     expect(parsePaymentLinks(undefined)).toEqual({});
+  });
+});
+
+describe("the BELLMAN_BILLING switch", () => {
+  const secrets = {
+    STRIPE_WEBHOOK_SECRET: "whsec_x",
+    STRIPE_PAYMENT_LINKS: JSON.stringify({ pro_monthly: "https://buy.stripe.com/abc" }),
+  };
+
+  it("is off unless set, and off for anything it does not recognise", () => {
+    expect(billingMode(undefined)).toBe("off");
+    expect(billingMode("")).toBe("off");
+    expect(billingMode("true")).toBe("off");
+    expect(billingMode("yes please")).toBe("off");
+    expect(billingMode(" On ")).toBe("on");
+  });
+
+  it("does nothing when off, even with every secret set", () => {
+    expect(billingSettings({ ...secrets })).toEqual({ mode: "off", applyPlans: false, paymentLinks: {} });
+    expect(billingSettings({ ...secrets, BELLMAN_BILLING: "off" }).webhookSecret).toBeUndefined();
+  });
+
+  it("records and sells in shadow, but leaves tokens alone", () => {
+    const shadow = billingSettings({ ...secrets, BELLMAN_BILLING: "shadow" });
+    expect(shadow).toMatchObject({ mode: "shadow", webhookSecret: "whsec_x", applyPlans: false });
+    expect(shadow.paymentLinks).toEqual({ pro_monthly: "https://buy.stripe.com/abc" });
+  });
+
+  it("applies plans when on", () => {
+    expect(billingSettings({ ...secrets, BELLMAN_BILLING: "on" })).toMatchObject({ mode: "on", applyPlans: true });
+  });
+
+  it("stays off when switched on without a webhook secret", () => {
+    const half = billingSettings({ BELLMAN_BILLING: "on", STRIPE_PAYMENT_LINKS: secrets.STRIPE_PAYMENT_LINKS });
+    expect(half).toEqual({ mode: "off", applyPlans: false, paymentLinks: {} });
   });
 });

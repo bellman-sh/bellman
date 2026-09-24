@@ -70,9 +70,19 @@ Unlike `BELLMAN_KEYS`, a malformed `BELLMAN_USERS` is **ignored rather than fata
 
 **Paying.** Stripe changes plans with no operator in the loop. Point a pricing page's buttons at `https://mcp.bellman.sh/upgrade/<link>`: the human signs in with GitHub or Google, then lands on the matching Stripe Payment Link tagged with their Bellman user id (`client_reference_id`). Stripe reports the purchase to `POST /stripe/webhook`, and the plan appears in the user's next token. Access tokens last 10 minutes and every refresh looks the plan up again, so upgrades and cancellations land within 10 minutes without signing in again.
 
+Billing is switched by `BELLMAN_BILLING` in `wrangler.toml`. It's a var, not a secret, so turning it on is a reviewed commit:
+
+| `BELLMAN_BILLING` | Webhook records payments | `/upgrade` sells | Tokens carry the paid plan |
+| --- | --- | --- | --- |
+| `off` (default; also any unknown value) | no (503) | no | no |
+| `shadow` | yes | yes | no |
+| `on` | yes | yes | yes |
+
+Use `shadow` to take real purchases end to end before anyone's plan depends on them. `shadow` or `on` without `STRIPE_WEBHOOK_SECRET` stays off and logs why.
+
 | Secret | What it is |
 | --- | --- |
-| `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). Unset means billing is off: the webhook answers 503 and plans come only from `BELLMAN_USERS`. |
+| `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
 | `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served. |
 
 Subscribe the endpoint to `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`. A price grants the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` grants `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise. Buying `team` makes the buyer admin of an org named for their Stripe customer. Adding other people to that org isn't built yet.

@@ -58,5 +58,12 @@ head_sampling_rate = 1
 persist = true
 
 
+# Billing: off | shadow | on (src/billing/config.ts). A var, not a secret, so
+# switching it is a reviewed commit. The Stripe values stay secrets:
+#   npx wrangler secret put STRIPE_WEBHOOK_SECRET
+#   npx wrangler secret put STRIPE_PAYMENT_LINKS
+[vars]
+BELLMAN_BILLING = "off"
+
 # BELLMAN_KEYS is a secret, never a var:
 #   npx wrangler secret put BELLMAN_KEYS

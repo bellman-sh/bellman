@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { Identity } from "./types.js";
 
@@ -37,13 +37,30 @@ export interface CredentialFile {
   servers: Record<string, ServerCredential>;
 }
 
-/** `$XDG_CONFIG_HOME/bellman`, or `~/.config/bellman`. */
+/**
+ * `$XDG_CONFIG_HOME/bellman`, or `~/.config/bellman`. Always absolute: it throws
+ * rather than return a relative path (see homeDir).
+ */
 export function credentialsDir(): string {
   const xdg = process.env.XDG_CONFIG_HOME;
   // A relative XDG_CONFIG_HOME would put credentials wherever the bridge
   // happened to be spawned. Fall back rather than honour it.
   if (xdg && isAbsolute(xdg)) return join(xdg, "bellman");
-  return join(homedir(), ".config", "bellman");
+  return join(homeDir(), ".config", "bellman");
+}
+
+/**
+ * os.homedir() returns $HOME as it finds it, so HOME="" or a relative HOME would
+ * put the credential in whatever directory the bridge was spawned from — very
+ * possibly a git tree. Same rule as XDG_CONFIG_HOME: do not honour it, ask the
+ * password database instead, and refuse to guess if that is no better.
+ */
+function homeDir(): string {
+  const home = homedir();
+  if (isAbsolute(home)) return home;
+  const fromPasswd = userInfo().homedir;
+  if (isAbsolute(fromPasswd)) return fromPasswd;
+  throw new Error("no absolute home directory found for the credential file; set XDG_CONFIG_HOME to an absolute path");
 }
 
 /**
@@ -73,23 +90,43 @@ function readFile(dir: string): CredentialFile {
 }
 
 export function readServer(dir: string, serverUrl: string): ServerCredential {
-  return readFile(dir).servers[serverUrl] ?? {};
+  const { servers } = readFile(dir);
+  // Own keys only: `servers` is parsed JSON, so "constructor" or "__proto__"
+  // would otherwise resolve to something inherited.
+  if (!Object.hasOwn(servers, serverUrl)) return {};
+  // And only an object: a hand-edited entry of any other shape reads as absent,
+  // like every other bad file.
+  const entry: unknown = servers[serverUrl];
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return {};
+  return entry as ServerCredential;
 }
 
 /**
  * Replace one server's entry, leaving every other server alone — production and
  * a `wrangler dev` server share the file and must never clobber each other.
+ *
+ * Throws on a filesystem failure — EPERM from the chmods on a path another user
+ * owns, EACCES, ENOSPC — and writes nothing if it cannot first secure the
+ * directory or an existing file.
  */
 export function writeServer(dir: string, serverUrl: string, cred: ServerCredential): void {
   // Modes are set twice on purpose: the `mode` option covers creation (a fresh
   // file is never on disk at the default mode), the chmod covers a directory or
   // file that already existed, where the option is ignored. Directory first, so
-  // an old loose file is already out of reach by the time it is rewritten.
+  // an old loose file is already out of reach by the time it is rewritten; the
+  // file before it is read or written, so one left at 0400 or 0000 can still be
+  // opened. The chmod after the write covers a umask that stripped bits.
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
+  const path = join(dir, FILE);
+  try {
+    chmodSync(path, 0o600);
+  } catch (err) {
+    // No file yet is fine: the mode option below covers creating it.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
   const file = readFile(dir);
   file.servers[serverUrl] = cred;
-  const path = join(dir, FILE);
   writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
   chmodSync(path, 0o600);
 }
@@ -103,6 +140,8 @@ export function writeServer(dir: string, serverUrl: string, cred: ServerCredenti
  * branching on this value for a security decision, you have found a bug.
  */
 export function decodeIdentity(accessToken: string): Identity | undefined {
+  // Read back from a file a person may have edited: `string` is a hope, not a fact.
+  if (typeof accessToken !== "string") return undefined;
   const parts = accessToken.split(".");
   if (parts.length !== 3) return undefined;
   try {

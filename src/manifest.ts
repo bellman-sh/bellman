@@ -23,16 +23,32 @@ export class ManifestError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Role keys are validated by regex, not merely by type. The leading [a-z] rules
- * out `__proto__` and every other Object.prototype member except `constructor`,
- * which IS a legal role name (stored as an ordinary own property). Code that
- * looks a role up by an untrusted name must therefore use Object.hasOwn — never
- * `in` or bare indexing, which would find the inherited `constructor` function.
+ * Names that must never be role keys. The regex alone cannot enforce this:
+ * `constructor` and `prototype` match it, and `__proto__` never reaches it (see
+ * RolesShape). Stored in `roles`, any of them would collide with what a bare
+ * `roles[name]` lookup finds on a plain object, so #2 and #3 could mistake an
+ * inherited property for a defined role.
  */
-export const RoleKeyShape = z.string().regex(
-  /^[a-z][a-z0-9_]{0,30}$/,
-  "role keys must match [a-z][a-z0-9_]{0,30}",
-);
+const RESERVED_ROLE_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * The one definition of a legal role key. Validate every externally supplied
+ * role name with it before using the name as a lookup key: banning a name from
+ * `roles` does not make a lookup by that name safe — `roles["constructor"]` on a
+ * plain object is the inherited Object function even when no such role exists.
+ *
+ * The ban is checked first on purpose. `__proto__` also fails the regex, but
+ * "reserved" is the more useful thing to tell the author.
+ */
+export const RoleKeyShape = z.string()
+  .refine(
+    (key) => !RESERVED_ROLE_KEYS.has(key),
+    `role keys must not be one of: ${[...RESERVED_ROLE_KEYS].join(", ")}`,
+  )
+  .regex(
+    /^[a-z][a-z0-9_]{0,30}$/,
+    "role keys must match [a-z][a-z0-9_]{0,30}",
+  );
 
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),
@@ -86,7 +102,28 @@ const AuthorShape = z.strictObject({
   creator_role: z.string(),
 });
 
-export const ManifestShape = z.union([CiteShape, AuthorShape]);
+/** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */
+function describeIssue(i: { path: PropertyKey[]; message: string }): string {
+  const path = i.path.map(String).join(".");
+  return path ? `${path}: ${i.message}` : i.message;
+}
+
+/** The arm the caller was aiming at: a `preset` key means "cite", anything else "author". */
+function aimedArm(input: unknown): typeof CiteShape | typeof AuthorShape {
+  return typeof input === "object" && input !== null && "preset" in input ? CiteShape : AuthorShape;
+}
+
+export const ManifestShape = z.union([CiteShape, AuthorShape], {
+  // A failed union reports one opaque "Invalid input". Say which field is wrong,
+  // using the arm the caller was aiming at. This is the message a tool caller sees
+  // when a tool's inputSchema is ManifestShape: the MCP SDK validates with it
+  // before any handler runs, and shows only each issue's message and path.
+  error: (iss) => {
+    if (iss.code !== "invalid_union") return undefined;
+    const first = iss.errors[aimedArm(iss.input) === CiteShape ? 0 : 1]?.[0];
+    return first ? describeIssue(first) : undefined;
+  },
+});
 export type ManifestInput = z.input<typeof ManifestShape>;
 
 // ---------------------------------------------------------------------------
@@ -153,9 +190,7 @@ export const PRESETS: Record<PresetName, PresetBody> = {
 // ---------------------------------------------------------------------------
 
 function firstIssue(err: z.ZodError): string {
-  const i = err.issues[0];
-  const path = i.path.join(".");
-  return path ? `${path}: ${i.message}` : i.message;
+  return describeIssue(err.issues[0]);
 }
 
 /**
@@ -166,7 +201,7 @@ function firstIssue(err: z.ZodError): string {
  * learn that presets exist.
  */
 export function resolveManifest(input: unknown): RoomManifest {
-  // Surface a readable preset error before the union collapses into a dump.
+  // Name the valid presets when given an unknown one.
   if (
     typeof input === "object" && input !== null &&
     "preset" in input && typeof (input as { preset: unknown }).preset === "string" &&
@@ -177,7 +212,11 @@ export function resolveManifest(input: unknown): RoomManifest {
     );
   }
 
-  const parsed = ManifestShape.safeParse(input);
+  // Validate against the arm the caller was aiming at, not the union: a single
+  // arm says which field is wrong. Accept/reject is identical to ManifestShape,
+  // because both arms are strict: input with a `preset` key can only match the
+  // cite arm, input without one can only match the author arm.
+  const parsed = aimedArm(input).safeParse(input);
   if (!parsed.success) throw new ManifestError(firstIssue(parsed.error));
   const v = parsed.data;
 

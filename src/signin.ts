@@ -137,10 +137,20 @@ export function openBrowser(url: URL, log: (message: string) => void): void {
     process.platform === "darwin" ? ["open", [target]]
     : process.platform === "win32" ? ["cmd", ["/c", "start", "", target]]
     : ["xdg-open", [target]];
+  const fallback = () => log(`could not open a browser. Sign in here: ${target}`);
   try {
-    spawn(command, args, { stdio: "ignore", detached: true }).unref();
-    log(`opened a browser to sign in: ${target}`);
+    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    /**
+     * A launcher that is not installed (xdg-open on a headless box, in a
+     * container, over SSH) does not throw: spawn reports it later, as an 'error'
+     * event, and an 'error' event nobody listens for is an uncaught exception
+     * that ends the bridge. So the log hears how it went from the child, and the
+     * user always gets the URL.
+     */
+    child.on("error", fallback);
+    child.once("spawn", () => log(`opened a browser to sign in: ${target}`));
+    child.unref();
   } catch {
-    log(`could not open a browser. Sign in here: ${target}`);
+    fallback();
   }
 }

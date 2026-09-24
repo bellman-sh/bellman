@@ -1,8 +1,18 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { createServer, type Server } from "node:http";
 import {
-  CALLBACK_PORTS, listenForCallback, loopbackRedirects, type Listener,
+  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, type Listener,
 } from "../src/signin.js";
+
+// openBrowser is the one thing here that starts a process. The real spawn stays
+// the default, so a test can ask a real launcher to fail; the tests that must
+// never open a browser swap in a fake child for a single call.
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, spawn: vi.fn(actual.spawn) };
+});
 
 /** Ports well away from the real range, so a developer's live bridge is untouched. */
 const TEST_PORTS = [53411, 53412, 53413];
@@ -117,5 +127,62 @@ describe("the loopback listener", () => {
     // It neither crashed the listener nor cancelled the pending sign-in.
     await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     await landed;
+  });
+});
+
+describe("openBrowser", () => {
+  const url = new URL("https://bellman.example/authorize?client_id=c&state=s");
+  beforeEach(() => { vi.mocked(spawn).mockClear(); });
+
+  /** A stand-in child process, handed out for exactly one spawn call. */
+  function fakeChild() {
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn() });
+    vi.mocked(spawn).mockImplementationOnce(() => child as unknown as ChildProcess);
+    return child;
+  }
+
+  // A launcher that is not installed is not a throw: spawn reports it later, as an
+  // 'error' event, and an 'error' event nobody listens for is an uncaught exception
+  // that ends the bridge. That is a headless box, a container, an SSH session.
+  it("gives the user the URL when there is no launcher, instead of crashing", async () => {
+    const logged: string[] = [];
+    const path = process.env.PATH;
+    process.env.PATH = "/nonexistent-bellman-test-path"; // no open, no xdg-open, no cmd
+    try { openBrowser(url, (m) => logged.push(m)); } finally { process.env.PATH = path; }
+    await vi.waitFor(
+      () => expect(logged.join("\n")).toContain("could not open a browser"),
+      { timeout: 1_000 },
+    );
+    expect(logged.join("\n")).toContain(url.toString());
+    expect(logged.join("\n")).not.toContain("opened a browser"); // and it must not claim success
+  });
+
+  it("says which URL it opened only once the launcher has started", () => {
+    const child = fakeChild();
+    const logged: string[] = [];
+    openBrowser(url, (m) => logged.push(m));
+    expect(logged).toEqual([]);
+    child.emit("spawn");
+    expect(logged).toEqual([`opened a browser to sign in: ${url}`]);
+  });
+
+  it("falls back to the URL when spawn itself throws", () => {
+    vi.mocked(spawn).mockImplementationOnce(() => { throw new Error("EACCES"); });
+    const logged: string[] = [];
+    openBrowser(url, (m) => logged.push(m));
+    expect(logged).toEqual([`could not open a browser. Sign in here: ${url}`]);
+  });
+
+  // A child writing to our stdout would corrupt the MCP transport.
+  it("spawns the launcher detached, with its output discarded, and lets go of it", () => {
+    const child = fakeChild();
+    openBrowser(url, () => {});
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(spawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining([url.toString()]),
+      { stdio: "ignore", detached: true },
+    );
+    expect(child.unref).toHaveBeenCalledOnce();
   });
 });

@@ -124,6 +124,23 @@ describe("the loopback listener", () => {
     await refused;
   });
 
+  // The page is HTML and the error text is the authorization server's, relayed
+  // from whatever provider refused. It only gets here past the state check, but it
+  // is still someone else's text.
+  it("shows the server's error text as text, not as markup", async () => {
+    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const waiting = listener.waitForCode("state-abc", 5_000);
+    const payload = '<script>alert("a&b")</script>';
+    const refused = expect(waiting).rejects.toThrow(`access_denied: ${payload}`); // subscribe first
+    const res = await get(
+      `${listener.redirectUri}?error=access_denied&error_description=${encodeURIComponent(payload)}&state=state-abc`,
+    );
+    const body = await res.text();
+    expect(body).not.toContain("<script>");
+    expect(body).toContain("&lt;script&gt;alert(&quot;a&amp;b&quot;)&lt;/script&gt;");
+    await refused; // the Error keeps the raw text: that goes to a terminal, not a browser
+  });
+
   it("times out rather than waiting forever", async () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);
     await expect(listener.waitForCode("state-abc", 200)).rejects.toThrow(/timed out/i);

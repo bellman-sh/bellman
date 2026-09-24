@@ -11,6 +11,16 @@ const open: { close(): void }[] = [];
 afterEach(() => { for (const item of open.splice(0)) item.close(); });
 function track<T extends { close(): void }>(x: T): T { open.push(x); return x; }
 
+/**
+ * fetch(), one connection per request. fetch pools keep-alive connections by
+ * origin, and every test here rebinds the same ports, so a pooled connection to
+ * the server the last test closed can be handed to this test's request, and it
+ * fails with ECONNRESET. Which pair of tests trips it depends on event-loop
+ * timing, so no delay cures it; not pooling does.
+ */
+const get = (url: string, init: { signal?: AbortSignal } = {}) =>
+  fetch(url, { ...init, headers: { connection: "close" } });
+
 async function block(port: number): Promise<void> {
   const blocker = track(createServer());
   await new Promise<void>((r) => blocker.listen(port, "127.0.0.1", r));
@@ -49,7 +59,7 @@ describe("the loopback listener", () => {
   it("captures the code from a matching callback", async () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);
     const waiting = listener.waitForCode("state-abc", 5_000);
-    const res = await fetch(`${listener.redirectUri}?code=the-code&state=state-abc`);
+    const res = await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("close this tab");
     await expect(waiting).resolves.toBe("the-code");
@@ -60,7 +70,7 @@ describe("the loopback listener", () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);
     const waiting = listener.waitForCode("state-abc", 400);
     const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
-    const res = await fetch(`${listener.redirectUri}?code=forged&state=state-xyz`);
+    const res = await get(`${listener.redirectUri}?code=forged&state=state-xyz`);
     expect(res.status).toBe(400);
     // The forged call must NOT complete the wait — it times out instead.
     await timedOut;
@@ -74,7 +84,7 @@ describe("the loopback listener", () => {
     // handler, while fetch() is still resolving; a rejection nobody is handling
     // yet is an unhandled rejection, and vitest fails the whole run on one.
     const refused = expect(waiting).rejects.toThrow(/access_denied/);
-    await fetch(`${listener.redirectUri}?error=access_denied&state=state-abc`);
+    await get(`${listener.redirectUri}?error=access_denied&state=state-abc`);
     await refused;
   });
 
@@ -87,7 +97,7 @@ describe("the loopback listener", () => {
     const listener = track((await listenForCallback(TEST_PORTS))!);
     const waiting = listener.waitForCode("state-abc", 400);
     const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
-    const res = await fetch(`http://127.0.0.1:${TEST_PORTS[0]}/favicon.ico`);
+    const res = await get(`http://127.0.0.1:${TEST_PORTS[0]}/favicon.ico`);
     expect(res.status).toBe(404);
     await timedOut;
   });

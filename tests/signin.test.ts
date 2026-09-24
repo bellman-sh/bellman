@@ -382,6 +382,56 @@ describe("openBrowser", () => {
     expect(logged).toEqual([`could not open a browser. Sign in here: ${url}`]);
   });
 
+  afterEach(() => { vi.unstubAllEnvs(); });
+
+  it.each([
+    ["darwin", "open"],
+    ["linux", "xdg-open"],
+    ["freebsd", "xdg-open"],
+  ] as const)("opens the URL on %s with %s", (platform, command) => {
+    fakeChild();
+    openBrowser(url, () => {}, platform);
+    expect(spawn).toHaveBeenCalledWith(command, [url.toString()], { stdio: "ignore", detached: true });
+  });
+
+  // UNVERIFIED on Windows: nobody has run this there. What can be held from here
+  // is the argv, and the argv is the point: no shell may parse the URL. cmd /c
+  // start split an authorization URL at its first "&" and ran the rest.
+  describe("on Windows", () => {
+    const rundll32 = (root: string) => `${root}\\System32\\rundll32.exe`;
+
+    it("hands the URL to rundll32 as one argument, with no shell to parse it", () => {
+      vi.stubEnv("SystemRoot", "C:\\Windows");
+      const child = fakeChild();
+      const hostile = new URL("https://as.example/authorize?client_id=c&calc.exe&state=s");
+      const logged: string[] = [];
+      openBrowser(hostile, (message) => logged.push(message), "win32");
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(spawn).toHaveBeenCalledWith(
+        rundll32("C:\\Windows"),
+        ["url.dll,FileProtocolHandler", hostile.toString()],
+        { stdio: "ignore", detached: true },
+      );
+      // rundll32 reports no failure, so the URL is in the line for a browser that never opens.
+      child.emit("spawn");
+      expect(logged).toEqual([`opened a browser to sign in: ${hostile}`]);
+    });
+
+    // A bare name is looked up in the current directory first, so the path is
+    // always absolute, from SystemRoot when that is a usable one.
+    it.each([
+      ["D:\\Windows", "D:\\Windows"], // Windows installed somewhere else
+      [undefined, "C:\\Windows"], // not set
+      ["", "C:\\Windows"],
+      ["Windows", "C:\\Windows"], // relative: would resolve against the current directory
+    ])("resolves rundll32 from a SystemRoot of %j to an absolute path", (systemRoot, expected) => {
+      vi.stubEnv("SystemRoot", systemRoot);
+      fakeChild();
+      openBrowser(url, () => {}, "win32");
+      expect(vi.mocked(spawn).mock.calls[0]![0]).toBe(rundll32(expected));
+    });
+  });
+
   // A child writing to our stdout would corrupt the MCP transport.
   it("spawns the launcher detached, with its output discarded, and lets go of it", () => {
     const child = fakeChild();

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { win32 } from "node:path";
 
 /**
  * The browser half of self-serve credentials: a loopback listener for the
@@ -204,16 +205,42 @@ function makeListener(server: Server, redirectUri: string, log: (message: string
   };
 }
 
+/** The command and arguments that open `target` in the platform's browser. */
+function launcherFor(platform: NodeJS.Platform, target: string): [string, string[]] {
+  if (platform === "darwin") return ["open", [target]];
+  if (platform === "win32") {
+    /**
+     * UNVERIFIED on Windows: nobody has run this there. A test pins the argv; what
+     * rundll32 then does with it is not pinned by anything.
+     *
+     * No shell parses this line, so nothing needs escaping. `cmd /c start "" <url>`
+     * did: libuv quotes an argument only for a space, tab or quote, so an
+     * authorization URL reached cmd unquoted, cmd split it at the first "&" and ran
+     * the rest as a command. client_id comes from dynamic client registration, so a
+     * hostile authorization server could return `c&calc.exe`. SystemRoot makes the
+     * path absolute, because a bare name is looked up in the current directory
+     * first. rundll32 reports no failure, so the URL stays in the log line for a
+     * browser that never opened.
+     */
+    const root = process.env.SystemRoot;
+    const base = root && win32.isAbsolute(root) ? root : "C:\\Windows";
+    return [win32.join(base, "System32", "rundll32.exe"), ["url.dll,FileProtocolHandler", target]];
+  }
+  return ["xdg-open", [target]];
+}
+
 /**
  * Open the platform browser, detached, with its output discarded — a child
- * writing to our stdout would corrupt the MCP transport.
+ * writing to our stdout would corrupt the MCP transport. The platform is a
+ * parameter so every platform's argv can be checked from any one of them.
  */
-export function openBrowser(url: URL, log: (message: string) => void): void {
+export function openBrowser(
+  url: URL,
+  log: (message: string) => void,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const target = url.toString();
-  const [command, args]: [string, string[]] =
-    process.platform === "darwin" ? ["open", [target]]
-    : process.platform === "win32" ? ["cmd", ["/c", "start", "", target]]
-    : ["xdg-open", [target]];
+  const [command, args] = launcherFor(platform, target);
   const fallback = () => log(`could not open a browser. Sign in here: ${target}`);
   try {
     const child = spawn(command, args, { stdio: "ignore", detached: true });

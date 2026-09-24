@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
-import { brief, openaiAgent } from "../helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { JOIN_CODE_TTL } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import type { Identity } from "../../src/types.js";
@@ -27,21 +27,21 @@ function travel(ms: number): void {
 describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
   it("blocks a free plan from creating a swarm session", async () => {
     const peer = await h.connect(DEV_KEY.peer);
-    const res = await peer.call("bellman_start", { mode: "swarm", brief: brief() });
+    const res = await peer.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     expect(res.isError).toBe(true);
     expect(res.text).toContain("pro or team");
   });
 
   it("lets a free plan create a pair session", async () => {
     const peer = await h.connect(DEV_KEY.peer);
-    const res = await peer.call("bellman_start", { mode: "pair", brief: brief() });
+    const res = await peer.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     expect(res.isError, res.text).toBe(false);
   });
 
   it("blocks a free plan from org_only, which needs the team plan", async () => {
     const peer = await h.connect(DEV_KEY.peer);
     const res = await peer.call("bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
     });
     expect(res.isError).toBe(true);
     expect(res.text).toContain("team plan");
@@ -51,7 +51,7 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -68,7 +68,7 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const outsider = await h.connect(DEV_KEY.outsider);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await outsider.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -88,12 +88,12 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
       (await h.store.recordCreate("u_peer"));
     }
 
-    const blocked = await peer.call("bellman_start", { mode: "pair", brief: brief() });
+    const blocked = await peer.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     expect(blocked.isError).toBe(true);
     expect(blocked.text).toContain("monthly session limit");
 
     // The same quota-exhausted identity can still join someone else's session.
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -110,9 +110,9 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
     };
     const client = await h.connectAs(pro);
 
-    expect((await client.call("bellman_start", { mode: "swarm", brief: brief() })).isError).toBe(false);
+    expect((await client.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() })).isError).toBe(false);
     const orgOnly = await client.call("bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
     });
     expect(orgOnly.isError).toBe(true);
     expect(orgOnly.text).toContain("team plan");
@@ -124,7 +124,7 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
     };
     const client = await h.connectAs(orgless);
     const res = await client.call("bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
     });
     expect(res.isError).toBe(true);
     expect(res.text).toContain("no org");
@@ -138,7 +138,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const creatorBrief = brief({ goal: "Only the creator's goal is visible here" });
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: creatorBrief });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: creatorBrief });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -157,7 +157,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const creatorMemberId = String(started.data.member_id);
 
@@ -185,7 +185,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const joinerBrief = brief({ goal: "Joiner goal crosses only at confirm", agent: openaiAgent });
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -208,7 +208,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "swarm", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -225,7 +225,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const outsider = await h.connect(DEV_KEY.outsider);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -243,7 +243,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const outsider = await h.connect(DEV_KEY.outsider);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const joinCode = String(started.data.join_code);
 
     const preview = await peer.call("bellman_connect", { join_code: joinCode });
@@ -261,7 +261,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const outsider = await h.connect(DEV_KEY.outsider);
 
-    const started = await jesse.call("bellman_start", { mode: "swarm", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     const joinCode = String(started.data.join_code);
 
     const p1 = await peer.call("bellman_connect", { join_code: joinCode });
@@ -278,7 +278,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     travel(JOIN_CODE_TTL + 1_000);
 
     const late = await peer.call("bellman_connect", {
@@ -292,7 +292,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const messy = `  ${String(started.data.join_code).toLowerCase()} `;
 
     const preview = await peer.call("bellman_connect", { join_code: messy });
@@ -304,7 +304,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const outsider = await h.connect(DEV_KEY.outsider);
 
     const started = await jesse.call("bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
     });
     const res = await outsider.call("bellman_connect", {
       join_code: String(started.data.join_code),
@@ -318,7 +318,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer); // free plan, same org
 
     const started = await jesse.call("bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
     });
     const res = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
@@ -331,7 +331,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const outsider = await h.connect(DEV_KEY.outsider);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const joinCode = String(started.data.join_code);
 
     // Both preview while there is still room.
@@ -357,7 +357,7 @@ describe("INVARIANT 7 — member handles are per-connection", () => {
     const machineA = await h.connect(DEV_KEY.jesse);
     const machineB = await h.connect(DEV_KEY.jesse);
 
-    const started = await machineA.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await machineA.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await machineB.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -379,7 +379,7 @@ describe("INVARIANT 7 — member handles are per-connection", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const jesseMember = String(started.data.member_id);
 
@@ -402,5 +402,82 @@ describe("INVARIANT 7 — member handles are per-connection", () => {
     });
     expect(send.isError).toBe(true);
     expect(send.text).toContain("not yours");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("INVARIANT 8 — every room is declared", () => {
+  it("refuses to start a room with no manifest", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", { brief: brief() });
+    expect(res.isError).toBe(true);
+  });
+
+  it("creates NO session when the manifest is malformed", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: {
+        room: "broken",
+        mode: "pair",
+        roles: { lead: { can: ["send"] } },
+        default_role: "ghost",
+        creator_role: "lead",
+      },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('default_role "ghost" is not defined');
+    // recordCreate() runs only after a session is stored, so an unchanged
+    // quota is proof that nothing was created.
+    expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(0);
+  });
+
+  // A shape error never reaches the handler: the MCP SDK validates the tool's
+  // inputSchema first, so this message carries no "invalid manifest — " prefix.
+  // What the caller must still get is the offending field.
+  it("names the offending field when the manifest's shape is wrong, and creates nothing", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "r", preset: "no-such-preset" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("preset");
+    expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(0);
+  });
+
+  it("creates NO session when the plan rejects the manifest's mode", async () => {
+    const peer = await h.connect(DEV_KEY.peer); // free plan
+    const before = await h.store.countCreatesThisMonth("u_peer");
+    const res = await peer.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "too-big", preset: "swarm" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("pro or team");
+    expect(await h.store.countCreatesThisMonth("u_peer")).toBe(before);
+  });
+
+  it("gives the creator the manifest's creator_role", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "r", preset: "review" },
+    });
+    expect(res.isError, res.text).toBe(false);
+    const session = await h.store.getSession(String(res.data.session_id));
+    expect(session?.members[0].roomRole).toBe("author");
+  });
+
+  it("derives mode from the manifest, not from an argument", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const res = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "r", preset: "swarm" },
+    });
+    expect(res.isError, res.text).toBe(false);
+    const session = await h.store.getSession(String(res.data.session_id));
+    expect(session?.manifest.mode).toBe("swarm");
+    expect(session?.maxMembers).toBeGreaterThan(2);
   });
 });

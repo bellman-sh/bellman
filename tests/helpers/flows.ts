@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import type { Brief } from "../../src/types.js";
-import { brief, openaiAgent } from "./fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "./fixtures.js";
 import { DEV_KEY, type Harness, type Peer } from "./harness.js";
 
 export interface PairedSession {
@@ -27,13 +27,14 @@ export async function pairUp(
     creatorBrief?: Brief;
     joinerBrief?: Brief;
     orgOnly?: boolean;
+    manifest?: Record<string, unknown>;
   } = {},
 ): Promise<PairedSession> {
   const creator = await h.connect(opts.creatorKey ?? DEV_KEY.jesse);
   const joiner = await h.connect(opts.joinerKey ?? DEV_KEY.peer);
 
   const started = await creator.call("bellman_start", {
-    mode: "pair",
+    manifest: opts.manifest ?? manifestFixture(),
     brief: opts.creatorBrief ?? brief(),
     capabilities: opts.creatorCapabilities ?? ["read_context", "receive_messages", "request_actions"],
     org_only: opts.orgOnly ?? false,

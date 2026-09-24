@@ -32,6 +32,7 @@ export interface Member {
   label: string;
   orgId: string | null;
   capabilities: Capability[];
+  roomRole: string; // the manifest role this member holds — NOT Identity.role (admin/member)
   brief: Brief;
   joinedAt: number;
   leftAt: number | null;
@@ -62,7 +63,9 @@ export interface SessionEvent {
 
 export interface Session {
   id: string;
-  mode: SessionMode;
+  // There is no `mode` here: read session.manifest.mode. Two fields for one fact
+  // could disagree.
+  manifest: RoomManifest; // immutable after createSession — the store has no way to change it
   createdBy: string;
   orgId: string | null;
   orgOnly: boolean;

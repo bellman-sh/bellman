@@ -10,7 +10,7 @@ import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
-import { brief, openaiAgent } from "./helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 /**
@@ -90,7 +90,7 @@ async function open(key: string, delivery: Delivery = "channel"): Promise<Sessio
 
 /** Creator and joiner handshake entirely through their bridges. */
 async function pair(creator: Session, joiner: Session) {
-  const started = await creator.call("bellman_start", { mode: "pair", brief: brief(), capabilities: caps });
+  const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
   expect(started.isError, started.text).toBe(false);
   const preview = await joiner.call("bellman_connect", { join_code: started.data.join_code });
   expect(preview.isError, preview.text).toBe(false);

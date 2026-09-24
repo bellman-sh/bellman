@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
 import type { Identity } from "../../src/types.js";
 
 let h: Harness;
@@ -109,8 +109,8 @@ describe("what the audit trail records", () => {
     const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
     const other = await h.connectAs(teamAdmin("u_other", "org_other"));
 
-    await acme.call("bellman_start", { mode: "pair", brief: brief() });
-    await other.call("bellman_start", { mode: "pair", brief: brief() });
+    await acme.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    await other.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
 
     const acmeLog = await acme.call("bellman_audit", { limit: 100 });
     const otherLog = await other.call("bellman_audit", { limit: 100 });
@@ -126,7 +126,7 @@ describe("what the audit trail records", () => {
     const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
     const other = await h.connectAs(teamAdmin("u_other", "org_other"));
 
-    const started = await acme.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await acme.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const preview = await other.call("bellman_connect", {
       join_code: String(started.data.join_code),
@@ -154,7 +154,7 @@ describe("what the audit trail records", () => {
     const bystander = await h.connectAs(teamAdmin("u_bystander", "org_bystander"));
 
     await bystander.call("bellman_start", {
-      mode: "pair", brief: brief({ goal: "unrelated org business" }),
+      manifest: manifestFixture(), brief: brief({ goal: "unrelated org business" }),
     });
 
     const acmeLog = await acme.call("bellman_audit", { limit: 100 });
@@ -166,7 +166,7 @@ describe("what the audit trail records", () => {
     const outsider = await h.connect(DEV_KEY.outsider);
     const jesse = await h.connect(DEV_KEY.jesse);
 
-    await outsider.call("bellman_start", { mode: "pair", brief: brief() });
+    await outsider.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
 
     const log = await jesse.call("bellman_audit", { limit: 100 });
     expect(rows(log.data)).toHaveLength(0);

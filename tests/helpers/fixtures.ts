@@ -1,4 +1,5 @@
-import type { Brief, Member, Session } from "../../src/types.js";
+import type { Brief, Member, RoomManifest, Session } from "../../src/types.js";
+import { resolveManifest } from "../../src/manifest.js";
 
 export const anthropicAgent = {
   provider: "anthropic",
@@ -23,6 +24,16 @@ export function brief(over: Partial<Brief> = {}): Brief {
   };
 }
 
+/** A manifest as it goes over the wire into bellman_start. */
+export function manifestFixture(over: Record<string, unknown> = {}) {
+  return { room: "test-room", preset: "pair", ...over };
+}
+
+/** The same manifest, already expanded — for building Session objects directly. */
+export function roomManifest(over: Partial<RoomManifest> = {}): RoomManifest {
+  return { ...resolveManifest(manifestFixture()), ...over };
+}
+
 export function member(over: Partial<Member> = {}): Member {
   return {
     memberId: "m_creator",
@@ -30,6 +41,7 @@ export function member(over: Partial<Member> = {}): Member {
     label: "jesse@codenerd",
     orgId: "org_codenerd",
     capabilities: ["read_context", "receive_messages"],
+    roomRole: "peer_a",
     brief: brief(),
     joinedAt: Date.now(),
     leftAt: null,
@@ -41,7 +53,7 @@ export function session(over: Partial<Session> = {}): Session {
   const now = Date.now();
   return {
     id: "qs_test",
-    mode: "pair",
+    manifest: roomManifest(),
     createdBy: "u_jesse",
     orgId: "org_codenerd",
     orgOnly: false,

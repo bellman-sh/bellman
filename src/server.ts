@@ -2,12 +2,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type {
-  AuditEntry, Brief, Capability, Identity, Member, Session, SessionEvent,
+  AuditEntry, Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent,
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
   generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
 } from "./codes.js";
+import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
 const SERVER_NAME = "bellman-mcp-server";
@@ -151,7 +152,11 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
 The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
 
 Args:
-  - mode ("pair" | "swarm"): pair = exactly 2 members; swarm = up to your plan's member limit
+  - manifest: the room's declaration. Either cite a preset —
+    { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
+    { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
+    Verbs: send, invite, revoke, request_actions, respond_actions, audit, close_room.
+    The manifest sets the room's mode; there is no separate mode argument.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
@@ -162,7 +167,7 @@ Keep member_id — every subsequent call needs it.
 Plan gating applies to CREATING sessions only; joining is free on every plan.
 Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "org_only requires..." (plan).`,
       inputSchema: {
-        mode: z.enum(["pair", "swarm"]).default("pair"),
+        manifest: ManifestShape,
         brief: BriefShape,
         capabilities: CapabilitiesShape,
         org_only: z.boolean().default(false),
@@ -171,9 +176,19 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ mode, brief, capabilities, org_only }): Promise<ToolResult> => {
+    async ({ manifest: manifestInput, brief, capabilities, org_only }): Promise<ToolResult> => {
+      // Resolve FIRST. A malformed manifest must not reach the store, and the
+      // plan check below reads the mode the manifest declares.
+      let manifest: RoomManifest;
+      try {
+        manifest = resolveManifest(manifestInput);
+      } catch (e) {
+        if (e instanceof ManifestError) return fail(`invalid manifest — ${e.message}`);
+        throw e;
+      }
+
       const ent = entitlementsFor(identity);
-      if (!ent.modes.includes(mode)) {
+      if (!ent.modes.includes(manifest.mode)) {
         return fail(`swarm mode requires the pro or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
       }
       if (org_only && !ent.orgScoping) {
@@ -195,27 +210,28 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
         label: identity.label,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
+        roomRole: manifest.creatorRole,
         brief: brief as Brief,
         joinedAt: now,
         leftAt: null,
       };
       const session: Session = {
         id: generateSessionId(),
-        mode,
+        manifest,
         createdBy: identity.userId,
         orgId: identity.orgId,
         orgOnly: org_only,
         joinCode: generateJoinCode(),
         joinCodeExpiresAt: now + JOIN_CODE_TTL,
         expiresAt: now + ent.sessionTtlMs,
-        maxMembers: mode === "pair" ? 2 : ent.maxMembers,
+        maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
         members: [creator],
         events: [],
         closed: false,
       };
       await s.createSession(session);
       await s.recordCreate(identity.userId);
-      await audit(s, session, identity, "session_created", { mode, org_only });
+      await audit(s, session, identity, "session_created", { mode: manifest.mode, org_only, preset: manifest.preset });
 
       return ok({
         session_id: session.id,
@@ -276,7 +292,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
           connect_token: token,
           connect_token_expires_at: new Date(Date.now() + CONNECT_TOKEN_TTL).toISOString(),
           session: {
-            mode: session.mode,
+            mode: session.manifest.mode,
             active_members: activeMembers(session).length,
             max_members: session.maxMembers,
             org_only: session.orgOnly,
@@ -332,6 +348,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         label: identity.label,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
+        roomRole: session.manifest.defaultRole,
         brief: brief as Brief,
         joinedAt: Date.now(),
         leftAt: null,

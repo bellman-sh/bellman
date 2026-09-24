@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
 
 const EXPECTED_TOOLS = [
   "bellman_start",
@@ -58,7 +58,7 @@ describe("tool surface", () => {
 
   /** INVARIANT 4: text-first, structuredContent as enhancement. */
   it("answers with a text block on both success and failure", async () => {
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     expect(started.text).not.toBe("");
     expect(started.data.session_id).toBeTruthy();
 
@@ -78,7 +78,7 @@ describe("tool surface", () => {
     expect(waitSchema.maximum).toBe(25);
     expect(waitSchema.minimum).toBe(0);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const over = await jesse.call("bellman_sync", {
       session_id: String(started.data.session_id),
       member_id: String(started.data.member_id),

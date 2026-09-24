@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
 import { DEV_KEY, Harness, envelopes } from "../helpers/harness.js";
 
@@ -43,7 +43,7 @@ describe("bellman_invite", () => {
 
   it("retires the previous code the moment a new one is issued", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
-    const started = await creator.call("bellman_start", { mode: "swarm", brief: brief() });
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     const first = String(started.data.join_code);
 
     const reissued = await creator.call("bellman_invite", {
@@ -63,7 +63,7 @@ describe("bellman_invite", () => {
 
   it("revokes without minting a replacement", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
-    const started = await creator.call("bellman_start", { mode: "swarm", brief: brief() });
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
 
     const revoked = await creator.call("bellman_invite", {
       session_id: started.data.session_id,
@@ -148,7 +148,7 @@ describe("bellman_invite", () => {
 
   it("lets a swarm room gather members one at a time", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
-    const started = await creator.call("bellman_start", { mode: "swarm", brief: brief() });
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     const sessionId = String(started.data.session_id);
 
     const first = await h.connect(DEV_KEY.peer);

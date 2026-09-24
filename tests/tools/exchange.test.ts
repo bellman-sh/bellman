@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief, openaiAgent } from "../helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 
 let h: Harness;
 
@@ -23,7 +23,7 @@ describe("INVARIANT 3 — peer content arrives as untrusted data", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -40,7 +40,7 @@ describe("INVARIANT 3 — peer content arrives as untrusted data", () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });
@@ -105,7 +105,7 @@ describe("INVARIANT 3 — peer content arrives as untrusted data", () => {
 describe("INVARIANT 6 — action requests need an explicit grant and a human", () => {
   it("does not grant request_actions by default", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const session = (await h.store.getSession(String(started.data.session_id)))!;
 
     expect(session.members[0].capabilities).toEqual(["read_context", "receive_messages"]);
@@ -308,7 +308,7 @@ describe("send / sync / leave mechanics", () => {
 
   it("refuses to send into an empty room", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
 
     const res = await jesse.call("bellman_send", {
       session_id: String(started.data.session_id),

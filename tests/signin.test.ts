@@ -171,6 +171,28 @@ describe("the loopback listener", () => {
     await get(`${listener.redirectUri}?code=the-code&state=state-abc`);
     await landed;
   });
+
+  // The page a successful sign-in ends on has the authorization code in its own
+  // URL, so nothing the listener says should be cached or handed on in a Referer.
+  it("marks every response uncacheable and referrer-free", async () => {
+    const listener = track((await listenForCallback(TEST_PORTS))!);
+    const waiting = listener.waitForCode("state-abc", 5_000);
+    const landed = expect(waiting).resolves.toBe("the-code"); // subscribe first
+    // The request that settles the wait goes last: after it there is no handler.
+    const responses = {
+      "a page refusing a forged callback": await get(`${listener.redirectUri}?code=forged&state=nope`),
+      "a bare 404": await get(`http://127.0.0.1:${TEST_PORTS[0]}/favicon.ico`),
+      "a bare 400": await get(`http://127.0.0.1:${TEST_PORTS[0]}//evil.com:99999999/callback`, {
+        signal: AbortSignal.timeout(2_000),
+      }),
+      "the page that carries the code": await get(`${listener.redirectUri}?code=the-code&state=state-abc`),
+    };
+    for (const [what, res] of Object.entries(responses)) {
+      expect(res.headers.get("cache-control"), what).toBe("no-store");
+      expect(res.headers.get("referrer-policy"), what).toBe("no-referrer");
+    }
+    await landed;
+  });
 });
 
 describe("openBrowser", () => {

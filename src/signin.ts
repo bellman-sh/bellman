@@ -80,6 +80,19 @@ function makeListener(server: Server, redirectUri: string): Listener {
 
         function onRequest(req: IncomingMessage, res: ServerResponse): void {
           /**
+           * Every response goes through here. The page a successful sign-in ends on
+           * has the authorization code in its own URL, so none of it is cached and
+           * none of it is handed on in a Referer.
+           */
+          const reply = (status: number, markup?: string) =>
+            res.writeHead(status, {
+              "cache-control": "no-store",
+              "referrer-policy": "no-referrer",
+              ...(markup === undefined ? {} : { "content-type": "text/html; charset=utf-8" }),
+            }).end(markup);
+          const html = (status: number, title: string, body: string) => reply(status, page(title, body));
+
+          /**
            * req.url is whatever a stranger sent. "//host:99999999/x" is a valid
            * request target that URL reads as a scheme-relative reference with an
            * impossible port, and throws; an exception out of this handler is
@@ -90,14 +103,12 @@ function makeListener(server: Server, redirectUri: string): Listener {
           try {
             url = new URL(req.url ?? "/", redirectUri);
           } catch {
-            res.writeHead(400).end();
+            reply(400);
             return;
           }
-          const html = (status: number, title: string, body: string) =>
-            res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(page(title, body));
 
           if (url.pathname !== path) {
-            res.writeHead(404).end();
+            reply(404);
             return;
           }
 

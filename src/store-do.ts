@@ -4,6 +4,7 @@ import type {
   AuditEntry, EventType, Member, PendingConnect, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, MemberPatch } from "./store.js";
+import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -33,9 +34,6 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
-/** The session record as stored — events live under their own keys. */
-type StoredSession = Omit<Session, "events">;
-
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -44,8 +42,14 @@ export class SessionDO extends DurableObject {
   /** Live long-polls. In-memory is correct: one instance serves this session. */
   private waiters: Waiter[] = [];
 
+  /**
+   * The one raw read of the "session" record. Everything in this class reads it
+   * through here, so a row written before Session.manifest existed reads as gone
+   * to all of it: getSession (and the facade's getSession and getSessionByJoinCode
+   * with it), every mutator, and the TTL alarm. Nothing rewrites such a row.
+   */
   private async stored(): Promise<StoredSession | undefined> {
-    return this.ctx.storage.get<StoredSession>("session");
+    return hydrateStoredSession(await this.ctx.storage.get("session"));
   }
 
   private async events(after = 0): Promise<SessionEvent[]> {

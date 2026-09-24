@@ -33,6 +33,9 @@ export function describeStoreContract(
       (await store.createSession(s));
       expect((await store.getSession(s.id))?.id).toBe(s.id);
       expect((await store.getSession(s.id))?.members).toHaveLength(1);
+      // The manifest is the room's authority; a store that drops it breaks every
+      // room, so every implementation must hand it back whole.
+      expect((await store.getSession(s.id))?.manifest).toEqual(s.manifest);
     });
 
     it("returns undefined for an unknown session", async () => {

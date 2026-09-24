@@ -168,6 +168,24 @@ describe("the loopback listener", () => {
     await timedOut;
   });
 
+  // The state is right but no code came back: the sign-in did not complete, and
+  // the wait goes on.
+  it("answers a callback with the state but no code with 400, and keeps waiting", async () => {
+    const listener = track((await listen())!);
+    const waiting = listener.waitForCode("state-abc", 400);
+    const timedOut = expect(waiting).rejects.toThrow(/timed out/i); // subscribe first
+    const res = await get(`${listener.redirectUri}?state=state-abc`);
+    expect(res.status).toBe(400);
+    await timedOut;
+  });
+
+  // A listener on every interface would take the callback from the network too.
+  it("listens on the loopback interface only", async () => {
+    track((await listen())!);
+    const server = vi.mocked(createServer).mock.results.at(-1)!.value as Server;
+    expect(server.address()).toMatchObject({ address: "127.0.0.1", port: TEST_PORTS[0] });
+  });
+
   // The handler must never throw: an exception out of it is uncaught, and it
   // ends the bridge. A web page can send this request while a sign-in is pending.
   it("answers a request target it cannot parse, and keeps waiting", async () => {
@@ -255,6 +273,13 @@ describe("closing the listener", () => {
     const ended = listener.waitForCode("state-abc", 300_000).catch((error: unknown) => error);
     expect(() => { listener.close(); listener.close(); }).not.toThrow();
     expect(await ended).toBeInstanceOf(SignInCancelled);
+  });
+
+  it("frees its port", async () => {
+    const listener = track((await listen())!);
+    listener.close();
+    // A blocker can only take the port if the listener let go of it.
+    await block(TEST_PORTS[0]);
   });
 
   it("refuses a wait on a closed listener at once, and starts no timer", async () => {

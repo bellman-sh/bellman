@@ -1,5 +1,8 @@
 import { ENTITLEMENTS } from "../auth.js";
 import type { Identity, Plan } from "../types.js";
+import { readSubscription, type SubscriptionSource } from "./subscription.js";
+
+export { isPaidPlan } from "./subscription.js";
 
 /**
  * What Stripe says a person has paid for, kept free of any Workers import so
@@ -22,10 +25,9 @@ export interface SubscriptionState {
   plan: Plan | null;
   status: string;
   /**
-   * When this state was read from Stripe, in milliseconds. The webhook
-   * records the subscription as Stripe reports it at that moment rather than
-   * as the event describes it, so a later reading always supersedes an
-   * earlier one, whatever order the events arrived in.
+   * Orders writes to one subscription: a lower value never overwrites a
+   * higher one. syncSubscription makes it strictly increasing per
+   * subscription, because it reads and writes one subscription at a time.
    */
   eventAt: number;
 }
@@ -46,7 +48,12 @@ export interface BillingStorage {
    * already linked to someone else stays theirs, and false says so.
    */
   linkCustomer(customerId: string, userId: string): Promise<boolean>;
-  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void>;
+  /**
+   * Read the subscription from Stripe and record it. Calls for the same
+   * subscription run one after another, read and write together, so a slow
+   * read can never land after, and overwrite, a newer one.
+   */
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void>;
   /** The best plan any of this user's customers is paying for, if any. */
   paidPlan(userId: string): Promise<PaidPlan | undefined>;
 }
@@ -63,12 +70,35 @@ const USER = "billing:user:";
 /** Plan order is the order ENTITLEMENTS declares them in, cheapest first. */
 const RANK = Object.keys(ENTITLEMENTS) as Plan[];
 
-export function isPaidPlan(value: unknown): value is Plan {
-  return typeof value === "string" && value !== "free" && Object.hasOwn(ENTITLEMENTS, value);
-}
-
 export class BillingLedger implements BillingStorage {
+  /**
+   * The sync in flight for each subscription. This only serializes anything
+   * because there is exactly one ledger: one Durable Object in production,
+   * one process in tests. It is memory, not storage, and needs to be: when the
+   * object is evicted, nothing is in flight.
+   */
+  private inFlight = new Map<string, Promise<void>>();
+
   constructor(private kv: LedgerKV) {}
+
+  async syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    const before = this.inFlight.get(subscriptionId) ?? Promise.resolve();
+    const run = before.catch(() => undefined).then(async () => {
+      // Read inside the queue: a read that started earlier finishes, and is
+      // written, before a later one begins.
+      const reading = await readSubscription(subscriptionId, source);
+      const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
+      const previous = record.subscriptions[subscriptionId];
+      const eventAt = Math.max(Date.now(), (previous?.eventAt ?? 0) + 1);
+      await this.recordSubscription(customerId, subscriptionId, { ...reading, eventAt });
+    });
+    this.inFlight.set(subscriptionId, run);
+    try {
+      await run;
+    } finally {
+      if (this.inFlight.get(subscriptionId) === run) this.inFlight.delete(subscriptionId);
+    }
+  }
 
   async linkCustomer(customerId: string, userId: string): Promise<boolean> {
     const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
@@ -90,9 +120,8 @@ export class BillingLedger implements BillingStorage {
   async recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
     const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
     const previous = record.subscriptions[subscriptionId];
-    // Two webhook calls can read Stripe and then write here in either order.
-    // A cancelled subscription stays cancelled, and an earlier reading never
-    // overwrites a later one.
+    // A cancelled subscription stays cancelled, and a lower eventAt never
+    // overwrites a higher one.
     if (previous && TERMINAL.has(previous.status)) return;
     if (previous && previous.eventAt > state.eventAt) return;
     record.subscriptions[subscriptionId] = state;

@@ -1,9 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./storage.js";
-import {
-  BillingLedger, type BillingStorage, type PaidPlan, type SubscriptionState,
-} from "../billing/ledger.js";
+import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
+import type { SubscriptionSource } from "../billing/subscription.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -35,8 +34,13 @@ export class AuthDO extends DurableObject {
     return this.ledger.linkCustomer(customerId, userId);
   }
 
-  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
-    return this.ledger.recordSubscription(customerId, subscriptionId, state);
+  /**
+   * The Stripe read happens here, inside the one object, because that is the
+   * only place the ledger's per-subscription queue can serialize it. A read
+   * made in the Worker could be overtaken by another Worker's.
+   */
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    return this.ledger.syncSubscription(customerId, subscriptionId, source);
   }
 
   paidPlan(userId: string): Promise<PaidPlan | undefined> {
@@ -118,8 +122,8 @@ export class AuthStore implements AuthStorage, BillingStorage {
   linkCustomer(customerId: string, userId: string): Promise<boolean> {
     return this.object.linkCustomer(customerId, userId);
   }
-  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
-    return this.object.recordSubscription(customerId, subscriptionId, state);
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    return this.object.syncSubscription(customerId, subscriptionId, source);
   }
   paidPlan(userId: string): Promise<PaidPlan | undefined> {
     return this.object.paidPlan(userId);

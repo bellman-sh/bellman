@@ -465,3 +465,64 @@ describe("body size", () => {
     expect(sent).toBeLessThan(10); // stopped reading early
   });
 });
+
+describe("two reads of one subscription at once", () => {
+  it("records the later read even when the earlier one is slower", async () => {
+    await billing.linkCustomer("cus_A", "u_github_1");
+    // The first read sees pro and stalls; Stripe changes to team; the second sees team.
+    let releaseFirst!: () => void;
+    const firstMayAnswer = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let reads = 0;
+    const racing = (async () => {
+      const n = ++reads;
+      if (n === 1) {
+        const snapshot = { id: "sub_1", status: "active", items: { data: [{ price: { lookup_key: "pro_monthly" } }] } };
+        await firstMayAnswer;
+        return Response.json(snapshot);
+      }
+      return Response.json({ id: "sub_1", status: "active", items: { data: [{ price: { lookup_key: "team_seat_monthly" } }] } });
+    }) as typeof fetch;
+
+    const first = billing.syncSubscription("cus_A", "sub_1", { apiKey: "rk", fetchImpl: racing });
+    const second = billing.syncSubscription("cus_A", "sub_1", { apiKey: "rk", fetchImpl: racing });
+    await new Promise((r) => setTimeout(r, 5));
+    expect(reads).toBe(1); // the second read waits its turn
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(reads).toBe(2);
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
+  });
+
+  it("keeps the queue moving after a failed read", async () => {
+    await billing.linkCustomer("cus_A", "u_github_1");
+    const failing = (async () => new Response("down", { status: 500 })) as typeof fetch;
+    await expect(billing.syncSubscription("cus_A", "sub_1", { apiKey: "rk", fetchImpl: failing })).rejects.toThrow(/500/);
+
+    stripeNow.set("sub_1", { id: "sub_1", status: "active", items: { data: [{ price: { lookup_key: "pro_monthly" } }] } });
+    await billing.syncSubscription("cus_A", "sub_1", { apiKey: "rk", fetchImpl: fakeStripe });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+});
+
+describe("which checkouts may link a customer", () => {
+  it("links only subscription checkouts", async () => {
+    for (const mode of ["payment", "setup"]) {
+      const res = await deliver("checkout.session.completed", {
+        object: "checkout.session", mode, customer: `cus_${mode}`, client_reference_id: "u_github_1",
+      });
+      expect(((await res.json()) as { applied: boolean }).applied, mode).toBe(false);
+    }
+    stripeNow.set("sub_p", { id: "sub_p", status: "active", items: { data: [{ price: { lookup_key: "pro_monthly" } }] } });
+    await subscription("created", { id: "sub_p", customer: "cus_payment" });
+
+    expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+  });
+
+  it("ignores an object that is not a checkout session", async () => {
+    const res = await deliver("checkout.session.completed", {
+      object: "invoice", mode: "subscription", customer: "cus_A", client_reference_id: "u_github_1",
+    });
+    expect(((await res.json()) as { applied: boolean }).applied).toBe(false);
+  });
+});

@@ -1,5 +1,7 @@
-import { isPaidPlan, type BillingStorage } from "./ledger.js";
-import type { Plan } from "../types.js";
+import type { BillingStorage } from "./ledger.js";
+import { isRecord } from "./subscription.js";
+
+export { planForPrice } from "./subscription.js";
 
 /**
  * POST /stripe/webhook — Stripe tells Bellman what someone has paid for.
@@ -14,8 +16,9 @@ import type { Plan } from "../types.js";
  * subscription now is. Stripe delivers events out of order, with `created`
  * only to the second, and nothing in them orders two changes made within
  * one. So every subscription event is answered by reading the subscription
- * from Stripe and recording that, stamped with when it was read. A late or
- * duplicate event then just records the current state again.
+ * from Stripe and recording that, one subscription at a time (see
+ * BillingStorage.syncSubscription). A late or duplicate event then just
+ * records the current state again.
  */
 
 /** Stripe's own default: reject signatures more than five minutes old. */
@@ -108,22 +111,6 @@ export async function verifyStripeSignature(
   return signatures.some((sig) => timingSafeEqual(sig, expected));
 }
 
-interface StripePrice {
-  lookup_key?: string | null;
-  metadata?: Record<string, string> | null;
-}
-
-/**
- * Which plan a price sells: `metadata.plan` when set, otherwise the lookup
- * key's prefix (`pro_monthly` → pro). A price naming no plan this server
- * knows grants nothing, rather than guessing.
- */
-export function planForPrice(price: StripePrice | null | undefined): Plan | null {
-  const lookup = typeof price?.lookup_key === "string" ? price.lookup_key.split("_")[0] : undefined;
-  const named = price?.metadata?.plan ?? lookup;
-  return isPaidPlan(named) ? named : null;
-}
-
 const idOf = (value: unknown): string | undefined =>
   typeof value === "string" ? value
     : value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string"
@@ -137,14 +124,10 @@ interface StripeEvent {
   data: { object: Record<string, unknown> };
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
 /**
  * The event envelope, checked rather than cast. A signed body is Stripe's, but
  * a shape this code did not expect must end in a clean 400, not a TypeError:
- * that would be a 500, which Stripe retries for days. `created` is required
- * because the ledger orders subscription updates by it.
+ * that would be a 500, which Stripe retries for days.
  */
 function parseEvent(payload: string): StripeEvent | null {
   let parsed: unknown;
@@ -160,13 +143,6 @@ function parseEvent(payload: string): StripeEvent | null {
   return { id, type, created, data: { object: parsed.data.object } };
 }
 
-/** Prices on a subscription's items, skipping anything that is not an item. */
-function pricesOf(items: unknown): (StripePrice | undefined)[] {
-  const data = isRecord(items) ? items.data : undefined;
-  if (!Array.isArray(data)) return [];
-  return data.filter(isRecord).map((item) => (isRecord(item.price) ? (item.price as StripePrice) : undefined));
-}
-
 export interface StripeWebhookConfig {
   secret: string;
   billing: BillingStorage;
@@ -174,23 +150,6 @@ export interface StripeWebhookConfig {
   apiKey: string;
   fetchImpl?: typeof fetch;
   now?: () => number;
-}
-
-/**
- * The subscription as Stripe has it now, or null when Stripe no longer knows
- * it. Anything else Stripe answers throws, so the webhook replies 5xx and
- * Stripe delivers the event again later.
- */
-async function currentSubscription(id: string, config: StripeWebhookConfig): Promise<Record<string, unknown> | null> {
-  const get = config.fetchImpl ?? fetch;
-  const res = await get(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(id)}`, {
-    headers: { authorization: `Bearer ${config.apiKey}` },
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Stripe answered ${res.status} reading subscription ${id}`);
-  const body: unknown = await res.json();
-  if (!isRecord(body)) throw new Error(`Stripe returned a non-object for subscription ${id}`);
-  return body;
 }
 
 const reply = (status: number, body: Record<string, unknown>) => Response.json(body, { status });
@@ -216,6 +175,11 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
   // Errors past this point are ours, so they surface as 5xx and Stripe retries.
   switch (event.type) {
     case "checkout.session.completed": {
+      // Only the subscription checkouts /upgrade sends people to may link a
+      // customer. A one-off payment or a card setup is not a purchase of a plan.
+      if (object.object !== "checkout.session" || object.mode !== "subscription") {
+        return reply(200, { received: true, applied: false });
+      }
       const userId = object.client_reference_id;
       const customerId = idOf(object.customer);
       if (typeof userId !== "string" || !USER_ID.test(userId) || !customerId) {
@@ -235,28 +199,16 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
       const customerId = idOf(object.customer);
       if (!subscriptionId || !customerId) return reply(400, { error: "subscription without an id or customer" });
 
-      let current: Record<string, unknown> | null;
+      // The ledger reads the subscription from Stripe and records it, one
+      // subscription at a time (see BillingStorage.syncSubscription).
       try {
-        current = await currentSubscription(subscriptionId, config);
+        await config.billing.syncSubscription(customerId, subscriptionId, {
+          apiKey: config.apiKey, fetchImpl: config.fetchImpl,
+        });
       } catch (err) {
         console.error(`stripe ${event.id}: could not read subscription ${subscriptionId}:`, err);
         return reply(502, { error: "could not read the subscription from Stripe" });
       }
-      // Read the clock after Stripe answers: that is the moment this state was true.
-      const readAt = config.now?.() ?? Date.now();
-
-      // Gone from Stripe means over. Otherwise Stripe's answer is the state.
-      const source = current ?? object;
-      const prices = pricesOf(source.items);
-      const plans = prices.map(planForPrice).filter((p): p is Plan => p !== null);
-      if (prices.length > 0 && plans.length === 0) {
-        console.warn(`stripe ${event.id}: subscription ${subscriptionId} has no price naming a known plan`);
-      }
-      await config.billing.recordSubscription(customerId, subscriptionId, {
-        plan: plans[0] ?? null,
-        status: current === null ? "canceled" : typeof current.status === "string" ? current.status : "",
-        eventAt: readAt,
-      });
       return reply(200, { received: true, applied: true });
     }
 

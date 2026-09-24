@@ -9,6 +9,7 @@ export const VERBS = [
 export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
 
 const MAX_ROLES = 16;
+const MAX_ROLE_NAME = 31; // a leading letter plus RoleKeyShape's {0,30}: its longest string
 
 /** A manifest that could not be resolved. The server turns this into a tool error. */
 export class ManifestError extends Error {
@@ -98,8 +99,10 @@ const AuthorShape = z.strictObject({
   purpose: z.string().max(300).nullish(),
   mode: z.enum(["pair", "swarm"]),
   roles: RolesShape,
-  default_role: z.string(),
-  creator_role: z.string(),
+  // Both are echoed verbatim by the cross-field errors, which reach tool errors and
+  // the audit log, so they are bounded like every other string in the shape.
+  default_role: z.string().max(MAX_ROLE_NAME),
+  creator_role: z.string().max(MAX_ROLE_NAME),
 });
 
 /** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */
@@ -212,11 +215,12 @@ export function resolveManifest(input: unknown): RoomManifest {
     );
   }
 
-  // Validate against the arm the caller was aiming at, not the union: a single
-  // arm says which field is wrong. Accept/reject is identical to ManifestShape,
-  // because both arms are strict: input with a `preset` key can only match the
-  // cite arm, input without one can only match the author arm.
-  const parsed = aimedArm(input).safeParse(input);
+  // Parse with the union itself, not a hand-picked arm. Zod already hoists the best
+  // arm's issues (roles plus a null preset says `Unrecognized key: "preset"`, the
+  // right advice), and ManifestShape's error hook names the field for the rest.
+  // Picking an arm here once said "preset: Invalid option" to someone who had
+  // authored roles.
+  const parsed = ManifestShape.safeParse(input);
   if (!parsed.success) throw new ManifestError(firstIssue(parsed.error));
   const v = parsed.data;
 

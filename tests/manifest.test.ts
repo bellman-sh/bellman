@@ -160,11 +160,29 @@ describe("hostile input", () => {
       roles: { lead: { can: ["summon_kraken"] }, helper: { can: ["send"] } },
     }))).toThrow(ManifestError);
   });
+
+  it.each(["default_role", "creator_role"])(
+    "caps %s at 31 characters, so an oversized value is never echoed into an error",
+    (field) => {
+      // Both are echoed verbatim by the cross-field errors, which reach tool errors
+      // and the audit log. 31 is the longest string RoleKeyShape accepts.
+      const oversized = "g".repeat(32);
+      let message = "";
+      try {
+        resolveManifest(authored({ [field]: oversized }));
+      } catch (e) {
+        message = (e as Error).message;
+      }
+      expect(message).toMatch(new RegExp(`^${field}: `));
+      expect(message).not.toContain(oversized);
+    },
+  );
 });
 
 describe("shape errors name the offending field", () => {
-  // A failed z.union reports one opaque "Invalid input". resolveManifest validates
-  // the arm the caller was aiming at, so the message says which field is wrong.
+  // A bare z.union reports one opaque "Invalid input". Zod hoists the best arm's
+  // own issues where it can, and ManifestShape's error hook covers the rest, so
+  // every message says which field is wrong.
   it("authored arm: an unknown verb names the role and position", () => {
     expect(() => resolveManifest(authored({
       roles: { lead: { can: ["summon_kraken"] }, helper: { can: ["send"] } },
@@ -198,6 +216,19 @@ describe("shape errors name the offending field", () => {
       .toThrow(/Unrecognized keys?: .*"roles"/);
   });
 
+  it("authored roles plus a null preset call the preset key unrecognized, not invalid", () => {
+    // A valueless `preset:` in YAML parses to exactly null, so this is the error the
+    // bridge produces for a real authoring mistake. The caller authored roles, so
+    // listing the valid preset names would be wrong advice: the fix is to drop the
+    // key. Do not parse with a hand-picked arm here — that is what said "preset:
+    // Invalid option" — parse with the union and let zod pick the arm.
+    for (const preset of [null, undefined]) {
+      const attempt = () => resolveManifest({ ...authored(), preset } as never);
+      expect(attempt, `preset: ${preset}`).toThrow(/^Unrecognized key: "preset"/);
+      expect(attempt, `preset: ${preset}`).not.toThrow(/expected one of/);
+    }
+  });
+
   it("says what was wrong with input that is not an object", () => {
     expect(() => resolveManifest("pair")).toThrow(/expected object/);
   });
@@ -221,6 +252,19 @@ describe("shape errors name the offending field", () => {
 
     it("cite arm: names preset", () => {
       expect(shapeMessage({ room: "r", preset: 3 })).toMatch(/^preset: /);
+    });
+
+    it("authored roles plus a null preset: the unrecognized key, not preset advice", () => {
+      expect(shapeMessage({ ...authored(), preset: null })).toMatch(/^Unrecognized key: "preset"/);
+    });
+
+    it("authored arm: an oversized default_role names the field and is not echoed", () => {
+      // Zod hoists this issue out of the union, so the field is in `path`; the SDK
+      // renders "<message> at manifest.default_role".
+      const r = ManifestShape.safeParse(authored({ default_role: "g".repeat(100) }));
+      if (r.success) throw new Error("expected ManifestShape to reject this input");
+      expect(r.error.issues[0].path).toEqual(["default_role"]);
+      expect(r.error.issues[0].message).not.toContain("ggg");
     });
 
     it("names a reserved role key", () => {
@@ -272,6 +316,24 @@ describe("legal edge cases", () => {
     const m = resolveManifest(authored());
     expect(m.purpose).toBeNull();
     expect(m.roles.lead.description).toBeNull();
+  });
+
+  it("accepts a 31-character default_role and creator_role, the same bound as a role key", () => {
+    const name = `a${"b".repeat(30)}`; // 31 characters: the longest legal role key
+    const m = resolveManifest(authored({
+      roles: { [name]: { can: ["send"] } },
+      default_role: name,
+      creator_role: name,
+    }));
+    expect([m.defaultRole, m.creatorRole]).toEqual([name, name]);
+
+    // The two bounds must agree: a 32-character role key is not a legal role.
+    const tooLong = `${name}c`;
+    expect(() => resolveManifest(authored({
+      roles: { [tooLong]: { can: ["send"] } },
+      default_role: tooLong,
+      creator_role: tooLong,
+    }))).toThrow(ManifestError);
   });
 
   it("bans reserved role names exactly, not by substring", () => {

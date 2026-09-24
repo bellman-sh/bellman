@@ -424,8 +424,13 @@ async function issueTokens(
   // otherwise carry the sign-in plan forward forever: a cancelled customer
   // would keep paying-customer limits and an upgrade would never arrive. With
   // this, a plan change lands within one access-token lifetime.
-  if (granted === false && config.billing) {
-    identity = withPaidPlan(identity, await config.billing.paidPlan(identity.userId));
+  //
+  // With billing switched off (or in shadow) there is no paid plan to find,
+  // and the identity drops back to the free default. Skipping the lookup
+  // instead would let a plan granted while billing was on ride refreshes
+  // forever after it was switched off.
+  if (granted === false) {
+    identity = withPaidPlan(identity, config.billing ? await config.billing.paidPlan(identity.userId) : undefined);
   }
   const accessToken = await signJwt(
     { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity },

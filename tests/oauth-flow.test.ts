@@ -423,3 +423,25 @@ describe("plans from billing", () => {
     expect((await call("/upgrade/platinum")).status).toBe(404);
   });
 });
+
+describe("switching billing off", () => {
+  it("drops a plan paid for while billing was on at the next refresh", async () => {
+    const billing = new MemoryBillingStore();
+    config.billing = billing;
+    await billing.linkCustomer("cus_1", "u_github_4242");
+    await billing.recordSubscription("cus_1", "sub_1", { plan: "pro", status: "active", eventAt: 1 });
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    expect((await identityFromAccessToken(first.access_token, config))?.plan).toBe("pro");
+
+    config.billing = undefined; // BELLMAN_BILLING back to off
+    const res = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: clientId }).toString(),
+    });
+    const after = (await res.json()) as Record<string, string>;
+
+    expect(await identityFromAccessToken(after.access_token, config)).toMatchObject({ plan: "free", orgId: null, role: "member" });
+  });
+});

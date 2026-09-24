@@ -18,8 +18,12 @@ import type { Plan } from "../types.js";
 /** Stripe's own default: reject signatures more than five minutes old. */
 export const SIGNATURE_TOLERANCE_SECONDS = 300;
 
-/** Bellman user ids as identityFor mints them, e.g. u_github_4308278. */
-const USER_ID = /^u_[a-z]+_[A-Za-z0-9_-]{1,160}$/;
+/**
+ * A Bellman user id: u_github_4308278 as identityFor mints it, or whatever an
+ * operator grant names, like u_jesse. Bounded by what Stripe allows in
+ * client_reference_id: 200 characters of letters, digits, - and _.
+ */
+const USER_ID = /^u_[A-Za-z0-9_-]{1,198}$/;
 
 const encoder = new TextEncoder();
 

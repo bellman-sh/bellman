@@ -158,6 +158,13 @@ describe("subscriptions to plans", () => {
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
   });
 
+  it("links a user id an operator grant named, not only the ones sign-in mints", async () => {
+    await checkout("cus_A", "u_jesse");
+    await subscription("created");
+
+    expect((await billing.paidPlan("u_jesse"))?.plan).toBe("pro");
+  });
+
   it("links nothing for a checkout without a Bellman user id", async () => {
     const none = await checkout("cus_A", null);
     const junk = await checkout("cus_B", "not a user id");

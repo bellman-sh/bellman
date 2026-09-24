@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { MemoryBillingStore, withPaidPlan } from "../src/billing/ledger.js";
 import {
-  handleStripeWebhook, parsePaymentLinks, planForPrice, verifyStripeSignature,
+  MAX_WEBHOOK_BYTES, handleStripeWebhook, parsePaymentLinks, planForPrice, verifyStripeSignature,
 } from "../src/billing/stripe.js";
 import { billingMode, billingSettings } from "../src/billing/config.js";
 import type { Identity } from "../src/types.js";
@@ -210,7 +210,7 @@ describe("plans on an identity", () => {
 
   it("gives a team buyer an org of their own, as its admin", () => {
     expect(withPaidPlan(signedIn, { plan: "team", customerId: "cus_A" })).toEqual({
-      ...signedIn, plan: "team", orgId: "org_cus_A", role: "admin",
+      ...signedIn, plan: "team", orgId: "org_u_github_1", role: "admin",
     });
   });
 
@@ -330,5 +330,68 @@ describe("signed bodies of an unexpected shape", () => {
 
     expect(res.status).toBe(200);
     expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+  });
+});
+
+describe("events from the same second", () => {
+  it("keeps active when a same-second created: incomplete arrives after it", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("updated", { status: "active", created: NOW });
+    await subscription("created", { status: "incomplete", created: NOW });
+
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+
+  it("still moves forward within a second, incomplete to active", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { status: "incomplete", created: NOW });
+    await subscription("updated", { status: "active", created: NOW });
+
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+});
+
+describe("which org a team buyer is in", () => {
+  it("does not depend on which customer paid first, or leave when a stranger cancels", async () => {
+    // A stranger pays for team with the victim's id before the victim does.
+    await checkout("cus_EVIL", "u_github_1");
+    await subscription("created", { customer: "cus_EVIL", id: "sub_evil", lookup: "team_seat_monthly" });
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { customer: "cus_A", id: "sub_1", lookup: "team_seat_monthly" });
+    const signedIn: Identity = { userId: "u_github_1", orgId: null, plan: "free", role: "member", label: "v" };
+
+    const before = withPaidPlan(signedIn, await billing.paidPlan("u_github_1"));
+    await subscription("deleted", { customer: "cus_EVIL", id: "sub_evil", status: "canceled", created: NOW + 60 });
+    const after = withPaidPlan(signedIn, await billing.paidPlan("u_github_1"));
+
+    expect(before.orgId).toBe("org_u_github_1");
+    expect(after).toEqual(before);
+  });
+});
+
+describe("body size", () => {
+  const post = (init: RequestInit & { duplex?: string }) =>
+    handleStripeWebhook(new Request("https://mcp.example.test/stripe/webhook", { method: "POST", ...init } as RequestInit), {
+      secret: SECRET, billing, now: () => NOW * 1000,
+    });
+
+  it("refuses a body declared larger than the limit before reading it", async () => {
+    const res = await post({ headers: { "content-length": String(MAX_WEBHOOK_BYTES + 1) }, body: "{}" });
+    expect(res.status).toBe(413);
+  });
+
+  it("refuses a chunked body once it passes the limit", async () => {
+    const chunk = new Uint8Array(64 * 1024);
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent++ < 10) controller.enqueue(chunk);
+        else controller.close();
+      },
+    });
+    const res = await post({ body: stream, duplex: "half" });
+
+    expect(res.status).toBe(413);
+    expect(sent).toBeLessThan(10); // stopped reading early
   });
 });

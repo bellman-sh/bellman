@@ -96,6 +96,12 @@ interface AuthorizeRequest {
   state?: string;
 }
 
+/** A configured Payment Link by name. Own keys only: /upgrade/constructor is not a plan. */
+function paymentLink(config: OAuthConfig, name: string): string | undefined {
+  const links = config.paymentLinks;
+  return links && Object.hasOwn(links, name) ? links[name] : undefined;
+}
+
 /** Carried through the provider round trip when signing in to pay. */
 interface UpgradeRequest {
   link: string;
@@ -109,7 +115,7 @@ async function finishUpgrade(
   pending: UpgradeRequest,
   config: OAuthConfig
 ): Promise<Response> {
-  const target = config.paymentLinks?.[pending.link];
+  const target = paymentLink(config, pending.link);
   const code = url.searchParams.get("code");
   if (!target || !code) {
     return html(`<h1>Sign-in did not finish</h1><p>Nothing was charged. Start the upgrade again.</p>`, 400);
@@ -272,7 +278,7 @@ export async function handleOAuth(
   const upgradeMatch = /^\/upgrade\/([a-z0-9_]{1,64})$/.exec(path);
   if (method === "GET" && upgradeMatch) {
     const link = upgradeMatch[1];
-    if (!config.paymentLinks?.[link]) {
+    if (!paymentLink(config, link)) {
       return html(`<h1>Unknown plan</h1><p>There is no plan called <code>${escape(link)}</code>.</p>`, 404);
     }
     const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);

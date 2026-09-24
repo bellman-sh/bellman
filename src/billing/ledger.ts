@@ -16,6 +16,25 @@ const GRANTING = new Set(["active", "trialing", "past_due"]);
 /** Statuses Stripe never moves a subscription out of. */
 const TERMINAL = new Set(["canceled", "incomplete_expired"]);
 
+/**
+ * How far along its lifecycle a status is. Stripe's `created` has one-second
+ * precision, so two events about one subscription can carry the same time;
+ * between those, the later stage wins. That is what keeps a same-second
+ * "created: incomplete" arriving after "updated: active" from erasing the
+ * plan. A subscription does not step backwards within one second.
+ */
+const LIFECYCLE: Record<string, number> = {
+  incomplete: 0,
+  trialing: 1,
+  active: 2,
+  past_due: 3,
+  paused: 4,
+  unpaid: 4,
+  canceled: 5,
+  incomplete_expired: 5,
+};
+const stage = (status: string) => LIFECYCLE[status] ?? -1;
+
 export interface SubscriptionState {
   /** null when the price names no plan this server knows. */
   plan: Plan | null;
@@ -85,9 +104,11 @@ export class BillingLedger implements BillingStorage {
     const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
     const previous = record.subscriptions[subscriptionId];
     // Stripe does not promise delivery order. A cancelled subscription stays
-    // cancelled, and an older event never overwrites a newer one.
+    // cancelled, an older event never overwrites a newer one, and between
+    // events from the same second the later lifecycle stage wins.
     if (previous && TERMINAL.has(previous.status)) return;
     if (previous && previous.eventAt > state.eventAt) return;
+    if (previous && previous.eventAt === state.eventAt && stage(previous.status) > stage(state.status)) return;
     record.subscriptions[subscriptionId] = state;
     await this.kv.put(`${CUSTOMER}${customerId}`, record);
   }
@@ -126,14 +147,16 @@ export class MemoryBillingStore extends BillingLedger {
  * always win: comping or fixing an account is deliberate, and a webhook
  * cannot undo it.
  *
- * Team buyers get an org of their own, named for their Stripe customer, and
- * are its admin. Adding other people to that org is not built yet.
+ * Team buyers get an org of their own and are its admin. The org is named for
+ * the user, not for whichever Stripe customer happens to be paying: anyone
+ * can pay with anyone's id attached, so which customer wins must not decide
+ * which org someone is in. Adding other people to that org is not built yet.
  */
 export function withPaidPlan(identity: Identity, paid: PaidPlan | undefined): Identity {
   const base: Identity = { ...identity, plan: "free", orgId: null, role: "member" };
   if (!paid) return base;
   if (ENTITLEMENTS[paid.plan].orgScoping) {
-    return { ...base, plan: paid.plan, orgId: `org_${paid.customerId}`, role: "admin" };
+    return { ...base, plan: paid.plan, orgId: `org_${identity.userId}`, role: "admin" };
   }
   return { ...base, plan: paid.plan };
 }

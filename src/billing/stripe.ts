@@ -19,6 +19,43 @@ import type { Plan } from "../types.js";
 export const SIGNATURE_TOLERANCE_SECONDS = 300;
 
 /**
+ * Largest body read. Stripe's events are a few kilobytes; this leaves room for
+ * a subscription with many items while keeping an unauthenticated caller
+ * from making the Worker buffer and hash an arbitrarily large body.
+ */
+export const MAX_WEBHOOK_BYTES = 256 * 1024;
+
+/**
+ * Read a body, giving up past `limit` bytes. Content-Length is checked first,
+ * but a chunked body has none, so the stream is counted as it arrives.
+ */
+async function readLimited(request: Request, limit: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
  * A Bellman user id: u_github_4308278 as identityFor mints it, or whatever an
  * operator grant names, like u_jesse. Bounded by what Stripe allows in
  * client_reference_id: 200 characters of letters, digits, - and _.
@@ -139,7 +176,8 @@ export async function handleStripeWebhook(request: Request, config: StripeWebhoo
   if (request.method !== "POST") {
     return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
   }
-  const payload = await request.text();
+  const payload = await readLimited(request, MAX_WEBHOOK_BYTES);
+  if (payload === null) return reply(413, { error: "body too large" });
   const nowSeconds = Math.floor((config.now?.() ?? Date.now()) / 1000);
   if (!(await verifyStripeSignature(payload, request.headers.get("stripe-signature"), config.secret, nowSeconds))) {
     return reply(400, { error: "signature verification failed" });

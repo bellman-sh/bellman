@@ -85,7 +85,7 @@ Use `shadow` to take real purchases end to end before anyone's plan depends on t
 | `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
 | `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served. |
 
-Subscribe the endpoint to `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`. A price grants the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` grants `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise. Buying `team` makes the buyer admin of an org named for their Stripe customer. Adding other people to that org isn't built yet.
+Subscribe the endpoint to `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`. A price grants the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` grants `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`). Adding other people to that org isn't built yet.
 
 An operator grant in `BELLMAN_USERS` always beats a paid plan, so an account you comp or fix stays that way. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
 

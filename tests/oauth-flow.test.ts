@@ -360,7 +360,7 @@ describe("plans from billing", () => {
     await pay("u_github_4242", "team");
     const upgraded = await refresh(clientId, first.refresh_token);
     expect(await identityFromAccessToken(upgraded.access_token, config)).toMatchObject({
-      userId: "u_github_4242", plan: "team", orgId: "org_cus_1", role: "admin",
+      userId: "u_github_4242", plan: "team", orgId: "org_u_github_4242", role: "admin",
     });
 
     await billing.recordSubscription("cus_1", "sub_1", { plan: "team", status: "canceled", eventAt: 2 });
@@ -421,6 +421,12 @@ describe("plans from billing", () => {
 
   it("refuses a plan it has no link for", async () => {
     expect((await call("/upgrade/platinum")).status).toBe(404);
+  });
+
+  it("does not mistake object built-ins for plans", async () => {
+    for (const name of ["constructor", "__proto__"]) {
+      expect((await call(`/upgrade/${name}`)).status, name).toBe(404);
+    }
   });
 });
 

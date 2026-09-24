@@ -68,6 +68,17 @@ The granted `userId` defaults to `u_<provider>_<subject>`, byte-identical to wha
 
 Unlike `BELLMAN_KEYS`, a malformed `BELLMAN_USERS` is **ignored rather than fatal**: `parseOverrides` logs and returns `{}`, silently dropping every granted human back to free. That's why the map is validated locally before upload.
 
+**Paying.** Stripe changes plans with no operator in the loop. Point a pricing page's buttons at `https://mcp.bellman.sh/upgrade/<link>`: the human signs in with GitHub or Google, then lands on the matching Stripe Payment Link tagged with their Bellman user id (`client_reference_id`). Stripe reports the purchase to `POST /stripe/webhook`, and the plan appears in the user's next token. Access tokens last 10 minutes and every refresh looks the plan up again, so upgrades and cancellations land within 10 minutes without signing in again.
+
+| Secret | What it is |
+| --- | --- |
+| `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). Unset means billing is off: the webhook answers 503 and plans come only from `BELLMAN_USERS`. |
+| `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served. |
+
+Subscribe the endpoint to `checkout.session.completed` and `customer.subscription.created`, `.updated` and `.deleted`. A price grants the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` grants `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise. Buying `team` makes the buyer admin of an org named for their Stripe customer. Adding other people to that org isn't built yet.
+
+An operator grant in `BELLMAN_USERS` always beats a paid plan, so an account you comp or fix stays that way. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
+
 ## Use it from Claude Code
 
 Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, `dist/channel.js`, which proxies the Bellman tools and delivers peer messages to your session as they arrive — the agent never has to remember to call `bellman_sync`.

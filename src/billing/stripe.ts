@@ -1,0 +1,189 @@
+import { isPaidPlan, type BillingStorage } from "./ledger.js";
+import type { Plan } from "../types.js";
+
+/**
+ * POST /stripe/webhook — Stripe tells Bellman what someone has paid for.
+ *
+ * Nothing here trusts the body until its signature checks out against the
+ * endpoint's signing secret: a webhook that cannot be verified changes
+ * nothing. Verification is done by hand with Web Crypto rather than the
+ * stripe package, because it is one HMAC and it keeps the Worker free of an
+ * SDK it would otherwise only use for this.
+ *
+ * Handling is idempotent, so Stripe's retries and redeliveries are harmless:
+ * a link is set-once, and a subscription update older than the one on record
+ * is dropped (see BillingLedger).
+ */
+
+/** Stripe's own default: reject signatures more than five minutes old. */
+export const SIGNATURE_TOLERANCE_SECONDS = 300;
+
+/** Bellman user ids as identityFor mints them, e.g. u_github_4308278. */
+const USER_ID = /^u_[a-z]+_[A-Za-z0-9_-]{1,160}$/;
+
+const encoder = new TextEncoder();
+
+async function hmacHex(secret: string, message: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(message)));
+  return Array.from(mac, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Check a Stripe-Signature header: `t=<seconds>,v1=<hex>[,v1=<hex>…]`, where
+ * each v1 is HMAC-SHA256 over `<t>.<raw body>`. Several v1 values appear while
+ * a signing secret is being rolled; any one matching is enough.
+ */
+export async function verifyStripeSignature(
+  payload: string,
+  header: string | null,
+  secret: string,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  tolerance = SIGNATURE_TOLERANCE_SECONDS
+): Promise<boolean> {
+  if (!header || !secret) return false;
+  let timestamp: number | undefined;
+  const signatures: string[] = [];
+  for (const part of header.split(",")) {
+    const [key, value] = part.split("=", 2).map((s) => s.trim());
+    if (key === "t") timestamp = Number(value);
+    else if (key === "v1" && value) signatures.push(value);
+  }
+  if (timestamp === undefined || !Number.isFinite(timestamp) || signatures.length === 0) return false;
+  if (Math.abs(nowSeconds - timestamp) > tolerance) return false;
+  const expected = await hmacHex(secret, `${timestamp}.${payload}`);
+  return signatures.some((sig) => timingSafeEqual(sig, expected));
+}
+
+interface StripePrice {
+  lookup_key?: string | null;
+  metadata?: Record<string, string> | null;
+}
+
+/**
+ * Which plan a price sells: `metadata.plan` when set, otherwise the lookup
+ * key's prefix (`pro_monthly` → pro). A price naming no plan this server
+ * knows grants nothing, rather than guessing.
+ */
+export function planForPrice(price: StripePrice | null | undefined): Plan | null {
+  const named = price?.metadata?.plan ?? price?.lookup_key?.split("_")[0];
+  return isPaidPlan(named) ? named : null;
+}
+
+const idOf = (value: unknown): string | undefined =>
+  typeof value === "string" ? value
+    : value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string"
+      ? (value as { id: string }).id
+      : undefined;
+
+interface StripeEvent {
+  id: string;
+  type: string;
+  created: number;
+  data: { object: Record<string, unknown> };
+}
+
+export interface StripeWebhookConfig {
+  secret: string;
+  billing: BillingStorage;
+  now?: () => number;
+}
+
+const reply = (status: number, body: Record<string, unknown>) => Response.json(body, { status });
+
+export async function handleStripeWebhook(request: Request, config: StripeWebhookConfig): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
+  }
+  const payload = await request.text();
+  const nowSeconds = Math.floor((config.now?.() ?? Date.now()) / 1000);
+  if (!(await verifyStripeSignature(payload, request.headers.get("stripe-signature"), config.secret, nowSeconds))) {
+    return reply(400, { error: "signature verification failed" });
+  }
+
+  let event: StripeEvent;
+  try {
+    event = JSON.parse(payload) as StripeEvent;
+  } catch {
+    return reply(400, { error: "body is not JSON" });
+  }
+  const object = event.data?.object ?? {};
+
+  // Errors past this point are ours, so they surface as 5xx and Stripe retries.
+  switch (event.type) {
+    case "checkout.session.completed": {
+      const userId = object.client_reference_id;
+      const customerId = idOf(object.customer);
+      if (typeof userId !== "string" || !USER_ID.test(userId) || !customerId) {
+        // A checkout that did not come through /upgrade has no one to credit.
+        console.warn(`stripe ${event.id}: checkout without a Bellman user id; nothing linked`);
+        return reply(200, { received: true, applied: false });
+      }
+      const linked = await config.billing.linkCustomer(customerId, userId);
+      if (!linked) console.warn(`stripe ${event.id}: customer ${customerId} already belongs to another user`);
+      return reply(200, { received: true, applied: linked });
+    }
+
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted": {
+      const subscriptionId = idOf(object);
+      const customerId = idOf(object.customer);
+      if (!subscriptionId || !customerId) return reply(400, { error: "subscription without an id or customer" });
+      const items = (object.items as { data?: { price?: StripePrice }[] } | undefined)?.data ?? [];
+      const plans = items.map((item) => planForPrice(item.price)).filter((p): p is Plan => p !== null);
+      if (items.length > 0 && plans.length === 0) {
+        console.warn(`stripe ${event.id}: subscription ${subscriptionId} has no price naming a known plan`);
+      }
+      await config.billing.recordSubscription(customerId, subscriptionId, {
+        plan: plans[0] ?? null,
+        status: event.type === "customer.subscription.deleted" ? "canceled" : String(object.status ?? ""),
+        eventAt: event.created,
+      });
+      return reply(200, { received: true, applied: true });
+    }
+
+    default:
+      // Subscribed to more than we act on is fine; acknowledge and move on.
+      return reply(200, { received: true, applied: false });
+  }
+}
+
+/**
+ * STRIPE_PAYMENT_LINKS: JSON of link name → Payment Link URL. Only https links
+ * on Stripe's own checkout hosts are kept, so a bad value cannot turn /upgrade
+ * into an open redirect, and malformed JSON serves no links rather than guessing.
+ */
+export function parsePaymentLinks(raw: string | undefined): Record<string, string> {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    console.error("STRIPE_PAYMENT_LINKS is set but is not valid JSON — ignoring it");
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object") return {};
+  const links: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed)) {
+    if (typeof value !== "string" || !/^[a-z0-9_]{1,64}$/.test(name)) continue;
+    try {
+      const url = new URL(value);
+      if (url.protocol === "https:" && (url.hostname === "buy.stripe.com" || url.hostname === "checkout.stripe.com")) {
+        links[name] = value;
+      }
+    } catch {
+      // not a URL; skipped
+    }
+  }
+  return links;
+}

@@ -7,6 +7,7 @@ import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { canonicalResource } from "./oauth/tokens.js";
+import { handleStripeWebhook, parsePaymentLinks } from "./billing/stripe.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -34,6 +35,10 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
+  /** Signing secret (whsec_…) of the Stripe webhook endpoint. Absent means billing is off. */
+  STRIPE_WEBHOOK_SECRET?: string;
+  /** Optional JSON: link name -> Stripe Payment Link URL, served at /upgrade/<name>. */
+  STRIPE_PAYMENT_LINKS?: string;
 }
 
 /**
@@ -51,13 +56,17 @@ function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined 
   if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
     credentials.google = { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET };
   }
+  const store = new AuthStore(env.AUTH);
   return {
     issuer: origin,
     resource: canonicalResource(`${origin}/mcp`),
     secret: env.BELLMAN_TOKEN_SECRET,
-    store: new AuthStore(env.AUTH),
+    store,
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
+    // Plans are read from billing only once Stripe can write to it.
+    billing: env.STRIPE_WEBHOOK_SECRET ? store : undefined,
+    paymentLinks: parsePaymentLinks(env.STRIPE_PAYMENT_LINKS),
   };
 }
 
@@ -77,6 +86,13 @@ export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     const oauth = oauthConfig(request, env);
+
+    if (url.pathname === "/stripe/webhook") {
+      if (!env.STRIPE_WEBHOOK_SECRET || !env.AUTH) {
+        return new Response("Billing is not configured", { status: 503 });
+      }
+      return handleStripeWebhook(request, { secret: env.STRIPE_WEBHOOK_SECRET, billing: new AuthStore(env.AUTH) });
+    }
 
     if (oauth) {
       const handled = await handleOAuth(request, oauth);

@@ -1,6 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./storage.js";
+import {
+  BillingLedger, type BillingStorage, type PaidPlan, type SubscriptionState,
+} from "../billing/ledger.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -11,12 +14,35 @@ import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./st
  * Access tokens are absent on purpose — they are signed, not stored. The shapes
  * and the in-memory implementation live in storage.ts, which stays importable
  * from plain Node.
+ *
+ * Billing lives here too: what Stripe says each user has paid for is read on
+ * the same token-issuing path. Its logic is BillingLedger, shared with the
+ * in-memory store; this object only supplies the storage. Each method is a
+ * run of storage calls with no other await between them, so the input gate
+ * keeps a webhook and a refresh from interleaving.
  */
 
 const CODE = "code:";
 const REFRESH = "refresh:";
 
 export class AuthDO extends DurableObject {
+  private ledger = new BillingLedger({
+    get: <T>(key: string) => this.ctx.storage.get<T>(key),
+    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
+  });
+
+  linkCustomer(customerId: string, userId: string): Promise<boolean> {
+    return this.ledger.linkCustomer(customerId, userId);
+  }
+
+  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
+    return this.ledger.recordSubscription(customerId, subscriptionId, state);
+  }
+
+  paidPlan(userId: string): Promise<PaidPlan | undefined> {
+    return this.ledger.paidPlan(userId);
+  }
+
   async registerClient(client: RegisteredClient): Promise<void> {
     await this.ctx.storage.put(`client:${client.client_id}`, client);
   }
@@ -64,7 +90,7 @@ export class AuthDO extends DurableObject {
 }
 
 /** What the routes use — a thin facade over the single AuthDO instance. */
-export class AuthStore implements AuthStorage {
+export class AuthStore implements AuthStorage, BillingStorage {
   constructor(private namespace: DurableObjectNamespace<AuthDO>) {}
 
   private get object() {
@@ -88,6 +114,15 @@ export class AuthStore implements AuthStorage {
   }
   takeRefresh(token: string): Promise<RefreshToken | undefined> {
     return this.object.takeRefresh(token);
+  }
+  linkCustomer(customerId: string, userId: string): Promise<boolean> {
+    return this.object.linkCustomer(customerId, userId);
+  }
+  recordSubscription(customerId: string, subscriptionId: string, state: SubscriptionState): Promise<void> {
+    return this.object.recordSubscription(customerId, subscriptionId, state);
+  }
+  paidPlan(userId: string): Promise<PaidPlan | undefined> {
+    return this.object.paidPlan(userId);
   }
 }
 

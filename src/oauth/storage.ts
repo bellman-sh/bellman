@@ -19,6 +19,13 @@ export interface AuthCode {
   code_challenge: string;
   resource: string;
   identity: Identity;
+  /**
+   * True when the identity is an operator grant (BELLMAN_USERS), false when it
+   * is the default a signed-in human gets. Only the default is re-resolved
+   * against billing when tokens are issued; a grant is left alone. Absent on
+   * records written before billing existed, which are left alone too.
+   */
+  granted?: boolean;
   expires_at: number;
 }
 
@@ -26,6 +33,8 @@ export interface RefreshToken {
   client_id: string;
   resource: string;
   identity: Identity;
+  /** See AuthCode.granted. */
+  granted?: boolean;
   expires_at: number;
 }
 

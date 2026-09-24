@@ -3,6 +3,7 @@ import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/o
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
+import { MemoryBillingStore } from "../src/billing/ledger.js";
 
 /**
  * The whole authorization code flow, with GitHub and Google stubbed at the
@@ -316,5 +317,109 @@ describe("the full flow", () => {
     });
 
     expect(((await res.json()) as Record<string, string>).error).toBe("unsupported_grant_type");
+  });
+});
+
+describe("plans from billing", () => {
+  let billing: MemoryBillingStore;
+
+  beforeEach(() => {
+    billing = new MemoryBillingStore();
+    config.billing = billing;
+    config.paymentLinks = { pro_monthly: "https://buy.stripe.com/test_pro" };
+  });
+
+  const refresh = async (clientId: string, token: string) => {
+    const res = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: token, client_id: clientId }).toString(),
+    });
+    return (await res.json()) as Record<string, string>;
+  };
+
+  const pay = async (userId: string, plan: "pro" | "team", status = "active", eventAt = 1) => {
+    await billing.linkCustomer("cus_1", userId);
+    await billing.recordSubscription("cus_1", "sub_1", { plan, status, eventAt });
+  };
+
+  it("signs in on the plan already paid for", async () => {
+    await pay("u_github_4242", "pro");
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const { body } = await exchange(clientId, code);
+
+    expect((await identityFromAccessToken(body.access_token, config))?.plan).toBe("pro");
+  });
+
+  it("picks up an upgrade and a cancellation on the next refresh, without signing in again", async () => {
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    expect((await identityFromAccessToken(first.access_token, config))?.plan).toBe("free");
+
+    await pay("u_github_4242", "team");
+    const upgraded = await refresh(clientId, first.refresh_token);
+    expect(await identityFromAccessToken(upgraded.access_token, config)).toMatchObject({
+      userId: "u_github_4242", plan: "team", orgId: "org_cus_1", role: "admin",
+    });
+
+    await billing.recordSubscription("cus_1", "sub_1", { plan: "team", status: "canceled", eventAt: 2 });
+    const cancelled = await refresh(clientId, upgraded.refresh_token);
+    expect(await identityFromAccessToken(cancelled.access_token, config)).toMatchObject({
+      plan: "free", orgId: null, role: "member",
+    });
+  });
+
+  it("leaves an operator grant alone, whatever billing says", async () => {
+    const granted: Identity = {
+      userId: "u_jesse", orgId: "org_codenerd", plan: "team", role: "admin", label: "jesse@codenerd",
+    };
+    config.overrides = { "github:4242": granted };
+    await pay("u_jesse", "pro", "canceled");
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    const again = await refresh(clientId, first.refresh_token);
+
+    expect(await identityFromAccessToken(first.access_token, config)).toEqual(granted);
+    expect(await identityFromAccessToken(again.access_token, config)).toEqual(granted);
+  });
+
+  it("leaves refresh tokens from before billing existed as they were", async () => {
+    const legacy: Identity = { userId: "u_github_4242", orgId: null, plan: "pro", role: "member", label: "x" };
+    await config.store.putRefresh("legacy-token", {
+      client_id: "c1", resource: RESOURCE, identity: legacy, expires_at: Date.now() + 60_000,
+    });
+    const body = await refresh("c1", "legacy-token");
+
+    expect(await identityFromAccessToken(body.access_token, config)).toEqual(legacy);
+  });
+
+  it("signs a human in on the way to checkout and tags the link with who they are", async () => {
+    const chooser = await call("/upgrade/pro_monthly");
+    expect(chooser.status).toBe(200);
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+
+    const handoff = await call(`/authorize/github?req=${encodeURIComponent(req)}`);
+    expect(handoff.headers.get("location")).toContain("https://github.com/login/oauth/authorize");
+
+    const back = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+    const checkout = new URL(back.headers.get("location")!);
+    expect(checkout.origin + checkout.pathname).toBe("https://buy.stripe.com/test_pro");
+    expect(checkout.searchParams.get("client_reference_id")).toBe("u_github_4242");
+    expect(checkout.searchParams.get("prefilled_email")).toBe("jesse@example.dev");
+  });
+
+  it("does not let an upgrade state stand in for an authorization request", async () => {
+    const chooser = await call("/upgrade/pro_monthly");
+    const req = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]);
+    const back = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+
+    // Straight to Stripe: no authorization code is minted for anyone.
+    expect(new URL(back.headers.get("location")!).searchParams.get("code")).toBeNull();
+  });
+
+  it("refuses a plan it has no link for", async () => {
+    expect((await call("/upgrade/platinum")).status).toBe(404);
   });
 });

@@ -1,6 +1,7 @@
 import type { Identity } from "../types.js";
+import { withPaidPlan, type BillingStorage } from "../billing/ledger.js";
 import {
-  PROVIDERS, identityFor, isProviderName, type ProviderCredentials, type ProviderName,
+  PROVIDERS, grantFor, identityFor, isProviderName, type ProviderCredentials, type ProviderName,
 } from "./providers.js";
 import type { AuthStorage } from "./storage.js";
 import {
@@ -27,10 +28,23 @@ export interface OAuthConfig {
   store: AuthStorage;
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
+  /**
+   * What Stripe says people have paid for. When set, every token issued to a
+   * signed-in human without an operator grant carries their paid plan, looked
+   * up at sign-in and again on every refresh.
+   */
+  billing?: BillingStorage;
+  /**
+   * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
+   * /upgrade/<name> signs the human in and sends them to the link tagged with
+   * their user id, which is how the webhook knows whose plan to change.
+   */
+  paymentLinks?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
 const STATE_AUDIENCE = "bellman:authorize-state";
+const UPGRADE_AUDIENCE = "bellman:upgrade-state";
 const SCOPE = "bellman";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -80,6 +94,40 @@ interface AuthorizeRequest {
   code_challenge: string;
   resource: string;
   state?: string;
+}
+
+/** Carried through the provider round trip when signing in to pay. */
+interface UpgradeRequest {
+  link: string;
+}
+
+/** Send a signed-in human to the Payment Link, tagged so the webhook can credit them. */
+async function finishUpgrade(
+  url: URL,
+  name: ProviderName,
+  creds: ProviderCredentials,
+  pending: UpgradeRequest,
+  config: OAuthConfig
+): Promise<Response> {
+  const target = config.paymentLinks?.[pending.link];
+  const code = url.searchParams.get("code");
+  if (!target || !code) {
+    return html(`<h1>Sign-in did not finish</h1><p>Nothing was charged. Start the upgrade again.</p>`, 400);
+  }
+  let identity: Identity;
+  let email: string | undefined;
+  try {
+    const profile = await PROVIDERS[name].exchange(creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl);
+    identity = identityFor(profile, config.overrides);
+    email = profile.email;
+  } catch (err) {
+    console.error(`${name} sign-in for upgrade failed:`, err);
+    return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
+  }
+  const checkout = new URL(target);
+  checkout.searchParams.set("client_reference_id", identity.userId);
+  if (email) checkout.searchParams.set("prefilled_email", email);
+  return Response.redirect(checkout.toString(), 302);
 }
 
 export async function handleOAuth(
@@ -219,6 +267,33 @@ export async function handleOAuth(
     );
   }
 
+  // --------------------------------------------------------- /upgrade/<link>
+  // Paying needs to know who is paying, so it starts with the same sign-in.
+  const upgradeMatch = /^\/upgrade\/([a-z0-9_]{1,64})$/.exec(path);
+  if (method === "GET" && upgradeMatch) {
+    const link = upgradeMatch[1];
+    if (!config.paymentLinks?.[link]) {
+      return html(`<h1>Unknown plan</h1><p>There is no plan called <code>${escape(link)}</code>.</p>`, 404);
+    }
+    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    if (available.length === 0) {
+      return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
+    }
+    const stateToken = await signJwt(
+      { iss: config.issuer, sub: "upgrade", aud: UPGRADE_AUDIENCE, bellman: { link } as never },
+      config.secret,
+      STATE_TTL_SECONDS
+    );
+    const buttons = available
+      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
+      .join("");
+    return html(
+      `<h1>Upgrade Bellman</h1>` +
+        `<p>Sign in with the account you use Bellman with, so the plan lands on it. Then you'll pay on Stripe.</p>` +
+        buttons
+    );
+  }
+
   // ------------------------------------------- hand off to a provider
   const startMatch = /^\/authorize\/([a-z]+)$/.exec(path);
   if (method === "GET" && startMatch) {
@@ -228,7 +303,9 @@ export async function handleOAuth(
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
     const req = url.searchParams.get("req") ?? "";
-    const claims = await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
+    const claims =
+      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE })) ??
+      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE }));
     if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
 
     return Response.redirect(
@@ -247,7 +324,11 @@ export async function handleOAuth(
 
     const state = url.searchParams.get("state") ?? "";
     const claims = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
-    if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    if (!claims) {
+      const upgrade = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE });
+      if (upgrade) return finishUpgrade(url, name, creds, upgrade.bellman as unknown as UpgradeRequest, config);
+      return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    }
     const pending = claims.bellman as unknown as AuthorizeRequest;
 
     const upstreamError = url.searchParams.get("error");
@@ -262,10 +343,12 @@ export async function handleOAuth(
     }
 
     let identity: Identity;
+    let granted: boolean;
     try {
       const profile = await PROVIDERS[name].exchange(
         creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl
       );
+      granted = grantFor(profile, config.overrides) !== undefined;
       identity = identityFor(profile, config.overrides);
     } catch (err) {
       console.error(`${name} sign-in failed:`, err);
@@ -281,6 +364,7 @@ export async function handleOAuth(
       code_challenge: pending.code_challenge,
       resource: pending.resource,
       identity,
+      granted,
       expires_at: Date.now() + AUTH_CODE_TTL_MS,
     });
     target.searchParams.set("code", authCode);
@@ -309,7 +393,7 @@ export async function handleOAuth(
       if (requested && canonicalResource(requested) !== stored.resource) {
         return oauthError("invalid_target", "resource does not match the authorization request");
       }
-      return issueTokens(config, stored.client_id, stored.resource, stored.identity);
+      return issueTokens(config, stored.client_id, stored.resource, stored.identity, stored.granted);
     }
 
     if (grant === "refresh_token") {
@@ -320,7 +404,7 @@ export async function handleOAuth(
       if (clientId && stored.client_id !== clientId) {
         return oauthError("invalid_grant", "refresh token was issued to another client");
       }
-      return issueTokens(config, stored.client_id, stored.resource, stored.identity);
+      return issueTokens(config, stored.client_id, stored.resource, stored.identity, stored.granted);
     }
 
     return oauthError("unsupported_grant_type", "use authorization_code or refresh_token");
@@ -333,8 +417,16 @@ async function issueTokens(
   config: OAuthConfig,
   clientId: string,
   resource: string,
-  identity: Identity
+  identity: Identity,
+  granted: boolean | undefined
 ): Promise<Response> {
+  // The plan is looked up here, not only at sign-in, because a refresh would
+  // otherwise carry the sign-in plan forward forever: a cancelled customer
+  // would keep paying-customer limits and an upgrade would never arrive. With
+  // this, a plan change lands within one access-token lifetime.
+  if (granted === false && config.billing) {
+    identity = withPaidPlan(identity, await config.billing.paidPlan(identity.userId));
+  }
   const accessToken = await signJwt(
     { iss: config.issuer, sub: identity.userId, aud: resource, bellman: identity },
     config.secret,
@@ -346,6 +438,7 @@ async function issueTokens(
     client_id: clientId,
     resource,
     identity,
+    granted,
     expires_at: Date.now() + REFRESH_TOKEN_TTL_MS,
   });
   return json({

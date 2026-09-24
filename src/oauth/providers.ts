@@ -156,6 +156,20 @@ export function identityFor(
   profile: ProviderProfile,
   overrides: Record<string, Identity> = {}
 ): Identity {
+  return grantFor(profile, overrides) ?? {
+    userId: `u_${profile.provider}_${profile.subject}`,
+    orgId: null,
+    plan: "free",
+    role: "member",
+    label: profile.email ?? `${profile.label}@${profile.provider}`,
+  };
+}
+
+/** The operator's grant for this human, if BELLMAN_USERS names them. */
+export function grantFor(
+  profile: ProviderProfile,
+  overrides: Record<string, Identity> = {}
+): Identity | undefined {
   const keys = [
     `${profile.provider}:${profile.subject}`,
     `${profile.provider}:${profile.label}`,
@@ -165,13 +179,7 @@ export function identityFor(
     const match = overrides[key];
     if (match) return match;
   }
-  return {
-    userId: `u_${profile.provider}_${profile.subject}`,
-    orgId: null,
-    plan: "free",
-    role: "member",
-    label: profile.email ?? `${profile.label}@${profile.provider}`,
-  };
+  return undefined;
 }
 
 export function parseOverrides(raw: string | undefined): Record<string, Identity> {

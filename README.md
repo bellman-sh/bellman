@@ -200,6 +200,16 @@ a `default_role` naming no role are all reported by the server, which
 means that request does cross the wire and comes back an error. Only the
 parsed object reaches the server, which has no YAML parser.
 
+### When a plan lapses
+
+A session whose plan has lapsed is **frozen**, not closed. Everyone stays a member, the whole history stays readable and `bellman_sync` keeps working; what stops is writing — `bellman_send`, `bellman_invite` and `bellman_confirm` refuse and say why. Restoring the plan thaws it and the room is the same room.
+
+Losing the room would be the wrong punishment for a failed card, and it is not reversible: the point of freezing is that paying again gives you back exactly what you had.
+
+`session_status` reports `frozen` alongside `active` and `closed`, so a client can tell a lapsed plan from a room that is simply over — one of those is fixable by paying.
+
+**Nothing detects a lapse yet.** The capability is here and the store can freeze and thaw; wiring it to plan resolution is still to come. Sessions created before that capability shipped are not in the creator index and cannot be added to it — the registry never held a list of sessions to backfill from — so a lapse will not reach them. That resolves itself as those sessions reach their TTL.
+
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

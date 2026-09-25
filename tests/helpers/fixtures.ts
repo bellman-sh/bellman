@@ -54,6 +54,7 @@ export function session(over: Partial<Session> = {}): Session {
   return {
     id: "qs_test",
     manifest: roomManifest(),
+    frozenAt: null,
     createdBy: "u_jesse",
     orgId: "org_codenerd",
     orgOnly: false,

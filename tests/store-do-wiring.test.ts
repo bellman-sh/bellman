@@ -185,7 +185,10 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     const before = legacyStorage.snapshot();
 
     await legacy.consumeJoinCode();
-    expect(await legacy.setJoinCode("BELL-NEW-02", Date.now() + 60_000)).toBeNull();
+    // false, not null: #71 gave this a third outcome, where null means "set, and
+    // there was no previous code" and false means refused — here, because the row
+    // reads as gone.
+    expect(await legacy.setJoinCode("BELL-NEW-02", Date.now() + 60_000)).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
     await legacy.closeSession();

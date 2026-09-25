@@ -197,6 +197,42 @@ async function audit(
 // Server factory — one McpServer per request, bound to the caller's identity
 // ---------------------------------------------------------------------------
 
+/**
+ * Refused while frozen, allowed while frozen: writes stop, reads do not.
+ *
+ * Freezing is what a lapsed plan does to a room, and it has to be reversible
+ * without costing anyone their work — so membership, history and sync all keep
+ * working, and only sending, joining and inviting are refused.
+ */
+const FROZEN =
+  "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
+  "history is still readable, but nothing new can be sent or joined until the plan is restored.";
+
+/**
+ * An event the caller can rely on, or a thrown refusal.
+ *
+ * appendEvent returns null when the session froze, and both callers are past
+ * the point where returning a value is convenient — the member is already
+ * added, or the code already issued. Throwing here keeps the null out of the
+ * happy path; the tool's catch turns it into the same refusal as the guards.
+ */
+class FrozenError extends Error {
+  constructor() { super(FROZEN); }
+}
+
+async function appendOrFrozen(
+  s: BellmanStore,
+  sessionId: string,
+  e: Parameters<BellmanStore["appendEvent"]>[1]
+): Promise<SessionEvent> {
+  const event = await s.appendEvent(sessionId, e);
+  if (!event) throw new FrozenError();
+  return event;
+}
+
+const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
+  session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
+
 export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
@@ -289,6 +325,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         members: [creator],
         events: [],
         closed: false,
+        frozenAt: null,
       };
       await s.createSession(session);
       await s.recordCreate(identity.userId);
@@ -407,6 +444,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       }
       const session = await s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
+      if (session.frozenAt !== null) return fail(FROZEN);
       if (activeMembers(session).length >= session.maxMembers) return fail("session filled while you were confirming.");
 
       const memberId = `m_${randomUUID().slice(0, 8)}`;
@@ -421,7 +459,10 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         joinedAt: Date.now(),
         leftAt: null,
       };
-      await s.addMember(session.id, member);
+      // The guard above read the session; this is the one that counts. A freeze
+      // landing in between would otherwise let a frozen room grow, and the
+      // store refuses inside the object where there is no gap to land in.
+      if (!(await s.addMember(session.id, member))) return fail(FROZEN);
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
@@ -431,7 +472,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         await s.consumeJoinCode(joined.id);
       }
 
-      const joinEvent = await s.appendEvent(session.id, {
+      const joinEvent = await appendOrFrozen(s, session.id, {
         type: "member_joined",
         fromMemberId: memberId,
         fromUserId: identity.userId,
@@ -487,6 +528,7 @@ Errors: only the creator can issue; a full session refuses (the code could not b
     async ({ session_id, member_id, revoke }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
+      if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
       // Roles land in M0; until then the creator is the only one who can reopen the door.
@@ -515,7 +557,7 @@ Errors: only the creator can issue; a full session refuses (the code could not b
 
       const code = generateJoinCode();
       const expiresAt = Date.now() + JOIN_CODE_TTL;
-      await s.setJoinCode(session_id, code, expiresAt);
+      if (!(await s.setJoinCode(session_id, code, expiresAt))) return fail(FROZEN);
       await s.appendEvent(session.id, {
         type: "invite_issued",
         fromMemberId: member_id,
@@ -570,6 +612,7 @@ Errors: capability errors name the member lacking the grant.`,
     async ({ session_id, member_id, type, payload, ref_id }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
+      if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
 
@@ -605,7 +648,7 @@ Errors: capability errors name the member lacking the grant.`,
         await s.updateMember(session.id, member_id, { brief: parsed.data as Brief });
       }
 
-      const event = await s.appendEvent(session.id, {
+      const event = await appendOrFrozen(s, session.id, {
         type,
         fromMemberId: member_id,
         fromUserId: identity.userId,
@@ -668,7 +711,7 @@ Always pass the returned cursor next time — even an empty events list can adva
             untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))
           ),
           cursor,
-          session_status: session.closed ? "closed" : "active",
+          session_status: sessionStatus(session),
         },
         foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
       );
@@ -694,7 +737,7 @@ Returns: { left: true, session_status }`,
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
-      if (me.leftAt !== null) return ok({ left: true, session_status: session.closed ? "closed" : "active" });
+      if (me.leftAt !== null) return ok({ left: true, session_status: sessionStatus(session) });
 
       await s.updateMember(session.id, member_id, { leftAt: Date.now() });
       await s.appendEvent(session.id, {
@@ -711,8 +754,11 @@ Returns: { left: true, session_status }`,
       if (activeMembers(after).length === 0) await s.closeSession(session_id);
       await audit(s, session, identity, "member_left", {});
 
+      // Closed wins over frozen: an empty room is over either way, and telling
+      // someone their room is frozen when it has no members left to thaw for
+      // would point them at paying to fix something payment will not fix.
       const closed = after.closed || activeMembers(after).length === 0;
-      return ok({ left: true, session_status: closed ? "closed" : "active" });
+      return ok({ left: true, session_status: closed ? "closed" : sessionStatus(after) });
     }
   );
 

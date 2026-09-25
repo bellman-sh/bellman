@@ -46,9 +46,10 @@ export class SessionDO extends DurableObject {
 
   /**
    * The one raw read of the "session" record. Everything in this class reads it
-   * through here, so a row written before Session.manifest existed reads as gone
-   * to all of it: getSession (and the facade's getSession and getSessionByJoinCode
-   * with it), every mutator, and the TTL alarm. Nothing rewrites such a row.
+   * through here, so hydrateStoredSession's rules reach all of it: getSession
+   * (and the facade's getSession and getSessionByJoinCode with it), every
+   * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
+   * one predating frozenAt reads as not frozen. Nothing rewrites either.
    */
   private async stored(): Promise<StoredSession | undefined> {
     return hydrateStoredSession(await this.ctx.storage.get("session"));
@@ -108,18 +109,23 @@ export class SessionDO extends DurableObject {
   }
 
   /** Returns the code being replaced, so the caller can drop it from the registry. */
-  async setJoinCode(code: string, expiresAt: number): Promise<string | null> {
+  /** `false` means frozen; a string (or null) means set, and names the old code. */
+  async setJoinCode(code: string, expiresAt: number): Promise<string | null | false> {
     const s = await this.stored();
-    if (!s) return null;
+    if (!s) return false;
+    if (s.frozenAt !== null) return false;
     const previous = s.joinCode;
     await this.ctx.storage.put("session", { ...s, joinCode: code, joinCodeExpiresAt: expiresAt });
     return previous;
   }
 
-  async addMember(member: Member): Promise<void> {
+  async addMember(member: Member): Promise<boolean> {
     const s = await this.stored();
-    if (!s) return;
+    if (!s) return false;
+    // Inside the object, so nothing can freeze between this read and the write.
+    if (s.frozenAt !== null) return false;
     await this.ctx.storage.put("session", { ...s, members: [...s.members, member] });
+    return true;
   }
 
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
@@ -142,9 +148,16 @@ export class SessionDO extends DurableObject {
     await this.ctx.storage.put("session", { ...s, closed: true });
   }
 
-  async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent> {
+  async freezeSession(frozenAt: number | null): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    await this.ctx.storage.put("session", { ...s, frozenAt });
+  }
+
+  async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {
     const s = await this.stored();
     if (!s) throw new Error("Unknown session");
+    if (s.frozenAt !== null) return null;
     const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
     await this.writeEvent(event);
     this.wake(event);
@@ -428,6 +441,34 @@ export class RegistryDO extends DurableObject {
     return list.filter((t) => t >= monthStart).length;
   }
 
+  /**
+   * `us:<userId>:<sessionId>` — which rooms a person created.
+   *
+   * The create counts below cannot answer this: they are timestamps kept for
+   * the monthly quota, with no session id in them. Freezing needs the ids.
+   *
+   * Two variable segments, so the same injectivity question as the grant index
+   * applies, and the same answer: neither can contain the separator. A user id
+   * is `u_[A-Za-z0-9_-]+` and a session id is `qs_<uuid>`.
+   *
+   * **Sessions created before this deploy are not in here, and cannot be.**
+   * This registry has never known which sessions exist — it holds join codes,
+   * which are consumed, and create counts, which are bare timestamps. There is
+   * no list to backfill from, so the gap cannot be closed by a migration; it
+   * closes by itself as those sessions reach their TTL and expire. Until then
+   * a lapse will not freeze them, which means a room outliving its plan rather
+   * than a room lost, and only for rooms that already existed.
+   */
+  async indexSession(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    const prefix = `us:${userId}:`;
+    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
   async recordCreate(userId: string): Promise<void> {
     const key = `cr:${userId}`;
     const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
@@ -492,6 +533,11 @@ export class DurableObjectStore implements BellmanStore {
   async createSession(s: Session): Promise<void> {
     await this.session(s.id).createSession(s);
     if (s.joinCode) await this.registry.putJoinCode(s.joinCode, s.id);
+    // A lapsed plan has to find this person's rooms, and bare create counts
+    // cannot say which they are. Another write into a second object with no
+    // transaction spanning it — the same gap as the join code above, tracked on
+    // #62. A missed index entry means a room that is not frozen, not one lost.
+    await this.registry.indexSession(s.createdBy, s.id);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -515,14 +561,16 @@ export class DurableObjectStore implements BellmanStore {
     if (code) await this.registry.dropJoinCode(code);
   }
 
-  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void> {
+  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean> {
     const previous = await this.session(sessionId).setJoinCode(code, expiresAt);
+    if (previous === false) return false;
     if (previous) await this.registry.dropJoinCode(previous);
     await this.registry.putJoinCode(code, sessionId);
+    return true;
   }
 
-  async addMember(sessionId: string, member: Member): Promise<void> {
-    await this.session(sessionId).addMember(member);
+  async addMember(sessionId: string, member: Member): Promise<boolean> {
+    return this.session(sessionId).addMember(member);
   }
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {
@@ -533,10 +581,18 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).closeSession();
   }
 
+  async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
+    await this.session(sessionId).freezeSession(frozenAt);
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsCreatedBy(userId, limit);
+  }
+
   async appendEvent(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">
-  ): Promise<SessionEvent> {
+  ): Promise<SessionEvent | null> {
     return this.session(sessionId).appendEvent(e);
   }
 

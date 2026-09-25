@@ -356,7 +356,36 @@ export function createBridge(opts: BridgeOptions) {
 
   async function watch(w: Watch): Promise<void> {
     let backoff = 1000;
+    /** The one reason a watcher stops on its own, said the one way. */
+    const giveUp = (): void => {
+      log(
+        `stopped watching ${w.memberId}: Bellman no longer accepts this connection. ` +
+          `Peer events will not arrive until the next Bellman tool call signs in again.`
+      );
+      disarm(w.memberId);
+    };
     while (w.active && !closed) {
+      /**
+       * A watcher REUSES a connection. It must never make one.
+       *
+       * remote() connects when the cache is empty, and on the signed-in path
+       * connecting means connectSignedIn, which is what opens a browser. So the
+       * question is not "did this poll fail in an interesting way" but "would
+       * asking for a connection produce one" — and that is answered here, in
+       * front of remote(), rather than after the fact.
+       *
+       * It has to be, because the poll is rarely the thing that fails first. A
+       * 401 on a TOOL call retires the shared connection and closes it
+       * underneath this long poll, which then rejects with a plain "Connection
+       * closed" — not an auth error at all. Judging that rejection would send us
+       * round the loop to reconnect. The empty cache is the honest signal, and
+       * it covers every route out of the loop: a retirement while we polled,
+       * while we backed off, or while we idled.
+       */
+      if (remotePromise === undefined) {
+        giveUp();
+        return;
+      }
       const startedAt = Date.now();
       let result: CallToolResult;
       try {
@@ -372,31 +401,31 @@ export function createBridge(opts: BridgeOptions) {
       } catch (err) {
         if (closed || !w.active) return;
         /**
-         * A rejected poll is the ONE error here that must not be retried, and
-         * the reason is that retrying it would reconnect.
+         * Retry only what can be retried ON THE CONNECTION WE HAVE. Two
+         * failures cannot be, and both end the watch rather than loop:
          *
-         * A reconnect on the signed-in path re-enters connectSignedIn, and that
-         * is what opens a browser. From a tool call that is defensible — a
-         * person just asked for something. From here there is no turn at all:
-         * someone is reading their email and a sign-in page appears, with
-         * nothing they did to explain it. A failed tool call is the better
-         * trade, and a sign-in page nobody asked for is the worse one.
+         *   - the poll was refused as unauthorized, so this connection is done;
+         *   - or it has already been retired underneath us, by a 401 on a tool
+         *     call, and the cache is empty. Going round would reconnect.
          *
-         * Nothing is lost by stopping, either. Everything a reconnect could
-         * recover has already been tried inside the connection we have: the
-         * transport refreshes a 401 itself and retries transparently, and
+         * The second is the likelier one and it does not look like an auth error
+         * from here: retire() closes the transport, so an in-flight long poll
+         * rejects with "Connection closed".
+         *
+         * Nothing is lost by stopping. Everything a reconnect could recover has
+         * already been tried inside the connection we had: the transport
+         * refreshes a 401 itself and retries transparently, and
          * BridgeAuth.invalidateCredentials("tokens") re-reads the file and
          * adopts a newer refresh token another bridge wrote, before auth() will
          * so much as redirect. Reaching here means the file held nothing newer
          * and a human is genuinely needed — which the next tool call, being an
          * action someone took, is allowed to ask for.
+         *
+         * Checked again at the top of the loop, because a retirement can also
+         * land while we back off or idle, when there is no rejection to inspect.
          */
-        if (unauthorized(err)) {
-          log(
-            `stopped watching ${w.memberId}: Bellman no longer accepts this connection. ` +
-              `Peer events will not arrive until the next Bellman tool call signs in again.`
-          );
-          disarm(w.memberId);
+        if (unauthorized(err) || remotePromise === undefined) {
+          giveUp();
           return;
         }
         log(`sync failed for ${w.memberId}: ${(err as Error).message}; retrying in ${backoff}ms`);

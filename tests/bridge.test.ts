@@ -890,6 +890,151 @@ describe("a connection Bellman stops accepting", () => {
     });
   });
 
+  /**
+   * The seam between the two fixes in this task, which is where the defect was.
+   * R7 retires the shared connection and CLOSES it; the watcher's long poll is
+   * riding that same connection, so it rejects with a plain "Connection closed"
+   * and not with an auth error at all. Judging the rejection therefore misses
+   * the likelier path entirely — the 401 arrives on a tool call, and the
+   * watcher reconnects into a browser without ever having seen one.
+   */
+  it("a 401 on a tool call, while a poll is in flight, opens no browser of its own", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bellman-watch-seam-"));
+    const bellman = fakeBellman();
+    const ports = await freePorts();
+    const browserOpens: URL[] = [];
+    const logs: string[] = [];
+    let refuseToolCalls = false;
+
+    const remote = async (): Promise<Remote> => {
+      const signedIn = await connectSignedIn({
+        serverUrl: RESOURCE,
+        configDir: dir,
+        fetchImpl: bellman.fetch,
+        ports,
+        lock: { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 },
+        callbackTimeoutMs: 5_000,
+        browser: async (url) => {
+          browserOpens.push(url);
+          await bellman.browser(url);
+        },
+      });
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return {
+        listTools: () => real.listTools(),
+        // The poll itself is never refused here — only the tool call is. That is
+        // the whole point: the watcher must stop without ever seeing a 401.
+        callTool: (p) =>
+          refuseToolCalls && p.name !== "bellman_sync"
+            ? Promise.reject(new UnauthorizedError())
+            : real.callTool(p),
+        close: async () => {
+          await Promise.all([signedIn.close(), real.close()]);
+        },
+      };
+    };
+
+    try {
+      const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+      const joiner = await open(DEV_KEY.peer);
+      const { sessionId, creatorMember } = await pair(creator, joiner);
+      const afterStartup = browserOpens.length;
+      // A poll is in flight on the shared connection by now.
+      await until(() => creator.bridge.watching().length === 1);
+
+      // A 401 on a TOOL call. R7 retires the connection and closes it, which is
+      // what the in-flight poll actually experiences.
+      refuseToolCalls = true;
+      const refused = await creator.call("bellman_audit").then(() => "answered", () => "rejected");
+      await until(() => logs.some((m) => m.startsWith("stopped watching")));
+      // Well past the 1000ms backoff a retrying watcher would have taken.
+      await new Promise((r) => setTimeout(r, 2_000));
+
+      expect({
+        afterStartup,
+        refused,
+        watching: creator.bridge.watching().length,
+        afterTheBackgroundWatcherGaveUp: browserOpens.length,
+        logs: logs.filter(
+          (m) => m === RETIRED || m.startsWith("stopped watching") || m.startsWith("sync failed")
+        ),
+      }).toEqual({
+        afterStartup: 1,
+        refused: "rejected",
+        watching: 0,
+        // The defect showed 2 here: a second tab, from a background poll, with
+        // nobody having asked for anything.
+        afterTheBackgroundWatcherGaveUp: 1,
+        // And no "retrying in 1000ms" in between. The watcher knows at the
+        // moment of the rejection that it is done; saying it will retry and then
+        // not retrying would be a false line in the one log a person reads to
+        // find out why their peer events stopped.
+        logs: [
+          RETIRED,
+          `stopped watching ${creatorMember}: Bellman no longer accepts this connection. ` +
+            `Peer events will not arrive until the next Bellman tool call signs in again.`,
+        ],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The same rule at the other moment. A retirement can land while the watcher
+   * is backing off from an ordinary blip, when there is no rejection left to
+   * inspect — so the check in front of remote() is what closes it, not the one
+   * in the catch.
+   */
+  it("gives up when the connection is retired while it is backing off", async () => {
+    const logs: string[] = [];
+    let connects = 0;
+    let blipped = false;
+    let refuseToolCalls = false;
+    const remote = async (): Promise<Remote> => {
+      connects++;
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return {
+        listTools: () => real.listTools(),
+        callTool: (p) => {
+          if (p.name === "bellman_sync") {
+            // One ordinary failure, which puts the watcher into its backoff.
+            if (!blipped) {
+              blipped = true;
+              return Promise.reject(new Error("socket hang up"));
+            }
+            return real.callTool(p);
+          }
+          return refuseToolCalls ? Promise.reject(new UnauthorizedError()) : real.callTool(p);
+        },
+        close: () => real.close(),
+      };
+    };
+
+    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const joiner = await open(DEV_KEY.peer);
+    await pair(creator, joiner);
+
+    // Wait until it is asleep, then retire the connection out from under it.
+    await until(() => logs.some((m) => m.includes("socket hang up")));
+    refuseToolCalls = true;
+    await creator.call("bellman_audit").catch(() => undefined);
+    await until(() => logs.some((m) => m.startsWith("stopped watching")));
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    expect({
+      connects,
+      watching: creator.bridge.watching().length,
+      logs: logs.filter((m) => m.startsWith("stopped watching")).length,
+    }).toEqual({
+      // One connection, ever. The watcher woke up, saw the cache empty and stopped
+      // rather than making the second one itself.
+      connects: 1,
+      watching: 0,
+      logs: 1,
+    });
+  });
+
   it("still lets the next call retry when the connect itself rejects", async () => {
     const logs: string[] = [];
     let attempts = 0;

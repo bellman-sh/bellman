@@ -1383,8 +1383,22 @@ describe("connectSignedIn", () => {
  */
 describe("concurrent bridges", () => {
   let dir: string;
-  const fastLock = { waitMs: 8_000, heartbeatMs: 20, staleMs: 2_000 };
-  /** How long a person takes over the sign-in page, and a token endpoint over a refresh. */
+  /**
+   * A live holder beats every 20ms and holds the lock for well under a second; a rival
+   * reclaims it only after staleMs without a beat. It is long so that a stalled machine
+   * cannot make a correct bridge look dead and open a second browser, and since nothing
+   * here waits on a lock that is actually dead, the length costs nothing.
+   */
+  const fastLock = { waitMs: 8_000, heartbeatMs: 20, staleMs: 5_000 };
+  /**
+   * How long a person takes over the sign-in page, and a token endpoint over a refresh.
+   *
+   * LOAD-BEARING. Do not lower it to speed the suite up. At 0, a lock released right
+   * after its first read (one that no longer spans the connect) passes all three tests,
+   * five runs in five; at 300ms it fails all three, every run. It reads as a free
+   * saving and quietly removes exactly that detection, leaving three green tests
+   * behind. Every other broken implementation tried dies the same at either value.
+   */
   const SLOW_MS = 300;
   const DEV_URL = "https://dev.example.test/mcp";
   const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

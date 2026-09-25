@@ -1,9 +1,17 @@
 /**
  * Conformance suite for the BellmanStore interface.
  *
- * Every implementation must pass this identically — that is what makes the
- * interface a real seam rather than a comment. M1 runs it against MemoryStore;
- * M3 runs the same suite against SqliteStore with no edits here.
+ * The intent is that every implementation passes this identically: that is what
+ * would make the interface a real seam rather than a comment. Today it runs
+ * against ONE store, MemoryStore (tests/store.test.ts).
+ *
+ * DurableObjectStore, the store that serves production, does not run it yet;
+ * issue #12 is the work to run it there. It is loadable under vitest, by
+ * stubbing `cloudflare:workers` as tests/store-do-wiring.test.ts does. What
+ * covers it until then is narrower: that file drives the real DurableObjectStore
+ * over a fake storage and pins the manifest round trip, the legacy-row guard and
+ * alarm(). So an assertion added below is proven for MemoryStore only. If a
+ * Durable Object must honour it too, add it there as well.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
@@ -34,7 +42,9 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.id).toBe(s.id);
       expect((await store.getSession(s.id))?.members).toHaveLength(1);
       // The manifest is the room's authority; a store that drops it breaks every
-      // room, so every implementation must hand it back whole.
+      // room, so every implementation must hand it back whole. Only MemoryStore
+      // runs this line; DurableObjectStore's round trip is pinned separately, in
+      // tests/store-do-wiring.test.ts.
       expect((await store.getSession(s.id))?.manifest).toEqual(s.manifest);
     });
 

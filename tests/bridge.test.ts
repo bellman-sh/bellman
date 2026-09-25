@@ -1035,6 +1035,84 @@ describe("a connection Bellman stops accepting", () => {
     });
   });
 
+  /**
+   * The case that decides whether the catch should look at the rejection as well
+   * as at the cache, and it says no.
+   *
+   * retire() empties the cache before the catch runs, so a refused poll nearly
+   * always arrives with the cache already empty and "was it a 401" reads the
+   * same as "is there a connection". Here they come apart: a poll is held open
+   * on conn 0, a tool-call 401 retires conn 0, a second tool call caches a
+   * healthy conn 1, and only THEN is the held poll refused. The refusal is from
+   * a server we are no longer talking to. Stopping on it would throw away a
+   * membership that conn 1 can go on serving, and no browser was ever at stake.
+   */
+  it("keeps watching when a stale poll is refused but a live connection is already in hand", async () => {
+    const logs: string[] = [];
+    const conns: { id: number; closed: boolean }[] = [];
+    let refuseToolCalls = false;
+    let refuseHeldPoll!: () => void;
+    const heldPoll = new Promise<never>((_, reject) => {
+      refuseHeldPoll = () => reject(new UnauthorizedError());
+    });
+    heldPoll.catch(() => undefined); // nobody is awaiting it yet
+
+    const remote = async (): Promise<Remote> => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      const conn = { id: conns.length, closed: false };
+      conns.push(conn);
+      return {
+        listTools: () => real.listTools(),
+        callTool: (p) => {
+          // conn 0 never answers its poll: it hangs until the test refuses it,
+          // by which time conn 0 has been retired and replaced.
+          if (conn.id === 0 && p.name === "bellman_sync") return heldPoll;
+          if (conn.id === 0 && refuseToolCalls) return Promise.reject(new UnauthorizedError());
+          return real.callTool(p);
+        },
+        close: async () => {
+          conn.closed = true;
+          await real.close();
+        },
+      };
+    };
+
+    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const joiner = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(creator, joiner);
+    await until(() => creator.bridge.watching().length === 1);
+
+    // Retire conn 0 with a tool-call 401, then let an ordinary tool call cache conn 1.
+    refuseToolCalls = true;
+    await creator.call("bellman_audit").catch(() => undefined);
+    const recovered = await creator.call("bellman_audit");
+
+    // Only now does the poll that was riding conn 0 come back refused.
+    refuseHeldPoll();
+
+    const sent = await joiner.call("bellman_send", {
+      session_id: sessionId, member_id: joinerMember, type: "message", payload: { text: "on the new one" },
+    });
+    expect(sent.isError, sent.text).toBe(false);
+    await until(() => channelEvents(creator).some((e) => e.meta.type === "message"));
+
+    expect({
+      recovered: recovered.isError,
+      connections: conns.length,
+      watching: creator.bridge.watching().length,
+      gaveUp: logs.some((m) => m.startsWith("stopped watching")),
+      events: channelEvents(creator).map((e) => e.meta.type),
+    }).toEqual({
+      recovered: false,
+      // Two: the retired one and its replacement. The watcher made neither.
+      connections: 2,
+      // Still armed, and still delivering, on the connection already in hand.
+      watching: 1,
+      gaveUp: false,
+      events: ["member_joined", "message"],
+    });
+  });
+
   it("still lets the next call retry when the connect itself rejects", async () => {
     const logs: string[] = [];
     let attempts = 0;

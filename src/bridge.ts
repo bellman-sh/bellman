@@ -401,30 +401,32 @@ export function createBridge(opts: BridgeOptions) {
       } catch (err) {
         if (closed || !w.active) return;
         /**
-         * Retry only what can be retried ON THE CONNECTION WE HAVE. Two
-         * failures cannot be, and both end the watch rather than loop:
+         * Retry only what can be retried ON THE CONNECTION WE HAVE — and the
+         * cache, not this rejection, is what says whether there is one.
          *
-         *   - the poll was refused as unauthorized, so this connection is done;
-         *   - or it has already been retired underneath us, by a 401 on a tool
-         *     call, and the cache is empty. Going round would reconnect.
+         * An empty cache means the connection was retired underneath us, by a
+         * 401 on a tool call, and going round would reconnect. Stopping loses
+         * nothing: everything a reconnect could recover has already been tried
+         * inside the connection we had. The transport refreshes a 401 itself and
+         * retries transparently, and BridgeAuth.invalidateCredentials("tokens")
+         * re-reads the file and adopts a newer refresh token another bridge
+         * wrote, before auth() will so much as redirect. Getting here means the
+         * file held nothing newer and a human is needed — which the next tool
+         * call, being an action someone took, is allowed to ask for.
          *
-         * The second is the likelier one and it does not look like an auth error
-         * from here: retire() closes the transport, so an in-flight long poll
-         * rejects with "Connection closed".
+         * Deliberately NOT also `unauthorized(err)`. retire() empties the cache
+         * before this runs, so a refused poll almost always arrives with the
+         * cache already empty and the two read the same. Where they differ, the
+         * auth check is the wrong answer: a poll held open on a connection that
+         * has since been retired AND REPLACED is refused by a server that is no
+         * longer the one we would use, and disarming then throws away a
+         * membership that a live cached connection could have gone on serving,
+         * for no browser risk at all. There is a test.
          *
-         * Nothing is lost by stopping. Everything a reconnect could recover has
-         * already been tried inside the connection we had: the transport
-         * refreshes a 401 itself and retries transparently, and
-         * BridgeAuth.invalidateCredentials("tokens") re-reads the file and
-         * adopts a newer refresh token another bridge wrote, before auth() will
-         * so much as redirect. Reaching here means the file held nothing newer
-         * and a human is genuinely needed — which the next tool call, being an
-         * action someone took, is allowed to ask for.
-         *
-         * Checked again at the top of the loop, because a retirement can also
-         * land while we back off or idle, when there is no rejection to inspect.
+         * Also checked at the top of the loop: a retirement can land while we
+         * back off or idle, where there is no rejection to inspect.
          */
-        if (unauthorized(err) || remotePromise === undefined) {
+        if (remotePromise === undefined) {
           giveUp();
           return;
         }

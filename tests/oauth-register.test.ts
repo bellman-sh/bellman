@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleOAuth, type OAuthConfig } from "../src/oauth/routes.js";
 import {
   CLIENT_CAP,
+  CLIENT_COUNT_KEY,
   MemoryAuthStore,
   REGISTRATIONS_PER_HOUR,
   REGISTRATION_WINDOW_MS,
   UNUSED_CLIENT_TTL_MS,
+  clientCount,
+  type CounterStorage,
 } from "../src/oauth/storage.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 
@@ -218,6 +221,80 @@ describe("unused registrations expire", () => {
 
     expect(await config.store.purgeStale(Date.now())).toMatchObject({ buckets: 0 });
     expect(await config.store.countRegistrationBuckets()).toBe(1);
+  });
+});
+
+/**
+ * The counter is newer than the data it counts. The deployed object already
+ * holds client registrations from before it existed, so the interesting case is
+ * a first read against a populated store — tested here through the same adapter
+ * the Durable Object supplies, because the DO itself cannot be imported by this
+ * test program.
+ */
+describe("the client counter on a deploy that already has clients", () => {
+  const PREFIX = "client:";
+  const PAGE = 200;
+
+  const fakeStorage = (keys: string[]) => {
+    const kv = new Map<string, unknown>(keys.map((k) => [k, { client_id: k }]));
+    let listCalls = 0;
+    const storage: CounterStorage = {
+      get: async <T>(key: string) => kv.get(key) as T | undefined,
+      put: async <T>(key: string, value: T) => void kv.set(key, value),
+      listKeys: async (prefix, startAfter, limit) => {
+        listCalls++;
+        return [...kv.keys()]
+          .filter((k) => k.startsWith(prefix) && (startAfter === undefined || k > startAfter))
+          .sort()
+          .slice(0, limit);
+      },
+    };
+    return { storage, kv, calls: () => listCalls };
+  };
+
+  const clientKeys = (n: number) =>
+    Array.from({ length: n }, (_, i) => `${PREFIX}c${String(i).padStart(6, "0")}`);
+
+  /**
+   * Reading an absent counter as zero would raise the effective cap by however
+   * many registrations are already stored.
+   */
+  it("seeds from the existing keys rather than starting at zero", async () => {
+    const { storage } = fakeStorage(clientKeys(37));
+
+    expect(await clientCount(storage, PREFIX, PAGE)).toBe(37);
+  });
+
+  it("pages through more keys than one listing returns", async () => {
+    const { storage, calls } = fakeStorage(clientKeys(PAGE * 2 + 13));
+
+    expect(await clientCount(storage, PREFIX, PAGE)).toBe(PAGE * 2 + 13);
+    expect(calls()).toBeGreaterThan(2);
+  });
+
+  it("persists the seeded count, so the scan happens once", async () => {
+    const { storage, kv, calls } = fakeStorage(clientKeys(5));
+
+    await clientCount(storage, PREFIX, PAGE);
+    const afterSeed = calls();
+    expect(kv.get(CLIENT_COUNT_KEY)).toBe(5);
+
+    expect(await clientCount(storage, PREFIX, PAGE)).toBe(5);
+    expect(calls()).toBe(afterSeed);
+  });
+
+  it("uses a counter that is already there, including a legitimate zero", async () => {
+    const { storage, calls } = fakeStorage(clientKeys(9));
+    await storage.put(CLIENT_COUNT_KEY, 0);
+
+    expect(await clientCount(storage, PREFIX, PAGE)).toBe(0);
+    expect(calls()).toBe(0);
+  });
+
+  it("counts nothing on a genuinely empty object", async () => {
+    const { storage } = fakeStorage([]);
+
+    expect(await clientCount(storage, PREFIX, PAGE)).toBe(0);
   });
 });
 

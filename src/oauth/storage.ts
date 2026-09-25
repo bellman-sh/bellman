@@ -60,6 +60,50 @@ export interface RefreshToken {
 /** Why a registration was refused, or that it was taken. */
 export type Admission = "ok" | "rate_limited" | "full";
 
+export const CLIENT_COUNT_KEY = "clients:count";
+
+/**
+ * The slice of key-value storage the client counter needs. Kept as an adapter
+ * so the counting runs under plain Node in tests, the way BillingLedger does
+ * for the billing half — the Durable Object supplies its own storage.
+ */
+export interface CounterStorage {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+  /** Keys under `prefix`, after `startAfter` when given, at most `limit` of them. */
+  listKeys(prefix: string, startAfter: string | undefined, limit: number): Promise<string[]>;
+}
+
+/**
+ * How many client registrations are stored.
+ *
+ * Durable Object storage has no count API, so this is a maintained counter
+ * rather than a listing per request. The catch is that the counter is newer
+ * than the data: an object that has already served registrations holds client
+ * keys and no counter, and reading absent as zero would raise the effective cap
+ * by however many are already there. So a first read seeds it from the keys,
+ * once, paging through them, and every read after that is one get.
+ */
+export async function clientCount(
+  storage: CounterStorage,
+  prefix: string,
+  page: number
+): Promise<number> {
+  const stored = await storage.get<number>(CLIENT_COUNT_KEY);
+  if (typeof stored === "number") return stored;
+
+  let total = 0;
+  let startAfter: string | undefined;
+  for (;;) {
+    const keys = await storage.listKeys(prefix, startAfter, page);
+    total += keys.length;
+    if (keys.length < page) break;
+    startAfter = keys[keys.length - 1];
+  }
+  await storage.put(CLIENT_COUNT_KEY, total);
+  return total;
+}
+
 /** What a purge reclaimed: lapsed client registrations, and empty rate buckets. */
 export interface Reclaimed {
   clients: number;

@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  CLIENT_CAP, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS,
-  type Admission, type AuthCode, type AuthStorage, type Reclaimed,
+  CLIENT_CAP, CLIENT_COUNT_KEY, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, clientCount,
+  type Admission, type AuthCode, type AuthStorage, type CounterStorage, type Reclaimed,
   type RefreshToken, type RegisteredClient,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
@@ -23,7 +23,7 @@ const CODE = "code:";
 const REFRESH = "refresh:";
 const CLIENT = "client:";
 const REG = "reg:";
-const COUNT = "clients:count";
+const COUNT = CLIENT_COUNT_KEY;
 /** How much stale data one registration is willing to clear. */
 const PURGE_BATCH = 200;
 
@@ -103,13 +103,28 @@ export class AuthDO extends DurableObject {
   }
 
   /**
-   * Kept as a counter rather than counted per request. Durable Object storage
-   * has no count API, so the alternative is list()ing up to CLIENT_CAP entries
-   * on every registration. Every insert and delete goes through registerClient
-   * or purgeStale, which are the only two places this moves.
+   * The counter's storage, as an adapter so the counting logic itself stays in
+   * storage.ts and runs under plain Node in tests — the same split BillingLedger
+   * uses above.
    */
-  private async clientCount(): Promise<number> {
-    return (await this.ctx.storage.get<number>(COUNT)) ?? 0;
+  private counterStorage: CounterStorage = {
+    get: <T>(key: string) => this.ctx.storage.get<T>(key),
+    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
+    listKeys: async (prefix, startAfter, limit) => [
+      ...(
+        await this.ctx.storage.list({ prefix, limit, ...(startAfter ? { startAfter } : {}) })
+      ).keys(),
+    ],
+  };
+
+  /**
+   * Counted once and then maintained, because Durable Object storage has no
+   * count API and the alternative is list()ing up to CLIENT_CAP entries on
+   * every registration. Every insert and delete goes through registerClient or
+   * purgeStale, which are the only two places this moves.
+   */
+  private clientCount(): Promise<number> {
+    return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
   }
 
   private async bumpCount(by: number): Promise<void> {

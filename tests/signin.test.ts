@@ -1267,6 +1267,71 @@ describe("connectSignedIn", () => {
   });
 
   /**
+   * Probe F, as a test: the release, not the write.
+   *
+   * A unit test on release() proves release() is quiet. This proves the thing a
+   * person would notice, and it is a different claim — because `held.release()`
+   * and `lock.release()` both sit in `finally` blocks, and a throw from a
+   * `finally` propagates past a `catch` that has already completed. The degrade
+   * boundary is drawn around the `try`, and `finally` is the one place that is
+   * never inside it. So no amount of catching around the WRITE reaches this, and
+   * the symptom is byte for byte the one the write fix removed: a completed
+   * browser flow, the credential saved, "signed in as" printed, and then the
+   * whole live Remote thrown away because a lock file could not be unlinked.
+   */
+  it("hands back the session when the lock file cannot be unlinked on release", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        rmSync: (...args: Parameters<typeof real.rmSync>) => {
+          // Only the lock, the way a sticky-bit or append-only directory refuses it.
+          if (String(args[0]).endsWith("credentials.lock")) {
+            throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+          }
+          return real.rmSync(...args);
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/signin.js");
+      const bellman = fakeBellman();
+      const calls: URL[] = [];
+      const said: string[] = [];
+
+      const remote = await mocked.connectSignedIn({
+        serverUrl: RESOURCE,
+        configDir: dir,
+        fetchImpl: bellman.fetch,
+        ports: TEST_PORTS,
+        lock: fastLock,
+        callbackTimeoutMs: 5_000,
+        log: (message) => said.push(message),
+        browser: async (url) => { calls.push(url); await bellman.browser(url); },
+      });
+      const tools = (await remote.listTools()).tools.map((t) => t.name);
+      await remote.close();
+
+      expect({
+        browsers: calls.length,
+        authenticated: tools.includes("bellman_start"),
+        saidSignedIn: said.some((m) => m.startsWith("signed in as ")),
+        saved: Boolean(readServer(dir, RESOURCE).tokens?.access_token),
+      }).toEqual({
+        browsers: 1,
+        // The connect used to reject here, with all three of the others already true.
+        authenticated: true,
+        saidSignedIn: true,
+        saved: true,
+      });
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+  });
+
+  /**
    * And when the lock genuinely cannot be had, persist degrades rather than
    * throws. This runs inside a live session's tool call, so throwing would end
    * the session over a write that costs one browser tab at the next start.

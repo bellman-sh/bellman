@@ -1,11 +1,18 @@
 /**
  * Pins the WIRING of the legacy-row guard: that SessionDO.stored() really calls
- * hydrateStoredSession, so every read path in store-do.ts inherits it.
+ * hydrateStoredSession, so every path that reads the session row inherits it.
  *
  * tests/store-do.test.ts proves the predicate on its own. It cannot prove this:
  * delete the call in stored() and that file still passes. These tests load the
  * real SessionDO, RegistryDO and DurableObjectStore over a fake storage, so
  * deleting the call turns them red.
+ *
+ * Which row a test uses matters. alarm() acts only on a row that is past its TTL:
+ * expireIfDue returns early on any other, with or without the guard. A test that calls
+ * alarm() on a row that is not due proves nothing about the guard, so the alarm tests
+ * here use due rows. When you add a SessionDO method that reads the row, add a test
+ * that goes red if the guard is bypassed in that method alone, and bypass it by hand
+ * once to check.
  *
  * EXCLUDED FROM `npm run typecheck`; see the comment beside the entry in
  * tsconfig.test.json. Vitest is unaffected: it does not typecheck, and the
@@ -25,6 +32,7 @@ vi.mock("cloudflare:workers", () => ({
 
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
+import type { Session } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -62,13 +70,18 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   };
 }
 
+/** The event rows in a storage snapshot. */
+function eventsIn(rows: Record<string, unknown>): unknown[] {
+  return Object.entries(rows).filter(([k]) => k.startsWith("e:")).map(([, e]) => e);
+}
+
 /**
  * A session as Durable Object storage held it before Session.manifest existed: a
  * top-level `mode`, no `manifest`, members with no `roomRole`, and no `events`
  * (those live under their own keys).
  */
-function legacyRow(): Record<string, unknown> {
-  const { manifest, events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE });
+function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
+  const { manifest, events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE, ...over });
   return {
     ...rest,
     mode: manifest.mode,
@@ -79,10 +92,13 @@ function legacyRow(): Record<string, unknown> {
 /**
  * A DurableObjectStore over real SessionDO and RegistryDO instances on fake
  * storage, with the legacy session already stored and its join code already
- * registered: the state production is in on the day this ships.
+ * registered, as a session created just before manifests shipped would be.
  */
-async function worldOn({ DurableObjectStore, RegistryDO, SessionDO }: StoreDo) {
-  const legacyStorage = fakeStorage({ session: legacyRow(), cursor: 0 });
+async function worldOn(
+  { DurableObjectStore, RegistryDO, SessionDO }: StoreDo,
+  row: Record<string, unknown> = legacyRow(),
+) {
+  const legacyStorage = fakeStorage({ session: row, cursor: 0 });
   const registry = new RegistryDO({ storage: fakeStorage() } as never, {} as never);
   const sessions = new Map<string, InstanceType<typeof SessionDO>>([
     [LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, {} as never)],
@@ -137,7 +153,7 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     expect(await store.getSessionByJoinCode(LEGACY_CODE)).toBeUndefined();
   });
 
-  it("no mutator and no alarm rewrites it, and appendEvent refuses it", async () => {
+  it("no mutator rewrites it, and appendEvent refuses it", async () => {
     const { legacy, legacyStorage } = await worldOn(storeDo);
     const before = legacyStorage.snapshot();
 
@@ -146,7 +162,6 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
     await legacy.closeSession();
-    await legacy.alarm();
     await expect(
       legacy.appendEvent({
         type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
@@ -154,7 +169,25 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
       }),
     ).rejects.toThrow("Unknown session");
 
-    // Not rewritten, not half-migrated, and the alarm did not reschedule itself.
+    // Not rewritten and not half-migrated. alarm() has its own test below: this row is
+    // not due, so calling it here would tell us nothing about the guard.
+    expect(legacyStorage.writes).toBe(0);
+    expect(legacyStorage.snapshot()).toEqual(before);
+  });
+
+  it("alarm() leaves it alone even when it is past its TTL", async () => {
+    // expireIfDue changes only a row that is past its TTL and returns early on any other.
+    // A row that is not due passes through alarm() untouched with or without the guard,
+    // so it would prove nothing.
+    const { legacy, legacyStorage } = await worldOn(
+      storeDo,
+      legacyRow({ expiresAt: Date.now() - 1 }),
+    );
+    const before = legacyStorage.snapshot();
+
+    await legacy.alarm();
+
+    // Not closed, no session_expired appended, and the alarm did not reschedule itself.
     expect(legacyStorage.writes).toBe(0);
     expect(legacyStorage.alarms).toEqual([]);
     expect(legacyStorage.snapshot()).toEqual(before);
@@ -185,12 +218,11 @@ describe("a current row is untouched by the guard", () => {
     // Read the raw rows: getSession() would expire it lazily and hide the alarm's part.
     const rows = storage.snapshot();
     expect(rows.session).toMatchObject({ closed: true, joinCode: null });
-    const events = Object.entries(rows).filter(([k]) => k.startsWith("e:")).map(([, e]) => e);
-    expect(events).toEqual([expect.objectContaining({ type: "session_expired" })]);
+    expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });
 
-describe("negative control: the same reads with the guard removed", () => {
+describe("negative control: the same calls with the guard removed", () => {
   /**
    * Without this, every "reads as gone" above could be a broken harness returning
    * undefined for its own reasons. Here the same world hands the legacy row to all
@@ -211,5 +243,24 @@ describe("negative control: the same reads with the guard removed", () => {
       expect(s).toBeDefined();
       expect(() => s!.manifest.mode).toThrow(TypeError);
     }
+  });
+
+  /**
+   * The same again for the two "leaves it alone" tests above, which could otherwise pass
+   * because the harness never gave the row to a mutator or to alarm(). Without the guard
+   * the same calls do reach it and do change it.
+   */
+  it("lets a mutator rewrite it and a due alarm expire it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+
+    const viaMutator = await worldOn(unguarded);
+    await viaMutator.legacy.closeSession();
+    expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
+
+    const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
+    await viaAlarm.legacy.alarm();
+    const rows = viaAlarm.legacyStorage.snapshot();
+    expect(rows.session).toMatchObject({ closed: true, joinCode: null });
+    expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });

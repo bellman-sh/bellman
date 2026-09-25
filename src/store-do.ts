@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
@@ -323,6 +324,32 @@ export class RegistryDO extends DurableObject {
     });
   }
 
+  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const stored = await txn.get<PlanGrant>(grantKey(grant.key));
+      const previous = stored && !lapsed(stored) ? stored : undefined;
+      if (previous && previous.source !== expectedSource) return { outcome: "conflict" as const };
+      for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
+      await txn.put(grantKey(grant.key), grant);
+      await txn.put(orgIndexKey(grant.orgId, grant.key), grant);
+      return { outcome: "written" as const, previous };
+    });
+  }
+
+  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<PlanGrant>(grantKey(key));
+      if (!existing) return { outcome: "missing" as const };
+      if (lapsed(existing)) {
+        for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+        return { outcome: "missing" as const };
+      }
+      if (existing.source !== expectedSource) return { outcome: "conflict" as const };
+      for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+      return { outcome: "deleted" as const, removed: existing };
+    });
+  }
+
   async moveGrant(fromKey: string, toKey: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const grant = await txn.get<PlanGrant>(grantKey(fromKey));
@@ -561,6 +588,14 @@ export class DurableObjectStore implements BellmanStore {
     expectedOrgId: string | null
   ): Promise<"deleted" | "missing" | "conflict"> {
     return this.registry.deleteGrantIfOwned(key, expectedOrgId);
+  }
+
+  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
+    return this.registry.putGrantIfSource(grant, expectedSource);
+  }
+
+  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
+    return this.registry.deleteGrantIfSource(key, expectedSource);
   }
 
   async moveGrant(fromKey: string, toKey: string): Promise<void> {

@@ -132,6 +132,24 @@ An address key is for onboarding someone you know by email, and it is **claimed 
 
 `orgId` must be your own org: grants are org-tenanted, and an admin administers only their own. Grants and revocations are written to the org audit log, so `bellman_audit` shows who changed whose plan and when.
 
+### Paying for a plan
+
+Stripe sells the plans. `BELLMAN_BILLING` in `wrangler.toml` is `off`, `shadow` or `on`; use `shadow` to take real purchases end to end before anyone's plan depends on them. The switch reaches plans already stored, not just new ones: with billing off, grants Stripe wrote earlier stop resolving, and operator and admin grants are untouched. Shadow still processes cancellations, so switching down from `on` cannot strand a plan nobody is paying for. `shadow` or `on` without both Stripe secrets stays off and logs why.
+
+| Secret | What it is |
+| --- | --- |
+| `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
+| `STRIPE_API_KEY` | A restricted key (`rk_…`) with **read** access to Subscriptions and nothing else. Stripe delivers events out of order and timestamps them only to the second, so the webhook reads each subscription's current state from Stripe instead of trusting the event. |
+| `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served, at `/upgrade/<name>`. |
+
+Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted`, `.paused` and `.resumed`. A price sells the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` sells `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise.
+
+**Plans are mutually exclusive, and a subscription sells exactly one.** Build the catalogue so no subscription can carry prices for two; one that does grants nothing at all and logs which plans it named, rather than picking a winner by Stripe's item order. Several items of the *same* plan are fine — that is quantity, not conflict.
+
+**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
+
+Billing only ever touches grants it wrote. An operator override in `BELLMAN_USERS` beats a purchase outright — `/upgrade` stops before Stripe rather than take money that would change nothing — and a grant an admin wrote by hand is left alone, with the clash logged for a human. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
+
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

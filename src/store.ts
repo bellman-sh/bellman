@@ -26,6 +26,26 @@ export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftA
  * rule is what makes the interface portable: a database-backed store cannot
  * hand out live references, so relying on them would silently break the port.
  */
+/**
+ * What a source-guarded write replaced, so the caller can tell a change from a
+ * repeat and see which org a grant moved out of.
+ *
+ * Only the source-guarded pair reports this. The org-guarded pair the admin
+ * route uses does not need it: that caller already knows what it sent and
+ * audits its own action unconditionally. Billing is reacting to Stripe, where
+ * the same event can arrive twice and a plan can move between orgs, so it has
+ * to be told what actually happened.
+ */
+export interface GrantWrite {
+  outcome: "written" | "conflict";
+  previous?: PlanGrant;
+}
+
+export interface GrantDelete {
+  outcome: "deleted" | "missing" | "conflict";
+  removed?: PlanGrant;
+}
+
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
   getSession(id: string): Promise<Session | undefined>;
@@ -75,6 +95,18 @@ export interface BellmanStore {
    * a revocation that did not occur, and must not report success for one.
    */
   deleteGrantIfOwned(key: string, expectedOrgId: string | null): Promise<"deleted" | "missing" | "conflict">;
+  /**
+   * Write a grant only if the key is unowned or already carries `expectedSource`.
+   *
+   * There are two writers with two different claims on a key. An admin claims
+   * by org, which is what putGrantIfOwned checks; billing claims by having
+   * written the record itself, because a subscription lapsing is no reason to
+   * revoke a plan an operator granted by hand. Same atomicity argument either
+   * way: the check and the write cannot be two calls.
+   */
+  putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite>;
+  /** Delete a grant only if it carries `expectedSource`, and say what happened. */
+  deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete>;
   /**
    * Re-file a grant under a new key, atomically. A no-op if `from` has none.
    *
@@ -248,6 +280,24 @@ export class MemoryStore implements BellmanStore {
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {
+    const grant = this.liveGrant(key);
+    return grant && detach(grant);
+  }
+
+  /**
+   * Deliberately synchronous, and the reason every guarded write below calls
+   * it instead of `await this.getGrant(...)`.
+   *
+   * Those methods promise that the check and the mutation are one operation.
+   * An `await` between them yields, and a second guarded writer can read the
+   * same record, act on it, and have its write undone or its grant deleted by
+   * the first one finishing against a value that is no longer there. The
+   * Durable Object gets this from `storage.transaction`; here it comes from
+   * not yielding, which only works if the read never awaits.
+   *
+   * Same rule, and the same reason, as `waitForEvents` above.
+   */
+  private liveGrant(key: string): PlanGrant | undefined {
     const grant = this.grants.get(key);
     if (!grant) return undefined;
     // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
@@ -255,7 +305,7 @@ export class MemoryStore implements BellmanStore {
       this.grants.delete(key);
       return undefined;
     }
-    return detach(grant);
+    return grant;
   }
 
   async putGrant(grant: PlanGrant): Promise<void> {
@@ -270,10 +320,10 @@ export class MemoryStore implements BellmanStore {
     grant: PlanGrant,
     expectedOrgId: string | null
   ): Promise<"written" | "conflict"> {
-    // Through getGrant, not the raw map: a lapsed grant is defined as absent
+    // liveGrant, not the raw map: a lapsed grant is defined as absent
     // everywhere else, and reading past that here would let a dead record from
     // another org hold a key hostage until some unrelated read swept it.
-    const existing = await this.getGrant(grant.key);
+    const existing = this.liveGrant(grant.key);
     if (existing && existing.orgId !== expectedOrgId) return "conflict";
     this.grants.set(grant.key, detach(grant));
     return "written";
@@ -283,15 +333,35 @@ export class MemoryStore implements BellmanStore {
     key: string,
     expectedOrgId: string | null
   ): Promise<"deleted" | "missing" | "conflict"> {
-    const existing = await this.getGrant(key);
+    const existing = this.liveGrant(key);
     if (!existing) return "missing";
     if (existing.orgId !== expectedOrgId) return "conflict";
     this.grants.delete(key);
     return "deleted";
   }
 
+  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
+    const previous = this.liveGrant(grant.key);
+    if (previous && previous.source !== expectedSource) return { outcome: "conflict" };
+    this.grants.set(grant.key, detach(grant));
+    // Detached after the write, because the caller is handed this and the
+    // stored object must not be reachable through it.
+    return { outcome: "written", previous: previous && detach(previous) };
+  }
+
+  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
+    const removed = this.liveGrant(key);
+    if (!removed) return { outcome: "missing" };
+    if (removed.source !== expectedSource) return { outcome: "conflict" };
+    this.grants.delete(key);
+    return { outcome: "deleted", removed: detach(removed) };
+  }
+
   async moveGrant(fromKey: string, toKey: string): Promise<void> {
-    const grant = this.grants.get(fromKey);
+    // Synchronous for the same reason as the guarded writes: a move that
+    // yielded between reading and re-filing could re-file a record another
+    // writer had already replaced.
+    const grant = this.liveGrant(fromKey);
     if (!grant) return;
     this.grants.delete(fromKey);
     this.grants.set(toKey, { ...grant, key: toKey });

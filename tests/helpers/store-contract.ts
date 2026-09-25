@@ -505,6 +505,80 @@ export function describeStoreContract(
       expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("missing");
     });
 
+    /**
+     * The second writer. An admin claims a key by org; billing claims one by
+     * having written it. A subscription lapsing must not revoke a plan an
+     * operator granted by hand, and a hand grant must not be silently replaced
+     * by a purchase either.
+     */
+    it("will not let billing overwrite a grant it did not write", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, source: "operator" }));
+
+      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase")).outcome)
+        .toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("conflict");
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", source: "operator" });
+    });
+
+    it("lets billing write, update and remove its own grant", async () => {
+      const purchase = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfSource(purchase, "purchase"))
+        .toEqual({ outcome: "written", previous: undefined });
+
+      // The write reports what it replaced, so billing can tell a real change
+      // from a repeated delivery and see which org a plan moved out of.
+      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase");
+      expect(updated.outcome).toBe("written");
+      expect(updated.previous).toMatchObject({ plan: "pro" });
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
+
+      const gone = await store.deleteGrantIfSource("github:4242", "purchase");
+      expect(gone.outcome).toBe("deleted");
+      expect(gone.removed).toMatchObject({ plan: "team" });
+      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("missing");
+      expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual([]);
+    });
+
+    /**
+     * A guarded write is one operation, not a read followed by a write. Run two
+     * of them at once and whichever goes second must see what the first did —
+     * otherwise the second acts on a record that is no longer there, and the
+     * guard it just passed was against the wrong value.
+     *
+     * The Durable Object gets this from `storage.transaction`. An in-memory
+     * store gets it by not yielding between the check and the mutation, which
+     * is easy to lose the moment someone awaits the read.
+     */
+    it("does not let two guarded writes interleave mid-check", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, source: "purchase" }));
+
+      // An admin replaces the purchase by hand while billing tries to remove
+      // it. In this order a store that reads before yielding will let the
+      // delete run against the record the put already replaced.
+      const [put] = await Promise.all([
+        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine"),
+        store.deleteGrantIfSource("github:4242", "purchase"),
+      ]);
+
+      // Either order of completion is fine. What must not happen is the delete
+      // removing a hand grant whose source it never checked.
+      if (put === "written") {
+        expect(await store.getGrant("github:4242")).toMatchObject({ source: "operator" });
+      }
+    });
+
     /** null is a bucket, not "unscoped": org-less grants list as their own set. */
     it("lists org-less grants separately from an org's", async () => {
       (await store.putGrant({

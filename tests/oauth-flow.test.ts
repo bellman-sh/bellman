@@ -493,6 +493,254 @@ describe("the account surface", () => {
   });
 });
 
+/**
+ * Paying starts with the same provider sign-in as connecting a client, so the
+ * two share a callback and are told apart by the audience on the state token.
+ * That branch had no coverage, and getting it wrong means an upgrade link
+ * hands out an OAuth code, or a sign-in ends at Stripe.
+ */
+/**
+ * Buying team makes you admin of your own org. If that also let you write
+ * grants, one month of team would buy permanent team: write a grant for your
+ * own key, cancel, and billing only removes grants it wrote itself.
+ */
+describe("what a purchased admin may do", () => {
+  async function purchasedAdminToken(): Promise<string> {
+    await config.plans!.putGrant({
+      key: "github:4242", plan: "team", role: "admin", orgId: "org_u_github_4242",
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    return (await exchange(clientId, code)).body.access_token;
+  }
+  const as = (token: string, init: RequestInit = {}) =>
+    ({ ...init, headers: { authorization: `Bearer ${token}` } });
+
+  it("can read the grant list for its own org", async () => {
+    const token = await purchasedAdminToken();
+
+    expect((await call("/admin/grants", as(token))).status).toBe(200);
+  });
+
+  it("cannot write a grant, which would outlive the purchase that made it admin", async () => {
+    const token = await purchasedAdminToken();
+
+    const written = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:5555", plan: "team", role: "admin", orgId: "org_u_github_4242" }),
+    }));
+    const revoked = await call("/admin/grants?key=github:4242", as(token, { method: "DELETE" }));
+
+    expect(written.status).toBe(403);
+    expect(revoked.status).toBe(403);
+    expect(await config.plans!.getGrant("github:5555")).toBeUndefined();
+  });
+
+  it("still lets an operator-granted admin write", async () => {
+    config.overrides = {
+      "github:4242": {
+        userId: "u_admin", orgId: "org_mine", plan: "team", role: "admin", label: "admin@example",
+      },
+    };
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const token = (await exchange(clientId, code)).body.access_token;
+
+    const res = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:5555", plan: "pro", role: "member", orgId: "org_mine" }),
+    }));
+
+    expect(res.status).toBe(201);
+  });
+});
+
+/**
+ * BELLMAN_BILLING has to be a real switch. Gating only new webhook writes
+ * would leave every plan Stripe granted earlier still issuing paid tokens.
+ */
+describe("turning billing off", () => {
+  const purchase = {
+    key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+    source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+  };
+
+  it("stops honouring plans Stripe granted while it was on", async () => {
+    await config.plans!.putGrant(purchase);
+    config.honourPurchases = false;
+
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const identity = await identityFromAccessToken((await exchange(clientId, code)).body.access_token, config);
+
+    expect(identity).toMatchObject({ plan: "free" });
+  });
+
+  it("leaves grants the operator or an admin wrote alone", async () => {
+    await config.plans!.putGrant({ ...purchase, source: "operator" });
+    config.honourPurchases = false;
+
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const identity = await identityFromAccessToken((await exchange(clientId, code)).body.access_token, config);
+
+    expect(identity).toMatchObject({ plan: "pro" });
+  });
+
+  it("stops honouring them on refresh too, not only at sign-in", async () => {
+    await config.plans!.putGrant(purchase);
+    const clientId = await registerClient();
+    const { code } = await authorizeThrough("github", clientId);
+    const first = (await exchange(clientId, code)).body;
+    expect((await identityFromAccessToken(first.access_token, config))?.plan).toBe("pro");
+
+    config.honourPurchases = false;
+    const refreshed = await call("/token", {
+      method: "POST",
+      body: new URLSearchParams({
+        grant_type: "refresh_token", refresh_token: first.refresh_token, client_id: clientId,
+      }).toString(),
+    });
+    const second = (await refreshed.json()) as Record<string, string>;
+
+    expect((await identityFromAccessToken(second.access_token, config))?.plan).toBe("free");
+  });
+});
+
+describe("signing in to pay", () => {
+  const LINK = "https://buy.stripe.com/test_abc";
+
+  beforeEach(() => {
+    config.paymentLinks = { pro_monthly: LINK };
+  });
+
+  /** Walks /upgrade/<name> through the provider and back. */
+  async function upgradeThrough(link = "pro_monthly") {
+    const chooser = await call(`/upgrade/${link}`);
+    const body = await chooser.text();
+    const match = /href="\/authorize\/github\?req=([^"]+)"/.exec(body);
+    if (!match) return { chooser, body, callback: undefined };
+    const req = decodeURIComponent(match[1]);
+    const callback = await call(`/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`);
+    return { chooser, body, callback };
+  }
+
+  it("sends a signed-in human to the Payment Link, tagged with their user id", async () => {
+    const { callback } = await upgradeThrough();
+
+    expect(callback!.status).toBe(302);
+    const target = new URL(callback!.headers.get("location")!);
+    expect(target.origin + target.pathname).toBe(LINK);
+    expect(target.searchParams.get("client_reference_id")).toBe("u_github_4242");
+    // Prefilled so they do not pay under a different address than they signed in with.
+    expect(target.searchParams.get("prefilled_email")).toBe("jesse@example.dev");
+  });
+
+  /** The upgrade audience must never come back as an authorization code. */
+  it("does not issue an OAuth code from an upgrade round trip", async () => {
+    const { callback } = await upgradeThrough();
+    const target = new URL(callback!.headers.get("location")!);
+
+    expect(target.searchParams.get("code")).toBeNull();
+    expect(target.host).toBe("buy.stripe.com");
+  });
+
+  /** Taking money that would change nothing is worse than refusing it. */
+  it("stops before Stripe when the operator has set this account's plan", async () => {
+    config.overrides = {
+      "github:4242": {
+        userId: "u_jesse", orgId: "org_codenerd", plan: "team", role: "admin", label: "jesse@codenerd",
+      },
+    };
+
+    const { callback } = await upgradeThrough();
+
+    expect(callback!.status).toBe(200);
+    expect(await callback!.text()).toMatch(/set by an administrator/);
+  });
+
+  /** A purchase may replace a purchase — that is what an upgrade is. */
+  it("still goes to Stripe when the current plan was itself bought", async () => {
+    await config.plans!.putGrant({
+      key: "github:4242", plan: "pro", role: "member", orgId: null,
+      source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+    });
+
+    const { callback } = await upgradeThrough();
+
+    expect(callback!.status).toBe(302);
+    expect(new URL(callback!.headers.get("location")!).host).toBe("buy.stripe.com");
+  });
+
+  /**
+   * A grant an admin wrote by hand is one billing may not touch. Sending this
+   * account to Stripe charges them, and reconciliation then gets "conflict"
+   * and changes nothing — the exact shape of taking money for nothing.
+   */
+  it("refuses when the current plan was written by an admin, not bought", async () => {
+    await config.plans!.putGrant({
+      key: "github:4242", plan: "team", role: "admin", orgId: "org_comped",
+      source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+    });
+
+    const { callback } = await upgradeThrough();
+
+    expect(callback!.status).toBe(200);
+    expect(callback!.headers.get("location")).toBeNull();
+    expect(await callback!.text()).toMatch(/set by an administrator/);
+  });
+
+  /**
+   * The worst outcome available here is taking the money and then refusing the
+   * grant. A subject long enough to overflow the org grammar does exactly that:
+   * the checkout succeeds, the team grant is built with a 65-character org, and
+   * `usableGrant` throws it away — so the buyer pays and stays free.
+   *
+   * Google subjects are strings, and 21 digits in practice, so this is a guard
+   * against the provider changing rather than a case seen today. It is still
+   * the one place where being wrong costs somebody money.
+   */
+  it("refuses before Stripe when no purchase could be applied to the account", async () => {
+    const longSubject = "9".repeat(52);
+    config.fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("https://oauth2.googleapis.com/token")) {
+        return Response.json({ access_token: "g_upstream_token" });
+      }
+      if (url.startsWith("https://openidconnect.googleapis.com")) {
+        return Response.json({ sub: longSubject, email_verified: false, name: "Jesse" });
+      }
+      return new Response("unexpected upstream call", { status: 500 });
+    }) as typeof fetch;
+
+    const chooser = await call("/upgrade/pro_monthly");
+    const req = decodeURIComponent(
+      /href="\/authorize\/google\?req=([^"]+)"/.exec(await chooser.text())![1]
+    );
+    const callback = await call(`/callback/google?code=upstream-code&state=${encodeURIComponent(req)}`);
+
+    expect(callback.status).toBe(409);
+    expect(callback.headers.get("location")).toBeNull();
+    expect(await callback.text()).toMatch(/can't be upgraded here/);
+  });
+
+  it("refuses a plan name it has no link for", async () => {
+    const res = await call("/upgrade/nonexistent");
+
+    expect(res.status).toBe(404);
+    // Own keys only: /upgrade/constructor is not a plan.
+    expect((await call("/upgrade/constructor")).status).toBe(404);
+  });
+
+  it("refuses an expired or forged upgrade state instead of guessing", async () => {
+    const forged = await call("/callback/github?code=upstream-code&state=not-a-token");
+
+    expect(forged.status).toBe(400);
+    expect(await forged.text()).toMatch(/expired/);
+  });
+});
+
 describe("granting plans at runtime", () => {
   const admin: Identity = {
     userId: "u_admin", orgId: "org_example", plan: "team", role: "admin", label: "admin@example",

@@ -4,9 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join, win32 } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import {
-  StreamableHTTPClientTransport, StreamableHTTPError,
-} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
@@ -14,7 +12,7 @@ import type {
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Remote } from "./bridge.js";
 import {
-  acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, tokensUsable, writeServer,
+  acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockOptions, type ServerCredential,
 } from "./credentials.js";
 
@@ -463,32 +461,121 @@ function remoteFrom(client: Client): Remote {
   };
 }
 
-/** The degraded path: a cached token, no listener, no auth provider. */
-async function connectWithHeader(
-  url: string,
-  token: string,
-  fetchImpl?: typeof fetch,
-  signal?: AbortSignal
-): Promise<Remote> {
+interface Attempt {
+  /** Set when the connect succeeded. */
+  remote?: Remote;
+  /** Carries the client_id and any rotation, so escalating does not re-register. */
+  provider: BridgeAuth;
+}
+
+/**
+ * Connect on the credential we already have, with the auth provider but NO
+ * listener bound. Undefined `remote` means the SDK asked for a browser and the
+ * caller has to escalate to the full sign-in.
+ *
+ * The provider is the point. An earlier version sent a bare Authorization
+ * header and no authProvider at all, which made this path unable to refresh:
+ * the transport's 401 handler is guarded on `this._authProvider`, so a 401 ten
+ * minutes in became a plain StreamableHTTPError and the session was dead. Since
+ * this is the path almost every window takes, that capped almost every session
+ * at one access-token lifetime.
+ *
+ * redirectUrl stays defined even though nothing is listening on it: the SDK
+ * reads `!provider.redirectUrl` as "non-interactive flow" and would go fetch a
+ * token directly. What it does instead is record that a browser was wanted, so
+ * the caller can bind a listener and run the real flow.
+ */
+async function connectCached(
+  opts: SignInOptions,
+  dir: string,
+  cred: ServerCredential,
+  persist?: (cred: ServerCredential) => Promise<void>
+): Promise<Attempt> {
+  let wantsBrowser = false;
+  const provider = new BridgeAuth(
+    cred,
+    loopbackRedirects(opts.ports)[0]!,
+    loopbackRedirects(opts.ports),
+    () => { wantsBrowser = true; },
+    () => readServer(dir, opts.serverUrl)
+  );
+  // Armed up front only when the caller holds no lock. Under the lock it stays
+  // inert and the caller writes once, because acquireLock is not reentrant.
+  if (persist) provider.armPersist(persist);
+
   const client = new Client({ name: "bellman-bridge", version: VERSION });
-  const transport = new StreamableHTTPClientTransport(new URL(url), {
-    requestInit: { headers: { Authorization: `Bearer ${token}` } },
-    fetch: fetchImpl,
+  const transport = new StreamableHTTPClientTransport(new URL(opts.serverUrl), {
+    authProvider: provider,
+    fetch: opts.fetchImpl,
   });
   try {
     await client.connect(transport);
+    return { remote: remoteFrom(client), provider };
   } catch (err) {
-    // The cancelling fetch has already aborted whatever was in flight; this
-    // only makes sure the caller sees why, whatever the transport wrapped it in.
-    if (signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
+    await transport.close().catch(() => undefined);
+    if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
+    // Either the SDK reached for the browser, or a second invalid_grant escaped
+    // auth()'s own retry — meaning the stored token and anything newer on disk
+    // are both dead. Both need a human, and neither is this function's to do.
+    if (err instanceof InvalidGrantError) return { provider };
+    if (err instanceof UnauthorizedError && wantsBrowser) return { provider };
     throw err;
   }
-  return remoteFrom(client);
 }
 
-/** A 401 from a server we reached, as opposed to never reaching one. */
-function isRefused(err: unknown): boolean {
-  return err instanceof StreamableHTTPError && err.code === 401;
+/**
+ * Writes a credential the provider changed after its connect returned.
+ *
+ * Deliberately takes NO AbortSignal. This runs during ordinary tool calls, and
+ * a shutdown arriving mid-refresh must not make it abandon the lock wait and
+ * drop the write — that loses the rotation, which is the whole bug this exists
+ * to fix. The lock wait is bounded anyway, and the process cannot exit while a
+ * synchronous write is in progress.
+ */
+function makePersist(
+  dir: string,
+  serverUrl: string,
+  lockOpts: LockOptions,
+  log: (message: string) => void
+): (cred: ServerCredential) => Promise<void> {
+  const writeOnce = async (cred: ServerCredential): Promise<void> => {
+    const held = await acquireLock(dir, lockOpts);
+    if (!held) {
+      // Degrade, never throw: this runs inside a live session's tool call, and
+      // ending the session is strictly worse than a rotation that did not reach
+      // disk. The next start pays one browser tab at worst.
+      log("could not take the credential lock to save the refreshed sign-in; it stays in memory for this session");
+      return;
+    }
+    try {
+      // Field by field, so a credential we have nothing new to say about —
+      // an identity we could not decode, a client we did not re-register —
+      // survives rather than being blanked by an undefined.
+      const onDisk = readServer(dir, serverUrl);
+      writeServer(dir, serverUrl, {
+        client: cred.client ?? onDisk.client,
+        tokens: cred.tokens ?? onDisk.tokens,
+        identity: cred.identity ?? onDisk.identity,
+      });
+    } finally {
+      held.release();
+    }
+  };
+
+  /**
+   * One at a time, explicitly. Two rapid refreshes must not interleave their
+   * read-modify-write. It happens to hold today without this — set() assigns
+   * and enters persist in one synchronous step, and acquireLock reaches
+   * openSync with no await ahead of it — but that is an emergent property of
+   * two unrelated functions, and a single await added before either would break
+   * it silently. The chain makes the ordering something the code states.
+   */
+  let tail: Promise<void> = Promise.resolve();
+  return (cred: ServerCredential): Promise<void> => {
+    const mine = tail.then(() => writeOnce(cred), () => writeOnce(cred));
+    tail = mine.then(() => undefined, () => undefined);
+    return mine;
+  };
 }
 
 /**
@@ -545,6 +632,7 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
   // Told to stop before we began: bind no port and take no lock.
   if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled before it started");
 
+  const persist = makePersist(dir, opts.serverUrl, opts.lock ?? {}, log);
   const lock = await acquireLock(dir, { ...opts.lock, signal: opts.signal });
   // No lock means someone else held it for the whole wait. Their sign-in may be
   // all we needed, so re-read before giving up.
@@ -559,8 +647,15 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
       throw new SignInCancelled("the sign-in was cancelled while waiting for the credential lock");
     }
     const cached = readServer(dir, opts.serverUrl);
-    if (tokensUsable(cached.tokens)) {
-      return await connectWithHeader(opts.serverUrl, cached.tokens!.access_token, opts.fetchImpl, opts.signal);
+    if (cached.tokens?.access_token) {
+      /**
+       * Persist is armed up front here, because we hold no lock for it to
+       * deadlock against, and it takes the lock itself when a refresh actually
+       * lands — by which time whoever is holding it now is long finished.
+       */
+      const attempt = await connectCached(opts, dir, cached, persist);
+      if (attempt.remote) return attempt.remote;
+      // It wants a browser, and a browser needs the lock we could not get.
     }
     throw new Error(
       `another Bellman sign-in is holding ${join(dir, LOCK_FILE)}. If nothing is signing in, delete that file.`
@@ -573,23 +668,29 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
   // saveTokens() at points we do not choose, so there is no smaller unit that is
   // still atomic against another bridge.
   try {
-    const cred = readServer(dir, opts.serverUrl);
+    let cred = readServer(dir, opts.serverUrl);
 
     /**
-     * A usable token needs no browser, so it needs no listener and no loopback
-     * port — much the commonest case, and the one that runs on every window.
+     * Any token at all is worth trying, not only an unexpired one: with the
+     * provider in play the SDK refreshes a stale one itself, so this covers the
+     * live case AND the ten-minutes-later case with no listener, no loopback
+     * port and no browser. Much the commonest path, and the one every window
+     * takes on every start.
      */
-    if (tokensUsable(cred.tokens)) {
-      try {
-        return await connectWithHeader(opts.serverUrl, cred.tokens!.access_token, opts.fetchImpl, opts.signal);
-      } catch (err) {
-        if (err instanceof SignInCancelled) throw err;
-        // Unexpired but refused: revoked, or signed with a key since rotated.
-        // Sign in again rather than strand the user with a file they would have
-        // to find and delete — the same call readFile makes about a bad file.
-        if (!isRefused(err)) throw err;
-        log("the saved sign-in was refused; signing in again");
+    if (cred.tokens?.access_token) {
+      const attempt = await connectCached(opts, dir, cred);
+      if (attempt.remote) {
+        // A refresh may have just happened, under the lock we are holding, so
+        // the one write belongs here — the same shape signIn uses, and for the
+        // same reason: one atomic write while nobody else can be writing.
+        writeServer(dir, opts.serverUrl, attempt.provider.cred);
+        arm = attempt.provider;
+        return attempt.remote;
       }
+      // It wants a human. Carry what it learned — the client_id above all, so
+      // escalating does not register a second client with the server.
+      cred = attempt.provider.cred;
+      log("the saved sign-in needs a browser; signing in again");
     }
 
     const listener = await listenForCallback(ports, log);
@@ -624,25 +725,7 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
      * not reentrant, and a refresh during the initial connect would stall on a
      * lock this very call is holding.
      */
-    arm?.armPersist(async (cred) => {
-      const held = await acquireLock(dir, { ...opts.lock, signal: opts.signal });
-      if (!held) {
-        log("could not take the credential lock to save the refreshed sign-in; it stays in memory for this session");
-        return;
-      }
-      try {
-        // Field by field, so a credential we have nothing new to say about —
-        // another server's entry, an identity we could not decode — survives.
-        const onDisk = readServer(dir, opts.serverUrl);
-        writeServer(dir, opts.serverUrl, {
-          client: cred.client ?? onDisk.client,
-          tokens: cred.tokens ?? onDisk.tokens,
-          identity: cred.identity ?? onDisk.identity,
-        });
-      } finally {
-        held.release();
-      }
-    });
+    arm?.armPersist(persist);
   }
 }
 

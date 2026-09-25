@@ -612,8 +612,18 @@ describe("connectSignedIn", () => {
     const calls: URL[] = [];
     await (await connect(bellman, calls)).close();
     expect(calls).toHaveLength(1);
-    await (await connect(bellman, calls)).close();
+    const first = readServer(dir, RESOURCE);
+
+    const remote = await connect(bellman, calls);
     expect(calls).toHaveLength(1); // still one
+    // The absence above needs a positive beside it, or it is satisfied by a
+    // connect that did nothing: the reused credential has to actually work.
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+    // And the file is still the credential it reused, not a rewritten husk.
+    const second = readServer(dir, RESOURCE);
+    expect(second.client?.client_id).toBe(first.client?.client_id);
+    expect(second.tokens?.access_token).toBe(first.tokens?.access_token);
   });
 
   it("refreshes an expired access token without opening a browser", async () => {
@@ -654,6 +664,37 @@ describe("connectSignedIn", () => {
     expect(calls).toHaveLength(2); // invalid_grant became a browser tab, not an error
     await remote.close();
     expect(readServer(dir, RESOURCE).tokens?.refresh_token).not.toBe("dead");
+    // Escalating from the cached path to the browser must carry the client_id
+    // it already had, or every rejected refresh registers a second client.
+    expect(bellman.registrations).toHaveLength(1);
+  });
+
+  /**
+   * Two tool calls can find the access token expired at the same moment. Their
+   * persists must not interleave their read-modify-write: refresh tokens are
+   * single use, so one of the two refreshes loses by design, and what matters
+   * is that the file ends up holding the winner rather than a mixture.
+   */
+  it("serializes two refreshes that land at the same moment", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, calls, { fetchImpl });
+    expireOnce();
+    const results = await Promise.allSettled([remote.listTools(), remote.listTools()]);
+    expect(results.some((r) => r.status === "fulfilled")).toBe(true);
+    await remote.close();
+
+    // Whatever happened, the file holds one coherent credential — and it works.
+    const after = readServer(dir, RESOURCE);
+    expect(after.tokens?.access_token).toBeTruthy();
+    expect(after.tokens?.refresh_token).toBeTruthy();
+    const again = await connect(bellman, calls);
+    expect((await again.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await again.close();
+    expect(calls).toHaveLength(1); // no browser anywhere in that
   });
 
   it("gives up cleanly when every loopback port is busy and there is no token", async () => {
@@ -714,10 +755,12 @@ describe("connectSignedIn", () => {
    * all and hangs the connection open, so the listener must go as soon as the
    * wait settles rather than at some later teardown.
    */
-  it("stops listening as soon as the sign-in finishes", async () => {
-    await (await connect(fakeBellman(), [])).close();
-    await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
-  });
+  // "the port is free once connectSignedIn returned" used to live here. It could
+  // not fail: the closing finally at the end of connectSignedIn satisfies it
+  // whether or not the prompt close exists, so it was a green light wired to
+  // nothing. The test below watches the port from inside the code exchange,
+  // which is the first thing after the wait settles, and fails both ways — if
+  // the listener is still bound, and if the exchange never happened at all.
 
   /**
    * Closing at the END of connectSignedIn is not the same thing: finishAuth and
@@ -938,6 +981,35 @@ describe("connectSignedIn", () => {
     }) as typeof fetch;
     return { fetchImpl, expireOnce: () => { armed = true; } };
   }
+
+  /**
+   * On the CACHED path specifically — the one every window takes, and the one
+   * that reached this test suite only through signIn before. Without an auth
+   * provider the transport's 401 handler is skipped entirely (it is guarded on
+   * this._authProvider), so a token expiring ten minutes in was a bare
+   * StreamableHTTPError and the session was over. That capped almost every
+   * session at one access-token lifetime.
+   */
+  it("refreshes mid-session on the cached-token path, and persists it", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close(); // sign in once, to fill the file
+    expect(calls).toHaveLength(1);
+
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, calls, { fetchImpl }); // cached: no listener, no browser
+    expect(calls).toHaveLength(1);
+    const before = readServer(dir, RESOURCE).tokens!;
+
+    expireOnce();
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+
+    const after = readServer(dir, RESOURCE).tokens!;
+    expect(after.refresh_token).not.toBe(before.refresh_token);
+    expect(after.access_token).not.toBe(before.access_token);
+    expect(calls).toHaveLength(1); // it refreshed; it did not reach for a human
+  });
 
   it("writes a refresh that happens after the connect to disk", async () => {
     const bellman = fakeBellman();

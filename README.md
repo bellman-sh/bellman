@@ -108,6 +108,30 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors: point them at the same URL and sign in with GitHub or Google.
 
+## Plans
+
+Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month, 4 hour lifetime. Joining somebody else's session is free on every plan — only creating one is gated.
+
+A plan can come from two places, and the order matters:
+
+1. **`BELLMAN_USERS`**, the operator's Worker secret, managed with `npm run grant-plan`. It wins over everything, which is what makes it useful for comping an account or fixing a bad automated grant. **Key it by subject** — `github:<numeric id>` or `google:<numeric id>`. A login or display name is not a key at all, and an address key applies at sign-in but not across a token refresh, because by then it may belong to someone else.
+2. **A stored grant**, written at runtime through `POST /admin/grants` by a team admin. This is what a billing webhook writes.
+
+A **stored grant** carries plan, role and org only: your `userId` still comes from the provider (`u_<provider>_<subject>`), so granting, changing or revoking one never orphans sessions you already created. A **`BELLMAN_USERS` override** is the exception — it supplies the whole identity at sign-in, `userId` included, which is what lets an operator point someone at a specific account. Across a token refresh it contributes plan, role and org only, so an override added mid-token cannot rename the holder.
+
+```
+GET    /account                  what you are, what plan, and your quota
+GET    /admin/grants             list grants           (team admin)
+POST   /admin/grants             {key, plan, role, orgId, expiresAt?}
+DELETE /admin/grants?key=<key>   revoke
+```
+
+`key` must name a human and keep naming them: `github:<numeric id>`, `google:<numeric id>`, or a verified email address (`github:`, `google:` or `email:`). A login or display name is refused, and never resolves even if written by another path — GitHub logins can be renamed and reclaimed, and a Google display name is an arbitrary string, so a grant filed against one is a standing offer of your plan to whoever takes the name next. This applies to `BELLMAN_USERS` too: `npm run grant-plan` refuses a label key, and warns about any already in the file.
+
+An address key is for onboarding someone you know by email, and it is **claimed on first use**: the first sign-in that resolves through it rewrites the grant onto that provider's numeric subject and retires the address key. After that the address carries nothing, so an address later reassigned inside a managed domain does not take the plan with it. Grant by subject where you can; grant by address when that is all you have, and expect it to move.
+
+`orgId` must be your own org: grants are org-tenanted, and an admin administers only their own. Grants and revocations are written to the org audit log, so `bellman_audit` shows who changed whose plan and when.
+
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

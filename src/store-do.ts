@@ -1,7 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
+import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, Session, SessionEvent,
+  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, MemberPatch } from "./store.js";
 
@@ -60,16 +61,28 @@ export class SessionDO extends DurableObject {
     return ((await this.ctx.storage.get<number>("cursor")) ?? 0) + 1;
   }
 
+  /**
+   * One write, not two. Awaiting each put separately commits them separately,
+   * and an interruption between the two leaves the event stored with `cursor`
+   * still naming the one before it — so the next append computes the same
+   * cursor and overwrites the event that is already there. A dropped message in
+   * a log whose whole job is not to drop messages, and silent: the cursors stay
+   * contiguous, so nothing downstream can tell.
+   */
   private async writeEvent(e: SessionEvent): Promise<void> {
-    await this.ctx.storage.put(eventKey(e.cursor), e);
-    await this.ctx.storage.put("cursor", e.cursor);
+    await this.ctx.storage.put<unknown>({ [eventKey(e.cursor)]: e, cursor: e.cursor });
   }
 
   async createSession(s: Session): Promise<void> {
     const { events, ...rest } = s;
-    await this.ctx.storage.put("session", rest);
-    await this.ctx.storage.put("cursor", 0);
-    for (const e of events) await this.writeEvent(e);
+    // Session, seed events and cursor land together. Separately committed, an
+    // interruption could leave a session with no events, or events with a
+    // cursor of zero — and the alarm below is what expires it, so a session
+    // that half-exists would also never be cleaned up.
+    const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
+    for (const e of events) seeded[eventKey(e.cursor)] = e;
+    if (events.length > 0) seeded.cursor = events[events.length - 1].cursor;
+    await this.ctx.storage.put<unknown>(seeded);
     // TTL is enforced by this alarm rather than by a global sweep.
     await this.ctx.storage.setAlarm(s.expiresAt);
   }
@@ -196,6 +209,10 @@ export class SessionDO extends DurableObject {
 // RegistryDO — singleton: how you FIND a session
 // ---------------------------------------------------------------------------
 
+/** One definition of "expired", so every path agrees on what a grant is. */
+const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
+  grant.expiresAt !== null && now > grant.expiresAt;
+
 export class RegistryDO extends DurableObject {
   async putJoinCode(code: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`jc:${code}`, sessionId);
@@ -223,6 +240,156 @@ export class RegistryDO extends DurableObject {
     return p;
   }
 
+  /**
+   * Every grant is written twice: `gr:<key>` is the record, `go:<org>:<key>` an
+   * org-scoped copy. A scoped listing then scans one org's range with the limit
+   * pushed into storage, rather than reading every grant on the platform to
+   * throw most of them away — which on this singleton object is O(all
+   * customers) per admin request, and gets worse with every sale.
+   *
+   * The price is that the two move together. putGrant retires the old org's
+   * copy before writing the new one, and both deletes drop both copies, or a
+   * re-homed key would stay listed under the org it left. The key layout and
+   * that rule live in grant-index.ts, which the test suite can reach; this
+   * object's own wiring is covered once #12 runs the contract suite here.
+   */
+  async putGrant(grant: PlanGrant): Promise<void> {
+    // One transaction, because the two copies must not be observable apart. A
+    // re-home is delete-then-write: interrupted between them it would drop the
+    // old org's entry without installing the new one, and the grant would stop
+    // appearing in any listing while still resolving by key.
+    await this.ctx.storage.transaction(async (txn) => {
+      const previous = await txn.get<PlanGrant>(grantKey(grant.key));
+      for (const stale of staleIndexKeys(previous, grant)) {
+        await txn.delete(stale);
+      }
+      await txn.put(grantKey(grant.key), grant);
+      await txn.put(orgIndexKey(grant.orgId, grant.key), grant);
+    });
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    const grant = await this.ctx.storage.get<PlanGrant>(grantKey(key));
+    if (!grant) return undefined;
+    // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
+    if (lapsed(grant)) {
+      await this.dropGrant(grant);
+      return undefined;
+    }
+    return grant;
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    const existing = await this.ctx.storage.get<PlanGrant>(grantKey(key));
+    if (!existing) return;
+    await this.dropGrant(existing);
+  }
+
+  async putGrantIfOwned(
+    grant: PlanGrant,
+    expectedOrgId: string | null
+  ): Promise<"written" | "conflict"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const stored = await txn.get<PlanGrant>(grantKey(grant.key));
+      // A lapsed grant is not a grant — the same rule getGrant applies. Letting
+      // an expired record from another org answer this check would block the
+      // key indefinitely, because nothing sweeps it until someone reads it.
+      const previous = stored && !lapsed(stored) ? stored : undefined;
+      if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
+      // The stale entry to clear is the one actually in storage, expired or not.
+      for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
+      await txn.put(grantKey(grant.key), grant);
+      await txn.put(orgIndexKey(grant.orgId, grant.key), grant);
+      return "written" as const;
+    });
+  }
+
+  async deleteGrantIfOwned(
+    key: string,
+    expectedOrgId: string | null
+  ): Promise<"deleted" | "missing" | "conflict"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const existing = await txn.get<PlanGrant>(grantKey(key));
+      if (!existing) return "missing" as const;
+      if (lapsed(existing)) {
+        // Already gone as far as every reader is concerned; tidy it away and
+        // say so, rather than reporting a revocation of something inert.
+        for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+        return "missing" as const;
+      }
+      if (existing.orgId !== expectedOrgId) return "conflict" as const;
+      for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+      return "deleted" as const;
+    });
+  }
+
+  async moveGrant(fromKey: string, toKey: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const grant = await txn.get<PlanGrant>(grantKey(fromKey));
+      if (!grant) return;
+      // Whatever sat at the destination goes first, index copy included, or
+      // its listing entry outlives the record it pointed at.
+      const displaced = await txn.get<PlanGrant>(grantKey(toKey));
+      for (const storageKey of displaced ? allKeysFor(displaced) : []) {
+        await txn.delete(storageKey);
+      }
+      for (const storageKey of allKeysFor(grant)) await txn.delete(storageKey);
+      const moved: PlanGrant = { ...grant, key: toKey };
+      await txn.put(grantKey(toKey), moved);
+      await txn.put(orgIndexKey(moved.orgId, toKey), moved);
+    });
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    // An omitted orgId means every org. That is the internal path; the admin
+    // endpoint always names one, including null for the org-less grants, and
+    // reads only that range. Scoping by prefix rather than by filtering is also
+    // what stops a caller paging past their own org: other orgs' records are
+    // never in the window to begin with.
+    const prefix = orgId === undefined ? "gr:" : orgIndexPrefix(orgId);
+    const now = Date.now();
+    const live: PlanGrant[] = [];
+    let startAfter: string | undefined;
+
+    // Page until the window is full or the range runs out, rather than reading
+    // one window and filtering it. Expired records are swept here to match
+    // getGrant, and if the first page is entirely expired a single-window read
+    // would answer "no grants" while live ones sat just past it — with no
+    // pagination on the endpoint to let the caller find out otherwise.
+    while (live.length < limit) {
+      const want = limit - live.length;
+      const page = await this.ctx.storage.list<PlanGrant>({ prefix, startAfter, limit: want });
+      if (page.size === 0) break;
+
+      let last: string | undefined;
+      for (const [storageKey, grant] of page) {
+        last = storageKey;
+        if (grant.expiresAt !== null && now > grant.expiresAt) {
+          await this.dropGrant(grant);
+          continue;
+        }
+        live.push(grant);
+      }
+      // A short page means the range is exhausted; nothing follows to scan.
+      if (page.size < want) break;
+      startAfter = last;
+    }
+    return live;
+  }
+
+  /**
+   * Remove both copies of a grant. Every delete path goes through here, and in
+   * one transaction: half a delete leaves the grant listed but unresolvable,
+   * or resolvable but unlisted.
+   */
+  private async dropGrant(grant: PlanGrant): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      for (const storageKey of allKeysFor(grant)) {
+        await txn.delete(storageKey);
+      }
+    });
+  }
+
   async countCreatesThisMonth(userId: string): Promise<number> {
     const list = (await this.ctx.storage.get<number[]>(`cr:${userId}`)) ?? [];
     const now = new Date();
@@ -248,8 +415,11 @@ export class RegistryDO extends DurableObject {
 export class AuditDO extends DurableObject {
   async append(entry: AuditEntry): Promise<void> {
     const seq = ((await this.ctx.storage.get<number>("seq")) ?? 0) + 1;
-    await this.ctx.storage.put(auditKey(seq), entry);
-    await this.ctx.storage.put("seq", seq);
+    // Entry and sequence in one write: committed separately, an interruption
+    // between them means the next entry reuses this sequence number and
+    // overwrites it. An audit log that can quietly drop the record of a
+    // privilege change is not an audit log.
+    await this.ctx.storage.put<unknown>({ [auditKey(seq)]: entry, seq });
   }
 
   async recent(limit: number): Promise<AuditEntry[]> {
@@ -365,6 +535,40 @@ export class DurableObjectStore implements BellmanStore {
 
   async recordCreate(userId: string): Promise<void> {
     await this.registry.recordCreate(userId);
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    return this.registry.getGrant(key);
+  }
+
+  async putGrant(grant: PlanGrant): Promise<void> {
+    await this.registry.putGrant(grant);
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    await this.registry.deleteGrant(key);
+  }
+
+  async putGrantIfOwned(
+    grant: PlanGrant,
+    expectedOrgId: string | null
+  ): Promise<"written" | "conflict"> {
+    return this.registry.putGrantIfOwned(grant, expectedOrgId);
+  }
+
+  async deleteGrantIfOwned(
+    key: string,
+    expectedOrgId: string | null
+  ): Promise<"deleted" | "missing" | "conflict"> {
+    return this.registry.deleteGrantIfOwned(key, expectedOrgId);
+  }
+
+  async moveGrant(fromKey: string, toKey: string): Promise<void> {
+    await this.registry.moveGrant(fromKey, toKey);
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    return this.registry.listGrants(limit, orgId);
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

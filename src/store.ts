@@ -1,5 +1,5 @@
 import type {
-  AuditEntry, Member, PendingConnect, Session, SessionEvent, EventType,
+  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -55,6 +55,38 @@ export interface BellmanStore {
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
 
+  /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
+  getGrant(key: string): Promise<PlanGrant | undefined>;
+  putGrant(grant: PlanGrant): Promise<void>;
+  deleteGrant(key: string): Promise<void>;
+  /**
+   * Write a grant only if the key is unowned or already belongs to `expectedOrgId`.
+   *
+   * The ownership check and the write are one operation because they cannot be
+   * two: a Durable Object's input gate covers one invocation, so a caller that
+   * reads with getGrant and then writes has given the object a window to serve
+   * somebody else's write for the same key in between.
+   */
+  putGrantIfOwned(grant: PlanGrant, expectedOrgId: string | null): Promise<"written" | "conflict">;
+  /**
+   * Delete a grant only if it belongs to `expectedOrgId`, and say what happened.
+   *
+   * "missing" and "conflict" are distinct on purpose: the caller must not audit
+   * a revocation that did not occur, and must not report success for one.
+   */
+  deleteGrantIfOwned(key: string, expectedOrgId: string | null): Promise<"deleted" | "missing" | "conflict">;
+  /**
+   * Re-file a grant under a new key, atomically. A no-op if `from` has none.
+   *
+   * Atomic because the caller is claiming an address-keyed grant onto the
+   * subject that just proved it owns the address: write-then-delete would, on a
+   * failed delete, leave the address key standing and claimable by whoever
+   * holds that address next — the exact transfer claiming exists to stop.
+   */
+  moveGrant(fromKey: string, toKey: string): Promise<void>;
+  /** Scoped to one org when given: grants are org-tenanted data. */
+  listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
+
   appendAudit(a: AuditEntry): Promise<void>;
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
 
@@ -70,6 +102,7 @@ export class MemoryStore implements BellmanStore {
   private byJoinCode = new Map<string, string>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
+  private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
 
@@ -212,6 +245,71 @@ export class MemoryStore implements BellmanStore {
     const list = this.creates.get(userId) ?? [];
     list.push(Date.now());
     this.creates.set(userId, list);
+  }
+
+  async getGrant(key: string): Promise<PlanGrant | undefined> {
+    const grant = this.grants.get(key);
+    if (!grant) return undefined;
+    // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
+    if (grant.expiresAt !== null && Date.now() > grant.expiresAt) {
+      this.grants.delete(key);
+      return undefined;
+    }
+    return detach(grant);
+  }
+
+  async putGrant(grant: PlanGrant): Promise<void> {
+    this.grants.set(grant.key, detach(grant));
+  }
+
+  async deleteGrant(key: string): Promise<void> {
+    this.grants.delete(key);
+  }
+
+  async putGrantIfOwned(
+    grant: PlanGrant,
+    expectedOrgId: string | null
+  ): Promise<"written" | "conflict"> {
+    // Through getGrant, not the raw map: a lapsed grant is defined as absent
+    // everywhere else, and reading past that here would let a dead record from
+    // another org hold a key hostage until some unrelated read swept it.
+    const existing = await this.getGrant(grant.key);
+    if (existing && existing.orgId !== expectedOrgId) return "conflict";
+    this.grants.set(grant.key, detach(grant));
+    return "written";
+  }
+
+  async deleteGrantIfOwned(
+    key: string,
+    expectedOrgId: string | null
+  ): Promise<"deleted" | "missing" | "conflict"> {
+    const existing = await this.getGrant(key);
+    if (!existing) return "missing";
+    if (existing.orgId !== expectedOrgId) return "conflict";
+    this.grants.delete(key);
+    return "deleted";
+  }
+
+  async moveGrant(fromKey: string, toKey: string): Promise<void> {
+    const grant = this.grants.get(fromKey);
+    if (!grant) return;
+    this.grants.delete(fromKey);
+    this.grants.set(toKey, { ...grant, key: toKey });
+  }
+
+  async listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]> {
+    // Same rule as getGrant: an expired grant is not a grant. Returning them
+    // would let stale records fill the caller's window and hide live ones.
+    const now = Date.now();
+    const live: PlanGrant[] = [];
+    for (const [key, grant] of this.grants) {
+      if (grant.expiresAt !== null && now > grant.expiresAt) {
+        this.grants.delete(key);
+        continue;
+      }
+      if (orgId === undefined || grant.orgId === orgId) live.push(grant);
+    }
+    return detach(live.slice(0, limit));
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {

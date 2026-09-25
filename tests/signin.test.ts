@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer, type Server } from "node:http";
+import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,8 +32,49 @@ vi.mock("node:http", async (importOriginal) => {
   return { ...actual, createServer: vi.fn(actual.createServer) };
 });
 
-/** Ports well away from the real range, so a developer's live bridge is untouched. */
-const TEST_PORTS = [53411, 53412, 53413];
+/** Claims `port` on loopback, or rejects if it is taken. The server holds it until released. */
+const claim = (port: number) =>
+  new Promise<NetServer>((resolve, reject) => {
+    const server = createNetServer();
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(server));
+  });
+const release = (server: NetServer) => new Promise<void>((resolve) => server.close(() => resolve()));
+
+/**
+ * Three consecutive loopback ports that are free right now, chosen once when this file
+ * loads and fixed for the whole run: the fake registers whatever loopbackRedirects(ports)
+ * is given, so they cannot move between tests.
+ *
+ * They used to be a fixed 53411-53413, which made two runs of the suite on one machine
+ * (two worktrees, a reviewer's clone beside the implementer's checkout) fight over them.
+ * The loser fails "binds the first free port in ascending order" and its neighbours for
+ * no reason, and a void run reads as unrelated failures, which sends the next person
+ * hunting a bug that is not there.
+ *
+ * The base is picked at random, not by asking the OS for a free port: bind(0) hands out
+ * ephemeral ports in sequence (measured, on macOS: 56698, 56699, 56700...), so two runs
+ * that start together are given neighbouring triples and trip over each other as soon
+ * as the probe lets go. 10000-31999 is below every OS's ephemeral range, and clear of
+ * the real bridge's, so a developer's live bridge is untouched.
+ */
+async function freeTriple(): Promise<number[]> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const base = 10_000 + Math.floor(Math.random() * 22_000);
+    const held: NetServer[] = [];
+    try {
+      for (const port of [base, base + 1, base + 2]) held.push(await claim(port));
+      return [base, base + 1, base + 2];
+    } catch {
+      // One of the three is taken. Pick again.
+    } finally {
+      await Promise.all(held.map(release));
+    }
+  }
+  throw new Error("no three consecutive free loopback ports after 50 tries");
+}
+
+const TEST_PORTS = await freeTriple();
 
 /**
  * An access token the SERVER refuses. Writing expires_at into the past is not

@@ -1,10 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  CALLBACK_PORTS, listenForCallback, loopbackRedirects, openBrowser, page, SignInCancelled, type Listener,
+  CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
+  SignInCancelled, type Listener, type SignInOptions,
 } from "../src/signin.js";
+import { readServer, writeServer } from "../src/credentials.js";
+import type { Identity } from "../src/types.js";
+import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
 // the default, so a test can ask a real launcher to fail; the tests that must
@@ -509,5 +516,332 @@ describe("openBrowser", () => {
       { stdio: "ignore", detached: true },
     );
     expect(child.unref).toHaveBeenCalledOnce();
+  });
+});
+
+describe("connectSignedIn", () => {
+  let dir: string;
+  let logs: string[];
+  const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 };
+  /**
+   * An access token the SERVER refuses. Writing expires_at into the past is not
+   * enough on its own: that is only our local bookkeeping, and the fake verifies
+   * the real JWT, whose own exp is still minutes out — so the request succeeds,
+   * no 401 comes back, and the refresh under test never runs. Pairing the two is
+   * the honest fixture: our clock says stale AND the far end agrees.
+   */
+  const STALE = "stale.not.a.jwt";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "bellman-signin-"));
+    logs = [];
+  });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  /**
+   * A sign-in against `bellman`, recording every URL the browser was asked to
+   * open. `extra` is whatever the test varies — usually fetchImpl, to stand a
+   * second bridge or a hostile server in the way.
+   */
+  function connect(bellman: FakeBellman, browserCalls: URL[], extra: Partial<SignInOptions> = {}) {
+    return connectSignedIn({
+      serverUrl: RESOURCE,
+      configDir: dir,
+      fetchImpl: bellman.fetch,
+      ports: TEST_PORTS,
+      lock: fastLock,
+      callbackTimeoutMs: 5_000,
+      log: (message) => logs.push(message),
+      browser: async (url) => { browserCalls.push(url); await bellman.browser(url); },
+      ...extra,
+    });
+  }
+
+  /** Stands a second bridge that writes `tokens` the moment our refresh goes out. */
+  function racingBridge(bellman: FakeBellman, cred: ReturnType<typeof readServer>, tokens: NonNullable<ReturnType<typeof readServer>["tokens"]>): typeof fetch {
+    let landed = false;
+    return async (input, init) => {
+      if (!landed && String(init?.body ?? "").includes("grant_type=refresh_token")) {
+        landed = true; // only the first attempt races; the adopted one must go through
+        writeServer(dir, RESOURCE, { ...cred, tokens });
+      }
+      return bellman.fetch(input, init);
+    };
+  }
+
+  it("registers, signs in, and caches tokens and identity", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    const remote = await connect(bellman, calls);
+
+    expect(calls).toHaveLength(1);
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+
+    const cred = readServer(dir, RESOURCE);
+    expect(cred.client?.client_id).toBeTruthy();
+    expect(cred.tokens?.access_token).toBeTruthy();
+    expect(cred.tokens?.refresh_token).toBeTruthy();
+    expect(cred.tokens?.expires_at).toBeGreaterThan(Date.now());
+    expect(cred.identity?.label).toBe("jesse@example.dev");
+  });
+
+  it("registers exactly one client and reuses it on the next run", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    expect(bellman.registrations).toHaveLength(1);
+
+    // Drop only the tokens; the client_id must survive and be reused.
+    const cred = readServer(dir, RESOURCE);
+    writeServer(dir, RESOURCE, { client: cred.client });
+    await (await connect(bellman, calls)).close();
+    expect(bellman.registrations).toHaveLength(1);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("registers the whole loopback range so any port can be used later", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+    const body = bellman.registrations[0] as { redirect_uris: string[] };
+    expect(body.redirect_uris).toEqual(TEST_PORTS.map((p) => `http://127.0.0.1:${p}/callback`));
+  });
+
+  it("reuses a cached token without opening a browser", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    expect(calls).toHaveLength(1);
+    await (await connect(bellman, calls)).close();
+    expect(calls).toHaveLength(1); // still one
+  });
+
+  it("refreshes an expired access token without opening a browser", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    const cred = readServer(dir, RESOURCE);
+    const before = cred.tokens!.access_token;
+    writeServer(dir, RESOURCE, {
+      ...cred,
+      tokens: { ...cred.tokens!, access_token: STALE, expires_at: Date.now() - 1 },
+    });
+
+    await (await connect(bellman, calls)).close();
+    expect(calls).toHaveLength(1); // no second browser
+    expect(readServer(dir, RESOURCE).tokens?.access_token).not.toBe(before);
+  });
+
+  /**
+   * NOTE: this passes by a path the plan describes wrongly. The plan has the SDK
+   * re-throwing invalid_grant to us; in SDK 1.30 `auth()` catches it itself,
+   * calls invalidateCredentials("tokens"), and retries — which reaches us as an
+   * ordinary UnauthorizedError with an authorization URL to open. The outer
+   * invalid_grant branch is the backstop for the SECOND one, tested below.
+   */
+  it("re-runs the browser flow when the refresh token is rejected", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    const cred = readServer(dir, RESOURCE);
+    // A refresh token rotated away by another process, or revoked.
+    writeServer(dir, RESOURCE, {
+      ...cred,
+      tokens: { access_token: STALE, refresh_token: "dead", expires_at: Date.now() - 1 },
+    });
+
+    const remote = await connect(bellman, calls);
+    expect(calls).toHaveLength(2); // invalid_grant became a browser tab, not an error
+    await remote.close();
+    expect(readServer(dir, RESOURCE).tokens?.refresh_token).not.toBe("dead");
+  });
+
+  it("gives up cleanly when every loopback port is busy and there is no token", async () => {
+    for (const port of TEST_PORTS) await block(port);
+    await expect(connect(fakeBellman(), [])).rejects.toThrow(/loopback port/i);
+  });
+
+  it("uses the cached token when every loopback port is busy", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+
+    // A busy port must not block someone who already has a working token.
+    for (const port of TEST_PORTS) await block(port);
+    const remote = await connect(bellman, calls);
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    expect(calls).toHaveLength(1); // no browser, no listener
+    await remote.close();
+  });
+
+  it("surfaces an unreachable server rather than hanging", async () => {
+    const dead: typeof fetch = () => Promise.reject(new Error("ECONNREFUSED"));
+    await expect(
+      connect(fakeBellman(), [], {
+        fetchImpl: dead,
+        callbackTimeoutMs: 1_000,
+        browser: () => { throw new Error("should never reach a browser"); },
+      })
+    ).rejects.toThrow();
+  });
+
+  // ------------------------------------------------------------------ R4
+  /**
+   * A request arriving when no waitForCode is registered gets no response at
+   * all and hangs the connection open, so the listener must go as soon as the
+   * wait settles rather than at some later teardown.
+   */
+  it("stops listening as soon as the sign-in finishes", async () => {
+    await (await connect(fakeBellman(), [])).close();
+    await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
+  });
+
+  it("stops listening when the sign-in fails", async () => {
+    const bellman = fakeBellman();
+    await expect(
+      connect(bellman, [], { browser: () => { throw new Error("the browser blew up"); } })
+    ).rejects.toThrow(/blew up/);
+    await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
+  });
+
+  // ------------------------------------------------------------------ R1
+  /**
+   * channel.ts's shutdown() awaits bridge.close(), which awaits the pending
+   * remote. If that remote is blocked on a browser callback for 300s, SIGTERM
+   * never reaches process.exit, Claude Code force-terminates, and the credential
+   * lock leaks — the very case the lock's exit handler exists to cover.
+   */
+  it("ends the wait when the sign-in is aborted, instead of holding the bridge open", async () => {
+    const controller = new AbortController();
+    const pending = connect(fakeBellman(), [], {
+      signal: controller.signal,
+      // Far past the suite's own timeout: only the abort can end this.
+      callbackTimeoutMs: 600_000,
+      browser: () => { setTimeout(() => controller.abort(), 10); },
+    });
+    await expect(pending).rejects.toThrow(SignInCancelled);
+  });
+
+  it("releases the credential lock when the sign-in is aborted", async () => {
+    const controller = new AbortController();
+    const bellman = fakeBellman();
+    await expect(
+      connect(bellman, [], {
+        signal: controller.signal,
+        callbackTimeoutMs: 600_000,
+        browser: () => { setTimeout(() => controller.abort(), 10); },
+      })
+    ).rejects.toThrow(SignInCancelled);
+
+    // The next sign-in must not wait on a lock nobody holds.
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never binds a port or opens a browser when the signal is already aborted", async () => {
+    const calls: URL[] = [];
+    await expect(
+      connect(fakeBellman(), calls, { signal: AbortSignal.abort() })
+    ).rejects.toThrow(SignInCancelled);
+    expect(calls).toHaveLength(0);
+    await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
+  });
+
+  // ------------------------------------------------------------------ R2
+  /**
+   * Access tokens live 10 minutes and every bridge shares one credential file,
+   * so N windows contend the refresh every ~10 minutes, not just at startup. A
+   * bridge that lost the race must pick up what the winner wrote, not open a tab.
+   */
+  it("adopts a refresh token another bridge wrote, rather than opening a browser", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    const cred = readServer(dir, RESOURCE);
+
+    // A second bridge refreshes first. That SPENDS our stored token — they
+    // rotate on use — and `fresh` is what it would write to the shared file.
+    const fresh = await bellman.refresh(cred.tokens!.refresh_token!, cred.client!.client_id);
+    writeServer(dir, RESOURCE, {
+      ...cred,
+      tokens: { ...cred.tokens!, access_token: STALE, expires_at: Date.now() - 1 },
+    });
+
+    const remote = await connect(bellman, calls, {
+      fetchImpl: racingBridge(bellman, cred, {
+        access_token: fresh.access_token,
+        refresh_token: fresh.refresh_token,
+        expires_at: Date.now() + fresh.expires_in * 1000,
+      }),
+    });
+
+    expect(calls).toHaveLength(1); // no spare tab, ten minutes after the first
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+  });
+
+  /** The backstop: what the other bridge wrote was dead too, so a tab after all. */
+  it("falls back to the browser when the token another bridge wrote is also rejected", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    const cred = readServer(dir, RESOURCE);
+    const dead = { access_token: STALE, expires_at: Date.now() - 1 };
+    writeServer(dir, RESOURCE, { ...cred, tokens: { ...dead, refresh_token: "dead" } });
+
+    const remote = await connect(bellman, calls, {
+      fetchImpl: racingBridge(bellman, cred, { ...dead, refresh_token: "also-dead" }),
+    });
+
+    expect(calls).toHaveLength(2);
+    await remote.close();
+    const after = readServer(dir, RESOURCE).tokens?.refresh_token;
+    expect(after).not.toBe("dead");
+    expect(after).not.toBe("also-dead");
+  });
+
+  // ------------------------------------------------------------------ R5
+  it("names who signed in", async () => {
+    await (await connect(fakeBellman(), [])).close();
+    expect(logs).toContain("signed in as jesse@example.dev (free plan)");
+  });
+
+  /**
+   * decodeIdentity returns the token's `bellman` claim verbatim with no field
+   * checks, so a malformed claim reaches the log exactly as minted. Branching on
+   * the identity merely existing prints "signed in as undefined".
+   */
+  it("does not say 'signed in as undefined' when the claim carries no label", async () => {
+    const bellman = fakeBellman({
+      overrides: {
+        "github:4242": { userId: "u_x", orgId: null, plan: "free", role: "member" } as unknown as Identity,
+      },
+    });
+    await (await connect(bellman, [])).close();
+    expect(logs.join("\n")).not.toContain("undefined");
+    expect(logs).toContain("signed in");
+  });
+
+  // ------------------------------------------------------------------ R6
+  /**
+   * openBrowser refuses a non-http(s) URL but only logs, so without a check here
+   * a hostile authorization_endpoint burns the whole callback timeout. The
+   * timeout below is far past the suite's: a regression hangs rather than passes.
+   */
+  it("refuses an authorization URL that is not http or https, without waiting for it", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    const hostile: typeof fetch = async (input, init) => {
+      const response = await bellman.fetch(input, init);
+      if (!String(input).includes("/.well-known/oauth-authorization-server")) return response;
+      const doc = (await response.json()) as Record<string, unknown>;
+      return Response.json({ ...doc, authorization_endpoint: "file:///etc/passwd" });
+    };
+
+    await expect(
+      connect(bellman, calls, { fetchImpl: hostile, callbackTimeoutMs: 600_000 })
+    ).rejects.toThrow(/only http and https/i);
+    expect(calls).toHaveLength(0);
   });
 });

@@ -1,6 +1,22 @@
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { win32 } from "node:path";
+import { join, win32 } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError, type OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import {
+  StreamableHTTPClientTransport, StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import type {
+  OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
+} from "@modelcontextprotocol/sdk/shared/auth.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { Remote } from "./bridge.js";
+import {
+  acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, tokensUsable, writeServer,
+  type LockOptions, type ServerCredential,
+} from "./credentials.js";
 
 /**
  * The browser half of self-serve credentials: a loopback listener for the
@@ -274,5 +290,351 @@ export function openBrowser(
     child.unref();
   } catch {
     fallback();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Signing in: the OAuth client half, over the credential file.
+// ---------------------------------------------------------------------------
+
+const VERSION = "0.1.0";
+const CALLBACK_TIMEOUT_MS = 300_000;
+
+export interface SignInOptions {
+  serverUrl: string;
+  configDir?: string;
+  fetchImpl?: typeof fetch;
+  browser?: (url: URL) => void | Promise<void>;
+  log?: (message: string) => void;
+  ports?: number[];
+  callbackTimeoutMs?: number;
+  lock?: LockOptions;
+  /**
+   * Ends a sign-in that is waiting on the browser. channel.ts's shutdown()
+   * awaits bridge.close(), which awaits the pending remote; without this, a
+   * SIGTERM arriving while a human has not finished signing in would never
+   * reach process.exit, Claude Code would force-terminate, and the credential
+   * lock would leak — the very case the lock's exit handler exists to cover.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * The bridge's own credential, held in memory for the life of one connect and
+ * written back under the lock. The SDK calls these methods at points we do not
+ * choose, which is why the lock wraps the whole connect rather than each write.
+ */
+class BridgeAuth implements OAuthClientProvider {
+  cred: ServerCredential;
+  private verifier = "";
+  /**
+   * Buffer.from around the bytes, not randomBytes(...).toString(): under the
+   * Worker program's types node:crypto returns a plain Uint8Array, whose
+   * toString takes no encoding, and tsconfig.worker.json compiles all of src.
+   * Same idiom decodeIdentity already uses in credentials.ts.
+   */
+  private readonly stateValue = Buffer.from(randomBytes(32)).toString("base64url");
+
+  constructor(
+    cred: ServerCredential,
+    readonly redirectUrl: string,
+    private readonly redirects: string[],
+    private readonly onRedirect: (url: URL) => void,
+    /** Re-reads the credential file from disk. See invalidateCredentials. */
+    private readonly reread: () => ServerCredential
+  ) { this.cred = cred; }
+
+  get clientMetadata(): OAuthClientMetadata {
+    return {
+      client_name: "Bellman bridge for Claude Code",
+      redirect_uris: this.redirects,
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+      scope: "bellman",
+    };
+  }
+
+  /**
+   * The SDK only sends an OAuth state because this exists, and finishAuth()
+   * takes only the code — the listener compares this value itself.
+   */
+  state(): string { return this.stateValue; }
+
+  clientInformation(): OAuthClientInformationFull | undefined {
+    return this.cred.client ? ({ ...this.cred.client } as OAuthClientInformationFull) : undefined;
+  }
+  saveClientInformation(info: OAuthClientInformationFull): void {
+    this.cred = { ...this.cred, client: { client_id: info.client_id } };
+  }
+
+  tokens(): OAuthTokens | undefined {
+    const t = this.cred.tokens;
+    return t ? { access_token: t.access_token, refresh_token: t.refresh_token, token_type: "Bearer" } : undefined;
+  }
+  saveTokens(tokens: OAuthTokens): void {
+    this.cred = {
+      ...this.cred,
+      tokens: {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+        expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
+      },
+      identity: decodeIdentity(tokens.access_token) ?? this.cred.identity,
+    };
+  }
+
+  saveCodeVerifier(verifier: string): void { this.verifier = verifier; }
+  codeVerifier(): string { return this.verifier; }
+  redirectToAuthorization(url: URL): void { this.onRedirect(url); }
+
+  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
+    if (scope === "all") { this.cred = {}; return; }
+    if (scope === "client") { this.cred = { ...this.cred, client: undefined }; return; }
+    if (scope !== "tokens") return;
+    /**
+     * The SDK calls this the moment it has judged the refresh token dead, and
+     * BEFORE it falls back to opening a browser — so it is the one place a
+     * re-read can still save a tab.
+     *
+     * Access tokens live ten minutes and every bridge on this machine shares one
+     * credential file, so N Claude Code windows contend the refresh every ten
+     * minutes, not just at startup. Losing that race is ordinary: the winner has
+     * already written a good refresh token where we can see it. Adopt theirs and
+     * let auth()'s own retry spend it. Only when the file holds nothing newer
+     * than what we just spent is a browser the right answer.
+     */
+    const spent = this.cred.tokens?.refresh_token;
+    const stored = this.reread().tokens;
+    if (stored?.refresh_token && stored.refresh_token !== spent) {
+      this.cred = { ...this.cred, tokens: stored };
+      return;
+    }
+    this.cred = { ...this.cred, tokens: undefined };
+  }
+}
+
+function remoteFrom(client: Client): Remote {
+  return {
+    listTools: () => client.listTools(),
+    callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
+    close: () => client.close(),
+  };
+}
+
+/** The degraded path: a cached token, no listener, no auth provider. */
+async function connectWithHeader(url: string, token: string, fetchImpl?: typeof fetch): Promise<Remote> {
+  const client = new Client({ name: "bellman-bridge", version: VERSION });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(url), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+      fetch: fetchImpl,
+    })
+  );
+  return remoteFrom(client);
+}
+
+/** A 401 from a server we reached, as opposed to never reaching one. */
+function isRefused(err: unknown): boolean {
+  return err instanceof StreamableHTTPError && err.code === 401;
+}
+
+/**
+ * Connect to Bellman as a signed-in user, running the browser flow if there is
+ * no usable credential. Returns the same Remote shape connectRemote does.
+ */
+export async function connectSignedIn(opts: SignInOptions): Promise<Remote> {
+  const dir = opts.configDir ?? credentialsDir();
+  const log = opts.log ?? (() => {});
+  const ports = opts.ports ?? CALLBACK_PORTS;
+  const timeout = opts.callbackTimeoutMs ?? CALLBACK_TIMEOUT_MS;
+  const openIt = opts.browser ?? ((url: URL) => openBrowser(url, log));
+
+  // Told to stop before we began: bind no port and take no lock.
+  if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled before it started");
+
+  const lock = await acquireLock(dir, opts.lock ?? {});
+  // No lock means someone else held it for the whole wait. Their sign-in may be
+  // all we needed, so re-read before giving up.
+  if (!lock) {
+    const cached = readServer(dir, opts.serverUrl);
+    if (tokensUsable(cached.tokens)) {
+      return await connectWithHeader(opts.serverUrl, cached.tokens!.access_token, opts.fetchImpl);
+    }
+    throw new Error(
+      `another Bellman sign-in is holding ${join(dir, LOCK_FILE)}. If nothing is signing in, delete that file.`
+    );
+  }
+
+  // The lock wraps the WHOLE connect, not each write: the SDK calls tokens() and
+  // saveTokens() at points we do not choose, so there is no smaller unit that is
+  // still atomic against another bridge.
+  try {
+    const cred = readServer(dir, opts.serverUrl);
+
+    /**
+     * A usable token needs no browser, so it needs no listener and no loopback
+     * port — much the commonest case, and the one that runs on every window.
+     */
+    if (tokensUsable(cred.tokens)) {
+      try {
+        return await connectWithHeader(opts.serverUrl, cred.tokens!.access_token, opts.fetchImpl);
+      } catch (err) {
+        // Unexpired but refused: revoked, or signed with a key since rotated.
+        // Sign in again rather than strand the user with a file they would have
+        // to find and delete — the same call readFile makes about a bad file.
+        if (!isRefused(err)) throw err;
+        log("the saved sign-in was refused; signing in again");
+      }
+    }
+
+    const listener = await listenForCallback(ports, log);
+    if (!listener) {
+      throw new Error(
+        `no free loopback port in ${ports[0]}-${ports[ports.length - 1]} to receive the sign-in`
+      );
+    }
+
+    // An abort has to reach the listener, because that is what the wait is on.
+    const onAbort = () => listener.close();
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await signIn(opts, dir, cred, listener, openIt, timeout, log);
+    } finally {
+      opts.signal?.removeEventListener("abort", onAbort);
+      listener.close(); // idempotent: covers every path signIn did not close on
+    }
+  } finally {
+    lock.release();
+  }
+}
+
+async function signIn(
+  opts: SignInOptions,
+  dir: string,
+  cred: ServerCredential,
+  listener: Listener,
+  openIt: (url: URL) => void | Promise<void>,
+  timeout: number,
+  log: (message: string) => void
+): Promise<Remote> {
+  let retried = false;
+  /** Set once the listener has been waited on: it is closed, so it is single use. */
+  let listenerSpent = false;
+  let current = cred;
+
+  for (;;) {
+    let pending: URL | undefined;
+    const provider = new BridgeAuth(
+      current,
+      listener.redirectUri,
+      loopbackRedirects(opts.ports),
+      (url) => { pending = url; },
+      () => readServer(dir, opts.serverUrl)
+    );
+    const newTransport = () =>
+      new StreamableHTTPClientTransport(new URL(opts.serverUrl), {
+        authProvider: provider,
+        fetch: opts.fetchImpl,
+      });
+    let client = new Client({ name: "bellman-bridge", version: VERSION });
+    let transport = newTransport();
+
+    try {
+      try {
+        await client.connect(transport);
+      } catch (err) {
+        if (!(err instanceof UnauthorizedError) || !pending) throw err;
+        /**
+         * The URL comes from authorization_endpoint in the server's own
+         * discovery document, so the SERVER picks the scheme. openBrowser
+         * refuses anything but http(s), but refusing only logs — so without this
+         * a hostile or misconfigured endpoint would open nothing and then burn
+         * the entire callback timeout waiting for a click that cannot happen.
+         */
+        if (pending.protocol !== "http:" && pending.protocol !== "https:") {
+          throw new Error(
+            `refusing to sign in at ${pending.toString()}: only http and https authorization URLs are opened`
+          );
+        }
+        if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
+        /**
+         * Arm the wait BEFORE opening the browser, not after. waitForCode is
+         * what installs the listener's request handler, and a callback that
+         * arrives before it does gets no response at all and hangs its
+         * connection open — so the browser half never finishes, and the openIt()
+         * that is driving it never returns. The browser can beat the next
+         * statement whenever no human is in the way: a test driving it in
+         * process, a password manager completing the form, an authorization
+         * server answering an already-approved client straight from cache.
+         */
+        const waiting = listener.waitForCode(provider.state(), timeout);
+        /**
+         * And attach a handler in the same turn. openIt() below can throw, and
+         * the close() in the finally would then reject this with nobody awaiting
+         * it yet — an unhandled rejection, which ends a Node process by default.
+         * `await waiting` still sees the rejection; this only marks it handled.
+         */
+        waiting.catch(() => undefined);
+        listenerSpent = true;
+        let code: string;
+        try {
+          await openIt(pending);
+          code = await waiting;
+        } finally {
+          /**
+           * Nothing else will ever arrive for this wait, and a request that
+           * finds no waitForCode registered gets no response at all and holds
+           * its connection open. The browser sends one the moment the callback
+           * page renders — a favicon — so this is the common case, not a rare one.
+           */
+          listener.close();
+        }
+        await transport.finishAuth(code);
+        /**
+         * A fresh pair for the connect that follows. client.connect() calls
+         * transport.start(), and a transport that has already been started
+         * throws rather than restart — and this one was started by the attempt
+         * that ended in the 401 above. The authorization lives on the provider,
+         * not the transport, so a new pair picks up the tokens finishAuth saved.
+         */
+        await transport.close().catch(() => undefined);
+        client = new Client({ name: "bellman-bridge", version: VERSION });
+        transport = newTransport();
+        await client.connect(transport);
+      }
+    } catch (err) {
+      await transport.close().catch(() => undefined);
+      /**
+       * auth() already handles the FIRST invalid_grant itself: it calls
+       * invalidateCredentials("tokens") — where we may adopt a token another
+       * bridge wrote — and retries. Only a second one reaches here, meaning what
+       * we adopted was dead too. Drop the tokens and start over from the browser.
+       *
+       * Not after the listener has been waited on: it is closed by then, so a
+       * second pass could not receive a callback.
+       */
+      if (!retried && !listenerSpent && err instanceof InvalidGrantError) {
+        retried = true;
+        current = { ...current, tokens: undefined };
+        writeServer(dir, opts.serverUrl, current);
+        log("the saved sign-in was rejected; signing in again");
+        continue;
+      }
+      throw err;
+    }
+
+    writeServer(dir, opts.serverUrl, provider.cred);
+    /**
+     * decodeIdentity returns the token's `bellman` claim verbatim, with no field
+     * checks, so a malformed claim can be an object carrying no label at all.
+     * Branch on a usable label, not on the identity merely being there, or this
+     * line reads "signed in as undefined".
+     */
+    const identity = provider.cred.identity;
+    const label = typeof identity?.label === "string" && identity.label ? identity.label : undefined;
+    const plan = typeof identity?.plan === "string" && identity.plan ? identity.plan : undefined;
+    log(label ? `signed in as ${label}${plan ? ` (${plan} plan)` : ""}` : "signed in");
+    return remoteFrom(client);
   }
 }

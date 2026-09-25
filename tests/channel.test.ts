@@ -71,9 +71,11 @@ interface Options {
    * competing for 51004 with whatever else is on the machine.
    */
   cached?: boolean;
+  /** Put a readable identity beside the cached tokens, as a real sign-in does. */
+  identity?: Record<string, unknown>;
 }
 
-function startBridge(bellman: Bellman, { key, cached = true }: Options = {}): Bridge {
+function startBridge(bellman: Bellman, { key, cached = true, identity }: Options = {}): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bellman-channel-"));
   dirs.push(configHome);
   servers.push(bellman.server);
@@ -91,6 +93,7 @@ function startBridge(bellman: Bellman, { key, cached = true }: Options = {}): Br
             // Deliberately not a JWT: a token to try, with no readable identity
             // behind it, which is what the ready line below reports as unknown.
             tokens: { access_token: "not.a.jwt", expires_at: Date.now() + 3_600_000 },
+            ...(identity ? { identity } : {}),
           },
         },
       }),
@@ -164,7 +167,7 @@ describe("the bridge as a process", () => {
 
     expect({ ready, log: bridge.log(), exitCode: bridge.proc.exitCode }).toEqual({
       ready: true,
-      log: [`ready: channel delivery via ${bellman.url} (signing in)`],
+      log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
       // Not exit 1 with "BELLMAN_KEY is not set; refusing to start".
       exitCode: null,
     });
@@ -227,7 +230,7 @@ describe("the bridge as a process", () => {
       stopped: "exited",
       code: 0,
       signal: null,
-      log: [`ready: channel delivery via ${bellman.url} (signing in)`],
+      log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
     });
   });
 
@@ -244,9 +247,27 @@ describe("the bridge as a process", () => {
     expect({ reported, log: bridge.log() }).toEqual({
       reported: true,
       log: [
-        `ready: channel delivery via ${bellman.url} (signing in)`,
+        `ready: channel delivery via ${bellman.url} (not signed in yet)`,
         expect.stringMatching(/^sign-in failed: .*nope/),
       ],
+    });
+  });
+
+  /**
+   * The ready line names which of the three states the start is in, because the
+   * browser is the surprising part and a cached credential is the silent case.
+   */
+  it("says it is already signed in when the cached credential names an account", async () => {
+    const bellman = await fakeBellman(hangs);
+    const bridge = startBridge(bellman, {
+      identity: { userId: "u_jesse", orgId: null, plan: "free", role: "member", label: "jesse@github" },
+    });
+
+    const ready = await until(() => bridge.log().length > 0);
+
+    expect({ ready, log: bridge.log() }).toEqual({
+      ready: true,
+      log: [`ready: channel delivery via ${bellman.url} (signed in)`],
     });
   });
 

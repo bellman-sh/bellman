@@ -121,4 +121,15 @@ process.on("SIGINT", shutdown);
 process.stdin.on("close", shutdown);
 
 await bridge.server.connect(new StdioServerTransport());
-log(`ready: ${delivery} delivery via ${url}` + (key ? " (BELLMAN_KEY)" : " (signing in)"));
+/**
+ * Which of the three states this start is in, because the browser is about to
+ * be the surprising part. A cached credential is reused in silence and a fresh
+ * machine is not, and the difference is invisible from the outside — so a user
+ * asking "why did a tab just open" has the answer in the line above it. Safe to
+ * call: signedInAs catches its own credentialsDir(), and a key never reads at all.
+ */
+const state = whoami().source;
+log(
+  `ready: ${delivery} delivery via ${url} ` +
+    (state === "env" ? "(BELLMAN_KEY)" : state === "oauth" ? "(signed in)" : "(not signed in yet)")
+);

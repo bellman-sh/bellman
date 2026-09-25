@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -697,6 +698,24 @@ describe("connectSignedIn", () => {
     expect(calls).toHaveLength(1); // no browser anywhere in that
   });
 
+  /**
+   * "another Bellman sign-in is holding the lock, delete the file if nothing
+   * is" was true in every word and wrong in its conclusion: the lock is held
+   * legitimately, by a bridge mid-sign-in, and someone who follows that advice
+   * breaks it. The reason we are here is that the saved credential needs a
+   * browser, so that has to be the part they read first.
+   */
+  it("says the sign-in needs a browser when the lock is held, not just that the lock is held", async () => {
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    try {
+      await expect(
+        connect(fakeBellman(), [], { lock: { heartbeatMs: 20, waitMs: 100 } })
+      ).rejects.toThrow(/needs a browser/i);
+    } finally {
+      holder.release();
+    }
+  });
+
   it("gives up cleanly when every loopback port is busy and there is no token", async () => {
     for (const port of TEST_PORTS) await block(port);
     await expect(connect(fakeBellman(), [])).rejects.toThrow(/loopback port/i);
@@ -900,6 +919,45 @@ describe("connectSignedIn", () => {
       connect(bellman, [], { signal: controller.signal, fetchImpl: stalled })
     ).rejects.toThrow(SignInCancelled);
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  /**
+   * The seam between two fixes that are each correct on their own. Persist is
+   * deliberately signal-less, so a shutdown cannot cost a refresh its rotation.
+   * Arming it up front in the !lock branch was also right — there is no lock of
+   * our own to deadlock against. Together they put a signal-less wait INSIDE
+   * connectSignedIn, in the one branch that exists because another bridge is
+   * holding the lock, most likely for a browser flow a human has not finished.
+   */
+  it("gives up the write, not the process, when a shutdown lands in the no-lock branch", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+    const stored = readServer(dir, RESOURCE);
+    // Stale, so the cached connect must refresh and therefore must write.
+    writeServer(dir, RESOURCE, {
+      ...stored,
+      tokens: { ...stored.tokens!, access_token: STALE, expires_at: Date.now() - 1 },
+    });
+
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    try {
+      const controller = new AbortController();
+      const waitMs = 1_500;
+      // After the main acquire has given up, so we reach the !lock branch, and
+      // while the write that follows it is still contending for the lock.
+      setTimeout(() => controller.abort(), waitMs + 150);
+      const started = Date.now();
+      await expect(
+        connect(bellman, [], { signal: controller.signal, lock: { heartbeatMs: 20, waitMs } })
+      ).rejects.toThrow(SignInCancelled);
+      const elapsed = Date.now() - started;
+
+      // Settled promptly after the abort. A signal-less wait here would have
+      // run the full waitMs past it, on top of the wait already survived.
+      expect(elapsed).toBeLessThan(waitMs + 1_000);
+    } finally {
+      holder.release();
+    }
   });
 
   // ------------------------------------------------------------------ R2
@@ -1166,6 +1224,44 @@ describe("connectSignedIn", () => {
     const failure = connect(bellman, [], { fetchImpl: refusing });
     await expect(failure).rejects.toThrow(/invalid_grant|code is invalid/i);
     await expect(failure).rejects.not.toThrow(/listener is closed/i);
+  });
+
+  /**
+   * The last uninterruptible wait in the system, measured rather than reasoned
+   * about. makePersist stays signal-less on purpose, so a refresh firing as the
+   * bridge shuts down starts a lock wait nothing can cancel — and if another
+   * bridge holds that lock for a browser flow, it is WAIT_MS behind a human.
+   * The claim that it cannot delay the exit is the claim being checked here:
+   * channel.ts ends at process.exit(), which does not wait for pending
+   * promises, so the write is abandoned rather than the process detained.
+   */
+  it("a lock wait still pending does not hold up process.exit", async () => {
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    const script = join(dir, "exiter.mjs");
+    writeFileSync(script, [
+      `import { acquireLock } from ${JSON.stringify(new URL("../src/credentials.ts", import.meta.url).href)};`,
+      // Never awaited, exactly as a persist in flight at shutdown is not.
+      `void acquireLock(${JSON.stringify(dir)}, { waitMs: 30_000, heartbeatMs: 20 });`,
+      `setTimeout(() => process.exit(0), 100);`,
+    ].join("\n"));
+
+    try {
+      const started = Date.now();
+      const code = await new Promise<number | null>((resolve, reject) => {
+        const child = spawn(process.execPath, ["--import", "tsx", script], {
+          cwd: fileURLToPath(new URL("..", import.meta.url)),
+          stdio: ["ignore", "ignore", "inherit"],
+        });
+        child.once("error", reject);
+        child.once("close", resolve);
+      });
+      const elapsed = Date.now() - started;
+      expect(code).toBe(0);
+      // Not the 30s the lock wait would have taken if it detained the process.
+      expect(elapsed).toBeLessThan(10_000);
+    } finally {
+      holder.release();
+    }
   });
 
   // ------------------------------------------------------------------ R5

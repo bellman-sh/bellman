@@ -538,7 +538,40 @@ function makePersist(
   lockOpts: LockOptions,
   log: (message: string) => void
 ): (cred: ServerCredential) => Promise<void> {
-  const writeOnce = async (cred: ServerCredential): Promise<void> => {
+  const writeOnce = (cred: ServerCredential) => writeMerged(dir, serverUrl, cred, lockOpts, log);
+
+  /**
+   * One at a time, explicitly. Two rapid refreshes must not interleave their
+   * read-modify-write. It happens to hold today without this — set() assigns
+   * and enters persist in one synchronous step, and acquireLock reaches
+   * openSync with no await ahead of it — but that is an emergent property of
+   * two unrelated functions, and a single await added before either would break
+   * it silently. The chain makes the ordering something the code states.
+   */
+  let tail: Promise<void> = Promise.resolve();
+  return (cred: ServerCredential): Promise<void> => {
+    const mine = tail.then(() => writeOnce(cred), () => writeOnce(cred));
+    tail = mine.then(() => undefined, () => undefined);
+    return mine;
+  };
+}
+
+/**
+ * Merge a credential into the file, under the lock.
+ *
+ * The lock options are the caller's, and the difference matters: a post-connect
+ * refresh passes no signal, because a shutdown must not cost it the rotation,
+ * while a write that happens INSIDE connectSignedIn passes one, because an
+ * uninterruptible wait there is a shutdown the process cannot complete.
+ */
+async function writeMerged(
+  dir: string,
+  serverUrl: string,
+  cred: ServerCredential,
+  lockOpts: LockOptions,
+  log: (message: string) => void
+): Promise<void> {
+  {
     const held = await acquireLock(dir, lockOpts);
     if (!held) {
       // Degrade, never throw: this runs inside a live session's tool call, and
@@ -560,22 +593,7 @@ function makePersist(
     } finally {
       held.release();
     }
-  };
-
-  /**
-   * One at a time, explicitly. Two rapid refreshes must not interleave their
-   * read-modify-write. It happens to hold today without this — set() assigns
-   * and enters persist in one synchronous step, and acquireLock reaches
-   * openSync with no await ahead of it — but that is an emergent property of
-   * two unrelated functions, and a single await added before either would break
-   * it silently. The chain makes the ordering something the code states.
-   */
-  let tail: Promise<void> = Promise.resolve();
-  return (cred: ServerCredential): Promise<void> => {
-    const mine = tail.then(() => writeOnce(cred), () => writeOnce(cred));
-    tail = mine.then(() => undefined, () => undefined);
-    return mine;
-  };
+  }
 }
 
 /**
@@ -649,16 +667,44 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
     const cached = readServer(dir, opts.serverUrl);
     if (cached.tokens?.access_token) {
       /**
-       * Persist is armed up front here, because we hold no lock for it to
-       * deadlock against, and it takes the lock itself when a refresh actually
-       * lands — by which time whoever is holding it now is long finished.
+       * Nothing is armed for this connect. Arming persist here used to look
+       * right — we hold no lock of our own to deadlock against — but it put a
+       * SIGNAL-LESS lock wait inside connectSignedIn, in the one branch that
+       * exists because another bridge is holding the lock, very likely for a
+       * browser flow a human has not finished. A shutdown then waited out the
+       * full WAIT_MS on top of the wait it had already survived.
+       *
+       * So: connect, then one write with the signal attached. An abort gives up
+       * the WRITE, which costs a rotation; the alternative was giving up the
+       * process, which costs the lock. Only once that write is done, and a
+       * refresh can no longer be in-connect, does persist take over.
        */
-      const attempt = await connectCached(opts, dir, cached, persist);
-      if (attempt.remote) return attempt.remote;
+      const attempt = await connectCached(opts, dir, cached);
+      if (attempt.remote) {
+        await writeMerged(dir, opts.serverUrl, attempt.provider.cred, { ...opts.lock, signal: opts.signal }, log);
+        if (opts.signal?.aborted) {
+          // The write was given up, and the cancelling fetch has already made
+          // this connection refuse everything. Handing it back would be handing
+          // back a Remote that cannot answer; say what happened instead.
+          await attempt.remote.close().catch(() => undefined);
+          throw new SignInCancelled("the sign-in was cancelled");
+        }
+        attempt.provider.armPersist(persist);
+        return attempt.remote;
+      }
       // It wants a browser, and a browser needs the lock we could not get.
     }
+    /**
+     * Naming the lock alone was actively misleading: every word of "another
+     * sign-in is holding it, delete the file if nothing is" was true, and the
+     * conclusion it invites — delete a lock another bridge legitimately holds
+     * mid-sign-in — breaks that bridge. The reason we are here is that the
+     * saved credential needs a browser, so say that first.
+     */
     throw new Error(
-      `another Bellman sign-in is holding ${join(dir, LOCK_FILE)}. If nothing is signing in, delete that file.`
+      `the saved sign-in needs a browser, and another Bellman sign-in is holding ` +
+        `${join(dir, LOCK_FILE)} — most likely finishing one of its own. Try again in a moment. ` +
+        `If nothing anywhere is signing in, delete that file.`
     );
   }
 

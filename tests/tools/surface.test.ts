@@ -108,6 +108,23 @@ describe("tool surface", () => {
     expect(flat).toContain("up to your plan's member limit");
   });
 
+  // A joiner's human decides on the verbs a room declares, and nothing enforces
+  // them at call time yet. Each tool that returns the room block says so. When #2
+  // enforces verbs, the trip-wire in exchange.test.ts fails first, and these
+  // sentences (and the README's) go with it.
+  it("says on every tool that shows a room's verbs that they are declared, not yet enforced", async () => {
+    const { tools } = await jesse.listTools();
+    const showsVerbs = ["bellman_confirm", "bellman_connect", "bellman_start"];
+    for (const name of showsVerbs) {
+      const doc = tools.find((t) => t.name === name)!.description!.replace(/\s+/g, " ");
+      expect(doc, name).toContain("not yet enforced at call time");
+    }
+    // No other tool mentions verbs, so none can be showing them unqualified.
+    for (const t of tools.filter((t) => !showsVerbs.includes(t.name))) {
+      expect(t.description, t.name).not.toMatch(/verbs/i);
+    }
+  });
+
   /** INVARIANT 4: tools only — no resources, prompts, sampling or elicitation. */
   it("advertises tools and nothing else", () => {
     const caps = jesse.serverCapabilities();

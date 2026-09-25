@@ -18,7 +18,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | Tool | Purpose |
 |---|---|
 | `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
-| `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists, and the one you would get). **Nothing of yours ships yet.** |
+| `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are declared, not yet enforced). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
@@ -28,7 +28,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 ## Trust model
 
-- **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists, and the one they would get) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
+- **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists and the one they would get; verbs are declared, not yet enforced) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
 - **Untrusted envelopes**: peer-written briefs, messages and artifacts arrive wrapped `{ trust: "untrusted", origin, data }`, and a response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions. `structuredContent` has none, so there `trust` is the only marker; role names, modes, verbs and agent fields ship unwrapped.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
@@ -119,6 +119,10 @@ creator_role: lead
 
 Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`,
 `audit`, `close_room`. Every member can always sync and leave.
+
+Verbs are declared, not yet enforced: the server records them and shows
+them to joiners but does not check them when a call is made, so read
+them as the creator's stated intent, not a guarantee.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

@@ -46,7 +46,7 @@ Five things the spec implies that a happy path will not exercise. Each has its t
 - Test: `tests/manifest.test.ts`
 
 **Interfaces:**
-- Consumes: existing `Verb`, `PresetName`, `RoleDef`, `RoomManifest`, `Session`, `SessionMode` from `src/types.js`; `VERBS`, `PRESETS`, `resolveManifest`, `ManifestShape` from `src/manifest.js`.
+- Consumes: existing `Verb`, `PresetName`, `RoleDef`, `RoomManifest`, `Session`, `SessionMode` from `src/types.js`; `VERBS`, `resolveManifest`, `ManifestShape` from `src/manifest.js`. `PRESETS` is private to that module and nothing may import it; Step 4 edits it in place.
 - Produces: `RoomSummary` (from `src/types.js`); `Verb` including `"summarize"`; `RoomManifest.scribe: boolean`; `Session.summary: RoomSummary | null`; `roomSummary(over?)` from `tests/helpers/fixtures.js`.
 
 - [ ] **Step 1: Write the failing tests**

@@ -139,7 +139,11 @@ function role(can: Verb[], description: string): RoleDef {
   return { can, description };
 }
 
-export const PRESETS: Record<PresetName, PresetBody> = {
+/**
+ * Not exported, on purpose. The `can` arrays are mutable, so an importer that could reach this would
+ * change every later resolution by editing one. What leaves the module is a structuredClone of it.
+ */
+const PRESETS: Record<PresetName, PresetBody> = {
   pair: {
     mode: "pair",
     roles: {

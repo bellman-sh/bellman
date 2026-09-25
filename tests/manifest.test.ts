@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
 } from "../src/manifest.js";
+import * as manifestModule from "../src/manifest.js";
 
 function authored(over: Record<string, unknown> = {}) {
   return {
@@ -56,13 +57,14 @@ describe("presets", () => {
     expect(resolveManifest(authored()).preset).toBeNull();
   });
 
-  // PRESETS is a module-level object. If a caller could reach it, one room's edit
-  // would change every later room cited from that preset, and #2 or #3 may well
-  // edit a manifest (promoting a member is a verb pushed onto a role). Nothing in
-  // src/ mutates a manifest today, so this is the only test that fails when the
-  // clone in resolveManifest is dropped or made shallow. The mutation is deep on
-  // purpose: a shallow copy shares the role objects, and a per-role copy still
-  // shares each `can` array.
+  // PRESETS is a module-level object, private to manifest.ts, so what a caller can
+  // reach is the copies resolveManifest hands out. If a copy shared anything with
+  // it, one room's edit would change every later room cited from that preset, and
+  // #2 or #3 may well edit a manifest (promoting a member is a verb pushed onto a
+  // role). Nothing in src/ mutates a manifest today, so this is the only test that
+  // fails when the clone in resolveManifest is dropped or made shallow. The
+  // mutation is deep on purpose: a shallow copy shares the role objects, and a
+  // per-role copy still shares each `can` array.
   it.each(PRESET_NAMES)("hands each %s room its own copy of the preset's roles", (name) => {
     const expected = structuredClone(resolveManifest({ room: "before", preset: name }).roles);
 
@@ -74,6 +76,15 @@ describe("presets", () => {
     first.roles.intruder = { can: ["close_room"], description: null };
 
     expect(resolveManifest({ room: "second", preset: name }).roles).toEqual(expected);
+  });
+
+  // The other way in is the module's own exports, and the test above cannot see it: it only
+  // mutates the copies. Exported, the catalog's nested `can` arrays are open to any importer,
+  // each of whom could change every later resolution. Nothing imports it, so it stays private;
+  // this is what keeps it so. (A re-export under another name is beyond a name check, which is
+  // why the catalog should not be handed out at all.)
+  it("keeps the preset catalog out of the module's exports", () => {
+    expect(Object.keys(manifestModule)).not.toContain("PRESETS");
   });
 
   // Presets bypass the shape and the cross-field checks, so nothing else stops a

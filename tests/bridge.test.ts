@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
@@ -507,5 +509,215 @@ describe("bellman_whoami", () => {
         logs: ["whoami: unrecognised answer; reporting unknown"],
       });
     });
+  });
+});
+
+/**
+ * A credential dies mid-session far more often than at the start of one: an
+ * access token expires every ten minutes, a refresh token rotates or is
+ * revoked, a key is rotated. All of that arrives as a rejected callTool or
+ * listTools on a connection that was fine when it was made — never as a failed
+ * connect, which is the only thing the bridge used to react to.
+ */
+describe("a connection Bellman stops accepting", () => {
+  const RETIRED = "Bellman rejected this connection; reconnecting on the next call";
+
+  interface Conn {
+    id: number;
+    closed: boolean;
+    calls: string[];
+  }
+
+  /** A remote factory that records every connection it hands out. */
+  function connector(failWith: (conn: Conn, name: string) => unknown | undefined) {
+    const conns: Conn[] = [];
+    const ok: CallToolResult = { content: [{ type: "text", text: "ok" }], structuredContent: {} };
+    const remote = async (): Promise<Remote> => {
+      const conn: Conn = { id: conns.length, closed: false, calls: [] };
+      conns.push(conn);
+      return {
+        listTools: async () => {
+          conn.calls.push("listTools");
+          const err = failWith(conn, "listTools");
+          if (err) throw err;
+          return { tools: [] };
+        },
+        callTool: async ({ name }) => {
+          conn.calls.push(name);
+          const err = failWith(conn, name);
+          if (err) throw err;
+          return ok;
+        },
+        close: async () => {
+          conn.closed = true;
+        },
+      };
+    };
+    return { conns, remote };
+  }
+
+  // bellman_audit, because observe() ignores it: arming a watcher here would put
+  // background polls into conn.calls and race every assertion below.
+  const INERT = "bellman_audit";
+
+  /**
+   * A remote that THROWS, rather than answering isError, comes back to Claude
+   * Code as a JSON-RPC error and rejects here — which is exactly the shape a
+   * 401 out of the SDK's transport has.
+   */
+  const attempt = (s: Session) => s.call(INERT).then(() => "answered", () => "rejected");
+
+  const rejections = [
+    { what: "an UnauthorizedError the SDK could not recover from",
+      make: () => new UnauthorizedError(), retires: true },
+    { what: "a 401 with no auth provider, so a revoked BELLMAN_KEY",
+      make: () => new StreamableHTTPError(401, "Error POSTing to endpoint: unauthorized"), retires: true },
+    { what: "a 401 that arrived straight after a successful refresh",
+      make: () => new StreamableHTTPError(401, "Server returned 401 after successful authentication"), retires: true },
+    // A 403 is an entitlement, not a credential: signing in again fixes nothing
+    // and costs the user a browser tab.
+    { what: "a 403 after up-scoping",
+      make: () => new StreamableHTTPError(403, "Server returned 403 after trying upscoping"), retires: false },
+    { what: "a 500",
+      make: () => new StreamableHTTPError(500, "Error POSTing to endpoint: boom"), retires: false },
+    { what: "a socket hang-up", make: () => new Error("socket hang up"), retires: false },
+  ];
+
+  it.each(rejections)("after $what, retires the connection: $retires", async ({ make, retires }) => {
+    const logs: string[] = [];
+    let calls = 0;
+    const { conns, remote } = connector(() => (calls++ === 0 ? make() : undefined));
+    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+
+    const first = await attempt(a);
+    const second = await attempt(a);
+
+    expect({
+      outcomes: [first, second],
+      conns: conns.map((c) => ({ closed: c.closed, calls: c.calls })),
+      logs,
+    }).toEqual({
+      outcomes: ["rejected", "answered"],
+      conns: retires
+        // Retired: closed, and the second call landed on a connection of its own.
+        ? [{ closed: true, calls: [INERT] }, { closed: false, calls: [INERT] }]
+        // Kept: one connection, still open, and it served both calls.
+        : [{ closed: false, calls: [INERT, INERT] }],
+      logs: retires ? [RETIRED] : [],
+    });
+  });
+
+  it("retires on a rejected tools/list too, not only on a tool call", async () => {
+    const logs: string[] = [];
+    let calls = 0;
+    const { conns, remote } = connector(() => (calls++ === 0 ? new UnauthorizedError() : undefined));
+    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+
+    const first = await a.client.listTools().then(() => "listed", () => "rejected");
+    const second = (await a.client.listTools()).tools.map((t) => t.name);
+
+    expect({
+      first,
+      second,
+      conns: conns.map((c) => ({ closed: c.closed, calls: c.calls })),
+      logs,
+    }).toEqual({
+      first: "rejected",
+      second: ["bellman_whoami"],
+      conns: [{ closed: true, calls: ["listTools"] }, { closed: false, calls: ["listTools"] }],
+      logs: [RETIRED],
+    });
+  });
+
+  it("retires once when several calls in flight are rejected together", async () => {
+    const logs: string[] = [];
+    const { conns, remote } = connector((conn) => (conn.id === 0 ? new UnauthorizedError() : undefined));
+    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+
+    const together = await Promise.all([attempt(a), attempt(a), attempt(a)]);
+    const after = await attempt(a);
+
+    expect({
+      together,
+      after,
+      conns: conns.map((c) => ({ closed: c.closed, calls: c.calls.length })),
+      logs,
+    }).toEqual({
+      together: ["rejected", "rejected", "rejected"],
+      after: "answered",
+      // Three rejections, one retirement, one replacement — not three.
+      conns: [{ closed: true, calls: 3 }, { closed: false, calls: 1 }],
+      logs: [RETIRED],
+    });
+  });
+
+  /**
+   * The watcher is the case that hurts. It is the only caller that runs with
+   * nobody watching, so a Remote it can never re-make is a session that silently
+   * stops delivering peer events for as long as Claude Code stays open.
+   */
+  it("a watcher whose poll is rejected reconnects and goes on delivering", async () => {
+    const logs: string[] = [];
+    const conns: { closed: boolean }[] = [];
+    const remote = async (): Promise<Remote> => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      const conn = { closed: false };
+      const id = conns.push(conn) - 1;
+      return {
+        listTools: () => real.listTools(),
+        // EVERY sync on the first connection, not just one: a bridge that keeps
+        // a dead Remote must never deliver, or this test passes without the fix.
+        callTool: (p) =>
+          id === 0 && p.name === "bellman_sync"
+            ? Promise.reject(new UnauthorizedError())
+            : real.callTool(p),
+        close: async () => {
+          conn.closed = true;
+          await real.close();
+        },
+      };
+    };
+
+    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const joiner = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(creator, joiner);
+    const sent = await joiner.call("bellman_send", {
+      session_id: sessionId, member_id: joinerMember, type: "message", payload: { text: "still there?" },
+    });
+    expect(sent.isError, sent.text).toBe(false);
+
+    await until(() => channelEvents(creator).some((e) => e.meta.type === "message"));
+
+    expect({
+      conns,
+      events: channelEvents(creator).map((e) => e.meta.type),
+      retirements: logs.filter((m) => m === RETIRED),
+    }).toEqual({
+      conns: [{ closed: true }, { closed: false }],
+      // The join the dead connection never got to report, and the message after it.
+      events: ["member_joined", "message"],
+      retirements: [RETIRED],
+    });
+  });
+
+  it("still lets the next call retry when the connect itself rejects", async () => {
+    const logs: string[] = [];
+    let attempts = 0;
+    const remote = async (): Promise<Remote> => {
+      if (attempts++ === 0) throw new Error("dial tone");
+      return {
+        listTools: async () => ({ tools: [] }),
+        callTool: async () => ({ content: [{ type: "text", text: "ok" }], structuredContent: {} }),
+        close: async () => undefined,
+      };
+    };
+    const a = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+
+    const first = await attempt(a);
+    const second = await attempt(a);
+
+    // No retirement: nothing was ever connected to retire.
+    expect({ outcomes: [first, second], attempts, logs })
+      .toEqual({ outcomes: ["rejected", "answered"], attempts: 2, logs: [] });
   });
 });

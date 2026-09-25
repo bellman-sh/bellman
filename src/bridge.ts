@@ -1,5 +1,8 @@
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  StreamableHTTPClientTransport, StreamableHTTPError,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
@@ -59,6 +62,32 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
     callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
     close: () => client.close(),
   };
+}
+
+/**
+ * Has Bellman stopped accepting this connection?
+ *
+ * Exactly the two errors that mean "the credential behind this transport is no
+ * longer good", and nothing else:
+ *
+ *   - UnauthorizedError — a 401 the SDK's own auth() could not recover from.
+ *     On the signed-in path that means the refresh token is dead too.
+ *   - StreamableHTTPError with code 401 — either no authProvider at all (the
+ *     BELLMAN_KEY path, where a 401 is a revoked key) or the SDK's circuit
+ *     breaker firing on a 401 that arrived straight after a successful refresh.
+ *
+ * NOT a 403. The SDK raises StreamableHTTPError(403) when up-scoping fails, and
+ * Bellman also answers 403 for an entitlement a plan does not carry. Neither is
+ * fixed by signing in again, and treating it as unauthorized would open a
+ * browser at a user whose credential was never the problem.
+ *
+ * NOT a transport failure either — a socket hang-up, a 500, a DNS error. Those
+ * are worth retrying on the connection we have; throwing it away would cost a
+ * reconnect, and on the signed-in path a credential-lock round trip, for nothing.
+ */
+export function unauthorized(err: unknown): boolean {
+  if (err instanceof UnauthorizedError) return true;
+  return err instanceof StreamableHTTPError && err.code === 401;
 }
 
 export interface BridgeOptions {
@@ -166,13 +195,72 @@ export function createBridge(opts: BridgeOptions) {
   const watches = new Map<string, Watch>(); // keyed by member_id
   let closed = false;
   let remotePromise: Promise<Remote> | undefined;
+  /** What remotePromise last resolved to. Lets a retire check identity without awaiting. */
+  let live: Remote | undefined;
 
   function remote(): Promise<Remote> {
-    remotePromise ??= opts.remote().catch((err: unknown) => {
-      remotePromise = undefined; // let the next call retry
-      throw err;
-    });
+    remotePromise ??= opts.remote().then(
+      (fresh) => (live = retiring(fresh)),
+      (err: unknown) => {
+        remotePromise = undefined; // let the next call retry
+        throw err;
+      }
+    );
     return remotePromise;
+  }
+
+  /**
+   * A Remote that takes itself out of the cache the moment Bellman stops
+   * accepting it.
+   *
+   * Clearing remotePromise only when the CONNECT rejects is not enough. A
+   * credential dies in the middle of a session far more often than at the start
+   * of one — an access token expires every ten minutes, a refresh token is
+   * rotated or revoked, a key is rotated — and all of that arrives as a rejected
+   * callTool or listTools on a connection that was fine when it was made. Cached
+   * past that, the dead Remote answers every later call with the same 401 until
+   * Claude Code is restarted, which is indistinguishable from Bellman being down.
+   *
+   * Wrapped once here rather than checked at each of the three call sites
+   * (tools/list, the tool handler, and the watcher's poll), so a fourth cannot
+   * forget.
+   *
+   * The error still propagates: this call fails, and the NEXT one reconnects —
+   * re-entering connectSignedIn, which is what may have to open a browser. It is
+   * not retried transparently, because the calls that come through here include
+   * bellman_send, and a caller that is told nothing happened can decide for
+   * itself whether to say it twice.
+   */
+  function retiring(fresh: Remote): Remote {
+    const retire = (): void => {
+      /**
+       * One guard, doing both jobs. Several calls are usually in flight when a
+       * credential dies and every one of them is rejected, so this has to be
+       * once-only; and whatever is live at that moment is the only thing worth
+       * clearing, so a connection that has already been replaced must not take
+       * its replacement with it. Both are the same question — "is this still
+       * the connection the bridge would hand out?" — and `live` answers it
+       * without awaiting a connect that may be a browser flow in progress.
+       */
+      if (live !== self) return;
+      remotePromise = undefined;
+      live = undefined;
+      log("Bellman rejected this connection; reconnecting on the next call");
+      // Not awaited. close() on a streamable transport is itself a request, and
+      // a server that has stopped answering is exactly the case we are in — the
+      // caller's error must not wait behind it.
+      void fresh.close().catch(() => undefined);
+    };
+    const fail = (err: unknown): never => {
+      if (unauthorized(err)) retire();
+      throw err;
+    };
+    const self: Remote = {
+      listTools: () => fresh.listTools().catch(fail),
+      callTool: (params) => fresh.callTool(params).catch(fail),
+      close: () => fresh.close(),
+    };
+    return self;
   }
 
   const server = new Server(
@@ -463,6 +551,10 @@ export function createBridge(opts: BridgeOptions) {
     watches.clear();
     persistMemberships();
     const connected = await remotePromise?.catch(() => undefined);
+    // Nothing is live once this returns, so a rejection still on its way from
+    // the connection being closed cannot log a retirement into a shutdown.
+    remotePromise = undefined;
+    live = undefined;
     await connected?.close();
   }
 

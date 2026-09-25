@@ -787,11 +787,21 @@ describe("connectSignedIn", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("never binds a port or opens a browser when the signal is already aborted", async () => {
+  /**
+   * And before reaching the server at all. A later check would also refuse to
+   * open a browser, so counting browser calls cannot tell the two apart; the
+   * one observable difference is whether a request was ever sent.
+   */
+  it("never binds a port, reaches the server, or opens a browser when the signal is already aborted", async () => {
     const calls: URL[] = [];
+    const bellman = fakeBellman();
+    let requests = 0;
+    const counted: typeof fetch = (input, init) => { requests += 1; return bellman.fetch(input, init); };
+
     await expect(
-      connect(fakeBellman(), calls, { signal: AbortSignal.abort() })
+      connect(bellman, calls, { signal: AbortSignal.abort(), fetchImpl: counted })
     ).rejects.toThrow(SignInCancelled);
+    expect(requests).toBe(0);
     expect(calls).toHaveLength(0);
     await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
   });

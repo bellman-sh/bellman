@@ -190,8 +190,15 @@ The bridge reads the file from the directory Claude Code was started in
 uses one. A `manifest` argument passed to `bellman_start` always wins
 over the file. A file that is malformed, unreadable, over 64 KB or not a
 regular file fails locally, before anything is sent; with no file and no
-argument, the server's own validation error comes back. Only the parsed
-object reaches the server, which has no YAML parser.
+argument, the server's own validation error comes back.
+
+Those local checks are about the FILE, not the manifest. The bridge does
+not know the schema — the server owns that, and has exactly one copy of
+it. So a file that is valid YAML and parses to a mapping is sent even
+when the manifest inside it is wrong: an unknown key, an invalid preset,
+a `default_role` naming no role are all reported by the server, which
+means that request does cross the wire and comes back an error. Only the
+parsed object reaches the server, which has no YAML parser.
 
 ## Production path
 

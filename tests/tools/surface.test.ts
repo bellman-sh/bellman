@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
+import { VERBS } from "../../src/manifest.js";
 
 const EXPECTED_TOOLS = [
   "bellman_start",
@@ -123,6 +124,18 @@ describe("tool surface", () => {
     for (const t of tools.filter((t) => !showsVerbs.includes(t.name))) {
       expect(t.description, t.name).not.toMatch(/verbs/i);
     }
+  });
+
+  // The one place a caller reads which verbs it may author is this line, and it is prose beside an enum
+  // it can outlive without anything noticing: it went on saying `audit, close_room` after the enum
+  // dropped them, so every model was told to author verbs the server rejects while the suite stayed
+  // green. Compared with the enum itself, neither can change without this failing.
+  it("lists in bellman_start's description exactly the verbs a manifest may hold", async () => {
+    const { tools } = await jesse.listTools();
+    const doc = tools.find((t) => t.name === "bellman_start")!.description!;
+    const listed = /^\s*Verbs: (.+)\.$/m.exec(doc)?.[1];
+    expect(listed, "bellman_start's description has a `Verbs:` line").toBeDefined();
+    expect(listed!.split(", ").sort()).toEqual([...VERBS].sort());
   });
 
   /** INVARIANT 4: tools only — no resources, prompts, sampling or elicitation. */

@@ -249,7 +249,7 @@ Args:
   - manifest: the room's declaration. Either cite a preset —
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
-    Verbs: send, invite, revoke, request_actions, respond_actions, audit, close_room.
+    Verbs: send, invite, revoke, request_actions, respond_actions.
     Verbs are declared, not yet enforced at call time: a role's list states your intent, not a guarantee.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.

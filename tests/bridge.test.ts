@@ -294,9 +294,13 @@ describe("bellman_whoami", () => {
   const signedIn = {
     source: "oauth", label: "jesse@github", plan: "free", role: "member", org_id: null,
   } satisfies WhoAmI;
+  const SIGNED_IN_TEXT = "Signed in as jesse@github — free plan, role member, org none.";
   const ENV_TEXT =
     "Using a BELLMAN_KEY from the environment. This bridge cannot tell whose key it is; " +
     "the server resolves it on every call.";
+  const UNKNOWN_TEXT =
+    "This bridge has no readable sign-in to report, so it cannot say which account peers will see. " +
+    "The server still resolves your identity on every call.";
 
   async function asked(session: Session) {
     const { isError, data, text } = await session.call("bellman_whoami");
@@ -309,12 +313,14 @@ describe("bellman_whoami", () => {
   ];
 
   it("reports the signed-in identity", async () => {
-    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn });
+    const logs: string[] = [];
+    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn, log: (m) => logs.push(m) });
 
-    expect(await asked(a)).toEqual({
+    expect({ ...(await asked(a)), logs }).toEqual({
       isError: false,
       data: signedIn,
-      text: "Signed in as jesse@github — free plan, role member, org none.",
+      text: SIGNED_IN_TEXT,
+      logs: [],
     });
   });
 
@@ -358,7 +364,7 @@ describe("bellman_whoami", () => {
       connects: 0,
       isError: false,
       data: signedIn,
-      text: "Signed in as jesse@github — free plan, role member, org none.",
+      text: SIGNED_IN_TEXT,
     });
   });
 
@@ -382,6 +388,100 @@ describe("bellman_whoami", () => {
     expect({ names, who: await asked(a) }).toEqual({
       names: [...remoteToolNames, "bellman_wait", "bellman_whoami"],
       who: { isError: false, data: { source: "env", label: null }, text: ENV_TEXT },
+    });
+  });
+
+  // decodeIdentity returns an access token's `bellman` claim verbatim, with no field checks, and
+  // the whoami built from it copies fields across. So an oauth answer can reach the bridge missing
+  // any of them, while TypeScript — which believes `label: string` — cannot see it, and a template
+  // literal would print it. A person must never be told "Signed in as undefined".
+  describe("an answer the bridge cannot trust", () => {
+    const whole = { label: "jesse@github", plan: "free", role: "member", org_id: null };
+    const unreadable: [string, Record<string, unknown>, string][] = [
+      ["no label", { plan: "free", role: "member", org_id: null }, "label"],
+      ["a null label", { ...whole, label: null }, "label"],
+      ["an empty label", { ...whole, label: "" }, "label"],
+      ["a blank label", { ...whole, label: "   " }, "label"],
+      ["a numeric label", { ...whole, label: 42 }, "label"],
+      ["an object label", { ...whole, label: { name: "jesse" } }, "label"],
+      ["no plan", { label: "jesse@github", role: "member", org_id: null }, "plan"],
+      ["a blank plan", { ...whole, plan: " " }, "plan"],
+      ["no role", { label: "jesse@github", plan: "free", org_id: null }, "role"],
+      ["a numeric role", { ...whole, role: 7 }, "role"],
+      ["an empty org", { ...whole, org_id: "" }, "org_id"],
+      ["a numeric org", { ...whole, org_id: 42 }, "org_id"],
+      ["an empty claim", {}, "label, plan, role"],
+    ];
+
+    it.each(unreadable)("reports a sign-in with %s as unknown, not as a sign-in", async (_what, claim, unusable) => {
+      const logs: string[] = [];
+      const a = await open(DEV_KEY.jesse, "channel", {
+        whoami: () => ({ source: "oauth", ...claim }) as unknown as WhoAmI,
+        log: (m) => logs.push(m),
+      });
+
+      expect({ ...(await asked(a)), logs }).toEqual({
+        isError: false,
+        data: { source: "unknown", label: null },
+        text: UNKNOWN_TEXT,
+        logs: [`whoami: the sign-in has no usable ${unusable}; reporting unknown`],
+      });
+    });
+
+    it("takes an absent org to mean no org", async () => {
+      // A server that leaves null fields out sends an org-less user a claim with no orgId at all.
+      const a = await open(DEV_KEY.jesse, "channel", {
+        whoami: () => ({ source: "oauth", label: "jesse@github", plan: "free", role: "member" }) as unknown as WhoAmI,
+      });
+
+      expect(await asked(a)).toEqual({ isError: false, data: signedIn, text: SIGNED_IN_TEXT });
+    });
+
+    const carrying: [string, unknown, WhoAmI, string][] = [
+      ["a sign-in", { ...signedIn, user_id: "u_jesse", access_token: "secret-token" }, signedIn, SIGNED_IN_TEXT],
+      ["a static key", { source: "env", label: "jesse@github", access_token: "secret-token" },
+        { source: "env", label: null }, ENV_TEXT],
+      ["an unknown", { source: "unknown", label: "jesse@github", access_token: "secret-token" },
+        { source: "unknown", label: null }, UNKNOWN_TEXT],
+    ];
+
+    it.each(carrying)("reports only its own fields for %s", async (_what, given, expected, text) => {
+      const a = await open(DEV_KEY.jesse, "channel", { whoami: () => given as WhoAmI });
+
+      expect(await asked(a)).toEqual({ isError: false, data: expected, text });
+    });
+
+    it("says unknown without complaint when the callback says so", async () => {
+      const logs: string[] = [];
+      const a = await open(DEV_KEY.jesse, "channel", {
+        whoami: () => ({ source: "unknown", label: null }),
+        log: (m) => logs.push(m),
+      });
+
+      expect({ ...(await asked(a)), logs }).toEqual({
+        isError: false,
+        data: { source: "unknown", label: null },
+        text: UNKNOWN_TEXT,
+        logs: [],
+      });
+    });
+
+    it.each([
+      ["nothing at all", undefined],
+      ["a source it does not know", { source: "saml", label: "jesse@github" }],
+    ])("reports %s as unknown, and logs it", async (_what, given) => {
+      const logs: string[] = [];
+      const a = await open(DEV_KEY.jesse, "channel", {
+        whoami: () => given as unknown as WhoAmI,
+        log: (m) => logs.push(m),
+      });
+
+      expect({ ...(await asked(a)), logs }).toEqual({
+        isError: false,
+        data: { source: "unknown", label: null },
+        text: UNKNOWN_TEXT,
+        logs: ["whoami: unrecognised answer; reporting unknown"],
+      });
     });
   });
 });

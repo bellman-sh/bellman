@@ -617,9 +617,12 @@ describe("the lock", () => {
       try { handle.release(); threw = undefined; } catch (error) { threw = error; }
 
       expect({ threw, listenersLeft: process.listenerCount("exit") - before }).toEqual({
-        // Quiet, AND it finished: the exit listener is gone, so release() ran to
-        // its end rather than stopping at the rmSync.
+        // Completion, and it is `threw` that carries it: the rmSync is the LAST
+        // statement in release(), so not throwing is running to the end.
         threw: undefined,
+        // Deregistration, and only that. process.off is the third statement of
+        // eight, so this says release() got started and cleaned up its listener
+        // — it cannot say anything about the rmSync five lines below it.
         listenersLeft: 0,
       });
     } finally {

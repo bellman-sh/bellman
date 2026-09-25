@@ -38,8 +38,10 @@ the other two are separate systems wearing a scribe costume.
    decision that has no business inside a summarisation feature.
 4. **Active housekeeping** — nudging idle members, flagging stale
    `open_questions`, proposing a room be closed. This makes the scribe an
-   *actor* rather than an observer, holding `close_room` in a room containing
-   another human's agent. It needs #2's enforcement and its own trust model,
+   *actor* rather than an observer, taking irreversible action in a room
+   containing another human's agent. (#1 removed the `close_room` verb for
+   having no room-scoped operation behind it; this work would need that
+   operation to exist before it could grant authority over it.) It needs #2's enforcement and its own trust model,
    and it cannot be built well before this spec ships: housekeeping decisions
    need a summary to reason over.
 

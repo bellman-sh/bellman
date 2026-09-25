@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- `Verb` gains exactly one member: `summarize`. Total verbs becomes 8.
+- `Verb` gains exactly one member: `summarize`. Total verbs becomes 6 — #1 shipped five (`audit` and `close_room` were removed there, having no room-scoped operation behind them).
 - The tool surface goes from 8 (as #1 leaves it) to 9. `surface.test.ts` asserts the count, so it changes with this work.
 - `RoomManifest` gains exactly one field: `scribe: boolean`, defaulting to `true`, set by every preset.
 - `RoomSummary.text` is capped at **4000** characters — not `MAX_PAYLOAD_CHARS` (20 000). A summary is read on every `bellman_connect` and every `bellman_sync`, so its size is a standing tax on the whole room.
@@ -120,8 +120,6 @@ export type Verb =
   | "revoke"
   | "request_actions"
   | "respond_actions"
-  | "audit"
-  | "close_room"
   | "summarize";
 
 /**

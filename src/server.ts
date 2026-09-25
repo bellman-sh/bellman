@@ -99,7 +99,8 @@ function publicMember(m: Member) {
 }
 
 /**
- * The manifest as a joiner sees it, split by trust.
+ * The manifest as one seat sees it, split by trust: a joiner's preview, and the
+ * creator's read-back of what the server recorded.
  *
  * The spine (preset, mode, role keys, verbs) is server-validated — role keys
  * match a short snake_case regex and verbs come from a closed enum — so it
@@ -117,9 +118,14 @@ function publicMember(m: Member) {
  * server (PRESETS in manifest.ts) and still ship under that origin, marked
  * untrusted. That errs toward distrust, the safe direction, so it stays.
  *
- * `viewerRole` must be a role the manifest defines. Both callers pass
- * `manifest.defaultRole`, which resolveManifest checked against `roles`; do not
- * pass a name that has not been validated that way.
+ * `viewerRole` must be a role the manifest defines. The callers pass
+ * `manifest.defaultRole` (the joiner's seat) or `manifest.creatorRole` (the
+ * creator's); resolveManifest checked both against `roles`. Do not pass a name
+ * that has not been validated that way.
+ *
+ * The creator gets the same block, not a second shape: their own words come back
+ * inside the same envelope. That is deliberate. One function builds it for every
+ * seat, so the trust split cannot differ between them.
  */
 function roomPreview(session: Session, viewerRole: string) {
   const m = session.manifest;
@@ -203,16 +209,18 @@ Args:
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions, audit, close_room.
-    The manifest sets the room's mode; there is no separate mode argument.
+    The manifest sets the room's mode; there is no separate mode argument. A "pair"
+    room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
+    The pair and review presets make pair rooms; the swarm preset makes a swarm room.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_code_expires_at, session_expires_at, plan }
-Keep member_id — every subsequent call needs it.
+Returns: { session_id, member_id, join_code, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)} }
+Keep member_id — every subsequent call needs it. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
-Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "org_only requires..." (plan).`,
+Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "swarm mode requires..." (plan), "org_only sessions require..." (plan), "org_only was set but..." (no org), "monthly session limit..." (quota).`,
       inputSchema: {
         manifest: ManifestShape,
         brief: BriefShape,
@@ -287,6 +295,10 @@ Errors: "swarm mode requires..." (plan), "monthly session limit..." (quota), "or
         join_code_expires_at: new Date(session.joinCodeExpiresAt).toISOString(),
         session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,
+        // What the server recorded, seen from the creator's seat. Without it the
+        // author of a manifest, especially one parsed from .bellman/room.yaml,
+        // cannot see a preset or role that validated but is not what they meant.
+        room: roomPreview(session, manifest.creatorRole),
         share_instructions:
           `Give the join code to the other session's user. In that session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own brief.`,
       });

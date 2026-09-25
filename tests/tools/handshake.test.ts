@@ -6,7 +6,8 @@
  *              the identity that minted it.
  * INVARIANT 10: every room is declared. bellman_start needs a manifest and
  *               resolves it before any plan, org or quota check, so a
- *               malformed one creates nothing.
+ *               malformed one creates nothing. What was recorded is read back
+ *               to the creator, who otherwise never sees it.
  * INVARIANT 11: a joiner reads the rules before committing. The connect preview
  *               carries the manifest split by trust — the server-validated spine
  *               as fact, the creator-authored prose inside the untrusted envelope.
@@ -592,6 +593,71 @@ describe("INVARIANT 10 — every room is declared", () => {
     const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;
     expect(roleOf("u_jesse")).toBe("driver");
     expect(roleOf("u_peer")).toBe("navigator");
+  });
+
+  // The creator otherwise never sees what the server recorded. A manifest can
+  // validate and still say something other than what its author meant (the wrong
+  // preset, a role they thought they renamed), and one parsed from
+  // .bellman/room.yaml was never on their screen at all.
+  it("reads the recorded manifest back to its creator, seated in creator_role", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: {
+        room: "reads-back",
+        purpose: "Check what the server kept",
+        mode: "swarm",
+        roles: {
+          // creator_role is neither the first role nor default_role, so a block
+          // built for the wrong seat cannot pass by accident.
+          scribe: { can: ["send"] },
+          driver: { can: ["send", "invite", "close_room"] },
+          watcher: { can: [] },
+        },
+        default_role: "watcher",
+        creator_role: "driver",
+      },
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const session = await h.store.getSession(String(started.data.session_id));
+    const room = started.data.room as {
+      your_role: string; your_verbs: string[]; roles: Record<string, string[]>;
+    };
+    expect(room.your_role).toBe(session?.manifest.creatorRole);
+    expect(room.your_role).toBe("driver");
+    expect(room.your_verbs).toEqual(["send", "invite", "close_room"]);
+    expect(room.roles).toEqual({
+      scribe: ["send"], driver: ["send", "invite", "close_room"], watcher: [],
+    });
+
+    // The same split a joiner gets: one envelope for the prose, nothing else
+    // outside it. The creator's own words come back marked like anyone's.
+    const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
+    expect(Object.keys(started.data.room as object).sort()).toEqual(
+      ["creator_role", "mode", "preset", "roles", "text", "your_role", "your_verbs"],
+    );
+    expect((skin as { trust: string }).trust).toBe("untrusted");
+    for (const prose of ["reads-back", "Check what the server kept"]) {
+      expect(JSON.stringify(spine)).not.toContain(prose);
+    }
+  });
+
+  it("shows a creator who cited a preset what it expanded to", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: { room: "r", preset: "review" },
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const room = started.data.room as {
+      preset: string; mode: string; your_role: string; roles: Record<string, string[]>;
+    };
+    expect(room.preset).toBe("review");
+    expect(room.mode).toBe("pair");
+    expect(room.your_role).toBe("author");
+    expect(room.roles.reviewer).toEqual(["send", "respond_actions"]);
   });
 });
 

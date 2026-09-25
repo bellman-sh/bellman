@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import fs from "node:fs/promises";
+import os, { tmpdir } from "node:os";
+import path, { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
+import { createBridge, loadRoomManifest, type Delivery, type Remote } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
@@ -55,12 +56,16 @@ const opened: Session[] = [];
 let store: BellmanStore;
 let inboxRoot: string;
 
-async function open(key: string, delivery: Delivery = "channel"): Promise<Session> {
+async function open(
+  key: string,
+  delivery: Delivery = "channel",
+  remote: () => Promise<Remote> = () => remoteFor(store, key),
+): Promise<Session> {
   const inboxDir = delivery === "hook" ? join(inboxRoot, `${key}-${opened.length}`) : undefined;
   const bridge = createBridge({
     delivery,
     inboxDir,
-    remote: () => remoteFor(store, key),
+    remote,
     pollWaitSeconds: 1,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -274,5 +279,193 @@ describe("hook delivery (the fallback)", () => {
     await new Promise((r) => setTimeout(r, 1500));
     const leftovers = drain(inbox).filter((e) => e.cursor <= Number(synced.data.cursor));
     expect(leftovers).toEqual([]);
+  });
+});
+
+describe("room.yaml", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-room-"));
+    await fs.mkdir(path.join(dir, ".bellman"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("returns null when there is no room.yaml", () => {
+    expect(loadRoomManifest(dir)).toBeNull();
+  });
+
+  it("parses a preset manifest into the object form", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      "room: payments-migration\npurpose: Port v2 to v3\npreset: review\n",
+    );
+    expect(loadRoomManifest(dir)).toEqual({
+      room: "payments-migration",
+      purpose: "Port v2 to v3",
+      preset: "review",
+    });
+  });
+
+  it("parses an authored manifest with roles", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      [
+        "room: custom",
+        "mode: swarm",
+        "roles:",
+        "  lead:",
+        "    can: [send, invite]",
+        "  helper:",
+        "    can: [send]",
+        "default_role: helper",
+        "creator_role: lead",
+      ].join("\n"),
+    );
+    const m = loadRoomManifest(dir) as Record<string, unknown>;
+    expect(m.mode).toBe("swarm");
+    expect((m.roles as Record<string, { can: string[] }>).lead.can).toEqual(["send", "invite"]);
+  });
+
+  it("throws a located error on malformed YAML rather than sending it", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      "room: broken\n  preset: [unclosed\n",
+    );
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml/);
+  });
+
+  it("throws when the file parses to something that is not a mapping", async () => {
+    await fs.writeFile(path.join(dir, ".bellman", "room.yaml"), "- just\n- a list\n");
+    expect(() => loadRoomManifest(dir)).toThrow(/mapping/);
+  });
+
+  it("calls an empty file empty, not an object", async () => {
+    await fs.writeFile(path.join(dir, ".bellman", "room.yaml"), "# nothing here yet\n");
+    expect(() => loadRoomManifest(dir)).toThrow(/mapping, got an empty document/);
+  });
+});
+
+describe("bellman_start with a room.yaml", () => {
+  const silenceStderr = () => vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  let dir: string;
+  let stderr: ReturnType<typeof silenceStderr>;
+  const said = () => stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+  const writeRoom = (yaml: string) => fs.writeFile(path.join(dir, ".bellman", "room.yaml"), yaml);
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-room-"));
+    await fs.mkdir(path.join(dir, ".bellman"), { recursive: true });
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+    stderr = silenceStderr();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("sends the file's manifest when the call carries none, and says so on stderr", async () => {
+    await writeRoom("room: payments-migration\npurpose: Port v2 to v3\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    // The joiner's preview is where the room the server actually stored shows up.
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect(preview.data.room).toMatchObject({
+      preset: "review",
+      mode: "pair",
+      your_role: "reviewer",
+      text: { data: { room: "payments-migration", purpose: "Port v2 to v3" } },
+    });
+    expect(said()).toBe(`bellman: using room manifest from ${join(".bellman", "room.yaml")}\n`);
+  });
+
+  it("accepts the README's authored-roles example end to end", async () => {
+    await writeRoom([
+      "room: payments-migration",
+      "mode: swarm",
+      "roles:",
+      "  lead:",
+      "    can: [send, invite, revoke, request_actions, respond_actions, audit, close_room]",
+      "  helper:",
+      "    can: [send, request_actions, respond_actions]",
+      "  observer:",
+      "    can: []",
+      "default_role: helper",
+      "creator_role: lead",
+    ].join("\n"));
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect(preview.data.room).toMatchObject({
+      preset: null,
+      mode: "swarm",
+      creator_role: "lead",
+      your_role: "helper",
+      your_verbs: ["send", "request_actions", "respond_actions"],
+    });
+  });
+
+  it("leaves an explicit manifest alone even when the file exists", async () => {
+    await writeRoom("room: from-file\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "pair" });
+    expect(said()).toBe("");
+  });
+
+  it("forwards unchanged when there is no file, so the server's own error stands", async () => {
+    const a = await open(DEV_KEY.jesse);
+
+    const res = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("expected object, received undefined at manifest");
+    expect(said()).toBe("");
+  });
+
+  it("fails locally on a malformed file, before anything is sent", async () => {
+    await writeRoom("room: broken\n  preset: [unclosed\n");
+    const sent: string[] = [];
+    const a = await open(DEV_KEY.jesse, "channel", async () => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return { ...real, callTool: (params) => { sent.push(params.name); return real.callTool(params); } };
+    });
+
+    const res = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toMatch(/^Error: .*room\.yaml is not valid YAML/);
+    expect(sent).toEqual([]);
+    expect(said()).toBe("");
+  });
+
+  it("never reads the file for any other tool", async () => {
+    await writeRoom("- not\n- a mapping\n");
+    const a = await open(DEV_KEY.jesse);
+
+    const res = await a.call("bellman_connect", { join_code: "BELL-0000-00" });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).not.toContain("room.yaml");
+    expect(said()).toBe("");
   });
 });

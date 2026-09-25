@@ -90,6 +90,38 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, so they wait on #7.
 
+### Declaring a room in your repo
+
+Put a manifest at `.bellman/room.yaml` and `bellman_start` picks it up
+automatically when called through the bridge:
+
+```yaml
+room: payments-migration
+purpose: Port Stripe v2 to v3
+preset: review          # pair | swarm | review
+```
+
+Or author the roles yourself:
+
+```yaml
+room: payments-migration
+mode: swarm
+roles:
+  lead:
+    can: [send, invite, revoke, request_actions, respond_actions, audit, close_room]
+  helper:
+    can: [send, request_actions, respond_actions]
+  observer:
+    can: []
+default_role: helper
+creator_role: lead
+```
+
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`,
+`audit`, `close_room`. Every member can always sync and leave.
+
+The bridge reads the file from the directory Claude Code was started in (it does not search parent directories) and logs `bellman: using room manifest from .bellman/room.yaml` to stderr when it uses one. A `manifest` argument passed to `bellman_start` always wins over the file. A malformed file fails locally, before anything is sent; with no file and no argument, the server's own validation error comes back. Only the parsed object reaches the server, which has no YAML parser.
+
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

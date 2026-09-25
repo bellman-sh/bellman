@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -7,6 +9,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { parse as parseYaml } from "yaml";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -22,7 +25,9 @@ import {
  * ordinary HTTP client.
  *
  *   - It proxies the remote bellman_* tools unchanged, so the agent uses
- *     Bellman exactly as it would over HTTP.
+ *     Bellman exactly as it would over HTTP. The one exception is
+ *     bellman_start: called with no manifest, it sends the one from
+ *     .bellman/room.yaml when that file exists, and says so on stderr.
  *   - It watches the tool results go by. Whenever a call reveals a membership
  *     (start, confirm, or a send/sync after a restart), it arms a watcher that
  *     long-polls bellman_sync for that member.
@@ -39,6 +44,7 @@ export type Delivery = "channel" | "hook";
 
 const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
+const ROOM_FILE = join(".bellman", "room.yaml");
 
 /** The part of an MCP client the bridge uses — the seam tests substitute. */
 export interface Remote {
@@ -125,6 +131,32 @@ function textOf(result: CallToolResult): string {
     .join("\n");
 }
 
+/**
+ * Read `.bellman/room.yaml` and return it as the object `bellman_start`
+ * expects. Returns null when the file is absent — that is not an error, it
+ * just means this room is declared inline.
+ *
+ * Parsing lives here and never on the server: the server has exactly one
+ * schema, and the Workers bundle never carries a YAML parser.
+ */
+export function loadRoomManifest(cwd: string): Record<string, unknown> | null {
+  const file = join(cwd, ROOM_FILE);
+  if (!existsSync(file)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(file, "utf8"));
+  } catch (e) {
+    throw new Error(`${ROOM_FILE} is not valid YAML: ${(e as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    // An empty or comment-only file parses to null, and typeof null is "object".
+    const got = parsed === null ? "an empty document" : Array.isArray(parsed) ? "a list" : typeof parsed;
+    throw new Error(`${ROOM_FILE} must be a YAML mapping, got ${got}`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function createBridge(opts: BridgeOptions) {
   const { delivery, inboxDir } = opts;
   if (delivery === "hook" && !inboxDir) {
@@ -161,8 +193,25 @@ export function createBridge(opts: BridgeOptions) {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name } = request.params;
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    let args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (name === WAIT_TOOL.name && delivery === "hook") return waitForQueued(args);
+
+    // The one place the bridge transforms a call instead of relaying it.
+    if (name === "bellman_start" && args.manifest === undefined) {
+      try {
+        const fromFile = loadRoomManifest(process.cwd());
+        if (fromFile) {
+          args = { ...args, manifest: fromFile };
+          process.stderr.write(`bellman: using room manifest from ${ROOM_FILE}\n`);
+        }
+      } catch (e) {
+        // A malformed room.yaml fails here, before anything leaves the machine.
+        return {
+          content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
 
     const result = await (await remote()).callTool({ name, arguments: args });
     observe(name, args, result);

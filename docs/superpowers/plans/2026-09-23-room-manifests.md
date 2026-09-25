@@ -1101,7 +1101,7 @@ Create `tests/store-do.test.ts`:
  * A row without a manifest is treated as gone rather than crashing a read.
  */
 import { describe, it, expect } from "vitest";
-import { hydrateStoredSession } from "../src/store-do.js";
+import { hydrateStoredSession } from "../src/stored-session.js";
 import { session } from "./helpers/fixtures.js";
 
 describe("legacy Durable Object rows", () => {
@@ -1131,11 +1131,17 @@ describe("legacy Durable Object rows", () => {
 - [ ] **Step 6: Run it to verify it fails**
 
 Run: `npx vitest run tests/store-do.test.ts`
-Expected: FAIL — `hydrateStoredSession` is not exported.
+Expected: FAIL — the module does not exist yet. (Note: importing `src/store-do.ts` under vitest fails on `cloudflare:workers`, which is why the guard lives in its own pure module.)
 
 - [ ] **Step 7: Implement the guard**
 
-In `src/store-do.ts`:
+The guard CANNOT live in `src/store-do.ts`: importing that module under vitest
+fails on `cloudflare:workers` ("Cannot find package"). Put it in a new pure
+module `src/stored-session.ts` with no Workers imports, and call it from
+`store-do.ts`'s single raw read. Note the stored shape is `StoredSession`, not
+`Session` — persisted rows carry no `events` — so type the guard accordingly.
+
+In `src/stored-session.ts`:
 
 ```ts
 /**
@@ -1146,13 +1152,13 @@ In `src/store-do.ts`:
  * — a manifest is a declaration, and inventing one would put words in the
  * creator's mouth — so they are treated as gone and age out on their own TTL.
  */
-export function hydrateStoredSession(raw: unknown): Session | undefined {
+export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const m = (raw as { manifest?: unknown }).manifest;
   if (!m || typeof m !== "object") return undefined;
   const roles = (m as { roles?: unknown }).roles;
   if (!roles || typeof roles !== "object") return undefined;
-  return raw as Session;
+  return raw as StoredSession;
 }
 ```
 
@@ -1363,7 +1369,31 @@ becomes `let args` — that is the only change to the existing lines:
 - [ ] **Step 6: Verify**
 
 Run: `npm run verify && npm run typecheck:worker`
-Expected: both PASS. The Worker typecheck failing on a missing `node:fs` means the import leaked into a worker-reachable module — move it.
+Expected: both PASS.
+
+Then run the REAL leak check. `typecheck:worker` does NOT catch a `node:fs`
+import leaking into the Worker — `nodejs_compat` is on and `@types/node` is
+present, so it type-checks fine. What actually matters is whether `bridge.ts`
+is reachable from the Worker entry point's import graph:
+
+```bash
+leak() {
+  npx tsc --ignoreConfig --noEmit --module ESNext --moduleResolution Bundler \
+    --types @cloudflare/workers-types --listFilesOnly "$1" 2>/dev/null \
+    | grep -c "src/bridge.ts"
+}
+echo "control (must be 1): $(leak src/channel.ts)"
+echo "worker   (must be 0): $(leak src/worker.ts)"
+```
+
+`--ignoreConfig` is REQUIRED. Without it tsc fails with TS5112, lists nothing,
+and `grep -c` prints `0` for every input — including `src/channel.ts`, which
+really does import the bridge. A check that cannot fail is not a check.
+
+That is why the positive control is part of the check, not optional: run both
+lines, and treat the result as meaningless unless the control prints `1`. If
+`worker.ts` prints anything but `0`, the bridge and its `yaml` dependency have
+been pulled into the Worker bundle — move the import.
 
 - [ ] **Step 7: Document it**
 

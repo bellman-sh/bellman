@@ -1377,8 +1377,9 @@ describe("connectSignedIn", () => {
  * Every sign-in is slowed to the pace of what it really waits on: the browser to a
  * person's, the refresh to a network's. The lock's whole job is to span that wait,
  * and a lock that lapsed early is only caught by a rival that arrives inside it.
- * Rivals poll for the lock every 100ms, so against a sign-in that finishes in 10ms
- * a lock released after its first read would pass every test here.
+ * Rivals poll for the lock every 100ms and an unslowed sign-in here takes about as
+ * long, so a lock released after its first read passed every test in this describe,
+ * five runs in five, with the slowdown taken out.
  */
 describe("concurrent bridges", () => {
   let dir: string;

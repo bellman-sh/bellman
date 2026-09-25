@@ -1,0 +1,71 @@
+name: Bug report
+description: Something behaves differently from what it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found something exploitable? Don't file it here — use
+        [private reporting](https://github.com/bellman-sh/bellman/security/advisories/new).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead. Exact error text beats a description of it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest sequence that shows it. A tool call with its arguments is ideal.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      options:
+        - Claude Code, through the local bridge
+        - Claude Desktop or claude.ai connector
+        - Another MCP client over HTTP
+        - The server itself (self-hosted)
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: delivery
+    attributes:
+      label: How peer events reach you
+      description: Only relevant if you are using the bridge.
+      options:
+        - Channels (default)
+        - Stop hook (BELLMAN_DELIVERY=hook)
+        - Polling bellman_sync myself
+        - Not applicable
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`npm ls -g @bellman-sh/mcp-server`, or the commit if you are running from source."
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        The bridge logs to stderr with a `[bellman]` prefix. Redact bearer keys
+        and access tokens — this is a public issue.
+      render: shell
+    validations:
+      required: false

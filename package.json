@@ -1,12 +1,43 @@
 {
-  "name": "bellman-mcp-server",
+  "name": "@bellman-sh/mcp-server",
   "version": "0.1.0",
   "description": "Cross-session, cross-provider agent collaboration over MCP",
+  "author": "mcfearsome",
+  "license": "MIT",
+  "homepage": "https://bellman.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bellman-sh/bellman.git"
+  },
+  "bugs": {
+    "url": "https://github.com/bellman-sh/bellman/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agents",
+    "collaboration",
+    "claude",
+    "cloudflare-workers"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "main": "dist/index.js",
   "bin": {
     "bellman-channel": "dist/channel.js",
     "bellman-stop-hook": "dist/stop-hook.js",
     "bellman-claude": "bin/bellman-claude"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc",
@@ -20,11 +51,10 @@
     "typecheck:worker": "tsc -p tsconfig.worker.json",
     "dev:worker": "wrangler dev",
     "deploy": "wrangler deploy",
-    "rotate-key": "tsx scripts/rotate-key.ts"
+    "rotate-key": "tsx scripts/rotate-key.ts",
+    "grant-plan": "tsx scripts/grant-plan.ts",
+    "prepublishOnly": "npm run verify && npm run typecheck:worker"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.2.1",
@@ -39,6 +69,5 @@
     "typescript": "^7.0.2",
     "vitest": "^5.0.0",
     "wrangler": "^4.132.0"
-  },
-  "type": "module"
+  }
 }

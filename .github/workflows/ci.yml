@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A fork PR gets no secrets and no write access. Nothing here needs either.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Two programs, two typechecks: the Node server, and the Worker, whose
+      # files are excluded from the Node build because they import
+      # cloudflare:workers.
+      - run: npm run typecheck
+      - run: npm run typecheck:worker
+      - run: npm run build
+      - run: npm test
+
+  deploy:
+    # Only a push to main that already passed the checks above.
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Never let two deploys race; a queued one waits rather than being dropped.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Fail loudly rather than letting wrangler guess at an account.
+      - name: Require deploy credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set as repository secrets"
+            exit 1
+          fi
+
+      # The pinned wrangler from devDependencies, not whatever an action ships.
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      # Prove the deployment actually serves. Needs no credentials.
+      - name: Verify the deployment
+        run: |
+          set -eu
+          for i in $(seq 1 10); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" https://mcp.bellman.sh/healthz || true)
+            [ "$code" = "200" ] && break
+            sleep 5
+          done
+          [ "$code" = "200" ] || { echo "::error::/healthz returned $code"; exit 1; }
+          curl -sf https://mcp.bellman.sh/.well-known/oauth-protected-resource > /dev/null \
+            || { echo "::error::OAuth discovery did not respond"; exit 1; }
+          echo "healthz 200, discovery served"

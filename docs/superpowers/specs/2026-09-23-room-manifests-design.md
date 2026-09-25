@@ -379,8 +379,15 @@ already flags it as verified by smoke alone.
 ## Bridge YAML path
 
 `src/bridge.ts` reads `.bellman/room.yaml`, parses it with `yaml`, and emits the
-object form. Failures (missing file, malformed YAML, unknown keys) are reported
-locally before any call leaves the machine.
+object form. It validates nothing about the manifest's SHAPE — that is the
+server's single schema, by D1.
+
+So the boundary is: a file that is missing, unreadable, not a regular file, too
+large, not valid YAML, or not a mapping fails locally and no call leaves the
+machine. Everything else — an unknown key, a bad verb, an undefined
+`default_role` — is reported by `ManifestShape` and `resolveManifest` on the
+server, which means that request does leave the machine and comes back an
+error.
 
 ```yaml
 # .bellman/room.yaml

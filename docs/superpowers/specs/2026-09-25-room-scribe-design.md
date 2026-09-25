@@ -20,7 +20,7 @@ A scribe fixes both with one artifact: a room-level summary, kept current.
 
 ## Scope
 
-The original request covered four things. Three of them are one coherent piece;
+The original request covered four things. Two of them are one coherent piece;
 the other two are separate systems wearing a scribe costume.
 
 **In scope:**

@@ -350,6 +350,22 @@ export interface SignInOptions {
 }
 
 /**
+ * The credential with its identity read off its own tokens, and from nothing else.
+ *
+ * bellman_whoami tells a person which account their room will show, and it reads
+ * this field, so the field has to be true of the tokens beside it. An identity is
+ * only ever a fact about the access token it was decoded from. Carried across a
+ * change of tokens — a second sign-in as someone else, tokens adopted from another
+ * bridge, tokens dropped — it names one account while the file holds another's, or
+ * none, and it does so silently. A token that cannot be read therefore has no
+ * identity: decodeIdentity returning undefined is its documented contract, and
+ * "unknown" is a true answer where the last account's name is not.
+ */
+function withIdentityFromTokens(cred: ServerCredential): ServerCredential {
+  return { ...cred, identity: cred.tokens ? decodeIdentity(cred.tokens.access_token) : undefined };
+}
+
+/**
  * The bridge's own credential, held in memory for the life of one connect and
  * written back under the lock. The SDK calls these methods at points we do not
  * choose, which is why the lock wraps the whole connect rather than each write.
@@ -421,13 +437,18 @@ class BridgeAuth implements OAuthClientProvider {
    * which mints a client_id that would otherwise never reach disk and be
    * re-registered on every start. Routing all three through one setter means a
    * later mutator cannot forget to persist, rather than each remembering to.
+   *
+   * For the same reason it is where the identity is read off the tokens. Tokens
+   * change in more places than saveTokens — adopting another bridge's, dropping
+   * them — and each would have to remember to bring the identity with it.
    */
   private async set(cred: ServerCredential): Promise<void> {
-    this.cred = cred;
-    await this.persist?.(cred);
+    this.cred = withIdentityFromTokens(cred);
+    await this.persist?.(this.cred);
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
+    // No identity here: set() reads it off these tokens, and carries nothing over from the last.
     await this.set({
       ...this.cred,
       tokens: {
@@ -435,7 +456,6 @@ class BridgeAuth implements OAuthClientProvider {
         refresh_token: tokens.refresh_token,
         expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
       },
-      identity: decodeIdentity(tokens.access_token) ?? this.cred.identity,
     });
   }
 
@@ -934,7 +954,10 @@ async function signIn(
        */
       if (!retried && !listenerSpent && err instanceof InvalidGrantError) {
         retried = true;
-        current = { ...current, tokens: undefined };
+        // No tokens, so no identity: the file must not go on naming an account that
+        // nothing can sign in as, for however long the browser takes — or for good, if
+        // nobody finishes it.
+        current = withIdentityFromTokens({ ...current, tokens: undefined });
         writeServer(dir, opts.serverUrl, current);
         log("the saved sign-in was rejected; signing in again");
         continue;

@@ -1384,6 +1384,149 @@ describe("connectSignedIn", () => {
     expect(logs).toContain("signed in");
   });
 
+  // ------------------------------------------------ identity follows the tokens
+  /**
+   * The identity in the file is what bellman_whoami tells a person their room will show, so
+   * it has to be true of the tokens beside it. The bridge reads it off the access token, and
+   * where it cannot it says nothing: "unknown" is a true answer, and the previous account's
+   * name is not. Carried across a change of tokens, it leaves a file that names one account
+   * and holds another's — the wrong-account mistake whoami exists to expose, stated as fact.
+   */
+  const OTHER: Identity = { userId: "u_other", orgId: null, plan: "team", role: "admin", label: "other@example.dev" };
+
+  /**
+   * A server whose access tokens the bridge cannot read. Bellman's own are JWTs that carry the
+   * identity, and the server insists on that claim, so a token without one cannot be minted at
+   * the source: this stands between the two, hands the client an opaque token, and turns it
+   * back into the real one on the way in. `only` limits it to one grant, for a session that
+   * signs in readably and later refreshes into something it cannot read.
+   */
+  function opaqueTokens(inner: typeof fetch, only?: "authorization_code" | "refresh_token"): typeof fetch {
+    const real = new Map<string, string>();
+    return async (input, init) => {
+      const headers = new Headers(init?.headers as HeadersInit);
+      const held = /^Bearer (opaque\.\S+)$/.exec(headers.get("authorization") ?? "")?.[1];
+      if (held) headers.set("authorization", `Bearer ${real.get(held)}`);
+      const response = await inner(input, held ? { ...init, headers } : init);
+      const grant = /grant_type=([a-z_]+)/.exec(String(init?.body ?? ""))?.[1];
+      if (!String(input).endsWith("/token") || !response.ok || (only && grant !== only)) return response;
+      const body = (await response.json()) as Record<string, unknown>;
+      const opaque = `opaque.${real.size}`; // two parts, so decodeIdentity cannot read it
+      real.set(opaque, String(body.access_token));
+      return Response.json({ ...body, access_token: opaque });
+    };
+  }
+
+  /** A token whose claim can be read but which the server refuses: the right shape, no signature. */
+  const readableButRefused = (identity: Identity) =>
+    ["e30", Buffer.from(JSON.stringify({ bellman: identity })).toString("base64url"), "no-signature"].join(".");
+
+  /**
+   * Runs `write` as each of the first `times` refreshes goes out: another bridge getting there
+   * first. `write` is told which refresh it is, so each write can be a different token.
+   */
+  function racing(inner: typeof fetch, write: (nth: number) => void, times = 1): typeof fetch {
+    let seen = 0;
+    return async (input, init) => {
+      if (seen < times && String(init?.body ?? "").includes("grant_type=refresh_token")) write(++seen);
+      return inner(input, init);
+    };
+  }
+
+  it("does not name the last account when the next sign-in's token names no one", async () => {
+    const overrides: Record<string, Identity> = {};
+    const bellman = fakeBellman({ overrides });
+    await (await connect(bellman, [])).close();
+    const first = readServer(dir, RESOURCE);
+    expect(first.identity?.label).toBe("jesse@example.dev"); // there is an account to wrongly keep
+
+    // The saved sign-in is refused, so the browser runs again — this time as someone else,
+    // against a server whose tokens the bridge cannot read.
+    overrides["github:4242"] = OTHER;
+    writeServer(dir, RESOURCE, {
+      ...first,
+      tokens: { access_token: STALE, refresh_token: "dead", expires_at: Date.now() - 1 },
+    });
+    await (await connect(bellman, [], { fetchImpl: opaqueTokens(bellman.fetch) })).close();
+
+    // Exact, so the positive facts sit in the same assertion as the absence: the client
+    // survived and the tokens are the second sign-in's, and there is no identity beside them.
+    expect(readServer(dir, RESOURCE)).toEqual({
+      client: first.client,
+      tokens: {
+        access_token: expect.stringMatching(/^opaque\./),
+        refresh_token: expect.any(String),
+        expires_at: expect.any(Number),
+      },
+    });
+  });
+
+  it("does not label another bridge's tokens with the account this one signed in as", async () => {
+    const overrides: Record<string, Identity> = {};
+    const bellman = fakeBellman({ overrides });
+    await (await connect(bellman, [])).close(); // as jesse
+    const mine = readServer(dir, RESOURCE);
+
+    // Someone signs in as another account on the same client: what the shared file holds
+    // after an account is switched. Then the file goes back to ours, with theirs in hand.
+    overrides["github:4242"] = OTHER;
+    writeServer(dir, RESOURCE, { client: mine.client });
+    await (await connect(bellman, [])).close();
+    const theirs = readServer(dir, RESOURCE);
+    expect(theirs.identity?.label).toBe("other@example.dev");
+    writeServer(dir, RESOURCE, mine);
+
+    // Our refresh token is spent, so our refresh is refused, and by then another bridge has
+    // written its own tokens — dead too, so nothing recovers them and the file keeps whatever
+    // adopting them wrote. That bridge keeps no identity in the file (an older one, say), so
+    // the identity that ends up beside its tokens can only have come from this bridge.
+    await bellman.refresh(mine.tokens!.refresh_token!, mine.client!.client_id);
+    const adopted = { access_token: theirs.tokens!.access_token, refresh_token: "also-dead", expires_at: Date.now() - 1 };
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, [], {
+      fetchImpl: racing(fetchImpl, () => writeServer(dir, RESOURCE, { client: mine.client, tokens: adopted })),
+    });
+    expireOnce();
+    await remote.listTools().catch(() => undefined); // the retry is refused as well; the write is what matters
+    await remote.close();
+
+    expect(readServer(dir, RESOURCE)).toEqual({ client: mine.client, tokens: adopted, identity: theirs.identity });
+  });
+
+  it("leaves no identity behind when the saved sign-in is dropped and the browser is abandoned", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+    const first = readServer(dir, RESOURCE);
+    // Readable, so the account is in the claim — but the server refuses every one of them.
+    const refused = (nth: number) => ({
+      access_token: readableButRefused(first.identity!),
+      refresh_token: `dead-${nth}`,
+      expires_at: Date.now() - 1,
+    });
+    writeServer(dir, RESOURCE, { ...first, tokens: refused(0) });
+
+    // Other bridges keep getting there first: each refresh goes out to find a newer token
+    // already written, and the retry on it is refused too, until the bridge gives up on the
+    // saved sign-in — the one path that writes the credential with its tokens taken away —
+    // and finds nobody at the browser.
+    await expect(
+      connect(bellman, [], {
+        fetchImpl: racing(bellman.fetch, (nth) => writeServer(dir, RESOURCE, { ...first, tokens: refused(nth) }), 4),
+        browser: () => { throw new Error("nobody is at the keyboard"); },
+      })
+    ).rejects.toThrow(/nobody is at the keyboard/);
+
+    // No tokens, so no account: a file that still said "jesse" would have whoami report a
+    // sign-in that no longer exists. Two positive companions keep the absence honest: the log
+    // line is written by the very branch under test, so it cannot be a flow that never got
+    // there; and the premise — an account WAS on file — so it cannot be a file that never had one.
+    expect({
+      before: first.identity?.label,
+      file: readServer(dir, RESOURCE),
+      dropped: logs.includes("the saved sign-in was rejected; signing in again"),
+    }).toEqual({ before: "jesse@example.dev", file: { client: first.client }, dropped: true });
+  });
+
   // ------------------------------------------------------------------ R6
   /**
    * openBrowser refuses a non-http(s) URL but only logs, so without a check here

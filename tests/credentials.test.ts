@@ -582,6 +582,52 @@ describe("the lock", () => {
     a!.release();
   });
 
+  /**
+   * release() itself, not the exit wrapper around it.
+   *
+   * This test used to call onExit(), which was `try { release() } catch {}` — so
+   * it proved the WRAPPER was quiet while its name promised that release was,
+   * and every other caller of release() is unwrapped. Two of them are `finally`
+   * blocks holding a result: writeMerged's, on a live tool call, and
+   * connectSignedIn's, holding a sign-in that has just succeeded. `force`
+   * suppresses ENOENT and not EPERM, so a directory that refuses the unlink
+   * would have thrown through both, discarding a working result over a lock file
+   * that could not be tidied away.
+   */
+  it("keeps a release that cannot remove the lock file quiet", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        rmSync: (...args: Parameters<typeof real.rmSync>) => {
+          if (String(args[0]).endsWith(LOCK_FILE)) {
+            throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+          }
+          return real.rmSync(...args);
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/credentials.js");
+      const before = process.listenerCount("exit");
+      const handle = (await mocked.acquireLock(dir, fast))!;
+
+      let threw: unknown = "nothing";
+      try { handle.release(); threw = undefined; } catch (error) { threw = error; }
+
+      expect({ threw, listenersLeft: process.listenerCount("exit") - before }).toEqual({
+        // Quiet, AND it finished: the exit listener is gone, so release() ran to
+        // its end rather than stopping at the rmSync.
+        threw: undefined,
+        listenersLeft: 0,
+      });
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
+  });
+
   it("keeps an exit that cannot remove the file quiet", async () => {
     // A listener that throws makes Node print a stack trace and change the exit status.
     vi.resetModules();

@@ -112,6 +112,26 @@ export function readServer(dir: string, serverUrl: string): ServerCredential {
  * owns, EACCES, ENOSPC — and writes nothing if it cannot first secure the
  * directory or an existing file.
  */
+/**
+ * Create the credential directory, and leave it at 0700 whether or not this call
+ * was the one that created it.
+ *
+ * Both steps, always: mkdirSync's `mode` applies only to a directory it actually
+ * creates, so a ~/.config/bellman that already exists at 0755 keeps 0755 and the
+ * option quietly does nothing.
+ *
+ * One function rather than the rule written twice, because writing it twice is
+ * not a hypothetical here — it already went wrong. The mode-is-ignored trap was
+ * found and fixed in writeServer, and then the pre-fix version was written again
+ * in acquireLock: two implementations of one rule in one repo, one of them known
+ * to be wrong before the other was typed. Every creator of this directory goes
+ * through here.
+ */
+function ensureCredentialsDir(dir: string): void {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+}
+
 export function writeServer(dir: string, serverUrl: string, cred: ServerCredential): void {
   // Modes are set twice on purpose: the `mode` option covers creation (a fresh
   // file is never on disk at the default mode), the chmod covers a directory or
@@ -119,8 +139,7 @@ export function writeServer(dir: string, serverUrl: string, cred: ServerCredenti
   // an old loose file is already out of reach by the time it is rewritten; the
   // file before it is read or written, so one left at 0400 or 0000 can still be
   // opened. The chmod after the write covers a umask that stripped bits.
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(dir, 0o700);
+  ensureCredentialsDir(dir);
   const path = join(dir, FILE);
   try {
     chmodSync(path, 0o600);
@@ -253,14 +272,7 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
   const staleMs = opts.staleMs ?? STALE_MS;
   const pidAlive = opts.pidAlive ?? livePid;
 
-  // Both, exactly as writeServer does: the `mode` option only applies to a
-  // directory this call creates, and a ~/.config/bellman left at 0755 by an
-  // older build or a stray mkdir would otherwise stay 0755 until the first
-  // writeServer happened to tighten it. No credential is exposed either way —
-  // writeServer tightens before it writes — but the rule lives in two places
-  // and this was the copy that had not been fixed.
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  chmodSync(dir, 0o700);
+  ensureCredentialsDir(dir);
   const path = join(dir, LOCK_FILE);
   const deadline = Date.now() + waitMs;
 
@@ -314,7 +326,19 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
       // while ours is open nothing else can be handed the inode number it names.
       const ours = stillOurs(handle, path);
       try { closeSync(handle); } catch { /* already closed */ }
-      if (ours) rmSync(path, { force: true });
+      /**
+       * `force` suppresses ENOENT and nothing else, so a directory that refuses
+       * the unlink throws EPERM out of release() — and release() is called from
+       * two `finally` blocks that are not wrapped: writeMerged's, on a live tool
+       * call, and connectSignedIn's, holding a sign-in that has just succeeded.
+       * Either one would discard a working result over a lock file that could
+       * not be tidied up, and the SDK would then relabel it Unauthorized. A
+       * stale lock is reclaimed by the next holder after staleMs; a thrown
+       * release is not recoverable by anyone.
+       */
+      if (ours) {
+        try { rmSync(path, { force: true }); } catch { /* the next holder reclaims it as stale */ }
+      }
     };
     // Quitting Claude Code mid-sign-in must not leave a stale lock. The bridge quits
     // through process.exit (its SIGTERM, SIGINT and stdin-close handlers in
@@ -326,8 +350,14 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
     // A declaration, not a `const`: release() above closes over this name, and
     // with a const the two are one reorder away from a ReferenceError thrown out
     // of release() — at process exit, where it has nowhere to be reported.
+    //
+    // No try/catch of its own. release() is total, and there is a test on
+    // release() itself saying so; wrapping it here as well would be a guard no
+    // test can fail, and it is what let the old test's name ("keeps an exit that
+    // cannot remove the file quiet") read as a promise about release when it
+    // only ever exercised this wrapper.
     function onExit(): void {
-      try { release(); } catch { /* going away: a failure here has nowhere useful to go */ }
+      release();
     }
     process.on("exit", onExit);
     return { release };

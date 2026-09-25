@@ -173,17 +173,22 @@ export function loadRoomManifest(cwd: string): Record<string, unknown> | null {
   const file = join(cwd, ROOM_FILE);
 
   // A repository supplies two parts of this path, `.bellman` and `room.yaml`, and the bridge sends what
-  // it reads to a server: it reads what the repository holds, never what a link in it points at. The open
-  // below refuses a link at room.yaml, but nothing there can refuse one at `.bellman`, so that is asked
-  // first. It is not atomic, yet a link that arrived with a clone is already in place, and swapping one in
-  // behind the bridge takes a local attacker who has no need of it.
+  // it reads to a server: it reads what the repository holds, never what a link in it points at. Both are
+  // asked about first. Nothing in an open can refuse a link partway along its path, so for `.bellman` asking
+  // is all there is. For room.yaml it is the fallback: the open below refuses a link atomically wherever the
+  // platform has O_NOFOLLOW, and asking is what refuses one where it has not (Windows). Asking is not atomic,
+  // yet a link that arrived with a clone is already in place, and swapping one in behind the bridge takes a
+  // local attacker who has no need of it.
   if (isSymlink(join(cwd, ROOM_DIR))) throw linkRefused(ROOM_DIR, "directory");
+  if (isSymlink(file)) throw linkRefused(ROOM_FILE, "file");
 
   // Everything else is learned from the one descriptor that is then read, so nothing can change between
   // the check and the read.
-  //   O_NOFOLLOW  fails with ELOOP when room.yaml is a link, whether or not its target exists. Where a
-  //               platform has no such flag (Windows) the constant is undefined, `|` reads it as 0, and a
-  //               link is followed.
+  //   O_NOFOLLOW  fails with ELOOP when room.yaml is a link, whether or not its target exists, and does it
+  //               in the open itself, so a link swapped in after the lstat above is refused too. Where a
+  //               platform has no such flag (Windows) the constant is undefined and `|` reads it as 0: the
+  //               lstat above is then the only thing between a link and the read. Both stay, because each
+  //               covers what the other cannot.
   //   O_NONBLOCK  makes opening a fifo return at once. Without it the open waits for a writer that never
   //               comes and freezes bellman_start; with it, fstat names the fifo. Regular files ignore it.
   let fd: number;

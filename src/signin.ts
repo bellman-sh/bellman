@@ -298,6 +298,38 @@ export function openBrowser(
 const VERSION = "0.1.0";
 const CALLBACK_TIMEOUT_MS = 300_000;
 
+/**
+ * How long a credential WRITE waits for the lock before giving up.
+ *
+ * Not the same question as how long a sign-in waits for it. A write sits on a
+ * path a user is waiting on — a tool call for a post-connect refresh, the
+ * connect itself in the no-lock branch — so this is a latency budget, not a
+ * correctness one, and the default six minutes on that path is a hang.
+ *
+ * Two seconds because of what actually holds the lock. An ordinary contender is
+ * another bridge doing its own read-modify-write, which is milliseconds; two
+ * seconds covers that many times over, including a cached connect that has to
+ * talk to the server first. The other holder is a bridge mid-SIGN-IN, which
+ * keeps the lock for as long as a human takes — up to the 300s callback
+ * timeout — and no bound short enough to be a latency budget will ever outlast
+ * that, so waiting longer buys nothing and costs the user the difference.
+ *
+ * Giving up is cheap: the persist chain writes again on the next refresh, ten
+ * minutes later at worst, and the only cost of never writing is one browser tab
+ * at the next start. That is strictly better than a stalled tool call.
+ */
+const PERSIST_LOCK_WAIT_MS = 2_000;
+
+/** Lock options for a write, capped at the latency budget above. */
+function persistLock(opts: SignInOptions, signal?: AbortSignal): LockOptions {
+  return {
+    ...opts.lock,
+    // Capped, not fixed: a test may ask for less, nothing gets more.
+    waitMs: Math.min(opts.lock?.waitMs ?? PERSIST_LOCK_WAIT_MS, PERSIST_LOCK_WAIT_MS),
+    signal,
+  };
+}
+
 export interface SignInOptions {
   serverUrl: string;
   configDir?: string;
@@ -650,7 +682,14 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
   // Told to stop before we began: bind no port and take no lock.
   if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled before it started");
 
-  const persist = makePersist(dir, opts.serverUrl, opts.lock ?? {}, log);
+  /**
+   * No signal — a shutdown must not cost a refresh its rotation — but a short
+   * wait, because a tool call awaits this: saveTokens -> set -> persist ->
+   * auth() -> the transport -> callTool. "Nothing awaits it" was wrong, and
+   * measured wrong rather than argued wrong. Signal-less AND unbounded would
+   * be an un-abortable stall on the call path of up to WAIT_MS.
+   */
+  const persist = makePersist(dir, opts.serverUrl, persistLock(opts), log);
   const lock = await acquireLock(dir, { ...opts.lock, signal: opts.signal });
   // No lock means someone else held it for the whole wait. Their sign-in may be
   // all we needed, so re-read before giving up.
@@ -681,7 +720,17 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
        */
       const attempt = await connectCached(opts, dir, cached);
       if (attempt.remote) {
-        await writeMerged(dir, opts.serverUrl, attempt.provider.cred, { ...opts.lock, signal: opts.signal }, log);
+        /**
+         * Only when something actually changed. BridgeAuth.cred is reassigned
+         * by set() and by nothing else, so identity here means no refresh, no
+         * registration, nothing saved — and taking the lock to rewrite a
+         * byte-identical credential would put back the very wait this branch
+         * exists to avoid, in the one case where the lock is already known to
+         * be held. A live cached token is the common path through here.
+         */
+        if (attempt.provider.cred !== cached) {
+          await writeMerged(dir, opts.serverUrl, attempt.provider.cred, persistLock(opts, opts.signal), log);
+        }
         if (opts.signal?.aborted) {
           // The write was given up, and the cancelling fetch has already made
           // this connection refuse everything. Handing it back would be handing

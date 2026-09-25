@@ -960,6 +960,60 @@ describe("connectSignedIn", () => {
     }
   });
 
+  /**
+   * The no-lock branch exists to say "someone else is busy, do not make this
+   * user wait". Writing unconditionally after the connect put the wait back: a
+   * live cached token changes nothing, so the second lock wait was spent
+   * rewriting bytes that were already on disk — and it is spent in the one
+   * branch where the lock is known to be held.
+   */
+  it("does not wait for the lock again to rewrite a credential nothing changed", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close(); // a live token, nothing to refresh
+
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    try {
+      const waitMs = 2_000;
+      const started = Date.now();
+      const remote = await connect(bellman, [], { lock: { heartbeatMs: 20, waitMs } });
+      const elapsed = Date.now() - started;
+
+      expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+      await remote.close();
+      // One failed lock wait is the price of this branch. A second is not.
+      expect(elapsed).toBeLessThan(waitMs + 1_000);
+    } finally {
+      holder.release();
+    }
+  });
+
+  /**
+   * And the write a live session's refresh makes is awaited by the tool call
+   * that triggered it — saveTokens -> set -> persist -> auth() -> transport ->
+   * callTool. Signal-less is right, because a shutdown must not cost the
+   * rotation; signal-less AND unbounded is an un-abortable stall of up to
+   * WAIT_MS on the call path.
+   */
+  it("does not stall a tool call waiting for the credential lock", async () => {
+    const bellman = fakeBellman();
+    const { fetchImpl, expireOnce } = aging(bellman);
+    await (await connect(bellman, [])).close();
+    const remote = await connect(bellman, [], { fetchImpl, lock: { heartbeatMs: 20, waitMs: 10_000 } });
+
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    try {
+      expireOnce();
+      const started = Date.now();
+      expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+      // Bounded by the write's own budget, not by the sign-in's lock wait.
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(logs.join("\n")).toContain("stays in memory for this session");
+    } finally {
+      holder.release();
+      await remote.close();
+    }
+  });
+
   // ------------------------------------------------------------------ R2
   /**
    * Access tokens live 10 minutes and every bridge shares one credential file,

@@ -1,6 +1,11 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
-import type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./storage.js";
+import {
+  CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, PURGE_IDLE_KEY,
+  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, clientCount, purgeDue,
+  type Admission, type AuthCode, type AuthStorage, type CounterStorage, type Reclaimed,
+  type RefreshToken, type RegisteredClient,
+} from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
 
@@ -17,6 +22,11 @@ import type { SubscriptionSource } from "../billing/subscription.js";
 
 const CODE = "code:";
 const REFRESH = "refresh:";
+const CLIENT = "client:";
+const REG = "reg:";
+const COUNT = CLIENT_COUNT_KEY;
+/** How much stale data one registration is willing to clear. */
+const PURGE_BATCH = 200;
 
 export class AuthDO extends DurableObject {
   /**
@@ -54,11 +64,149 @@ export class AuthDO extends DurableObject {
   }
 
   async registerClient(client: RegisteredClient): Promise<void> {
-    await this.ctx.storage.put(`client:${client.client_id}`, client);
+    const key = `${CLIENT}${client.client_id}`;
+    const existed = (await this.ctx.storage.get(key)) !== undefined;
+    await this.ctx.storage.put(key, client);
+    if (!existed) await this.bumpCount(1);
+  }
+
+  /**
+   * One RPC, and it awaits nothing but storage. That is what makes it atomic:
+   * the input gate holds other events off for the duration, so no concurrent
+   * registration can pass the same check before this one writes. (A method that
+   * awaited the network would not get that — see the ledger comment above.)
+   */
+  async admitRegistration(
+    client: RegisteredClient,
+    ip: string | null,
+    now: number
+  ): Promise<Admission> {
+    if (ip) {
+      const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      if (recent.length >= REGISTRATIONS_PER_HOUR) return "rate_limited";
+    }
+
+    // Evict before testing the cap, or anyone who fills the table with clients
+    // they never signed in with blocks every real client until the next purge.
+    //
+    // Only when the cap is in the way, and only when the last scan found
+    // something. A full registry is refused without writing per-IP state, so it
+    // can be retried without limit — what has to stay bounded is the work each
+    // retry costs, which was a scan per request.
+    if ((await this.clientCount()) >= CLIENT_CAP) {
+      const idleUntil = await this.ctx.storage.get<number>(PURGE_IDLE_KEY);
+      if (purgeDue(idleUntil, now)) {
+        const { clients, buckets } = await this.purgeStale(now);
+        if (clients + buckets === 0) {
+          await this.ctx.storage.put(PURGE_IDLE_KEY, now + PURGE_BACKOFF_MS);
+        }
+      }
+      if ((await this.clientCount()) >= CLIENT_CAP) return "full";
+    }
+
+    await this.registerClient(client);
+    if (ip) {
+      const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      await this.ctx.storage.put(`${REG}${ip}`, [...recent, now]);
+    }
+    return "ok";
+  }
+
+  /**
+   * The counter's storage, as an adapter so the counting logic itself stays in
+   * storage.ts and runs under plain Node in tests — the same split BillingLedger
+   * uses above.
+   */
+  private counterStorage: CounterStorage = {
+    get: <T>(key: string) => this.ctx.storage.get<T>(key),
+    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
+    listKeys: async (prefix, startAfter, limit) => [
+      ...(
+        await this.ctx.storage.list({ prefix, limit, ...(startAfter ? { startAfter } : {}) })
+      ).keys(),
+    ],
+  };
+
+  /**
+   * Counted once and then maintained, because Durable Object storage has no
+   * count API and the alternative is list()ing up to CLIENT_CAP entries on
+   * every registration. Every insert and delete goes through registerClient or
+   * purgeStale, which are the only two places this moves.
+   */
+  private clientCount(): Promise<number> {
+    return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
+  }
+
+  private async bumpCount(by: number): Promise<void> {
+    await this.ctx.storage.put(COUNT, Math.max(0, (await this.clientCount()) + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
-    return this.ctx.storage.get<RegisteredClient>(`client:${clientId}`);
+    const client = await this.ctx.storage.get<RegisteredClient>(`${CLIENT}${clientId}`);
+    if (!client) return undefined;
+    // Checked on read as well as purged in bulk, so a lapsed registration is
+    // never usable just because no purge has run yet.
+    if (client.expires_at !== null && Date.now() > client.expires_at) return undefined;
+    return client;
+  }
+
+  /** A token was issued for this client, so it stops being disposable. */
+  async markClientUsed(clientId: string): Promise<void> {
+    const key = `${CLIENT}${clientId}`;
+    const client = await this.ctx.storage.get<RegisteredClient>(key);
+    if (!client) return;
+    await this.ctx.storage.put(key, { ...client, expires_at: null, used_at: Date.now() });
+  }
+
+  /**
+   * Bounded and batched, because this runs on the registration path. An
+   * unbounded sweep with one delete per key means a caller waits on up to
+   * CLIENT_CAP sequential round-trips; PURGE_BATCH at a time still frees room
+   * to admit, and the existing code/refresh purge below bounds itself the same
+   * way for the same reason.
+   */
+  async purgeStale(now: number): Promise<Reclaimed> {
+    const stale = await this.ctx.storage.list<RegisteredClient>({ prefix: CLIENT, limit: PURGE_BATCH });
+    const expired = [...stale]
+      .filter(([, c]) => c.expires_at !== null && now > c.expires_at)
+      .map(([key]) => key);
+    if (expired.length > 0) {
+      await this.ctx.storage.delete(expired);
+      await this.bumpCount(-expired.length);
+    }
+
+    const buckets = await this.ctx.storage.list<number[]>({ prefix: REG, limit: PURGE_BATCH });
+    const empty: string[] = [];
+    for (const [key, stamps] of buckets) {
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      // An empty bucket is deleted, not stored empty: otherwise one key per
+      // source address survives forever and rotating addresses grow storage
+      // without bound.
+      if (recent.length === 0) empty.push(key);
+      else if (recent.length !== stamps.length) await this.ctx.storage.put(key, recent);
+    }
+    if (empty.length > 0) await this.ctx.storage.delete(empty);
+
+    // Freeing something un-sticks admission immediately, rather than leaving it
+    // waiting out a backoff that is no longer true.
+    if (expired.length + empty.length > 0) await this.ctx.storage.delete(PURGE_IDLE_KEY);
+
+    return { clients: expired.length, buckets: empty.length };
+  }
+
+  async countClients(): Promise<number> {
+    return this.clientCount();
+  }
+
+  async countRegistrationBuckets(): Promise<number> {
+    return (await this.ctx.storage.list({ prefix: REG })).size;
+  }
+
+  async countRecentRegistrations(ip: string, since: number): Promise<number> {
+    const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+    return stamps.filter((at) => at >= since).length;
   }
 
   async putCode(code: string, value: AuthCode): Promise<void> {
@@ -128,6 +276,24 @@ export class AuthStore implements AuthStorage, BillingStorage {
   }
   getClient(clientId: string): Promise<RegisteredClient | undefined> {
     return this.object.getClient(clientId);
+  }
+  markClientUsed(clientId: string): Promise<void> {
+    return this.object.markClientUsed(clientId);
+  }
+  admitRegistration(client: RegisteredClient, ip: string | null, now: number): Promise<Admission> {
+    return this.object.admitRegistration(client, ip, now);
+  }
+  purgeStale(now: number): Promise<Reclaimed> {
+    return this.object.purgeStale(now);
+  }
+  countClients(): Promise<number> {
+    return this.object.countClients();
+  }
+  countRegistrationBuckets(): Promise<number> {
+    return this.object.countRegistrationBuckets();
+  }
+  countRecentRegistrations(ip: string, since: number): Promise<number> {
+    return this.object.countRecentRegistrations(ip, since);
   }
   putCode(code: string, value: AuthCode): Promise<void> {
     return this.object.putCode(code, value);

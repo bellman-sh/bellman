@@ -9,7 +9,7 @@ import {
   isProviderName, isStableIdentityKey,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import type { AuthStorage } from "./storage.js";
+import { UNUSED_CLIENT_TTL_MS, type AuthStorage } from "./storage.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
   canonicalResource, randomId, signJwt, verifyJwt, verifyPkce,
@@ -433,8 +433,25 @@ export async function handleOAuth(
       client_name: typeof body.client_name === "string" ? body.client_name.slice(0, 120) : undefined,
       redirect_uris: redirects,
       created_at: Date.now(),
+      // Disposable until a token is issued for it.
+      expires_at: Date.now() + UNUSED_CLIENT_TTL_MS,
     };
-    await config.store.registerClient(client);
+
+    // Cloudflare sets this; the Node server is local development with no proxy
+    // in front of it. An unknown address is not limited rather than sharing one
+    // bucket, which would rate-limit a developer against themself.
+    //
+    // Rate window, stale purge, cap and insert all happen inside the store, as
+    // one operation. Checking here and writing there would let every request in
+    // a burst pass the same check before any of them wrote.
+    const ip = request.headers.get("cf-connecting-ip");
+    const admission = await config.store.admitRegistration(client, ip, Date.now());
+    if (admission === "rate_limited") {
+      return oauthError("too_many_requests", "too many registrations from this address — try later", 429);
+    }
+    if (admission === "full") {
+      return oauthError("too_many_requests", "the client registry is full — try later", 429);
+    }
     return json(
       {
         client_id: client.client_id,
@@ -960,6 +977,10 @@ async function issueTokens(
     config.secret,
     ACCESS_TOKEN_TTL_SECONDS
   );
+  // A token was issued, so this client is no longer a disposable registration.
+  // This is the only place that mints one, and reaching it needed a human to
+  // complete a GitHub or Google sign-in.
+  await config.store.markClientUsed(clientId);
   // Rotated on every use: the previous one was deleted when it was taken.
   const refreshToken = randomId();
   await config.store.putRefresh(refreshToken, {

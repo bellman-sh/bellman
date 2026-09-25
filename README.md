@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief, confirms with its own, and the two sessions become members of each other's work.
+One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
 
 ## Why MCP as the rendezvous
 
@@ -17,8 +17,8 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 | Tool | Purpose |
 |---|---|
-| `bellman_start` | Create a room, get join code + `member_id`. Entitlement-gated. |
-| `bellman_connect` | Phase 1: preview the creator's brief. **Nothing of yours ships yet.** |
+| `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
+| `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists, and the one you would get). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
@@ -28,8 +28,8 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 ## Trust model
 
-- **Two-phase connect**: joiners see the creator's brief before their own context crosses. Codes are single-use and expire in 15 minutes unused.
-- **Untrusted envelopes**: every peer-originated payload arrives wrapped `{ trust: "untrusted", origin, data }` with an explicit preamble instructing the receiving agent to treat it as data, not instructions. Cross-provider makes this load-bearing: it's a GPT agent's output landing in a Claude context, and vice versa.
+- **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists, and the one they would get) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
+- **Untrusted envelopes**: peer-written briefs, messages, artifacts and the room's name, purpose and role descriptions arrive wrapped `{ trust: "untrusted", origin, data }`. A response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions; `structuredContent` has none, so there `trust` is the only marker. Role names, modes, verbs and each member's agent (provider, model, client) ship unwrapped. Cross-provider makes this load-bearing: it's a GPT agent's output landing in a Claude context, and vice versa.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
 

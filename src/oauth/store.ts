@@ -1,8 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  REGISTRATION_WINDOW_MS,
-  type AuthCode, type AuthStorage, type RefreshToken, type RegisteredClient,
+  CLIENT_CAP, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS,
+  type Admission, type AuthCode, type AuthStorage, type Reclaimed,
+  type RefreshToken, type RegisteredClient,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
@@ -22,6 +23,9 @@ const CODE = "code:";
 const REFRESH = "refresh:";
 const CLIENT = "client:";
 const REG = "reg:";
+const COUNT = "clients:count";
+/** How much stale data one registration is willing to clear. */
+const PURGE_BATCH = 200;
 
 export class AuthDO extends DurableObject {
   /**
@@ -59,7 +63,57 @@ export class AuthDO extends DurableObject {
   }
 
   async registerClient(client: RegisteredClient): Promise<void> {
-    await this.ctx.storage.put(`${CLIENT}${client.client_id}`, client);
+    const key = `${CLIENT}${client.client_id}`;
+    const existed = (await this.ctx.storage.get(key)) !== undefined;
+    await this.ctx.storage.put(key, client);
+    if (!existed) await this.bumpCount(1);
+  }
+
+  /**
+   * One RPC, and it awaits nothing but storage. That is what makes it atomic:
+   * the input gate holds other events off for the duration, so no concurrent
+   * registration can pass the same check before this one writes. (A method that
+   * awaited the network would not get that — see the ledger comment above.)
+   */
+  async admitRegistration(
+    client: RegisteredClient,
+    ip: string | null,
+    now: number
+  ): Promise<Admission> {
+    if (ip) {
+      const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      if (recent.length >= REGISTRATIONS_PER_HOUR) return "rate_limited";
+    }
+
+    // Evict before testing the cap, or anyone who fills the table with clients
+    // they never signed in with blocks every real client until the next purge.
+    if ((await this.clientCount()) >= CLIENT_CAP) {
+      await this.purgeStale(now);
+      if ((await this.clientCount()) >= CLIENT_CAP) return "full";
+    }
+
+    await this.registerClient(client);
+    if (ip) {
+      const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      await this.ctx.storage.put(`${REG}${ip}`, [...recent, now]);
+    }
+    return "ok";
+  }
+
+  /**
+   * Kept as a counter rather than counted per request. Durable Object storage
+   * has no count API, so the alternative is list()ing up to CLIENT_CAP entries
+   * on every registration. Every insert and delete goes through registerClient
+   * or purgeStale, which are the only two places this moves.
+   */
+  private async clientCount(): Promise<number> {
+    return (await this.ctx.storage.get<number>(COUNT)) ?? 0;
+  }
+
+  private async bumpCount(by: number): Promise<void> {
+    await this.ctx.storage.put(COUNT, Math.max(0, (await this.clientCount()) + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
@@ -79,35 +133,49 @@ export class AuthDO extends DurableObject {
     await this.ctx.storage.put(key, { ...client, expires_at: null, used_at: Date.now() });
   }
 
-  async purgeExpiredClients(now: number): Promise<number> {
-    const entries = await this.ctx.storage.list<RegisteredClient>({ prefix: CLIENT });
-    let removed = 0;
-    for (const [key, client] of entries) {
-      if (client.expires_at !== null && now > client.expires_at) {
-        await this.ctx.storage.delete(key);
-        removed++;
-      }
+  /**
+   * Bounded and batched, because this runs on the registration path. An
+   * unbounded sweep with one delete per key means a caller waits on up to
+   * CLIENT_CAP sequential round-trips; PURGE_BATCH at a time still frees room
+   * to admit, and the existing code/refresh purge below bounds itself the same
+   * way for the same reason.
+   */
+  async purgeStale(now: number): Promise<Reclaimed> {
+    const stale = await this.ctx.storage.list<RegisteredClient>({ prefix: CLIENT, limit: PURGE_BATCH });
+    const expired = [...stale]
+      .filter(([, c]) => c.expires_at !== null && now > c.expires_at)
+      .map(([key]) => key);
+    if (expired.length > 0) {
+      await this.ctx.storage.delete(expired);
+      await this.bumpCount(-expired.length);
     }
-    return removed;
+
+    const buckets = await this.ctx.storage.list<number[]>({ prefix: REG, limit: PURGE_BATCH });
+    const empty: string[] = [];
+    for (const [key, stamps] of buckets) {
+      const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
+      // An empty bucket is deleted, not stored empty: otherwise one key per
+      // source address survives forever and rotating addresses grow storage
+      // without bound.
+      if (recent.length === 0) empty.push(key);
+      else if (recent.length !== stamps.length) await this.ctx.storage.put(key, recent);
+    }
+    if (empty.length > 0) await this.ctx.storage.delete(empty);
+
+    return { clients: expired.length, buckets: empty.length };
   }
 
   async countClients(): Promise<number> {
-    return (await this.ctx.storage.list({ prefix: CLIENT })).size;
+    return this.clientCount();
+  }
+
+  async countRegistrationBuckets(): Promise<number> {
+    return (await this.ctx.storage.list({ prefix: REG })).size;
   }
 
   async countRecentRegistrations(ip: string, since: number): Promise<number> {
     const stamps = (await this.ctx.storage.get<number[]>(`${REG}${ip}`)) ?? [];
     return stamps.filter((at) => at >= since).length;
-  }
-
-  async recordRegistration(ip: string): Promise<void> {
-    const key = `${REG}${ip}`;
-    const stamps = (await this.ctx.storage.get<number[]>(key)) ?? [];
-    // Pruned on write, or this key grows for as long as the address keeps
-    // registering — the same reason RegistryDO.recordCreate trims on write.
-    const recent = stamps.filter((at) => at >= Date.now() - REGISTRATION_WINDOW_MS);
-    recent.push(Date.now());
-    await this.ctx.storage.put(key, recent);
   }
 
   async putCode(code: string, value: AuthCode): Promise<void> {
@@ -181,17 +249,20 @@ export class AuthStore implements AuthStorage, BillingStorage {
   markClientUsed(clientId: string): Promise<void> {
     return this.object.markClientUsed(clientId);
   }
-  purgeExpiredClients(now: number): Promise<number> {
-    return this.object.purgeExpiredClients(now);
+  admitRegistration(client: RegisteredClient, ip: string | null, now: number): Promise<Admission> {
+    return this.object.admitRegistration(client, ip, now);
+  }
+  purgeStale(now: number): Promise<Reclaimed> {
+    return this.object.purgeStale(now);
   }
   countClients(): Promise<number> {
     return this.object.countClients();
   }
+  countRegistrationBuckets(): Promise<number> {
+    return this.object.countRegistrationBuckets();
+  }
   countRecentRegistrations(ip: string, since: number): Promise<number> {
     return this.object.countRecentRegistrations(ip, since);
-  }
-  recordRegistration(ip: string): Promise<void> {
-    return this.object.recordRegistration(ip);
   }
   putCode(code: string, value: AuthCode): Promise<void> {
     return this.object.putCode(code, value);

@@ -9,10 +9,7 @@ import {
   isProviderName, isStableIdentityKey,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import {
-  CLIENT_CAP, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, UNUSED_CLIENT_TTL_MS,
-  type AuthStorage,
-} from "./storage.js";
+import { UNUSED_CLIENT_TTL_MS, type AuthStorage } from "./storage.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
   canonicalResource, randomId, signJwt, verifyJwt, verifyPkce,
@@ -423,31 +420,12 @@ export async function handleOAuth(
     } catch {
       return oauthError("invalid_client_metadata", "body must be JSON");
     }
-    // Cloudflare sets this; the Node server is local development and has no
-    // proxy in front of it. Unknown IP means no limiting rather than a shared
-    // bucket, which would rate-limit a developer against themself.
-    const ip = request.headers.get("cf-connecting-ip");
-    if (ip) {
-      const recent = await config.store.countRecentRegistrations(ip, Date.now() - REGISTRATION_WINDOW_MS);
-      if (recent >= REGISTRATIONS_PER_HOUR) {
-        return oauthError("too_many_requests", "too many registrations from this address — try later", 429);
-      }
-    }
-
     const redirects = Array.isArray(body.redirect_uris) ? (body.redirect_uris as string[]) : [];
     if (redirects.length === 0) {
       return oauthError("invalid_redirect_uri", "redirect_uris is required");
     }
     if (!redirects.every((uri) => typeof uri === "string" && usableRedirect(uri))) {
       return oauthError("invalid_redirect_uri", "every redirect_uri must be https, or http on loopback");
-    }
-
-    // Evict lapsed registrations before testing the cap. Refusing outright
-    // would let anyone who fills the table with clients they never signed in
-    // with block every real client until the next purge.
-    await config.store.purgeExpiredClients(Date.now());
-    if ((await config.store.countClients()) >= CLIENT_CAP) {
-      return oauthError("too_many_requests", "the client registry is full — try later", 429);
     }
 
     const client = {
@@ -458,8 +436,22 @@ export async function handleOAuth(
       // Disposable until a token is issued for it.
       expires_at: Date.now() + UNUSED_CLIENT_TTL_MS,
     };
-    await config.store.registerClient(client);
-    if (ip) await config.store.recordRegistration(ip);
+
+    // Cloudflare sets this; the Node server is local development with no proxy
+    // in front of it. An unknown address is not limited rather than sharing one
+    // bucket, which would rate-limit a developer against themself.
+    //
+    // Rate window, stale purge, cap and insert all happen inside the store, as
+    // one operation. Checking here and writing there would let every request in
+    // a burst pass the same check before any of them wrote.
+    const ip = request.headers.get("cf-connecting-ip");
+    const admission = await config.store.admitRegistration(client, ip, Date.now());
+    if (admission === "rate_limited") {
+      return oauthError("too_many_requests", "too many registrations from this address — try later", 429);
+    }
+    if (admission === "full") {
+      return oauthError("too_many_requests", "the client registry is full — try later", 429);
+    }
     return json(
       {
         client_id: client.client_id,

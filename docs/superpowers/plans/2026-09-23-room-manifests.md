@@ -1150,7 +1150,8 @@ In `src/stored-session.ts`:
  * Rows written before Session.manifest existed have no manifest, and a read
  * of `session.manifest.mode` on one is a TypeError. They cannot be migrated
  * — a manifest is a declaration, and inventing one would put words in the
- * creator's mouth — so they are treated as gone and age out on their own TTL.
+ * creator's mouth — so they are treated as gone: no read returns them, and
+ * nothing rewrites them. They stay in storage; nothing deletes the session key.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -1186,7 +1187,8 @@ would break every room.
 Rows written before Session.manifest existed are treated as gone
 rather than crashing a read. They are not migrated: a manifest is a
 declaration, and synthesizing one would put words in the creator's
-mouth. They age out on their own TTL.
+mouth. No read returns them and nothing rewrites them; they simply
+stay in storage, since nothing deletes the session key.
 
 Refs #1"
 ```

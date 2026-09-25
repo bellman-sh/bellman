@@ -611,7 +611,7 @@ describe("INVARIANT 10 — every room is declared", () => {
           // creator_role is neither the first role nor default_role, so a block
           // built for the wrong seat cannot pass by accident.
           scribe: { can: ["send"] },
-          driver: { can: ["send", "invite", "close_room"] },
+          driver: { can: ["send", "invite", "revoke"] },
           watcher: { can: [] },
         },
         default_role: "watcher",
@@ -626,9 +626,9 @@ describe("INVARIANT 10 — every room is declared", () => {
     };
     expect(room.your_role).toBe(session?.manifest.creatorRole);
     expect(room.your_role).toBe("driver");
-    expect(room.your_verbs).toEqual(["send", "invite", "close_room"]);
+    expect(room.your_verbs).toEqual(["send", "invite", "revoke"]);
     expect(room.roles).toEqual({
-      scribe: ["send"], driver: ["send", "invite", "close_room"], watcher: [],
+      scribe: ["send"], driver: ["send", "invite", "revoke"], watcher: [],
     });
 
     // The same split a joiner gets: one envelope for the prose, nothing else

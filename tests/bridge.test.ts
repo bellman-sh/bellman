@@ -610,7 +610,7 @@ describe("bellman_start with a room.yaml", () => {
       "mode: swarm",
       "roles:",
       "  lead:",
-      "    can: [send, invite, revoke, request_actions, respond_actions, audit, close_room]",
+      "    can: [send, invite, revoke, request_actions, respond_actions]",
       "  helper:",
       "    can: [send, request_actions, respond_actions]",
       "  observer:",

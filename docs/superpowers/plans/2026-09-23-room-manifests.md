@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Verb enum is exactly: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `audit`, `close_room`. No others.
+- Verb enum is exactly: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`. No others. `audit` and `close_room` were dropped after review: neither names an operation that exists room-scoped (`bellman_audit` takes no session, so it is org-wide, and no tool closes a room on a member's say-so), so a role listing them would promise something no code can keep. Each verb returns in the PR that adds its operation.
 - Preset enum is exactly: `pair`, `swarm`, `review`. `observer` is a role, never a preset.
 - Role keys match `/^[a-z][a-z0-9_]{0,30}$/` **and** are rejected outright if they are `__proto__`, `constructor`, or `prototype`. The regex alone is NOT sufficient, verified against zod 4.5.4: `constructor` matches it, and `z.record` silently DROPS an own `__proto__` key before the key schema ever runs, so the regex never sees it. Reserved keys must be guarded on the raw input object, ahead of Zod.
 - Limits: `roles` ≤ 16 entries; `room` ≤ 80 chars; `purpose` ≤ 300 chars; role `description` ≤ 300 chars.
@@ -58,9 +58,7 @@ export type Verb =
   | "invite"
   | "revoke"
   | "request_actions"
-  | "respond_actions"
-  | "audit"
-  | "close_room";
+  | "respond_actions";
 
 export type PresetName = "pair" | "swarm" | "review";
 
@@ -113,8 +111,9 @@ describe("presets", () => {
     expect(m.preset).toBe("pair");
     expect(m.creatorRole).toBe("peer_a");
     expect(m.defaultRole).toBe("peer_b");
-    expect(m.roles.peer_a.can).toContain("close_room");
-    expect(m.roles.peer_b.can).not.toContain("close_room");
+    expect(m.roles.peer_a.can).toEqual(expect.arrayContaining(["invite", "revoke"]));
+    expect(m.roles.peer_b.can).not.toContain("invite");
+    expect(m.roles.peer_b.can).not.toContain("revoke");
   });
 
   it("expands swarm with mode swarm and a verbless observer", () => {
@@ -254,9 +253,18 @@ Expected: FAIL — `Cannot find module '../src/manifest.js'`
 import { z } from "zod";
 import type { PresetName, RoleDef, RoomManifest, Verb } from "./types.js";
 
+/**
+ * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
+ * is shown maps to a guard that can exist; an open set would let a manifest advertise authority that
+ * enforces nothing. Each of these is an operation a room member invokes on that room.
+ *
+ * `audit` and `close_room` are absent on purpose, because neither names such an operation. bellman_audit
+ * takes no session, so it is org-wide and no room role can gate it. No tool closes a room on a member's
+ * say-so: a room ends when its last member leaves. Each verb returns in the PR that adds its operation.
+ * Adding one sooner lets a role's `can` promise something no code can keep.
+ */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions",
-  "respond_actions", "audit", "close_room",
+  "send", "invite", "revoke", "request_actions", "respond_actions",
 ] as const satisfies readonly Verb[];
 
 export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
@@ -327,12 +335,12 @@ export const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       peer_a: role(
-        ["send", "request_actions", "respond_actions", "invite", "revoke", "close_room"],
+        ["send", "request_actions", "respond_actions", "invite", "revoke"],
         "Creator. Equal in conversation, holds room control.",
       ),
       peer_b: role(
         ["send", "request_actions", "respond_actions"],
-        "Equal peer in conversation; cannot invite or close the room.",
+        "Equal peer in conversation; cannot change who can join.",
       ),
     },
     defaultRole: "peer_b",
@@ -342,8 +350,8 @@ export const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       lead: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "audit", "close_room"],
-        "Runs the room: invites, audits, closes.",
+        ["send", "invite", "revoke", "request_actions", "respond_actions"],
+        "Runs the room: controls who can join.",
       ),
       helper: role(
         ["send", "request_actions", "respond_actions"],
@@ -358,7 +366,7 @@ export const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       author: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "close_room"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions"],
         "Brought the work. Can ask the reviewer to do things.",
       ),
       reviewer: role(
@@ -693,7 +701,7 @@ Then update `bellman_start`'s description text: drop the `mode` bullet, add
   - manifest: the room's declaration. Either cite a preset —
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
-    Verbs: send, invite, revoke, request_actions, respond_actions, audit, close_room.
+    Verbs: send, invite, revoke, request_actions, respond_actions.
     The manifest sets the room's mode; there is no separate mode argument.
 ```
 
@@ -1043,7 +1051,7 @@ describe("manifest persistence", () => {
 
     const back = await store.getSession(s.id);
     expect(back?.manifest).toEqual(s.manifest);
-    expect(back?.manifest.roles.peer_a.can).toContain("close_room");
+    expect(back?.manifest.roles.peer_a.can).toContain("revoke");
   });
 
   it("hands back a detached manifest that callers cannot mutate in place", async () => {
@@ -1052,10 +1060,10 @@ describe("manifest persistence", () => {
     await store.createSession(s);
 
     const first = await store.getSession(s.id);
-    first!.manifest.roles.peer_b.can.push("close_room");
+    first!.manifest.roles.peer_b.can.push("revoke");
 
     const second = await store.getSession(s.id);
-    expect(second?.manifest.roles.peer_b.can).not.toContain("close_room");
+    expect(second?.manifest.roles.peer_b.can).not.toContain("revoke");
   });
 });
 ```
@@ -1422,7 +1430,7 @@ room: payments-migration
 mode: swarm
 roles:
   lead:
-    can: [send, invite, revoke, request_actions, respond_actions, audit, close_room]
+    can: [send, invite, revoke, request_actions, respond_actions]
   helper:
     can: [send, request_actions, respond_actions]
   observer:
@@ -1431,8 +1439,8 @@ default_role: helper
 creator_role: lead
 ```
 
-Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`,
-`audit`, `close_room`. Every member can always sync and leave.
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`.
+Every member can always sync and leave.
 ````
 
 - [ ] **Step 8: Commit**

@@ -1,9 +1,18 @@
 import { z } from "zod";
 import type { PresetName, RoleDef, RoomManifest, Verb } from "./types.js";
 
+/**
+ * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
+ * is shown maps to a guard that can exist; an open set would let a manifest advertise authority that
+ * enforces nothing. Each of these is an operation a room member invokes on that room.
+ *
+ * `audit` and `close_room` are absent on purpose, because neither names such an operation. bellman_audit
+ * takes no session, so it is org-wide and no room role can gate it. No tool closes a room on a member's
+ * say-so: a room ends when its last member leaves. Each verb returns in the PR that adds its operation.
+ * Adding one sooner lets a role's `can` promise something no code can keep.
+ */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions",
-  "respond_actions", "audit", "close_room",
+  "send", "invite", "revoke", "request_actions", "respond_actions",
 ] as const satisfies readonly Verb[];
 
 export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
@@ -148,12 +157,12 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       peer_a: role(
-        ["send", "request_actions", "respond_actions", "invite", "revoke", "close_room"],
+        ["send", "request_actions", "respond_actions", "invite", "revoke"],
         "Creator. Equal in conversation, holds room control.",
       ),
       peer_b: role(
         ["send", "request_actions", "respond_actions"],
-        "Equal peer in conversation; cannot invite or close the room.",
+        "Equal peer in conversation; cannot change who can join.",
       ),
     },
     defaultRole: "peer_b",
@@ -163,8 +172,8 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       lead: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "audit", "close_room"],
-        "Runs the room: invites, audits, closes.",
+        ["send", "invite", "revoke", "request_actions", "respond_actions"],
+        "Runs the room: controls who can join.",
       ),
       helper: role(
         ["send", "request_actions", "respond_actions"],
@@ -179,7 +188,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       author: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions", "close_room"],
+        ["send", "invite", "revoke", "request_actions", "respond_actions"],
         "Brought the work. Can ask the reviewer to do things.",
       ),
       reviewer: role(

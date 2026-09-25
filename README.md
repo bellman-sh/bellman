@@ -168,7 +168,7 @@ room: payments-migration
 mode: swarm
 roles:
   lead:
-    can: [send, invite, revoke, request_actions, respond_actions, audit, close_room]
+    can: [send, invite, revoke, request_actions, respond_actions]
   helper:
     can: [send, request_actions, respond_actions]
   observer:
@@ -177,8 +177,8 @@ default_role: helper
 creator_role: lead
 ```
 
-Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`,
-`audit`, `close_room`. Every member can always sync and leave.
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`.
+Every member can always sync and leave.
 
 Verbs are declared, not yet enforced: the server records them and shows
 them to joiners but does not check them when a call is made, so read

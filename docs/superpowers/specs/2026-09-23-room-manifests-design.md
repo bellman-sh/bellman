@@ -34,7 +34,7 @@ bundle never parses YAML.
 ### D2 — Permission verbs are a closed enum mirroring the tool surface.
 
 ```
-send | invite | revoke | request_actions | respond_actions | audit | close_room
+send | invite | revoke | request_actions | respond_actions
 ```
 
 Zod validates the enum for free, MCP clients get schema hints, and #2's
@@ -42,6 +42,13 @@ enforcement is a one-line guard per handler. Most importantly: every verb shown
 in a connect preview provably maps to a real guard. An open string set would let
 a manifest advertise authority that enforces nothing — the exact lie this issue
 exists to prevent.
+
+`audit` and `close_room` were in this enum as first specified and are not in it.
+Neither names an operation that exists room-scoped: `bellman_audit` takes no
+`session_id`, so it is org-wide and no room role can gate it, and no tool closes
+a room on a member's say-so (a room ends when its last member leaves). Listing
+either would be the same lie. Each verb returns in the PR that adds its
+operation.
 
 **Verbs gate outbound actions only.** `bellman_sync` and `bellman_leave` are
 never gated: reading is implied by membership, and a member must always be able
@@ -138,9 +145,7 @@ export type Verb =
   | "invite"           // bellman_invite — mint a join code
   | "revoke"           // bellman_invite { revoke: true }
   | "request_actions"  // send action_request payloads
-  | "respond_actions"  // send action_response payloads
-  | "audit"            // bellman_audit
-  | "close_room";      // end the session for everyone
+  | "respond_actions"; // send action_response payloads
 
 export type PresetName = "pair" | "swarm" | "review";
 
@@ -202,22 +207,21 @@ Presets are room *shapes*: each implies a mode and a role structure. `observer`
 was considered and rejected as a preset — it is a *role*, and a room where
 everyone observes does nothing. It appears inside `swarm` instead.
 
-Room-control verbs (`invite`, `revoke`, `close_room`, `audit`) stay with the
-creator's role in every preset. Interaction verbs are symmetric where the shape
-is symmetric.
+Room-control verbs (`invite`, `revoke`) stay with the creator's role in every
+preset. Interaction verbs are symmetric where the shape is symmetric.
 
 ### `pair` — two peers, mode `pair`
 
 | role | can |
 |---|---|
-| `peer_a` *(creator)* | send, request_actions, respond_actions, invite, revoke, close_room |
+| `peer_a` *(creator)* | send, request_actions, respond_actions, invite, revoke |
 | `peer_b` *(default)* | send, request_actions, respond_actions |
 
 ### `swarm` — a lead and helpers, mode `swarm`
 
 | role | can |
 |---|---|
-| `lead` *(creator)* | send, invite, revoke, request_actions, respond_actions, audit, close_room |
+| `lead` *(creator)* | send, invite, revoke, request_actions, respond_actions |
 | `helper` *(default)* | send, request_actions, respond_actions |
 | `observer` | *(none — sync only)* |
 
@@ -225,7 +229,7 @@ is symmetric.
 
 | role | can |
 |---|---|
-| `author` *(creator)* | send, invite, revoke, request_actions, respond_actions, close_room |
+| `author` *(creator)* | send, invite, revoke, request_actions, respond_actions |
 | `reviewer` *(default)* | send, respond_actions |
 
 A reviewer can answer an action request but not initiate one.
@@ -314,7 +318,7 @@ room: {
   your_verbs: ["send", "respond_actions"],
   creator_role: "author",
   roles: {
-    author:   ["send","invite","revoke","request_actions","respond_actions","close_room"],
+    author:   ["send","invite","revoke","request_actions","respond_actions"],
     reviewer: ["send","respond_actions"],
   },
 

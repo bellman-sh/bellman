@@ -453,7 +453,7 @@ describe("a room's verbs are declared, not yet enforced", () => {
         room: "declared-not-enforced",
         mode: "pair",
         roles: {
-          lead: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "audit", "close_room"] },
+          lead: { can: ["send", "invite", "revoke", "request_actions", "respond_actions"] },
           // The joiner's seat: it omits `send` and lists `invite`.
           guest: { can: ["invite"] },
         },

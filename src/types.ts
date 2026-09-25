@@ -131,14 +131,13 @@ export interface Entitlements {
   audit: boolean;
 }
 
+// The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
 export type Verb =
   | "send"
   | "invite"
   | "revoke"
   | "request_actions"
-  | "respond_actions"
-  | "audit"
-  | "close_room";
+  | "respond_actions";
 
 export type PresetName = "pair" | "swarm" | "review";
 

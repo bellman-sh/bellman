@@ -14,7 +14,7 @@ describe("manifest persistence", () => {
 
     const back = await store.getSession(s.id);
     expect(back?.manifest).toEqual(s.manifest);
-    expect(back?.manifest.roles.peer_a.can).toContain("close_room");
+    expect(back?.manifest.roles.peer_a.can).toContain("revoke");
   });
 
   it("hands back a detached manifest that callers cannot mutate in place", async () => {
@@ -23,10 +23,10 @@ describe("manifest persistence", () => {
     await store.createSession(s);
 
     const first = await store.getSession(s.id);
-    first!.manifest.roles.peer_b.can.push("close_room");
+    first!.manifest.roles.peer_b.can.push("revoke");
 
     const second = await store.getSession(s.id);
-    expect(second?.manifest.roles.peer_b.can).not.toContain("close_room");
+    expect(second?.manifest.roles.peer_b.can).not.toContain("revoke");
   });
 });
 

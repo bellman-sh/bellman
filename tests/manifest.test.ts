@@ -7,6 +7,7 @@ import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
+import type { PresetName } from "../src/types.js";
 
 function authored(over: Record<string, unknown> = {}) {
   return {
@@ -29,8 +30,9 @@ describe("presets", () => {
     expect(m.preset).toBe("pair");
     expect(m.creatorRole).toBe("peer_a");
     expect(m.defaultRole).toBe("peer_b");
-    expect(m.roles.peer_a.can).toContain("close_room");
-    expect(m.roles.peer_b.can).not.toContain("close_room");
+    expect(m.roles.peer_a.can).toEqual(expect.arrayContaining(["invite", "revoke"]));
+    expect(m.roles.peer_b.can).not.toContain("invite");
+    expect(m.roles.peer_b.can).not.toContain("revoke");
   });
 
   it("expands swarm with mode swarm and a verbless observer", () => {
@@ -70,10 +72,10 @@ describe("presets", () => {
 
     const first = resolveManifest({ room: "first", preset: name });
     for (const def of Object.values(first.roles)) {
-      def.can.push("audit");
+      def.can.push("revoke");
       def.description = "poisoned";
     }
-    first.roles.intruder = { can: ["close_room"], description: null };
+    first.roles.intruder = { can: ["revoke"], description: null };
 
     expect(resolveManifest({ room: "second", preset: name }).roles).toEqual(expected);
   });
@@ -98,6 +100,62 @@ describe("presets", () => {
     }
     expect(Object.hasOwn(m.roles, m.defaultRole)).toBe(true);
     expect(Object.hasOwn(m.roles, m.creatorRole)).toBe(true);
+  });
+
+  // The catalog is a decision, so it is written out. The verbs each role holds are what a joiner's
+  // human reads before agreeing to a room, and the design's preset tables say the same; a verb that
+  // leaves or joins a role should show up as an edit to this table, not only to the catalog.
+  const catalog: Record<PresetName, Record<string, string[]>> = {
+    pair: {
+      peer_a: ["send", "request_actions", "respond_actions", "invite", "revoke"],
+      peer_b: ["send", "request_actions", "respond_actions"],
+    },
+    swarm: {
+      lead: ["send", "invite", "revoke", "request_actions", "respond_actions"],
+      helper: ["send", "request_actions", "respond_actions"],
+      observer: [],
+    },
+    review: {
+      author: ["send", "invite", "revoke", "request_actions", "respond_actions"],
+      reviewer: ["send", "respond_actions"],
+    },
+  };
+  it.each(PRESET_NAMES)("%s holds the verbs the design's table gives it, and no other roles", (name) => {
+    const sorted = (verbs: readonly string[]) => [...verbs].sort();
+    const held = Object.fromEntries(
+      Object.entries(resolveManifest({ room: "r", preset: name }).roles).map(([key, def]) => [key, sorted(def.can)]),
+    );
+    const expected = Object.fromEntries(
+      Object.entries(catalog[name]).map(([key, verbs]) => [key, sorted(verbs)]),
+    );
+    expect(held).toEqual(expected);
+  });
+});
+
+describe("the verb enum", () => {
+  // The enum is closed so that every verb a connect preview shows maps to a guard that can exist.
+  // `audit` and `close_room` were in it once and are not now, because neither names an operation
+  // that exists room-scoped: bellman_audit takes no session, so it is org-wide and no room role can
+  // gate it, and no tool closes a room on a member's say-so (a room ends when its last member
+  // leaves). Each verb returns in the PR that adds its operation, and this list changes in that
+  // PR, not before.
+  it("holds exactly the five verbs whose operations exist room-scoped", () => {
+    expect([...VERBS]).toEqual(["send", "invite", "revoke", "request_actions", "respond_actions"]);
+  });
+
+  it.each(["audit", "close_room"])("rejects %s from a role, and from the tool's own schema", (verb) => {
+    const input = authored({ roles: { lead: { can: ["send", verb] }, helper: { can: ["send"] } } });
+    expect(() => resolveManifest(input)).toThrow(/^roles\.lead\.can\.1: Invalid option: expected one of/);
+    expect(ManifestShape.safeParse(input).success).toBe(false);
+  });
+
+  // A preset's words about a role reach the joiner beside the verbs it holds, so they cannot name an
+  // operation the enum lacks either: "runs the room: invites, audits, closes" told them what no verb
+  // could. The pattern is the two removed verbs' stems; a verb that returns takes its stem out of it.
+  it.each(PRESET_NAMES)("%s's role descriptions do not describe a removed verb", (name) => {
+    for (const [key, def] of Object.entries(resolveManifest({ room: "r", preset: name }).roles)) {
+      expect(def.description ?? "", key).not.toMatch(/\baudit|\bclose/i);
+    }
   });
 });
 
@@ -128,7 +186,7 @@ describe("hostile input", () => {
     // MUST be built with JSON.parse: it makes "__proto__" a real own key, which is
     // how it arrives over the wire. An object literal's `__proto__:` sets the
     // prototype and creates no key, so a literal-based test proves nothing.
-    const hostile = JSON.parse('{"__proto__":{"can":["close_room"]},"helper":{"can":["send"]}}');
+    const hostile = JSON.parse('{"__proto__":{"can":["invite"]},"helper":{"can":["send"]}}');
     const control = JSON.parse('{"helper":{"can":["send"]}}');
     const resolve = (roles: unknown) => () =>
       resolveManifest(authored({ roles, creator_role: "helper" }));
@@ -158,11 +216,15 @@ describe("hostile input", () => {
       // that into a rejection. Without it, the MCP SDK (which parses arguments with
       // the shape before any handler runs) would hand resolveManifest a roles map
       // that had already lost the key.
-      const wire = JSON.parse(
+      const wire = (key: string) => JSON.parse(
         '{"room":"r","mode":"pair","default_role":"helper","creator_role":"helper",'
-        + `"roles":{"${name}":{"can":["close_room"]},"helper":{"can":["send"]}}}`,
+        + `"roles":{"${key}":{"can":["invite"]},"helper":{"can":["send"]}}}`,
       );
-      expect(ManifestShape.safeParse(wire).success).toBe(false);
+      // The same payload under a legal key is valid, so the key is the only thing that can
+      // be rejecting the other. Without this control, a role definition that was itself
+      // invalid (a verb the enum no longer holds, say) would make the test pass for nothing.
+      expect(ManifestShape.safeParse(wire("lead")).success).toBe(true);
+      expect(ManifestShape.safeParse(wire(name)).success).toBe(false);
     },
   );
 

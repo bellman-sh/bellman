@@ -1527,6 +1527,54 @@ describe("connectSignedIn", () => {
     }).toEqual({ before: "jesse@example.dev", file: { client: first.client }, dropped: true });
   });
 
+  it("does not resurrect the last account when a refresh lands on a token nobody can read", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+    const before = readServer(dir, RESOURCE);
+    expect(before.identity?.label).toBe("jesse@example.dev"); // there is an account to wrongly keep
+
+    // A live session refreshes into a token the bridge cannot read. That write goes through the
+    // merge onto the file, which fills in whatever a credential says nothing about from what is
+    // already there — and used to count an identity it could not read as saying nothing.
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, [], { fetchImpl: opaqueTokens(fetchImpl, "refresh_token") });
+    expireOnce();
+    // The session carries on with the token it cannot read, which is what makes the file worth checking.
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+
+    expect(readServer(dir, RESOURCE)).toEqual({
+      client: before.client,
+      tokens: {
+        access_token: expect.stringMatching(/^opaque\./),
+        refresh_token: expect.not.stringContaining(before.tokens!.refresh_token!), // rotated: it did write
+        expires_at: expect.any(Number),
+      },
+    });
+  });
+
+  /**
+   * The other side of the merge. A refresh refused with nothing newer on disk to adopt costs
+   * this session its credential, in memory only: the file may be what another bridge is using,
+   * so it is left exactly as it was, identity and all. Reading the identity off "our" side
+   * unconditionally would blank it here, and no other test would notice.
+   */
+  it("leaves the file's account alone when a refresh is refused and there is nothing to adopt", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+    const before = readServer(dir, RESOURCE);
+
+    // Our refresh token is spent elsewhere, and the file holds nothing newer.
+    await bellman.refresh(before.tokens!.refresh_token!, before.client!.client_id);
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, [], { fetchImpl });
+    expireOnce();
+    await expect(remote.listTools()).rejects.toThrow(); // the session did lose its credential
+    await remote.close();
+
+    expect(readServer(dir, RESOURCE)).toEqual(before);
+  });
+
   // ------------------------------------------------------------------ R6
   /**
    * openBrowser refuses a non-http(s) URL but only logs, so without a check here

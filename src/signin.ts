@@ -633,14 +633,21 @@ async function writeMerged(
       return;
     }
     try {
-      // Field by field, so a credential we have nothing new to say about —
-      // an identity we could not decode, a client we did not re-register —
-      // survives rather than being blanked by an undefined.
+      // Field by field, so a client we did not re-register survives rather than
+      // being blanked by an undefined.
+      //
+      // The tokens and the identity read off them are ONE fact, so they come from
+      // the same side: ours when we hold tokens, the file's when we do not. Not
+      // `cred.identity ?? onDisk.identity`, which said "an identity we could not
+      // decode survives": a token we cannot read then inherited the identity of
+      // the tokens it had just replaced, and the file named the wrong account. An
+      // invalidation that emptied our tokens in memory still cannot blank the
+      // file — it holds none, so it takes the file's whole pair.
       const onDisk = readServer(dir, serverUrl);
       writeServer(dir, serverUrl, {
         client: cred.client ?? onDisk.client,
         tokens: cred.tokens ?? onDisk.tokens,
-        identity: cred.identity ?? onDisk.identity,
+        identity: cred.tokens ? cred.identity : onDisk.identity,
       });
     } finally {
       held.release();

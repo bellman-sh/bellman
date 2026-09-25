@@ -372,7 +372,19 @@ class BridgeAuth implements OAuthClientProvider {
     const t = this.cred.tokens;
     return t ? { access_token: t.access_token, refresh_token: t.refresh_token, token_type: "Bearer" } : undefined;
   }
-  saveTokens(tokens: OAuthTokens): void {
+  /**
+   * Where a refresh that happens AFTER connectSignedIn returned is written.
+   *
+   * Undefined for the whole of the initial connect, and that is the point: the
+   * credential lock is held across it, this process cannot take the lock twice
+   * (O_EXCL against its own file), and a re-take would stall for the full
+   * waitMs and then write nothing. The single writeServer at the end of signIn
+   * covers everything up to that moment; arming happens once the lock is gone.
+   */
+  private persist: ((cred: ServerCredential) => Promise<void>) | undefined;
+  armPersist(fn: (cred: ServerCredential) => Promise<void>): void { this.persist = fn; }
+
+  async saveTokens(tokens: OAuthTokens): Promise<void> {
     this.cred = {
       ...this.cred,
       tokens: {
@@ -382,6 +394,7 @@ class BridgeAuth implements OAuthClientProvider {
       },
       identity: decodeIdentity(tokens.access_token) ?? this.cred.identity,
     };
+    await this.persist?.(this.cred);
   }
 
   saveCodeVerifier(verifier: string): void { this.verifier = verifier; }
@@ -406,6 +419,15 @@ class BridgeAuth implements OAuthClientProvider {
      */
     const spent = this.cred.tokens?.refresh_token;
     const stored = this.reread().tokens;
+    /**
+     * `!== spent` is deliberately not load-bearing, and a mutation sweep will
+     * report removing it as survivable. Adopting the token we just spent costs
+     * one more refresh that fails the same way, after which auth() is out of
+     * retries and the backstop below opens a browser — the same end state, one
+     * wasted round trip later. It stays because "adopt something NEWER" is the
+     * rule the code means, and a reader should not have to derive the outcome
+     * to see that re-spending a dead token is pointless.
+     */
     if (stored?.refresh_token && stored.refresh_token !== spent) {
       this.cred = { ...this.cred, tokens: stored };
       return;
@@ -423,14 +445,33 @@ function remoteFrom(client: Client): Remote {
 }
 
 /** The degraded path: a cached token, no listener, no auth provider. */
-async function connectWithHeader(url: string, token: string, fetchImpl?: typeof fetch): Promise<Remote> {
+async function connectWithHeader(
+  url: string,
+  token: string,
+  fetchImpl?: typeof fetch,
+  signal?: AbortSignal
+): Promise<Remote> {
   const client = new Client({ name: "bellman-bridge", version: VERSION });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(url), {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
-      fetch: fetchImpl,
-    })
-  );
+  const transport = new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    fetch: fetchImpl,
+  });
+  /**
+   * Closing the transport aborts the request in flight, which is the only way
+   * to end this one early: the SDK overwrites requestInit.signal with its own
+   * controller's on every send, so a signal passed in there would be ignored.
+   * Without it a shutdown waits out a stalled connect with no timeout at all.
+   */
+  const onAbort = () => { void transport.close().catch(() => undefined); };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    await client.connect(transport);
+  } catch (err) {
+    if (signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
+    throw err;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
   return remoteFrom(client);
 }
 
@@ -453,19 +494,30 @@ export async function connectSignedIn(opts: SignInOptions): Promise<Remote> {
   // Told to stop before we began: bind no port and take no lock.
   if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled before it started");
 
-  const lock = await acquireLock(dir, opts.lock ?? {});
+  const lock = await acquireLock(dir, { ...opts.lock, signal: opts.signal });
   // No lock means someone else held it for the whole wait. Their sign-in may be
   // all we needed, so re-read before giving up.
   if (!lock) {
+    /**
+     * Or that we were told to stop while waiting. WAIT_MS is six minutes, so a
+     * shutdown arriving while another bridge holds the lock would otherwise sit
+     * here long past the point Claude Code force-terminates us — the same
+     * failure R1 exists to prevent, one layer further down.
+     */
+    if (opts.signal?.aborted) {
+      throw new SignInCancelled("the sign-in was cancelled while waiting for the credential lock");
+    }
     const cached = readServer(dir, opts.serverUrl);
     if (tokensUsable(cached.tokens)) {
-      return await connectWithHeader(opts.serverUrl, cached.tokens!.access_token, opts.fetchImpl);
+      return await connectWithHeader(opts.serverUrl, cached.tokens!.access_token, opts.fetchImpl, opts.signal);
     }
     throw new Error(
       `another Bellman sign-in is holding ${join(dir, LOCK_FILE)}. If nothing is signing in, delete that file.`
     );
   }
 
+  /** The provider to arm for later refreshes, once the lock is released below. */
+  let arm: BridgeAuth | undefined;
   // The lock wraps the WHOLE connect, not each write: the SDK calls tokens() and
   // saveTokens() at points we do not choose, so there is no smaller unit that is
   // still atomic against another bridge.
@@ -478,8 +530,9 @@ export async function connectSignedIn(opts: SignInOptions): Promise<Remote> {
      */
     if (tokensUsable(cred.tokens)) {
       try {
-        return await connectWithHeader(opts.serverUrl, cred.tokens!.access_token, opts.fetchImpl);
+        return await connectWithHeader(opts.serverUrl, cred.tokens!.access_token, opts.fetchImpl, opts.signal);
       } catch (err) {
+        if (err instanceof SignInCancelled) throw err;
         // Unexpired but refused: revoked, or signed with a key since rotated.
         // Sign in again rather than strand the user with a file they would have
         // to find and delete — the same call readFile makes about a bad file.
@@ -499,13 +552,46 @@ export async function connectSignedIn(opts: SignInOptions): Promise<Remote> {
     const onAbort = () => listener.close();
     opts.signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      return await signIn(opts, dir, cred, listener, openIt, timeout, log);
+      const signedIn = await signIn(opts, dir, cred, listener, openIt, timeout, log);
+      arm = signedIn.provider;
+      return signedIn.remote;
     } finally {
       opts.signal?.removeEventListener("abort", onAbort);
       listener.close(); // idempotent: covers every path signIn did not close on
     }
   } finally {
     lock.release();
+    /**
+     * Only now. The provider outlives this call — the Remote holds the
+     * transport, which holds the provider — and access tokens live ten minutes,
+     * so any session longer than that refreshes, and every refresh ROTATES the
+     * refresh token server-side. Without this the file keeps a token the server
+     * has already deleted, and the next start opens a browser: the exact
+     * opposite of what a cached credential is for.
+     *
+     * Armed after release() rather than in the constructor because the lock is
+     * not reentrant, and a refresh during the initial connect would stall on a
+     * lock this very call is holding.
+     */
+    arm?.armPersist(async (cred) => {
+      const held = await acquireLock(dir, { ...opts.lock, signal: opts.signal });
+      if (!held) {
+        log("could not take the credential lock to save the refreshed sign-in; it stays in memory for this session");
+        return;
+      }
+      try {
+        // Field by field, so a credential we have nothing new to say about —
+        // another server's entry, an identity we could not decode — survives.
+        const onDisk = readServer(dir, opts.serverUrl);
+        writeServer(dir, opts.serverUrl, {
+          client: cred.client ?? onDisk.client,
+          tokens: cred.tokens ?? onDisk.tokens,
+          identity: cred.identity ?? onDisk.identity,
+        });
+      } finally {
+        held.release();
+      }
+    });
   }
 }
 
@@ -517,7 +603,7 @@ async function signIn(
   openIt: (url: URL) => void | Promise<void>,
   timeout: number,
   log: (message: string) => void
-): Promise<Remote> {
+): Promise<{ remote: Remote; provider: BridgeAuth }> {
   let retried = false;
   /** Set once the listener has been waited on: it is closed, so it is single use. */
   let listenerSpent = false;
@@ -635,6 +721,8 @@ async function signIn(
     const label = typeof identity?.label === "string" && identity.label ? identity.label : undefined;
     const plan = typeof identity?.plan === "string" && identity.plan ? identity.plan : undefined;
     log(label ? `signed in as ${label}${plan ? ` (${plan} plan)` : ""}` : "signed in");
-    return remoteFrom(client);
+    // The provider goes back with the Remote: it outlives this call inside the
+    // transport, and connectSignedIn arms its persist once the lock is released.
+    return { remote: remoteFrom(client), provider };
   }
 }

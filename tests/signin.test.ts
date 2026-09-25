@@ -9,7 +9,7 @@ import {
   CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
   SignInCancelled, type Listener, type SignInOptions,
 } from "../src/signin.js";
-import { readServer, writeServer } from "../src/credentials.js";
+import { acquireLock, readServer, writeServer } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
 
@@ -703,7 +703,9 @@ describe("connectSignedIn", () => {
         callbackTimeoutMs: 1_000,
         browser: () => { throw new Error("should never reach a browser"); },
       })
-    ).rejects.toThrow();
+      // Named, not a bare rejects.toThrow(): the guard browser above throws too,
+      // so an unqualified assertion passes on the wrong error entirely.
+    ).rejects.toThrow(/ECONNREFUSED/);
   });
 
   // ------------------------------------------------------------------ R4
@@ -806,6 +808,57 @@ describe("connectSignedIn", () => {
     await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
   });
 
+  /**
+   * R1 one layer down. The default lock wait is six minutes, so a shutdown that
+   * arrives while another bridge holds the lock would sit here long past the
+   * point Claude Code force-terminates us — which leaks the very lock the exit
+   * handler exists to clean up.
+   */
+  it("gives up waiting for the credential lock when the sign-in is aborted", async () => {
+    const holder = await acquireLock(dir, { heartbeatMs: 20 });
+    expect(holder).toBeDefined();
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 50);
+      const started = Date.now();
+      await expect(
+        connect(fakeBellman(), [], {
+          signal: controller.signal,
+          lock: { heartbeatMs: 20 }, // the real six-minute wait
+        })
+      ).rejects.toThrow(SignInCancelled);
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      holder!.release();
+    }
+  });
+
+  /**
+   * And the fast path, which has no listener to close. The SDK overwrites
+   * requestInit.signal with its own controller's on every send, so the abort has
+   * to reach the transport instead.
+   */
+  it("ends the cached-token connect when the sign-in is aborted", async () => {
+    const bellman = fakeBellman();
+    await (await connect(bellman, [])).close();
+
+    const controller = new AbortController();
+    // A server that never answers: only the abort can end this.
+    const stalled: typeof fetch = (input, init) =>
+      new Promise((resolve, reject) => {
+        const signal = (init as RequestInit | undefined)?.signal;
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        if (String(input).includes("/.well-known/")) resolve(bellman.fetch(input, init));
+      });
+
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+    await expect(
+      connect(bellman, [], { signal: controller.signal, fetchImpl: stalled })
+    ).rejects.toThrow(SignInCancelled);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
   // ------------------------------------------------------------------ R2
   /**
    * Access tokens live 10 minutes and every bridge shares one credential file,
@@ -857,6 +910,119 @@ describe("connectSignedIn", () => {
     const after = readServer(dir, RESOURCE).tokens?.refresh_token;
     expect(after).not.toBe("dead");
     expect(after).not.toBe("also-dead");
+  });
+
+  // ---------------------------------------------- refreshes after the connect
+  /**
+   * The provider outlives connectSignedIn — the Remote holds the transport,
+   * which holds the provider — and access tokens live ten minutes, so any
+   * session longer than that refreshes. Every refresh rotates the refresh token
+   * server-side, so a rotation that is not written leaves the file holding a
+   * token the server has already deleted, and the NEXT start opens a browser.
+   */
+  function aging(bellman: FakeBellman) {
+    let armed = false;
+    // The 401 a ten-minute-old access token gets, from the real server rather
+    // than faked, by dropping the header it would have rejected anyway.
+    const fetchImpl = (async (input, init) => {
+      const isRpc = String(input).endsWith("/mcp") && init?.method === "POST";
+      if (!isRpc || !armed) return bellman.fetch(input, init);
+      // Exactly one request, then disarm. The SDK retries the same message
+      // after refreshing, and a second 401 on that retry trips its
+      // _hasCompletedAuthFlow guard — "401 after successful authentication" —
+      // which is a real protection, not something to route around.
+      armed = false;
+      const headers = new Headers(init?.headers as HeadersInit);
+      headers.delete("authorization");
+      return bellman.fetch(input, { ...init, headers });
+    }) as typeof fetch;
+    return { fetchImpl, expireOnce: () => { armed = true; } };
+  }
+
+  it("writes a refresh that happens after the connect to disk", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, calls, { fetchImpl });
+
+    const before = readServer(dir, RESOURCE).tokens!;
+    expireOnce();
+    expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+    await remote.close();
+
+    const after = readServer(dir, RESOURCE).tokens!;
+    expect(after.refresh_token).not.toBe(before.refresh_token);
+    expect(after.access_token).not.toBe(before.access_token);
+    expect(calls).toHaveLength(1); // no browser: it only refreshed
+  });
+
+  it("leaves the file holding the latest token after two rotations in one session", async () => {
+    const bellman = fakeBellman();
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const remote = await connect(bellman, [], { fetchImpl });
+    const seen: string[] = [readServer(dir, RESOURCE).tokens!.refresh_token!];
+
+    for (let i = 0; i < 2; i++) {
+      expireOnce();
+      await remote.listTools();
+      seen.push(readServer(dir, RESOURCE).tokens!.refresh_token!);
+    }
+    await remote.close();
+
+    expect(new Set(seen).size).toBe(3); // three distinct tokens, in order
+    // And the last one still works: a fresh connect reuses it with no browser.
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    expect(calls).toHaveLength(0);
+  });
+
+  /**
+   * The credential lock is not reentrant, so a persist that re-takes it while
+   * connectSignedIn still holds it would stall for the whole waitMs and write
+   * nothing. Arming only after release() is what prevents that; this fails with
+   * a timeout rather than an assertion if it is ever armed too early.
+   */
+  it("does not deadlock on its own lock when the first connect refreshes", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    // A first connect whose token is stale: it refreshes DURING the connect,
+    // with the lock held, and must not try to take it again.
+    await (await connect(bellman, calls)).close();
+    const stored = readServer(dir, RESOURCE);
+    writeServer(dir, RESOURCE, {
+      ...stored,
+      tokens: { ...stored.tokens!, access_token: STALE, expires_at: Date.now() - 1 },
+    });
+
+    const remote = await connect(bellman, calls, { lock: { ...fastLock, waitMs: 2_000 } });
+    expect(calls).toHaveLength(1);
+    await remote.close();
+    expect(readServer(dir, RESOURCE).tokens?.access_token).not.toBe(STALE);
+  });
+
+  /**
+   * The backstop must not re-run the browser flow once the listener has been
+   * waited on: it is closed by then, so a second pass cannot receive a callback
+   * and the user would see "the sign-in listener is closed" in place of the
+   * real failure. Task 3's closed-listener guard keeps it from hanging, which
+   * is why this is defence in depth — but the message the user gets is the
+   * difference between a diagnosis and a puzzle.
+   */
+  it("reports the real failure when the code exchange is rejected, not a closed listener", async () => {
+    const bellman = fakeBellman();
+    const refusing: typeof fetch = async (input, init) => {
+      if (String(init?.body ?? "").includes("grant_type=authorization_code")) {
+        return Response.json(
+          { error: "invalid_grant", error_description: "authorization code is invalid, used, or expired" },
+          { status: 400 }
+        );
+      }
+      return bellman.fetch(input, init);
+    };
+
+    const failure = connect(bellman, [], { fetchImpl: refusing });
+    await expect(failure).rejects.toThrow(/invalid_grant|code is invalid/i);
+    await expect(failure).rejects.not.toThrow(/listener is closed/i);
   });
 
   // ------------------------------------------------------------------ R5

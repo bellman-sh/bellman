@@ -4,6 +4,8 @@ import {
   REGISTRATION_WINDOW_MS,
   type AuthCode, type AuthStorage, type RefreshToken, type RegisteredClient,
 } from "./storage.js";
+import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
+import type { SubscriptionSource } from "../billing/subscription.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -22,6 +24,40 @@ const CLIENT = "client:";
 const REG = "reg:";
 
 export class AuthDO extends DurableObject {
+  /**
+   * What Stripe says each customer is paying for. The logic is BillingLedger,
+   * shared with the in-memory store; this object only supplies the storage.
+   *
+   * The input gate is not enough on its own here: a sync awaits a fetch to
+   * Stripe and other calls run meanwhile, so the ledger queues every write per
+   * customer and per user itself.
+   */
+  private ledger = new BillingLedger({
+    get: <T>(key: string) => this.ctx.storage.get<T>(key),
+    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
+  });
+
+  linkCustomer(customerId: string, userId: string): Promise<boolean> {
+    return this.ledger.linkCustomer(customerId, userId);
+  }
+
+  /**
+   * The Stripe read happens here, inside the one object, because that is the
+   * only place the ledger's per-subscription queue can serialize it. A read
+   * made in the Worker could be overtaken by another Worker's.
+   */
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    return this.ledger.syncSubscription(customerId, subscriptionId, source);
+  }
+
+  userForCustomer(customerId: string): Promise<string | undefined> {
+    return this.ledger.userForCustomer(customerId);
+  }
+
+  paidPlan(userId: string): Promise<PaidPlan | undefined> {
+    return this.ledger.paidPlan(userId);
+  }
+
   async registerClient(client: RegisteredClient): Promise<void> {
     await this.ctx.storage.put(`${CLIENT}${client.client_id}`, client);
   }
@@ -113,8 +149,24 @@ export class AuthDO extends DurableObject {
 }
 
 /** What the routes use — a thin facade over the single AuthDO instance. */
-export class AuthStore implements AuthStorage {
+export class AuthStore implements AuthStorage, BillingStorage {
   constructor(private namespace: DurableObjectNamespace<AuthDO>) {}
+
+  linkCustomer(customerId: string, userId: string): Promise<boolean> {
+    return this.object.linkCustomer(customerId, userId);
+  }
+
+  syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
+    return this.object.syncSubscription(customerId, subscriptionId, source);
+  }
+
+  userForCustomer(customerId: string): Promise<string | undefined> {
+    return this.object.userForCustomer(customerId);
+  }
+
+  paidPlan(userId: string): Promise<PaidPlan | undefined> {
+    return this.object.paidPlan(userId);
+  }
 
   private get object() {
     return this.namespace.get(this.namespace.idFromName("auth"));

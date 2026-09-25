@@ -277,6 +277,334 @@ export function describeStoreContract(
       expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.id).toBe(a.id);
     });
 
+    // ----------------------------------------------------------- plan grants
+    it("round-trips a grant and deletes it", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const,
+        orgId: "org_example", source: "purchase", grantedAt: Date.now(),
+        grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant(grant));
+
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team", orgId: "org_example" });
+      expect(await store.getGrant("github:nobody")).toBeUndefined();
+
+      (await store.deleteGrant("github:4242"));
+      expect(await store.getGrant("github:4242")).toBeUndefined();
+    });
+
+    /** A lapsed subscription must stop granting, without anyone sweeping it. */
+    it("stops honouring a grant once it has expired", async () => {
+      (await store.putGrant({
+        key: "google:lapsed", plan: "pro" as const, role: "member" as const,
+        orgId: null, source: "purchase", grantedAt: Date.now() - 1000,
+        grantedBy: "stripe", expiresAt: Date.now() - 1,
+      }));
+
+      expect(await store.getGrant("google:lapsed")).toBeUndefined();
+    });
+
+    it("does not list a grant that has expired", async () => {
+      (await store.putGrant({
+        key: "github:lapsed", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now() - 1000, grantedBy: "stripe", expiresAt: Date.now() - 1,
+      }));
+      (await store.putGrant({
+        key: "github:live", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:live"]);
+    });
+
+    it("lists grants scoped to one org", async () => {
+      (await store.putGrant({
+        key: "github:mine", plan: "team" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+      (await store.putGrant({
+        key: "github:theirs", plan: "team" as const, role: "member" as const, orgId: "org_theirs",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:mine"]);
+      expect((await store.listGrants(50)).length).toBe(2);
+    });
+
+    /**
+     * The invariant an org-scoped secondary index can break: move a key to
+     * another org and the copy filed under the old one has to go with it, or
+     * the previous org keeps listing a customer it no longer has. MemoryStore
+     * passes this by construction; a store that indexes by org passes it only
+     * if every write retires the old entry.
+     */
+    it("stops listing a grant under the org it was moved out of", async () => {
+      const base = {
+        key: "github:moved", plan: "team" as const, role: "member" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, orgId: "org_before" }));
+      (await store.putGrant({ ...base, orgId: "org_after" }));
+
+      expect((await store.listGrants(50, "org_before")).map((g) => g.key)).toEqual([]);
+      expect((await store.listGrants(50, "org_after")).map((g) => g.key)).toEqual(["github:moved"]);
+      expect(await store.getGrant("github:moved")).toMatchObject({ orgId: "org_after" });
+    });
+
+    /** Deleting has to clear every copy too, by the same argument. */
+    it("stops listing a grant once it is deleted", async () => {
+      (await store.putGrant({
+        key: "github:gone", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+      (await store.deleteGrant("github:gone"));
+
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual([]);
+      expect((await store.listGrants(50)).map((g) => g.key)).toEqual([]);
+    });
+
+    /**
+     * A store that applies the limit before dropping expired records answers
+     * "no grants" here, because the whole first window is lapsed — and the
+     * endpoint offers no pagination, so the caller has no way to learn
+     * otherwise. Scanning must continue past them.
+     */
+    it("finds a live grant hiding behind a window of expired ones", async () => {
+      for (let i = 0; i < 5; i++) {
+        (await store.putGrant({
+          key: `github:${i}`, plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+          source: "purchase", grantedAt: Date.now() - 1000, grantedBy: "stripe",
+          expiresAt: Date.now() - 1,
+        }));
+      }
+      (await store.putGrant({
+        key: "github:zlive", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(2, "org_mine")).map((g) => g.key)).toEqual(["github:zlive"]);
+    });
+
+    /**
+     * Claiming an address-keyed grant onto a subject. It has to be one
+     * operation: a write followed by a failed delete would leave the address
+     * key standing and claimable by whoever holds that address next.
+     */
+    it("moves a grant to a new key, leaving nothing behind", async () => {
+      (await store.putGrant({
+        key: "email:jesse@example.dev", plan: "pro" as const, role: "member" as const,
+        orgId: "org_mine", source: "purchase", grantedAt: Date.now(), grantedBy: "stripe",
+        expiresAt: null,
+      }));
+
+      (await store.moveGrant("email:jesse@example.dev", "github:4242"));
+
+      expect(await store.getGrant("email:jesse@example.dev")).toBeUndefined();
+      expect(await store.getGrant("github:4242")).toMatchObject({ key: "github:4242", plan: "pro" });
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:4242"]);
+    });
+
+    it("moving a key that has no grant changes nothing", async () => {
+      await expect(store.moveGrant("github:nobody", "github:4242")).resolves.not.toThrow();
+      expect(await store.getGrant("github:4242")).toBeUndefined();
+    });
+
+    /** The destination's own index copy has to go, or it outlives its record. */
+    it("does not leave the displaced grant listed when a move overwrites it", async () => {
+      const base = {
+        plan: "pro" as const, role: "member" as const, source: "purchase",
+        grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, key: "email:a@b.test", orgId: "org_mine" }));
+      (await store.putGrant({ ...base, key: "github:4242", orgId: "org_other" }));
+
+      (await store.moveGrant("email:a@b.test", "github:4242"));
+
+      expect((await store.listGrants(50, "org_other")).map((g) => g.key)).toEqual([]);
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:4242"]);
+    });
+
+    /**
+     * Ownership and the write are one operation. Two calls give the store a
+     * window to serve another org's write for the same key in between, and the
+     * guard that is supposed to stop cross-org clobbering misses it.
+     */
+    it("refuses to write over a grant held by another org", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, orgId: "org_theirs" }));
+
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine"))
+        .toBe("conflict");
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    it("writes when the key is unowned, or already the caller's", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfOwned(base, "org_mine")).toBe("written");
+      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine")).toBe("written");
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
+    });
+
+    /**
+     * "missing" and "conflict" have to be distinguishable, or the caller
+     * audits a revocation that did not happen and answers 200 for it.
+     */
+    it("says what a guarded delete actually did", async () => {
+      (await store.putGrant({
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_theirs",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine")).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("conflict");
+      expect(await store.getGrant("github:4242")).toBeDefined();
+
+      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs")).toBe("deleted");
+      expect(await store.getGrant("github:4242")).toBeUndefined();
+      expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
+    });
+
+    /**
+     * Every other read defines a lapsed grant as absent. If the ownership check
+     * reads past that, a dead record from an org that has since churned holds
+     * the key hostage: every attempt from the new org is a 403 until some
+     * unrelated read happens to sweep it.
+     */
+    it("treats a lapsed grant as unowned when guarding a write", async () => {
+      (await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "member" as const, orgId: "org_theirs",
+        source: "purchase", grantedAt: Date.now() - 1000, grantedBy: "stripe",
+        expiresAt: Date.now() - 1,
+      }));
+
+      expect(await store.putGrantIfOwned({
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }, "org_mine")).toBe("written");
+
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_mine" });
+      expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:4242"]);
+    });
+
+    /** And a guarded delete reports it as gone, not as somebody else's. */
+    it("reports a lapsed grant as missing rather than a conflict", async () => {
+      (await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "member" as const, orgId: "org_theirs",
+        source: "purchase", grantedAt: Date.now() - 1000, grantedBy: "stripe",
+        expiresAt: Date.now() - 1,
+      }));
+
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("missing");
+    });
+
+    /**
+     * The second writer. An admin claims a key by org; billing claims one by
+     * having written it. A subscription lapsing must not revoke a plan an
+     * operator granted by hand, and a hand grant must not be silently replaced
+     * by a purchase either.
+     */
+    it("will not let billing overwrite a grant it did not write", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, source: "operator" }));
+
+      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase")).outcome)
+        .toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("conflict");
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", source: "operator" });
+    });
+
+    it("lets billing write, update and remove its own grant", async () => {
+      const purchase = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: null,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfSource(purchase, "purchase"))
+        .toEqual({ outcome: "written", previous: undefined });
+
+      // The write reports what it replaced, so billing can tell a real change
+      // from a repeated delivery and see which org a plan moved out of.
+      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase");
+      expect(updated.outcome).toBe("written");
+      expect(updated.previous).toMatchObject({ plan: "pro" });
+      expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
+
+      const gone = await store.deleteGrantIfSource("github:4242", "purchase");
+      expect(gone.outcome).toBe("deleted");
+      expect(gone.removed).toMatchObject({ plan: "team" });
+      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("missing");
+      expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual([]);
+    });
+
+    /**
+     * A guarded write is one operation, not a read followed by a write. Run two
+     * of them at once and whichever goes second must see what the first did —
+     * otherwise the second acts on a record that is no longer there, and the
+     * guard it just passed was against the wrong value.
+     *
+     * The Durable Object gets this from `storage.transaction`. An in-memory
+     * store gets it by not yielding between the check and the mutation, which
+     * is easy to lose the moment someone awaits the read.
+     */
+    it("does not let two guarded writes interleave mid-check", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
+        grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      (await store.putGrant({ ...base, source: "purchase" }));
+
+      // An admin replaces the purchase by hand while billing tries to remove
+      // it. In this order a store that reads before yielding will let the
+      // delete run against the record the put already replaced.
+      const [put] = await Promise.all([
+        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine"),
+        store.deleteGrantIfSource("github:4242", "purchase"),
+      ]);
+
+      // Either order of completion is fine. What must not happen is the delete
+      // removing a hand grant whose source it never checked.
+      if (put === "written") {
+        expect(await store.getGrant("github:4242")).toMatchObject({ source: "operator" });
+      }
+    });
+
+    /** null is a bucket, not "unscoped": org-less grants list as their own set. */
+    it("lists org-less grants separately from an org's", async () => {
+      (await store.putGrant({
+        key: "github:solo", plan: "pro" as const, role: "member" as const, orgId: null,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+      (await store.putGrant({
+        key: "github:team", plan: "team" as const, role: "member" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      }));
+
+      expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual(["github:solo"]);
+      expect((await store.listGrants(50, "org_mine")).map((g) => g.key)).toEqual(["github:team"]);
+    });
+
+    it("lists grants", async () => {
+      for (const key of ["github:1", "github:2"]) {
+        (await store.putGrant({
+          key, plan: "pro" as const, role: "member" as const, orgId: null,
+          source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+        }));
+      }
+
+      expect((await store.listGrants(10)).map((g) => g.key).sort()).toEqual(["github:1", "github:2"]);
+    });
+
     it("takePendingConnect is single-use", async () => {
       (await store.putPendingConnect({
         token: "qct_1", sessionId: "qs_test", userId: "u_peer",

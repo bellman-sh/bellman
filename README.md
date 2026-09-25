@@ -108,6 +108,48 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors: point them at the same URL and sign in with GitHub or Google.
 
+## Plans
+
+Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month, 4 hour lifetime. Joining somebody else's session is free on every plan — only creating one is gated.
+
+A plan can come from two places, and the order matters:
+
+1. **`BELLMAN_USERS`**, the operator's Worker secret, managed with `npm run grant-plan`. It wins over everything, which is what makes it useful for comping an account or fixing a bad automated grant. **Key it by subject** — `github:<numeric id>` or `google:<numeric id>`. A login or display name is not a key at all, and an address key applies at sign-in but not across a token refresh, because by then it may belong to someone else.
+2. **A stored grant**, written at runtime through `POST /admin/grants` by a team admin. This is what a billing webhook writes.
+
+A **stored grant** carries plan, role and org only: your `userId` still comes from the provider (`u_<provider>_<subject>`), so granting, changing or revoking one never orphans sessions you already created. A **`BELLMAN_USERS` override** is the exception — it supplies the whole identity at sign-in, `userId` included, which is what lets an operator point someone at a specific account. Across a token refresh it contributes plan, role and org only, so an override added mid-token cannot rename the holder.
+
+```
+GET    /account                  what you are, what plan, and your quota
+GET    /admin/grants             list grants           (team admin)
+POST   /admin/grants             {key, plan, role, orgId, expiresAt?}
+DELETE /admin/grants?key=<key>   revoke
+```
+
+`key` must name a human and keep naming them: `github:<numeric id>`, `google:<numeric id>`, or a verified email address (`github:`, `google:` or `email:`). A login or display name is refused, and never resolves even if written by another path — GitHub logins can be renamed and reclaimed, and a Google display name is an arbitrary string, so a grant filed against one is a standing offer of your plan to whoever takes the name next. This applies to `BELLMAN_USERS` too: `npm run grant-plan` refuses a label key, and warns about any already in the file.
+
+An address key is for onboarding someone you know by email, and it is **claimed on first use**: the first sign-in that resolves through it rewrites the grant onto that provider's numeric subject and retires the address key. After that the address carries nothing, so an address later reassigned inside a managed domain does not take the plan with it. Grant by subject where you can; grant by address when that is all you have, and expect it to move.
+
+`orgId` must be your own org: grants are org-tenanted, and an admin administers only their own. Grants and revocations are written to the org audit log, so `bellman_audit` shows who changed whose plan and when.
+
+### Paying for a plan
+
+Stripe sells the plans. `BELLMAN_BILLING` in `wrangler.toml` is `off`, `shadow` or `on`; use `shadow` to take real purchases end to end before anyone's plan depends on them. The switch reaches plans already stored, not just new ones: with billing off, grants Stripe wrote earlier stop resolving, and operator and admin grants are untouched. Shadow still processes cancellations, so switching down from `on` cannot strand a plan nobody is paying for. `shadow` or `on` without both Stripe secrets stays off and logs why.
+
+| Secret | What it is |
+| --- | --- |
+| `STRIPE_WEBHOOK_SECRET` | The endpoint's signing secret (`whsec_…`). |
+| `STRIPE_API_KEY` | A restricted key (`rk_…`) with **read** access to Subscriptions and nothing else. Stripe delivers events out of order and timestamps them only to the second, so the webhook reads each subscription's current state from Stripe instead of trusting the event. |
+| `STRIPE_PAYMENT_LINKS` | JSON of link name → Payment Link, e.g. `{"pro_monthly":"https://buy.stripe.com/…"}`. Only `https://buy.stripe.com` and `checkout.stripe.com` links are served, at `/upgrade/<name>`. |
+
+Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscription.created`, `.updated`, `.deleted`, `.paused` and `.resumed`. A price sells the plan named in its `metadata.plan`, or else its lookup key's prefix (`pro_monthly` sells `pro`). The plan holds while the subscription is `active`, `trialing` or `past_due`, and ends otherwise.
+
+**Plans are mutually exclusive, and a subscription sells exactly one.** Build the catalogue so no subscription can carry prices for two; one that does grants nothing at all and logs which plans it named, rather than picking a winner by Stripe's item order. Several items of the *same* plan are fine — that is quantity, not conflict.
+
+**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
+
+Billing only ever touches grants it wrote. An operator override in `BELLMAN_USERS` beats a purchase outright — `/upgrade` stops before Stripe rather than take money that would change nothing — and a grant an admin wrote by hand is left alone, with the clash logged for a human. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
+
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.

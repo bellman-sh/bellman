@@ -41,6 +41,10 @@ export interface AuthCode {
   code_challenge: string;
   resource: string;
   identity: Identity;
+  /** Where the plan came from: operator override, stored grant, or default. */
+  plan_source: string;
+  /** Upstream keys this human resolves under, so a refresh can re-check the plan. */
+  identity_keys: string[];
   expires_at: number;
 }
 
@@ -48,6 +52,8 @@ export interface RefreshToken {
   client_id: string;
   resource: string;
   identity: Identity;
+  plan_source: string;
+  identity_keys: string[];
   expires_at: number;
 }
 

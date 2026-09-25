@@ -466,6 +466,30 @@ describe("bellman_whoami", () => {
       });
     });
 
+    // The other half of not trusting the callback: not its answer, but its call. Building the
+    // answer reaches the filesystem (credentialsDir() throws where there is no absolute home
+    // directory, userInfo() where there is no passwd entry — a container, CI), and this is the
+    // tool that has to answer BEFORE the first sign-in, when those are most likely to be wrong.
+    // Unguarded, the person gets a raw protocol error carrying whatever the message says.
+    it.each([
+      ["an Error", () => { throw new Error("EACCES: permission denied, open '/home/jesse/.config/bellman/credentials.json'"); },
+        "EACCES: permission denied, open '/home/jesse/.config/bellman/credentials.json'"],
+      ["something that is not an Error", () => { throw "no absolute home directory found"; },
+        "no absolute home directory found"],
+    ])("reports unknown, and keeps the failure to the log, when the callback throws %s", async (_what, callback, message) => {
+      const logs: string[] = [];
+      const a = await open(DEV_KEY.jesse, "channel", { whoami: callback, log: (m) => logs.push(m) });
+
+      // One object: what the person is told (the exact unknown answer, so no path in it), and
+      // where the failure went instead.
+      expect({ ...(await asked(a)), logs }).toEqual({
+        isError: false,
+        data: { source: "unknown", label: null },
+        text: UNKNOWN_TEXT,
+        logs: [`whoami: the callback threw: ${message}; reporting unknown`],
+      });
+    });
+
     it.each([
       ["nothing at all", undefined],
       ["a source it does not know", { source: "saml", label: "jesse@github" }],

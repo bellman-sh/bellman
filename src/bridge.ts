@@ -357,7 +357,7 @@ export function createBridge(opts: BridgeOptions) {
    * before the first call — which is exactly when a wrong-account sign-in bites.
    */
   function describeSelf(): CallToolResult {
-    const who = settle(whoami());
+    const who = ask();
     let text: string;
     switch (who.source) {
       case "oauth":
@@ -371,6 +371,27 @@ export function createBridge(opts: BridgeOptions) {
         break;
     }
     return { content: [{ type: "text", text }], structuredContent: { ...who } };
+  }
+
+  /**
+   * The callback's answer, settled — and its call survived. settle() judges the
+   * value; this judges the call, which is just as little ours to trust. Building
+   * the answer reaches the filesystem (credentialsDir() throws where there is no
+   * absolute home directory, userInfo() where there is no passwd entry), and this
+   * is the tool that must answer BEFORE the first sign-in, when those are most
+   * likely to be wrong. Unguarded, the person gets a raw protocol error carrying
+   * whatever the message says — a path, say — where "unknown" was the true answer.
+   * The message goes to the log instead, for whoever runs the bridge.
+   */
+  function ask(): WhoAmI {
+    let raw: unknown;
+    try {
+      raw = whoami();
+    } catch (error) {
+      log(`whoami: the callback threw: ${error instanceof Error ? error.message : String(error)}; reporting unknown`);
+      return { source: "unknown", label: null };
+    }
+    return settle(raw);
   }
 
   /**

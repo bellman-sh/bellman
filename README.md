@@ -188,8 +188,8 @@ The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it
 uses one. A `manifest` argument passed to `bellman_start` always wins
-over the file. A file that is malformed, unreadable, over 64 KB or not a
-regular file fails locally, before anything is sent; with no file and no
+over the file. A file that is malformed, unreadable, over 64 KB, not a
+regular file, or a symlink fails locally, before anything is sent; with no file and no
 argument, the server's own validation error comes back.
 
 Those local checks are about the FILE, not the manifest. The bridge does

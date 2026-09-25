@@ -364,8 +364,8 @@ class BridgeAuth implements OAuthClientProvider {
   clientInformation(): OAuthClientInformationFull | undefined {
     return this.cred.client ? ({ ...this.cred.client } as OAuthClientInformationFull) : undefined;
   }
-  saveClientInformation(info: OAuthClientInformationFull): void {
-    this.cred = { ...this.cred, client: { client_id: info.client_id } };
+  async saveClientInformation(info: OAuthClientInformationFull): Promise<void> {
+    await this.set({ ...this.cred, client: { client_id: info.client_id } });
   }
 
   tokens(): OAuthTokens | undefined {
@@ -384,8 +384,21 @@ class BridgeAuth implements OAuthClientProvider {
   private persist: ((cred: ServerCredential) => Promise<void>) | undefined;
   armPersist(fn: (cred: ServerCredential) => Promise<void>): void { this.persist = fn; }
 
+  /**
+   * The ONLY place this.cred is assigned. saveTokens is not the only mutator
+   * that can run after the connect returns: auth() answers an InvalidClientError
+   * mid-session by calling invalidateCredentials("all") and registering again,
+   * which mints a client_id that would otherwise never reach disk and be
+   * re-registered on every start. Routing all three through one setter means a
+   * later mutator cannot forget to persist, rather than each remembering to.
+   */
+  private async set(cred: ServerCredential): Promise<void> {
+    this.cred = cred;
+    await this.persist?.(cred);
+  }
+
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    this.cred = {
+    await this.set({
       ...this.cred,
       tokens: {
         access_token: tokens.access_token,
@@ -393,17 +406,16 @@ class BridgeAuth implements OAuthClientProvider {
         expires_at: tokens.expires_in ? Date.now() + tokens.expires_in * 1000 : undefined,
       },
       identity: decodeIdentity(tokens.access_token) ?? this.cred.identity,
-    };
-    await this.persist?.(this.cred);
+    });
   }
 
   saveCodeVerifier(verifier: string): void { this.verifier = verifier; }
   codeVerifier(): string { return this.verifier; }
   redirectToAuthorization(url: URL): void { this.onRedirect(url); }
 
-  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
-    if (scope === "all") { this.cred = {}; return; }
-    if (scope === "client") { this.cred = { ...this.cred, client: undefined }; return; }
+  async invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): Promise<void> {
+    if (scope === "all") { await this.set({}); return; }
+    if (scope === "client") { await this.set({ ...this.cred, client: undefined }); return; }
     if (scope !== "tokens") return;
     /**
      * The SDK calls this the moment it has judged the refresh token dead, and
@@ -429,10 +441,17 @@ class BridgeAuth implements OAuthClientProvider {
      * to see that re-spending a dead token is pointless.
      */
     if (stored?.refresh_token && stored.refresh_token !== spent) {
-      this.cred = { ...this.cred, tokens: stored };
+      await this.set({ ...this.cred, tokens: stored });
       return;
     }
-    this.cred = { ...this.cred, tokens: undefined };
+    /**
+     * Clearing is in-memory only in practice: the persist callback merges with
+     * `??`, so an undefined field keeps what is on disk. That is deliberate. A
+     * transient invalidation mid-session would otherwise blank a credential
+     * another bridge is still using, and whatever the SDK settles on next —
+     * refreshed tokens, a re-registered client — persists the truth over it.
+     */
+    await this.set({ ...this.cred, tokens: undefined });
   }
 }
 
@@ -456,21 +475,13 @@ async function connectWithHeader(
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
     fetch: fetchImpl,
   });
-  /**
-   * Closing the transport aborts the request in flight, which is the only way
-   * to end this one early: the SDK overwrites requestInit.signal with its own
-   * controller's on every send, so a signal passed in there would be ignored.
-   * Without it a shutdown waits out a stalled connect with no timeout at all.
-   */
-  const onAbort = () => { void transport.close().catch(() => undefined); };
-  signal?.addEventListener("abort", onAbort, { once: true });
   try {
     await client.connect(transport);
   } catch (err) {
+    // The cancelling fetch has already aborted whatever was in flight; this
+    // only makes sure the caller sees why, whatever the transport wrapped it in.
     if (signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
     throw err;
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
   }
   return remoteFrom(client);
 }
@@ -481,10 +492,50 @@ function isRefused(err: unknown): boolean {
 }
 
 /**
+ * A fetch that also gives up when the sign-in is cancelled.
+ *
+ * Every network wait in this module goes through one of the SDK's transports,
+ * and there is no one place to interrupt them: discovery, registration, the
+ * token exchange, the refresh and each connect are separate requests, and the
+ * transport overwrites requestInit.signal with its own controller's on every
+ * send, so a signal handed in there is ignored. Wrapping fetch is the one seam
+ * they all share — which makes this the whole class, not the two instances
+ * (the lock wait and the cached-token connect) that were found first.
+ *
+ * AbortSignal.any would do this in a line, but it needs Node 20.3; this keeps
+ * the floor where the rest of the bridge has it.
+ */
+function withAbort(base: typeof fetch | undefined, signal: AbortSignal | undefined): typeof fetch | undefined {
+  if (!signal) return base;
+  const inner = base ?? fetch;
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    if (signal.aborted) return Promise.reject(new SignInCancelled("the sign-in was cancelled"));
+    const ours = new AbortController();
+    const theirs = init?.signal ?? undefined;
+    const fromUs = () => ours.abort(new SignInCancelled("the sign-in was cancelled"));
+    const fromThem = () => ours.abort(theirs?.reason);
+    signal.addEventListener("abort", fromUs, { once: true });
+    theirs?.addEventListener("abort", fromThem, { once: true });
+    if (theirs?.aborted) fromThem();
+    return inner(input, { ...init, signal: ours.signal }).finally(() => {
+      signal.removeEventListener("abort", fromUs);
+      theirs?.removeEventListener("abort", fromThem);
+    });
+  }) as typeof fetch;
+}
+
+/**
  * Connect to Bellman as a signed-in user, running the browser flow if there is
  * no usable credential. Returns the same Remote shape connectRemote does.
  */
-export async function connectSignedIn(opts: SignInOptions): Promise<Remote> {
+export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
+  /**
+   * Every transport built below gets the cancelling fetch, so there is no path
+   * through this function — fast or full — that can wait on the network past a
+   * shutdown. Done once, here, rather than at each of the five call sites that
+   * would each have to remember.
+   */
+  const opts: SignInOptions = { ...options, fetchImpl: withAbort(options.fetchImpl, options.signal) };
   const dir = opts.configDir ?? credentialsDir();
   const log = opts.log ?? (() => {});
   const ports = opts.ports ?? CALLBACK_PORTS;
@@ -691,6 +742,9 @@ async function signIn(
       }
     } catch (err) {
       await transport.close().catch(() => undefined);
+      // A shutdown mid-request: the cancelling fetch rejected it, and the
+      // reason matters more than whatever the SDK wrapped it in.
+      if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
       /**
        * auth() already handles the FIRST invalid_grant itself: it calls
        * invalidateCredentials("tokens") — where we may adopt a token another

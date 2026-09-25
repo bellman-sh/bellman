@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
+import { createBridge, type BridgeOptions, type Delivery, type Remote, type WhoAmI } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
@@ -55,13 +55,19 @@ const opened: Session[] = [];
 let store: BellmanStore;
 let inboxRoot: string;
 
-async function open(key: string, delivery: Delivery = "channel"): Promise<Session> {
+/** `extra` overrides any option, so a test can swap the remote or supply whoami and still get teardown. */
+async function open(
+  key: string,
+  delivery: Delivery = "channel",
+  extra: Partial<BridgeOptions> = {}
+): Promise<Session> {
   const inboxDir = delivery === "hook" ? join(inboxRoot, `${key}-${opened.length}`) : undefined;
   const bridge = createBridge({
     delivery,
     inboxDir,
     remote: () => remoteFor(store, key),
     pollWaitSeconds: 1,
+    ...extra,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "claude-code", version: "0.0.1" });
@@ -137,7 +143,7 @@ describe("channel delivery", () => {
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_invite",
-      "bellman_leave", "bellman_send", "bellman_start", "bellman_sync",
+      "bellman_leave", "bellman_send", "bellman_start", "bellman_sync", "bellman_whoami",
     ]);
   });
 
@@ -274,5 +280,108 @@ describe("hook delivery (the fallback)", () => {
     await new Promise((r) => setTimeout(r, 1500));
     const leftovers = drain(inbox).filter((e) => e.cursor <= Number(synced.data.cursor));
     expect(leftovers).toEqual([]);
+  });
+});
+
+/**
+ * bellman_whoami is answered by the bridge itself, from a callback, so these
+ * tests hand the bridge a `whoami` and read what Claude Code would read. Every
+ * check compares the whole answer — structured data AND the text a person is
+ * shown — in one value: an assertion on the data alone passes on any text, and
+ * one on the text alone passes on any structure.
+ */
+describe("bellman_whoami", () => {
+  const signedIn = {
+    source: "oauth", label: "jesse@github", plan: "free", role: "member", org_id: null,
+  } satisfies WhoAmI;
+  const ENV_TEXT =
+    "Using a BELLMAN_KEY from the environment. This bridge cannot tell whose key it is; " +
+    "the server resolves it on every call.";
+
+  async function asked(session: Session) {
+    const { isError, data, text } = await session.call("bellman_whoami");
+    return { isError, data, text };
+  }
+
+  const remoteToolNames = [
+    "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_invite",
+    "bellman_leave", "bellman_send", "bellman_start", "bellman_sync",
+  ];
+
+  it("reports the signed-in identity", async () => {
+    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn });
+
+    expect(await asked(a)).toEqual({
+      isError: false,
+      data: signedIn,
+      text: "Signed in as jesse@github — free plan, role member, org none.",
+    });
+  });
+
+  it("names the org when there is one", async () => {
+    const inOrg: WhoAmI = { ...signedIn, org_id: "org_codenerd" };
+    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => inOrg });
+
+    expect(await asked(a)).toEqual({
+      isError: false,
+      data: inOrg,
+      text: "Signed in as jesse@github — free plan, role member, org org_codenerd.",
+    });
+  });
+
+  it("says so honestly when a static key is in play", async () => {
+    const a = await open(DEV_KEY.jesse); // no whoami: the bridge was handed a BELLMAN_KEY
+
+    expect(await asked(a)).toEqual({
+      isError: false,
+      data: { source: "env", label: null },
+      text: ENV_TEXT,
+    });
+  });
+
+  it("answers without connecting to Bellman", async () => {
+    // Under the real wiring the remote factory IS the browser sign-in, and
+    // "which account am I" is asked precisely so the wrong one is not signed in.
+    // A whoami that connected first would start that flow to answer.
+    let connects = 0;
+    const a = await open(DEV_KEY.jesse, "channel", {
+      remote: async () => {
+        connects++;
+        throw new Error("bellman_whoami must not connect");
+      },
+      whoami: () => signedIn,
+    });
+
+    const who = await asked(a);
+
+    expect({ connects, ...who }).toEqual({
+      connects: 0,
+      isError: false,
+      data: signedIn,
+      text: "Signed in as jesse@github — free plan, role member, org none.",
+    });
+  });
+
+  it("declares itself a read-only tool", async () => {
+    // bellman_wait is the template a copy-paste would start from, and it is not read-only.
+    const a = await open(DEV_KEY.jesse);
+
+    const { tools } = await a.client.listTools();
+
+    expect(tools.find((t) => t.name === "bellman_whoami")).toMatchObject({
+      inputSchema: { type: "object" },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    });
+  });
+
+  it("is offered and answered under hook delivery too, alongside bellman_wait", async () => {
+    const a = await open(DEV_KEY.jesse, "hook");
+
+    const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
+
+    expect({ names, who: await asked(a) }).toEqual({
+      names: [...remoteToolNames, "bellman_wait", "bellman_whoami"],
+      who: { isError: false, data: { source: "env", label: null }, text: ENV_TEXT },
+    });
   });
 });

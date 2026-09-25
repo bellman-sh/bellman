@@ -10,7 +10,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 - **Tools only** — no MCP resources, sampling, or elicitation (spotty support elsewhere)
 - **Text-first responses**, `structuredContent` as progressive enhancement
-- **Bearer-key auth** (OAuth 2.1 + DCR is the swap-in path, isolated in `src/auth.ts`)
+- **Bearer keys and OAuth 2.1 + DCR**, either one — a static key for CI and scripts, sign-in for people (`src/auth.ts`, `src/oauth/`)
 - **Long-poll capped at 25s** to stay under the strictest client tool-call timeouts
 
 ## Tool surface
@@ -105,7 +105,7 @@ claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel
 
 Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. The hook finds the bridge's queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
-**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, so they wait on #7.
+**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
 ## Production path
 

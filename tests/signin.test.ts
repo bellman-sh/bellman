@@ -1011,6 +1011,77 @@ describe("connectSignedIn", () => {
     expect(calls).toHaveLength(1); // it refreshed; it did not reach for a human
   });
 
+  /**
+   * A refresh can land while the bridge is shutting down, and the write must
+   * still happen: losing it is the original bug, just in a narrower window —
+   * and narrow is how that one hid. So persist takes no signal, unlike every
+   * other wait in the module.
+   */
+  it("still writes a refresh that lands while the sign-in is shutting down", async () => {
+    const bellman = fakeBellman();
+    const controller = new AbortController();
+    const { fetchImpl, expireOnce } = aging(bellman);
+    await (await connect(bellman, [])).close();
+    const remote = await connect(bellman, [], { fetchImpl, signal: controller.signal });
+    const before = readServer(dir, RESOURCE).tokens!;
+
+    // Hold the lock so the persist has to wait, then shut down while it waits.
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    expireOnce();
+    const call = remote.listTools().catch(() => undefined); // the retry may be cancelled; the write must not be
+    await new Promise((r) => setTimeout(r, 100));
+    controller.abort();
+    await new Promise((r) => setTimeout(r, 50));
+    holder.release();
+    await call;
+
+    expect(readServer(dir, RESOURCE).tokens?.refresh_token).not.toBe(before.refresh_token);
+  });
+
+  /**
+   * And when the lock genuinely cannot be had, persist degrades rather than
+   * throws. This runs inside a live session's tool call, so throwing would end
+   * the session over a write that costs one browser tab at the next start.
+   */
+  it("keeps the session alive when a refresh cannot reach the credential lock", async () => {
+    const bellman = fakeBellman();
+    const { fetchImpl, expireOnce } = aging(bellman);
+    await (await connect(bellman, [])).close();
+    const remote = await connect(bellman, [], { fetchImpl, lock: { ...fastLock, waitMs: 150 } });
+
+    const holder = (await acquireLock(dir, { heartbeatMs: 20 }))!;
+    try {
+      expireOnce();
+      // The tool call still succeeds; only the write is given up on.
+      expect((await remote.listTools()).tools.map((t) => t.name)).toContain("bellman_start");
+      expect(logs.join("\n")).toContain("stays in memory for this session");
+    } finally {
+      holder.release();
+      await remote.close();
+    }
+  });
+
+  /**
+   * A credential file holding tokens but no client is reachable by hand-editing,
+   * and the cached attempt then registers one before discovering the tokens are
+   * dead. Escalating has to carry that registration forward.
+   */
+  it("does not register a second client when the cached attempt escalates", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    expect(bellman.registrations).toHaveLength(1);
+
+    // Tokens that cannot work, and no client at all.
+    writeServer(dir, RESOURCE, {
+      tokens: { access_token: STALE, refresh_token: "dead", expires_at: Date.now() - 1 },
+    });
+    await (await connect(bellman, calls)).close();
+
+    expect(calls).toHaveLength(2); // it needed a human
+    expect(bellman.registrations).toHaveLength(2); // one more, not two more
+  });
+
   it("writes a refresh that happens after the connect to disk", async () => {
     const bellman = fakeBellman();
     const calls: URL[] = [];

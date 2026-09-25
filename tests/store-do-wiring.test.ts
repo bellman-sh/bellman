@@ -56,7 +56,34 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     alarms,
     snapshot: (): Record<string, unknown> => structuredClone(Object.fromEntries(rows)),
     get: async (key: string) => (rows.has(key) ? structuredClone(rows.get(key)) : undefined),
-    put: async (key: string, value: unknown) => { writes++; rows.set(key, structuredClone(value)); },
+    /**
+     * Both shapes the real DurableObjectStorage offers: put(key, value) and the
+     * batched put(entries). createSession uses the batched one so the session,
+     * its seed events and the cursor commit together.
+     *
+     * Anything else THROWS rather than being quietly absorbed. An earlier
+     * version accepted only put(key, value); when the batched call arrived it
+     * stored the entries object as a key and lost every row, and the tests
+     * failed far away with an undefined session instead of here.
+     */
+    put: async (keyOrEntries: unknown, value?: unknown) => {
+      if (typeof keyOrEntries === "string") {
+        writes++;
+        rows.set(keyOrEntries, structuredClone(value));
+        return;
+      }
+      if (keyOrEntries && typeof keyOrEntries === "object" && value === undefined) {
+        for (const [k, v] of Object.entries(keyOrEntries as Record<string, unknown>)) {
+          writes++;
+          rows.set(k, structuredClone(v));
+        }
+        return;
+      }
+      throw new TypeError(
+        `fakeStorage.put: unsupported call shape (${typeof keyOrEntries}, ${typeof value}). ` +
+        "Mirror the real DurableObjectStorage API here rather than letting a call be absorbed.",
+      );
+    },
     delete: async (key: string) => { writes++; return rows.delete(key); },
     setAlarm: async (at: number) => { alarms.push(at); },
     list: async (opts: { prefix?: string; start?: string; reverse?: boolean; limit?: number } = {}) => {

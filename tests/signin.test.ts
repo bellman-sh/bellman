@@ -10,6 +10,7 @@ import {
   CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
   SignInCancelled, type Listener, type SignInOptions,
 } from "../src/signin.js";
+import type { Remote } from "../src/bridge.js";
 import { acquireLock, readServer, writeServer } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
@@ -1361,5 +1362,212 @@ describe("connectSignedIn", () => {
       connect(bellman, calls, { fetchImpl: hostile, callbackTimeoutMs: 600_000 })
     ).rejects.toThrow(/only http and https/i);
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * The claim the credential lock exists to serve: bridges that start together open
+ * ONE browser and do ONE refresh.
+ *
+ * Each test balances a ledger of what a server was actually asked. A ledger holds
+ * counts that must be present as well as counts that must not multiply, because
+ * "no second browser" is satisfied for free by a bridge that never ran, and by a
+ * fixture in which the thing being raced never happens.
+ *
+ * Every sign-in is slowed to the pace of what it really waits on: the browser to a
+ * person's, the refresh to a network's. The lock's whole job is to span that wait,
+ * and a lock that lapsed early is only caught by a rival that arrives inside it.
+ * Rivals poll for the lock every 100ms, so against a sign-in that finishes in 10ms
+ * a lock released after its first read would pass every test here.
+ */
+describe("concurrent bridges", () => {
+  let dir: string;
+  const fastLock = { waitMs: 8_000, heartbeatMs: 20, staleMs: 2_000 };
+  /** How long a person takes over the sign-in page, and a token endpoint over a refresh. */
+  const SLOW_MS = 300;
+  const DEV_URL = "https://dev.example.test/mcp";
+  const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bellman-concurrent-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  /** One server, watched from the client's side of the wire. */
+  interface Site {
+    name: string;
+    url: string;
+    bellman: FakeBellman;
+    fetchImpl: typeof fetch;
+    /** Every URL a browser was asked to open for this server. */
+    browsers: URL[];
+    /** `grant:status` for each request to /token, in the order it arrived. */
+    grants: string[];
+    /** Requests to /mcp that carried a token the server turned away. */
+    refused: number;
+    /** Registrations that predate this watch, so a second phase counts only its own. */
+    registeredBefore: number;
+  }
+
+  function watch(
+    name: string,
+    bellman: FakeBellman,
+    { url = RESOURCE, tokenMs = 0 }: { url?: string; tokenMs?: number } = {},
+  ): Site {
+    const site: Site = {
+      name, url, bellman, browsers: [], grants: [], refused: 0,
+      registeredBefore: bellman.registrations.length,
+      fetchImpl: async (input, init) => {
+        const { pathname } = new URL(String(input));
+        const token = pathname === "/token" && init?.method === "POST";
+        if (token && tokenMs) await pause(tokenMs); // a refresh takes a network's time
+        const response = await bellman.fetch(input, init);
+        if (token) {
+          site.grants.push(`${new URLSearchParams(String(init?.body)).get("grant_type")}:${response.status}`);
+        }
+        if (pathname === "/mcp" && response.status === 401 && new Headers(init?.headers).has("authorization")) {
+          site.refused += 1;
+        }
+        return response;
+      },
+    };
+    return site;
+  }
+
+  /** A bridge signing in to `site`, with a person at the browser. */
+  function connect(site: Site, extra: Partial<SignInOptions> = {}): Promise<Remote> {
+    return connectSignedIn({
+      serverUrl: site.url,
+      configDir: dir,
+      fetchImpl: site.fetchImpl,
+      ports: TEST_PORTS,
+      lock: fastLock,
+      callbackTimeoutMs: 8_000,
+      browser: async (url) => {
+        site.browsers.push(url);
+        await pause(SLOW_MS);
+        await site.bellman.browser(url);
+      },
+      ...extra,
+    });
+  }
+
+  /**
+   * Every connect runs to its end, pass or fail. A Promise.all that rejected on the
+   * first failure would leave the others running into the next test, holding its
+   * ports, and a failure would then read as a run of unrelated ones.
+   */
+  async function all(connects: Promise<Remote>[]): Promise<Remote[]> {
+    const settled = await Promise.allSettled(connects);
+    const remotes = settled.flatMap((s) => (s.status === "fulfilled" ? [s.value] : []));
+    const failures = settled.flatMap((s) => (s.status === "rejected" ? [s.reason as unknown] : []));
+    if (failures.length > 0) await Promise.all(remotes.map((remote) => remote.close()));
+    expect(failures).toEqual([]);
+    return remotes;
+  }
+
+  /** What a server was asked. Each count is of something that must not multiply when bridges race. */
+  const ledger = (site: Site) => ({
+    browsers: site.browsers.length,
+    registrations: site.bellman.registrations.length - site.registeredBefore,
+    grants: site.grants,
+    refused: site.refused,
+  });
+
+  /** A remote that is really connected and authorized, not merely one that came back. */
+  const toolsOf = async (remote: Remote) => (await remote.listTools()).tools.map((t) => t.name);
+
+  it("opens ONE browser for three simultaneous first runs", async () => {
+    const site = watch("bellman", fakeBellman());
+    const remotes = await all([connect(site), connect(site), connect(site)]);
+    try {
+      // One sign-in, in full — a browser, a registration, a code exchange — and
+      // nothing after it: the two rivals came in on the winner's token, so nobody
+      // refreshed, and the server turned no token away.
+      expect(ledger(site)).toEqual({
+        browsers: 1,
+        registrations: 1,
+        grants: ["authorization_code:200"],
+        refused: 0,
+      });
+      // And all three ended up with a bridge that works.
+      for (const remote of remotes) expect(await toolsOf(remote)).toContain("bellman_start");
+    } finally {
+      for (const remote of remotes) await remote.close();
+    }
+  });
+
+  it("refreshes once when three bridges wake to an expired token", async () => {
+    const bellman = fakeBellman();
+    await (await connect(watch("first", bellman))).close(); // sign in once, to have a credential to age
+    const seeded = readServer(dir, RESOURCE);
+    // Expired from both ends of the wire: our clock says so, and the server no
+    // longer accepts the access token (see STALE). The refresh token is still good.
+    writeServer(dir, RESOURCE, {
+      ...seeded,
+      tokens: { ...seeded.tokens!, access_token: STALE, expires_at: Date.now() - 1 },
+    });
+
+    const site = watch("bellman", bellman, { tokenMs: SLOW_MS });
+    const remotes = await all([connect(site), connect(site), connect(site)]);
+    try {
+      // One refresh, and it worked. The only token the server ever turned away is
+      // the stale one, once: the two rivals neither spent the refresh token the
+      // winner had already rotated nor showed the dead access token again, because
+      // they came in on the winner's. No browser and no registration either.
+      expect(ledger(site)).toEqual({
+        browsers: 0,
+        registrations: 0,
+        grants: ["refresh_token:200"],
+        refused: 1,
+      });
+      for (const remote of remotes) expect(await toolsOf(remote)).toContain("bellman_start");
+    } finally {
+      for (const remote of remotes) await remote.close();
+    }
+  });
+
+  // Review Focus 5 — one lock, two server keys.
+  it("a second server URL waits for the lock, then signs in on its own key", async () => {
+    const prod = watch("prod", fakeBellman());
+    // A genuinely separate origin, not a URL rewrite: the access token carries a
+    // resource indicator derived from the server URL, and /authorize refuses any
+    // resource that is not its own.
+    const dev = watch("dev", fakeBellman({ origin: "https://dev.example.test" }), { url: DEV_URL });
+
+    // How many of the two were on the wire at once, from a bridge's first request
+    // until its connect returned. A bridge waiting for the lock sends nothing.
+    const live = new Set<string>();
+    let peak = 0;
+    for (const site of [prod, dev]) {
+      const inner = site.fetchImpl;
+      site.fetchImpl = (input, init) => {
+        live.add(site.name);
+        peak = Math.max(peak, live.size);
+        return inner(input, init);
+      };
+    }
+    const remotes = await all([prod, dev].map(async (site) => {
+      const remote = await connect(site);
+      live.delete(site.name);
+      return remote;
+    }));
+    try {
+      // They took turns: at most one on the wire at a time, and one was. This is
+      // read first, before the checks below put both back on the wire.
+      expect(peak).toBe(1);
+      // Two servers means two full sign-ins, each on its own server. The lock
+      // serializes them; it does not let the second mistake the first's tokens for
+      // its own, which the server would show as a token it turned away.
+      const signedInOnce = { browsers: 1, registrations: 1, grants: ["authorization_code:200"], refused: 0 };
+      expect({ prod: ledger(prod), dev: ledger(dev) }).toEqual({ prod: signedInOnce, dev: signedInOnce });
+      // One file, two credentials, neither written over the other.
+      const prodToken = readServer(dir, RESOURCE).tokens?.access_token;
+      const devToken = readServer(dir, DEV_URL).tokens?.access_token;
+      expect(prodToken).toBeTruthy();
+      expect(devToken).toBeTruthy();
+      expect(devToken).not.toBe(prodToken);
+      for (const remote of remotes) expect(await toolsOf(remote)).toContain("bellman_start");
+    } finally {
+      for (const remote of remotes) await remote.close();
+    }
   });
 });

@@ -33,6 +33,15 @@ vi.mock("node:http", async (importOriginal) => {
 /** Ports well away from the real range, so a developer's live bridge is untouched. */
 const TEST_PORTS = [53411, 53412, 53413];
 
+/**
+ * An access token the SERVER refuses. Writing expires_at into the past is not
+ * enough on its own: that is only our local bookkeeping, and the fake verifies
+ * the real JWT, whose own exp is still minutes out — so the request succeeds,
+ * no 401 comes back, and the refresh under test never runs. Pairing the two is
+ * the honest fixture: our clock says stale AND the far end agrees.
+ */
+const STALE = "stale.not.a.jwt";
+
 /** What the listeners under test said. A listener that is not in trouble says nothing. */
 const diagnostics: string[] = [];
 beforeEach(() => { diagnostics.length = 0; });
@@ -524,14 +533,6 @@ describe("connectSignedIn", () => {
   let dir: string;
   let logs: string[];
   const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 };
-  /**
-   * An access token the SERVER refuses. Writing expires_at into the past is not
-   * enough on its own: that is only our local bookkeeping, and the fake verifies
-   * the real JWT, whose own exp is still minutes out — so the request succeeds,
-   * no 401 comes back, and the refresh under test never runs. Pairing the two is
-   * the honest fixture: our clock says stale AND the far end agrees.
-   */
-  const STALE = "stale.not.a.jwt";
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "bellman-signin-"));

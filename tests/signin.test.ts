@@ -674,6 +674,27 @@ describe("connectSignedIn", () => {
     await remote.close();
   });
 
+  /**
+   * The fast path hands over a token our own clock still likes. If the server
+   * refuses it anyway — revoked, or signed with a key since rotated — failing
+   * here would strand the user with a file they would have to find and delete.
+   */
+  it("signs in again when a cached token that has not expired is refused", async () => {
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close();
+    const cred = readServer(dir, RESOURCE);
+    writeServer(dir, RESOURCE, {
+      ...cred,
+      tokens: { ...cred.tokens!, access_token: STALE, expires_at: Date.now() + 600_000 },
+    });
+
+    const remote = await connect(bellman, calls);
+    expect(calls).toHaveLength(1); // the refresh token was still good: no tab
+    await remote.close();
+    expect(readServer(dir, RESOURCE).tokens?.access_token).not.toBe(STALE);
+  });
+
   it("surfaces an unreachable server rather than hanging", async () => {
     const dead: typeof fetch = () => Promise.reject(new Error("ECONNREFUSED"));
     await expect(
@@ -694,6 +715,33 @@ describe("connectSignedIn", () => {
   it("stops listening as soon as the sign-in finishes", async () => {
     await (await connect(fakeBellman(), [])).close();
     await expect(block(TEST_PORTS[0])).resolves.toBeUndefined();
+  });
+
+  /**
+   * Closing at the END of connectSignedIn is not the same thing: finishAuth and
+   * the reconnect sit in between, and the browser sends its favicon request the
+   * moment the callback page renders. This widens that window by watching the
+   * port from inside the code exchange, which is the first thing after the wait.
+   */
+  it("stops listening when the wait settles, not when the connect finishes", async () => {
+    const bellman = fakeBellman();
+    const isFree = (port: number) =>
+      new Promise<boolean>((resolve) => {
+        const probe = createServer();
+        probe.once("error", () => resolve(false));
+        probe.listen(port, "127.0.0.1", () => probe.close(() => resolve(true)));
+      });
+
+    let freeDuringExchange: boolean | undefined;
+    const watched: typeof fetch = async (input, init) => {
+      if (freeDuringExchange === undefined && String(init?.body ?? "").includes("grant_type=authorization_code")) {
+        freeDuringExchange = await isFree(TEST_PORTS[0]);
+      }
+      return bellman.fetch(input, init);
+    };
+
+    await (await connect(bellman, [], { fetchImpl: watched })).close();
+    expect(freeDuringExchange).toBe(true);
   });
 
   it("stops listening when the sign-in fails", async () => {

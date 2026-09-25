@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
@@ -1568,11 +1568,19 @@ describe("connectSignedIn", () => {
     await bellman.refresh(before.tokens!.refresh_token!, before.client!.client_id);
     const { fetchImpl, expireOnce } = aging(bellman);
     const remote = await connect(bellman, [], { fetchImpl });
+    // "Left exactly as it was" is an absence, and an absence is satisfied by a merge that never
+    // ran. So the file's clock is stopped a long time ago, and a write from here on is
+    // unmistakable: the merge has to have run, and still leave the content alone.
+    const file = join(dir, "credentials.json");
+    utimesSync(file, 1, 1);
     expireOnce();
     await expect(remote.listTools()).rejects.toThrow(); // the session did lose its credential
     await remote.close();
 
-    expect(readServer(dir, RESOURCE)).toEqual(before);
+    expect({ file: readServer(dir, RESOURCE), rewritten: statSync(file).mtimeMs > 1_000 }).toEqual({
+      file: before,
+      rewritten: true,
+    });
   });
 
   // ------------------------------------------------------------------ R6

@@ -1089,8 +1089,8 @@ until it expires — up to 30 days on the team plan. `expireIfDue`/`sweep` never
 read `mode`, so expiry itself is safe; the crash is on `bellman_connect`-style
 reads.
 
-`src/store-do.ts` has **no test coverage at all** and the repo cannot run
-workerd under vitest, so the guard must be a pure exported function that the
+`src/store-do.ts` had **no test coverage at all** before this task, and the
+repo cannot run workerd under vitest, so the guard must be a pure exported function that the
 DO read path calls. That is what makes it testable.
 
 Create `tests/store-do.test.ts`:
@@ -1181,7 +1181,7 @@ git add <the files this task changed>
 git commit -m "feat: drop pre-manifest Durable Object sessions
 
 DurableObjectStore is the only store serving production (see #12),
-had no test coverage at all, and a manifest that failed to serialize
+had no test coverage at all before this task, and a manifest that failed to serialize
 would break every room.
 
 Rows written before Session.manifest existed are treated as gone

@@ -56,6 +56,26 @@ describe("presets", () => {
     expect(resolveManifest(authored()).preset).toBeNull();
   });
 
+  // PRESETS is a module-level object. If a caller could reach it, one room's edit
+  // would change every later room cited from that preset, and #2 or #3 may well
+  // edit a manifest (promoting a member is a verb pushed onto a role). Nothing in
+  // src/ mutates a manifest today, so this is the only test that fails when the
+  // clone in resolveManifest is dropped or made shallow. The mutation is deep on
+  // purpose: a shallow copy shares the role objects, and a per-role copy still
+  // shares each `can` array.
+  it.each(PRESET_NAMES)("hands each %s room its own copy of the preset's roles", (name) => {
+    const expected = structuredClone(resolveManifest({ room: "before", preset: name }).roles);
+
+    const first = resolveManifest({ room: "first", preset: name });
+    for (const def of Object.values(first.roles)) {
+      def.can.push("audit");
+      def.description = "poisoned";
+    }
+    first.roles.intruder = { can: ["close_room"], description: null };
+
+    expect(resolveManifest({ room: "second", preset: name }).roles).toEqual(expected);
+  });
+
   // Presets bypass the shape and the cross-field checks, so nothing else stops a
   // catalog typo — or a reserved name — from reaching the store.
   it.each(PRESET_NAMES)("%s only holds legal role keys, real verbs, and roles that exist", (name) => {

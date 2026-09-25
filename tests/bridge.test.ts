@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, type CallToolResult, type Notification } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, loadRoomManifest, type Delivery, type Remote } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
@@ -347,6 +349,65 @@ describe("room.yaml", () => {
     await fs.writeFile(path.join(dir, ".bellman", "room.yaml"), "# nothing here yet\n");
     expect(() => loadRoomManifest(dir)).toThrow(/mapping, got an empty document/);
   });
+
+  // What the loader must refuse without reading. Before the single statSync a directory came back as
+  // "not valid YAML: EISDIR", a fifo blocked bellman_start forever, and size was unbounded.
+  const room = () => path.join(dir, ".bellman", "room.yaml");
+  // chmod cannot keep root out, and Windows has no such modes.
+  const permissionsEnforced = process.platform !== "win32" && process.getuid?.() !== 0;
+  // Valid YAML of exactly `bytes` bytes, so that only its size can be a reason to refuse it.
+  const yamlOfSize = (bytes: number) => {
+    const head = "room: x\n# ";
+    return head + "a".repeat(bytes - head.length - 1) + "\n";
+  };
+
+  it("refuses a directory named room.yaml as not a regular file", async () => {
+    await fs.mkdir(room());
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is not a regular file/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a fifo instead of blocking on it", async () => {
+    execFileSync("mkfifo", [room()]);
+    // Opening a fifo waits for its other end, and readFileSync would freeze the whole thread, out of reach
+    // of vitest's timeout. Hand it a writer so a regression fails the assertion below instead of hanging.
+    const writer = spawn("sh", ["-c", 'printf "room: x\\n" > "$1"', "sh", room()], { stdio: "ignore" });
+    try {
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is not a regular file/);
+    } finally {
+      writer.kill("SIGKILL");
+    }
+  });
+
+  it("loads a file exactly at the 64 KB limit", async () => {
+    await fs.writeFile(room(), yamlOfSize(64 * 1024));
+    expect(loadRoomManifest(dir)).toEqual({ room: "x" });
+  });
+
+  it("refuses a file one byte over the limit as too large, before parsing it", async () => {
+    await fs.writeFile(room(), yamlOfSize(64 * 1024 + 1));
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is too large/);
+  });
+
+  it.skipIf(!permissionsEnforced)("calls an unreadable file unreadable, not bad YAML", async () => {
+    await fs.writeFile(room(), "room: x\npreset: pair\n", { mode: 0o000 });
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml could not be read: EACCES/);
+  });
+
+  it.skipIf(!permissionsEnforced)("reports a room.yaml it cannot reach rather than treating it as absent", async () => {
+    await fs.writeFile(room(), "room: x\npreset: pair\n");
+    await fs.chmod(path.join(dir, ".bellman"), 0o000);
+    try {
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml could not be read: EACCES/);
+    } finally {
+      await fs.chmod(path.join(dir, ".bellman"), 0o755); // afterEach has to be able to remove it
+    }
+  });
+
+  it("treats a .bellman that is a file, not a directory, as no room.yaml", async () => {
+    await fs.rm(path.join(dir, ".bellman"), { recursive: true });
+    await fs.writeFile(path.join(dir, ".bellman"), "not a directory");
+    expect(loadRoomManifest(dir)).toBeNull();
+  });
 });
 
 describe("bellman_start with a room.yaml", () => {
@@ -467,5 +528,50 @@ describe("bellman_start with a room.yaml", () => {
     expect(res.isError).toBe(true);
     expect(res.text).not.toContain("room.yaml");
     expect(said()).toBe("");
+  });
+
+  it("still honors an explicit manifest when the file is malformed", async () => {
+    await writeRoom("room: broken\n  preset: [unclosed\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "pair" });
+    expect(said()).toBe("");
+  });
+
+  it("never mutates the arguments it is handed", async () => {
+    await writeRoom("room: payments-migration\npreset: review\n");
+    // The SDK gives a handler a parsed copy of every request, so through a client an in-place write would
+    // be invisible. Capture the raw handler and call it with an object this test still holds.
+    const handlers = new Map<unknown, (request: unknown, extra: unknown) => Promise<unknown>>();
+    vi.spyOn(Server.prototype, "setRequestHandler").mockImplementation((schema: unknown, handler: unknown) => {
+      handlers.set(schema, handler as (request: unknown, extra: unknown) => Promise<unknown>);
+    });
+    const sent: Record<string, unknown>[] = [];
+    const bridge = createBridge({
+      delivery: "channel",
+      remote: async () => ({
+        listTools: async () => ({ tools: [] }),
+        callTool: async (params) => {
+          sent.push(params.arguments ?? {});
+          return { content: [{ type: "text", text: "ok" }] };
+        },
+        close: async () => {},
+      }),
+    });
+
+    const handed = { brief: brief(), capabilities: caps };
+    await handlers.get(CallToolRequestSchema)!(
+      { method: "tools/call", params: { name: "bellman_start", arguments: handed } },
+      {},
+    );
+
+    expect(handed).not.toHaveProperty("manifest");
+    expect(sent[0]).toHaveProperty("manifest");
+    await bridge.close();
   });
 });

@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync, statSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -45,6 +45,12 @@ export type Delivery = "channel" | "hook";
 const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
 const ROOM_FILE = join(".bellman", "room.yaml");
+/**
+ * The schema allows at most 16 roles with 300-character descriptions: about 20 KB in the very worst
+ * case. A room.yaml over this is a mistake (a wrong path, a log, a build artifact), and refusing it
+ * costs less than reading it and sending it to a server that can only reject it.
+ */
+const MAX_ROOM_FILE_BYTES = 64 * 1024;
 
 /** The part of an MCP client the bridge uses — the seam tests substitute. */
 export interface Remote {
@@ -134,18 +140,43 @@ function textOf(result: CallToolResult): string {
 /**
  * Read `.bellman/room.yaml` and return it as the object `bellman_start`
  * expects. Returns null when the file is absent — that is not an error, it
- * just means this room is declared inline.
+ * just means this room is declared inline. Anything else that keeps the file
+ * from being used throws, and the message names what is wrong: it is not a
+ * regular file, it is too large, it cannot be read, or it is not YAML that
+ * holds a mapping.
  *
  * Parsing lives here and never on the server: the server has exactly one
  * schema, and the Workers bundle never carries a YAML parser.
  */
 export function loadRoomManifest(cwd: string): Record<string, unknown> | null {
   const file = join(cwd, ROOM_FILE);
-  if (!existsSync(file)) return null;
+
+  // One stat answers three questions before anything is opened: is there a file, is it the kind that
+  // is safe to read, and is it a sane size. Opening a fifo, for one, blocks bellman_start forever.
+  let info: Stats;
+  try {
+    info = statSync(file);
+  } catch (e) {
+    // ENOTDIR: `.bellman` is itself a file, so nothing lives under it either.
+    const code = (e as { code?: string }).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
+  }
+  if (!info.isFile()) throw new Error(`${ROOM_FILE} is not a regular file`);
+  if (info.size > MAX_ROOM_FILE_BYTES) {
+    throw new Error(`${ROOM_FILE} is too large: ${info.size} bytes, and the limit is ${MAX_ROOM_FILE_BYTES}`);
+  }
+
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch (e) {
+    throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
+  }
 
   let parsed: unknown;
   try {
-    parsed = parseYaml(readFileSync(file, "utf8"));
+    parsed = parseYaml(text);
   } catch (e) {
     throw new Error(`${ROOM_FILE} is not valid YAML: ${(e as Error).message}`);
   }

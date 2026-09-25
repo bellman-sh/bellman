@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - `Verb` gains exactly one member: `summarize`. Total verbs becomes 8.
+- The tool surface goes from 8 (as #1 leaves it) to 9. `surface.test.ts` asserts the count, so it changes with this work.
 - `RoomManifest` gains exactly one field: `scribe: boolean`, defaulting to `true`, set by every preset.
 - `RoomSummary.text` is capped at **4000** characters — not `MAX_PAYLOAD_CHARS` (20 000). A summary is read on every `bellman_connect` and every `bellman_sync`, so its size is a standing tax on the whole room.
 - Only the room's **creator** may summarize. This is an ownership check like `bellman_invite`'s, NOT verb enforcement — verb enforcement is issue #2.
@@ -361,7 +362,7 @@ Refs the room-scribe spec"
 - Consumes: `setSummary` from Task 2; `RoomSummary`, `Session` from `src/types.js`; existing `ok`, `fail`, `findMember`, `audit` helpers in `src/server.ts`.
 - Produces: the `bellman_summarize` tool. Task 4 consumes `Session.summary` and computes `events_since_summary` from it.
 
-**This task breaks `INVARIANT 9` deliberately.** `tests/tools/surface.test.ts` pins the tool surface at 7 and ties it to a stated value — "lowest-common-denominator MCP". That test exists to force this decision to be noticed. The spec's D4 records why it is worth it: `bellman_send`'s job is fan-out with recipient capability filtering, and a summary is a state write that must reach a joiner who has never called sync.
+**This task breaks `INVARIANT 9` deliberately.** `tests/tools/surface.test.ts` pins the tool surface at 8 as #1 leaves it, and ties that number to a stated value — "lowest-common-denominator MCP". That test exists to force this decision to be noticed. The spec's D4 records why it is worth it: `bellman_send`'s job is fan-out with recipient capability filtering, and a summary is a state write that must reach a joiner who has never called sync.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -598,15 +599,15 @@ Errors: "only the room's creator can write a summary"; "cannot summarize events 
 
 - [ ] **Step 4: Update the tool-surface invariant**
 
-In `tests/tools/surface.test.ts`, add `"bellman_summarize"` to `EXPECTED_TOOLS`, and change the header comment from `INVARIANT 9: the tool surface stays at 7.` to:
+In `tests/tools/surface.test.ts`, add `"bellman_summarize"` to `EXPECTED_TOOLS`, and change the header comment from `INVARIANT 9: the tool surface stays at 8.` to:
 
 ```
- * INVARIANT 9: the tool surface stays at 8. Every addition is deliberate —
+ * INVARIANT 9: the tool surface stays at 9. Every addition is deliberate —
  *              bellman_summarize was added because a summary is a state write,
  *              not a fan-out, so it could not fold into bellman_send.
 ```
 
-Update any assertion in that file that hard-codes the number 7.
+Update any assertion in that file that hard-codes the number 8.
 
 - [ ] **Step 5: Run the tests**
 
@@ -628,7 +629,7 @@ git commit -m "feat: add bellman_summarize
 A summary is a state write, not a fan-out: it must reach a joiner who
 has never called sync, so folding it into bellman_send would have meant
 a skip-the-fan-out branch inside the fan-out tool. That is why the tool
-surface goes from 7 to 8.
+surface goes from 8 to 9.
 
 Authority is an ownership check, the pattern bellman_invite already
 uses. #2 generalises it to the summarize verb.

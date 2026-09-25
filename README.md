@@ -29,7 +29,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 ## Trust model
 
 - **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists, and the one they would get) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
-- **Untrusted envelopes**: peer-written briefs, messages, artifacts and the room's name, purpose and role descriptions arrive wrapped `{ trust: "untrusted", origin, data }`. A response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions; `structuredContent` has none, so there `trust` is the only marker. Role names, modes, verbs and each member's agent (provider, model, client) ship unwrapped. Cross-provider makes this load-bearing: it's a GPT agent's output landing in a Claude context, and vice versa.
+- **Untrusted envelopes**: peer-written briefs, messages and artifacts arrive wrapped `{ trust: "untrusted", origin, data }`, and a response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions. `structuredContent` has none, so there `trust` is the only marker; role names, modes, verbs and agent fields ship unwrapped.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
 

@@ -4,12 +4,10 @@
     "noEmit": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "types": [
-      "@cloudflare/workers-types"
-    ]
+    "types": ["@cloudflare/workers-types"]
   },
-  "include": [
-    "src"
-  ],
-  "exclude": []
+  // exclude is inherited from tsconfig.json, where it hides exactly the files
+  // this program exists to check. Reset it: here the Workers files ARE the point.
+  "exclude": [],
+  "include": ["src"]
 }

@@ -42,6 +42,7 @@ export function session(over: Partial<Session> = {}): Session {
   return {
     id: "qs_test",
     mode: "pair",
+    frozenAt: null,
     createdBy: "u_jesse",
     orgId: "org_codenerd",
     orgOnly: false,

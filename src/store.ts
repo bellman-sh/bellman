@@ -53,19 +53,36 @@ export interface BellmanStore {
 
   /** Consume a session's single-use join code. Idempotent. */
   consumeJoinCode(sessionId: string): Promise<void>;
-  /** Issue a join code, retiring whatever code the session had. */
-  setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void>;
-  /** Append a member to a session. */
-  addMember(sessionId: string, member: Member): Promise<void>;
+  /** Issue a join code, retiring whatever the session had. False means frozen. */
+  setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean>;
+  /**
+   * Append a member to a session, unless it is frozen. False means frozen.
+   *
+   * The refusal is here rather than only in the tool, because the tool reads
+   * the session and then writes, and a freeze landing in that gap would let a
+   * frozen room grow — which is the one thing freezing is for. Unlike the
+   * cross-object races on #59 and #62, both halves live in the same object, so
+   * this one can simply be made not to have a gap.
+   */
+  addMember(sessionId: string, member: Member): Promise<boolean>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /** Mark a session closed. Idempotent. */
   closeSession(sessionId: string): Promise<void>;
+  /** Freeze or thaw a session. null thaws. */
+  freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
+  /**
+   * Sessions this user created, newest first is not promised — only that a
+   * lapsed plan can find the rooms it has to freeze. The create *counts* used
+   * for quota cannot answer that: they are timestamps, not identities.
+   */
+  sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
 
+  /** Append an event. Null means the session is frozen, for the same reason. */
   appendEvent(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">
-  ): Promise<SessionEvent>;
+  ): Promise<SessionEvent | null>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
@@ -125,6 +142,23 @@ export interface BellmanStore {
   sweep(now: number): Promise<void>;
 }
 
+/**
+ * Fill in fields that were added after a stored record was written.
+ *
+ * `frozenAt` did not exist when the sessions now in production were created,
+ * so their records have no such property. Every guard is written
+ * `frozenAt !== null`, and `undefined !== null` — so without this, deploying
+ * reports every existing room as frozen and refuses every write in it.
+ *
+ * It lives here, rather than inline in the Durable Object, because nothing can
+ * import that file into a test. Same reason as grant-index.ts.
+ */
+export function hydrateSession<T extends { frozenAt?: number | null }>(
+  stored: T
+): T & { frozenAt: number | null } {
+  return { ...stored, frozenAt: stored.frozenAt ?? null };
+}
+
 function detach<T>(value: T): T {
   return structuredClone(value);
 }
@@ -132,6 +166,7 @@ function detach<T>(value: T): T {
 export class MemoryStore implements BellmanStore {
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
+  private byCreator = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -142,6 +177,9 @@ export class MemoryStore implements BellmanStore {
     const stored = detach(s);
     this.sessions.set(stored.id, stored);
     if (stored.joinCode) this.byJoinCode.set(stored.joinCode, stored.id);
+    const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
+    mine.add(stored.id);
+    this.byCreator.set(stored.createdBy, mine);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -168,19 +206,23 @@ export class MemoryStore implements BellmanStore {
     s.joinCode = null;
   }
 
-  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<void> {
+  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean> {
     const s = this.sessions.get(sessionId);
-    if (!s) return;
+    if (!s) return false;
+    if (s.frozenAt !== null) return false;
     if (s.joinCode) this.byJoinCode.delete(s.joinCode); // the old code stops resolving
     s.joinCode = code;
     s.joinCodeExpiresAt = expiresAt;
     this.byJoinCode.set(code, sessionId);
+    return true;
   }
 
-  async addMember(sessionId: string, member: Member): Promise<void> {
+  async addMember(sessionId: string, member: Member): Promise<boolean> {
     const s = this.sessions.get(sessionId);
-    if (!s) return;
+    if (!s) return false;
+    if (s.frozenAt !== null) return false;
     s.members.push(detach(member));
+    return true;
   }
 
   async updateMember(
@@ -203,12 +245,23 @@ export class MemoryStore implements BellmanStore {
     s.closed = true;
   }
 
+  async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    s.frozenAt = frozenAt;
+  }
+
+  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+    return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
+  }
+
   async appendEvent(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">
-  ): Promise<SessionEvent> {
+  ): Promise<SessionEvent | null> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
+    if (s.frozenAt !== null) return null;
     const event: SessionEvent = { ...detach(e), cursor: s.events.length + 1, at: Date.now() };
     s.events.push(event);
     this.wake(s);

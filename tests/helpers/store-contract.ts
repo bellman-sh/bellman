@@ -145,6 +145,93 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    // --------------------------------------------------------------- freezing
+    /**
+     * Frozen is not closed. A lapsed plan must be undoable without costing
+     * anyone their room, so freezing sets a flag and nothing else: the members
+     * are still members and the history is still there.
+     */
+    it("freezes and thaws without disturbing anything else", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { text: "before" }, refId: null,
+      }));
+
+      const at = Date.now();
+      (await store.freezeSession(s.id, at));
+      const frozen = (await store.getSession(s.id))!;
+      expect(frozen.frozenAt).toBe(at);
+      expect(frozen.closed).toBe(false);
+      expect(frozen.members).toHaveLength(1);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+
+      (await store.freezeSession(s.id, null));
+      expect((await store.getSession(s.id))?.frozenAt).toBeNull();
+    });
+
+    /**
+     * The tool reads the session, then writes. A freeze landing in that gap
+     * would let a frozen room grow, which is the one thing freezing is for —
+     * so the refusal has to come from the write, not only from the read.
+     */
+    it("refuses the writes themselves while frozen, not only the reads", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.freezeSession(s.id, Date.now()));
+
+      expect(await store.addMember(s.id, member({ memberId: "m_late" }))).toBe(false);
+      expect(await store.setJoinCode(s.id, "BELL-NEW-01", Date.now() + 60_000)).toBe(false);
+      expect(await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { text: "nope" }, refId: null,
+      })).toBeNull();
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.members).toHaveLength(1);
+      expect(after.joinCode).toBe(s.joinCode);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
+    });
+
+    it("accepts them again once thawed", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.freezeSession(s.id, Date.now()));
+      (await store.freezeSession(s.id, null));
+
+      expect(await store.addMember(s.id, member({ memberId: "m_late" }))).toBe(true);
+      expect((await store.getSession(s.id))?.members).toHaveLength(2);
+    });
+
+    it("ignores a freeze aimed at a session that does not exist", async () => {
+      await expect(store.freezeSession("qs_nope", Date.now())).resolves.not.toThrow();
+    });
+
+    /**
+     * A lapsed plan has to find the rooms it is about to freeze. The create
+     * counts cannot answer that — they are timestamps for the monthly quota,
+     * with no session id in them.
+     */
+    it("lists the sessions a person created, and nobody else's", async () => {
+      (await store.createSession(session({ id: "qs_mine_1", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_mine_2", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_theirs", createdBy: "u_peer" })));
+
+      expect((await store.sessionsCreatedBy("u_jesse", 10)).sort())
+        .toEqual(["qs_mine_1", "qs_mine_2"]);
+      expect(await store.sessionsCreatedBy("u_peer", 10)).toEqual(["qs_theirs"]);
+      expect(await store.sessionsCreatedBy("u_nobody", 10)).toEqual([]);
+    });
+
+    it("honours the limit on that listing", async () => {
+      for (const id of ["qs_a", "qs_b", "qs_c"]) {
+        (await store.createSession(session({ id, createdBy: "u_jesse" })));
+      }
+
+      expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
     // ---------------------------------------------------------------- events
     it("assigns monotonic cursors starting at 1", async () => {
       const s = session();
@@ -159,9 +246,9 @@ export function describeStoreContract(
         fromLabel: "jesse", payload: { text: "two" }, refId: null,
       }));
 
-      expect(a.cursor).toBe(1);
-      expect(b.cursor).toBe(2);
-      expect(a.at).toBe(Date.now());
+      expect(a!.cursor).toBe(1);
+      expect(b!.cursor).toBe(2);
+      expect(a!.at).toBe(Date.now());
     });
 
     it("eventsAfter filters strictly by cursor", async () => {

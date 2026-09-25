@@ -1,8 +1,9 @@
 import type { Session } from "./types.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
-// exists only inside workerd, so a Node test cannot load anything it exports. What
-// a test has to reach lives here, with no Cloudflare imports.
+// exists only inside workerd, so a test can load it only by stubbing that module, and
+// then has to stay out of the Node typecheck (see tests/store-do-wiring.test.ts). What
+// a plain test has to reach lives here, with no Cloudflare imports.
 
 /** The session record as stored — events live under their own keys. */
 export type StoredSession = Omit<Session, "events">;

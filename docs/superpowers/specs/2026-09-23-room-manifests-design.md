@@ -290,6 +290,19 @@ if (!ent.modes.includes(manifest.mode)) return fail("swarm mode requires ...");
 Manifest validation is the first thing that happens. Plan gating reads
 `manifest.mode`. The creator's `Member.roomRole` is set to `manifest.creatorRole`.
 
+The response carries the same `room` block a joiner gets, seated at the
+creator's own role:
+
+```ts
+room: roomPreview(session, manifest.creatorRole),
+```
+
+Without it the author of a manifest never sees what the server recorded, which
+matters most for the `.bellman/room.yaml` path: a mistake that still validates
+— the wrong preset, a role they thought they had renamed — would be invisible
+to the person who wrote it. D7's hazard does not apply here, because a creator
+reading their own words back is not receiving peer content.
+
 ## `bellman_connect` preview
 
 ```ts
@@ -382,7 +395,7 @@ preset: review
 |---|---|
 | `src/manifest.ts` | **new** — `PRESETS`, `resolveManifest()`, `ManifestError` |
 | `src/types.ts` | `Verb`, `PresetName`, `RoleDef`, `RoomManifest`; `Member.roomRole`; `Session.manifest`; delete `Session.mode` |
-| `src/server.ts` | `ManifestShape`; `bellman_start` drops `mode`, gains `manifest`, resolves before gating; `bellman_confirm` assigns `defaultRole` and echoes `room`; `bellman_connect` returns the `room` block; `publicMember` exposes `room_role` |
+| `src/server.ts` | `ManifestShape`; `bellman_start` drops `mode`, gains `manifest`, resolves before gating, and returns `room` seated at the creator's role; `bellman_confirm` assigns `defaultRole` and echoes `room`; `bellman_connect` returns the `room` block; `publicMember` exposes `room_role` |
 | `src/store.ts` | expected unchanged |
 | `src/store-do.ts` | expected unchanged; add round-trip assertion |
 | `src/bridge.ts` | `.bellman/room.yaml` conversion (slice 2) |

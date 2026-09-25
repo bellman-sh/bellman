@@ -1,3 +1,5 @@
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -7,6 +9,7 @@ import {
   type CallToolResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { parse as parseYaml } from "yaml";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -22,7 +25,11 @@ import {
  * ordinary HTTP client.
  *
  *   - It proxies the remote bellman_* tools unchanged, so the agent uses
- *     Bellman exactly as it would over HTTP.
+ *     Bellman exactly as it would over HTTP. The one exception is
+ *     bellman_start: called with no manifest, it sends the one from
+ *     .bellman/room.yaml when that file exists, and says so on stderr. Its
+ *     listing says the same and marks manifest optional, because a host that
+ *     honours the schema it is shown would otherwise never make that call.
  *   - It watches the tool results go by. Whenever a call reveals a membership
  *     (start, confirm, or a send/sync after a restart), it arms a watcher that
  *     long-polls bellman_sync for that member.
@@ -39,6 +46,25 @@ export type Delivery = "channel" | "hook";
 
 const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
+/** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
+const START_TOOL = "bellman_start";
+/**
+ * What the bridge adds to that tool's description, after the server's own words. The server describes
+ * manifest as required, because to the server it is; through this bridge it is not.
+ */
+const START_NOTE =
+  "Through the local Bellman bridge, manifest is optional: leave it out and the bridge sends " +
+  ".bellman/room.yaml, read from the directory this session was started in, as the manifest (the same " +
+  "object, written as YAML). A manifest you pass wins over the file. With no such file and no manifest " +
+  "the call fails, so pass one.";
+const ROOM_DIR = ".bellman";
+const ROOM_FILE = join(ROOM_DIR, "room.yaml");
+/**
+ * The schema allows at most 16 roles with 300-character descriptions: about 20 KB in the very worst
+ * case. A room.yaml over this is a mistake (a wrong path, a log, a build artifact), and refusing it
+ * costs less than reading it and sending it to a server that can only reject it.
+ */
+const MAX_ROOM_FILE_BYTES = 64 * 1024;
 
 /** The part of an MCP client the bridge uses — the seam tests substitute. */
 export interface Remote {
@@ -125,6 +151,123 @@ function textOf(result: CallToolResult): string {
     .join("\n");
 }
 
+/**
+ * What the bridge lists for a tool the server listed. The server requires a manifest, and a host that
+ * honours the schema it is shown will not make a call that leaves a required argument out: shown the
+ * server's own listing, it would refuse the very call .bellman/room.yaml exists to make possible, and the
+ * file would work only through hosts that ignore the schema. So bellman_start alone is listed with manifest
+ * optional and with the fallback described. Nothing else about it changes, and no other tool is touched.
+ * It is edited as a copy: the list is the remote's, and may be handed back again on the next request.
+ */
+function advertised(tool: Tool): Tool {
+  if (tool.name !== START_TOOL) return tool;
+  const { required, ...schema } = tool.inputSchema;
+  const stillRequired = (required ?? []).filter((key) => key !== "manifest");
+  return {
+    ...tool,
+    description: [tool.description, START_NOTE].filter(Boolean).join("\n\n"),
+    inputSchema: stillRequired.length > 0 ? { ...schema, required: stillRequired } : schema,
+  };
+}
+
+/** Whether `path` is itself a symbolic link. A path that cannot be examined is left to the open to report. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bridge sends what it reads to a server, so following a link would send whatever it points at. The
+ * target is deliberately not named: it is text the repository chose, on its way into the agent's context.
+ */
+function linkRefused(path: string, kind: "file" | "directory"): Error {
+  return new Error(
+    `${path} is a symbolic link, and the bridge will not follow one: whatever it points at would be read ` +
+      `and sent to the server. Replace the link with the ${kind} itself, or pass the manifest to bellman_start directly.`
+  );
+}
+
+/**
+ * Read `.bellman/room.yaml` and return it as the object `bellman_start`
+ * expects. Returns null when the file is absent — that is not an error, it
+ * just means this room is declared inline. Anything else that keeps the file
+ * from being used throws, and the message names what is wrong: it, or
+ * `.bellman`, is a symbolic link; it is not a regular file; it is too large;
+ * it cannot be read; or it is not YAML that holds a mapping.
+ *
+ * Parsing lives here and never on the server: the server has exactly one
+ * schema, and the Workers bundle never carries a YAML parser.
+ */
+export function loadRoomManifest(cwd: string): Record<string, unknown> | null {
+  const file = join(cwd, ROOM_FILE);
+
+  // A repository supplies two parts of this path, `.bellman` and `room.yaml`, and the bridge sends what
+  // it reads to a server: it reads what the repository holds, never what a link in it points at. Both are
+  // asked about first. Nothing in an open can refuse a link partway along its path, so for `.bellman` asking
+  // is all there is. For room.yaml it is the fallback: the open below refuses a link atomically wherever the
+  // platform has O_NOFOLLOW, and asking is what refuses one where it has not (Windows). Asking is not atomic,
+  // yet a link that arrived with a clone is already in place, and swapping one in behind the bridge takes a
+  // local attacker who has no need of it.
+  if (isSymlink(join(cwd, ROOM_DIR))) throw linkRefused(ROOM_DIR, "directory");
+  if (isSymlink(file)) throw linkRefused(ROOM_FILE, "file");
+
+  // Everything else is learned from the one descriptor that is then read, so nothing can change between
+  // the check and the read.
+  //   O_NOFOLLOW  fails with ELOOP when room.yaml is a link, whether or not its target exists, and does it
+  //               in the open itself, so a link swapped in after the lstat above is refused too. Where a
+  //               platform has no such flag (Windows) the constant is undefined and `|` reads it as 0: the
+  //               lstat above is then the only thing between a link and the read. Both stay, because each
+  //               covers what the other cannot.
+  //   O_NONBLOCK  makes opening a fifo return at once. Without it the open waits for a writer that never
+  //               comes and freezes bellman_start; with it, fstat names the fifo. Regular files ignore it.
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    // ENOTDIR: `.bellman` is itself a file, so nothing lives under it either.
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    if (code === "ELOOP") throw linkRefused(ROOM_FILE, "file");
+    throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
+  }
+
+  // Judge the descriptor before reading it, and close it on every way out. A refusal is only recorded
+  // inside the try and raised once the descriptor is closed, so the catch below sees only fs errors.
+  let text = "";
+  let refusal: string | undefined;
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) {
+      refusal = "is not a regular file";
+    } else if (info.size > MAX_ROOM_FILE_BYTES) {
+      refusal = `is too large: ${info.size} bytes, and the limit is ${MAX_ROOM_FILE_BYTES}`;
+    } else {
+      text = readFileSync(fd, "utf8");
+    }
+  } catch (e) {
+    throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
+  } finally {
+    closeSync(fd);
+  }
+  if (refusal) throw new Error(`${ROOM_FILE} ${refusal}`);
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(text);
+  } catch (e) {
+    throw new Error(`${ROOM_FILE} is not valid YAML: ${(e as Error).message}`);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    // An empty or comment-only file parses to null, and typeof null is "object".
+    const got = parsed === null ? "an empty document" : Array.isArray(parsed) ? "a list" : typeof parsed;
+    throw new Error(`${ROOM_FILE} must be a YAML mapping, got ${got}`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 export function createBridge(opts: BridgeOptions) {
   const { delivery, inboxDir } = opts;
   if (delivery === "hook" && !inboxDir) {
@@ -156,13 +299,31 @@ export function createBridge(opts: BridgeOptions) {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { tools } = await (await remote()).listTools();
-    return { tools: delivery === "hook" ? [...tools, WAIT_TOOL] : tools };
+    const listed = tools.map(advertised);
+    return { tools: delivery === "hook" ? [...listed, WAIT_TOOL] : listed };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name } = request.params;
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
+    let args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (name === WAIT_TOOL.name && delivery === "hook") return waitForQueued(args);
+
+    // The one place the bridge transforms a call instead of relaying it.
+    if (name === START_TOOL && args.manifest === undefined) {
+      try {
+        const fromFile = loadRoomManifest(process.cwd());
+        if (fromFile) {
+          args = { ...args, manifest: fromFile };
+          process.stderr.write(`bellman: using room manifest from ${ROOM_FILE}\n`);
+        }
+      } catch (e) {
+        // A malformed room.yaml fails here, before anything leaves the machine.
+        return {
+          content: [{ type: "text", text: `Error: ${(e as Error).message}` }],
+          isError: true,
+        };
+      }
+    }
 
     const result = await (await remote()).callTool({ name, arguments: args });
     observe(name, args, result);

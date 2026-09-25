@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
 
 let h: Harness;
 
@@ -47,7 +47,7 @@ describe("a frozen session refuses writes", () => {
   it("refuses to confirm a join that was already in flight", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);
-    const started = await creator.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const preview = await peer.call("bellman_connect", {
       join_code: String(started.data.join_code),
     });

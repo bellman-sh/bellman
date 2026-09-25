@@ -1,16 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import fs from "node:fs/promises";
+import os, { tmpdir } from "node:os";
+import path, { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { CallToolResult, Notification } from "@modelcontextprotocol/sdk/types.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, type CallToolResult, type Notification, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, type Delivery, type Remote } from "../src/bridge.js";
+import { createBridge, loadRoomManifest, type Delivery, type Remote } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
-import { brief, openaiAgent } from "./helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 /**
@@ -51,16 +55,32 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000):
   }
 }
 
+const startOf = (tools: Tool[]) => tools.find((t) => t.name === "bellman_start")!;
+
+/** The tools the server itself lists, before the bridge has touched them. */
+async function servedTools(key: string): Promise<Tool[]> {
+  const remote = await remoteFor(store, key);
+  try {
+    return (await remote.listTools()).tools;
+  } finally {
+    await remote.close();
+  }
+}
+
 const opened: Session[] = [];
 let store: BellmanStore;
 let inboxRoot: string;
 
-async function open(key: string, delivery: Delivery = "channel"): Promise<Session> {
+async function open(
+  key: string,
+  delivery: Delivery = "channel",
+  remote: () => Promise<Remote> = () => remoteFor(store, key),
+): Promise<Session> {
   const inboxDir = delivery === "hook" ? join(inboxRoot, `${key}-${opened.length}`) : undefined;
   const bridge = createBridge({
     delivery,
     inboxDir,
-    remote: () => remoteFor(store, key),
+    remote,
     pollWaitSeconds: 1,
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -90,7 +110,7 @@ async function open(key: string, delivery: Delivery = "channel"): Promise<Sessio
 
 /** Creator and joiner handshake entirely through their bridges. */
 async function pair(creator: Session, joiner: Session) {
-  const started = await creator.call("bellman_start", { mode: "pair", brief: brief(), capabilities: caps });
+  const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
   expect(started.isError, started.text).toBe(false);
   const preview = await joiner.call("bellman_connect", { join_code: started.data.join_code });
   expect(preview.isError, preview.text).toBe(false);
@@ -274,5 +294,439 @@ describe("hook delivery (the fallback)", () => {
     await new Promise((r) => setTimeout(r, 1500));
     const leftovers = drain(inbox).filter((e) => e.cursor <= Number(synced.data.cursor));
     expect(leftovers).toEqual([]);
+  });
+});
+
+describe("the tools the bridge lists", () => {
+  const deepFreeze = <T>(value: T): T => {
+    if (value && typeof value === "object") {
+      Object.values(value).forEach(deepFreeze);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  // The server requires a manifest, and a host that honours the listed schema will not make a call that
+  // leaves a required argument out. That would leave .bellman/room.yaml, which exists so that the call CAN
+  // leave it out, reachable only through hosts that ignore the schema. The SDK's own client is one of them:
+  // it validates a tool's output and never its input, which is why nothing else in this file could see it.
+  it.each<Delivery>(["channel", "hook"])(
+    "lists bellman_start with manifest optional, and every other tool as the server sent it (%s)",
+    async (delivery) => {
+      const a = await open(DEV_KEY.jesse, delivery);
+      const served = await servedTools(DEV_KEY.jesse);
+      const listed = (await a.client.listTools()).tools;
+
+      // The premise: the server does require it. If that stops being true, this rewrite is moot.
+      expect(startOf(served).inputSchema.required).toContain("manifest");
+      expect(startOf(listed).inputSchema.required).not.toContain("manifest");
+
+      // That is the whole change to the schema: the same properties and the same other requirements.
+      expect(startOf(listed).inputSchema).toEqual({
+        ...startOf(served).inputSchema,
+        required: startOf(served).inputSchema.required!.filter((key) => key !== "manifest"),
+      });
+      // The tool keeps everything else, and its description keeps the server's words and adds the fallback.
+      const withoutText = (tool: Tool) => ({ ...tool, inputSchema: undefined, description: undefined });
+      expect(withoutText(startOf(listed))).toEqual(withoutText(startOf(served)));
+      expect(startOf(listed).description!.startsWith(startOf(served).description!)).toBe(true);
+      expect(startOf(listed).description).toContain(".bellman/room.yaml");
+
+      // No other tool is edited, added or dropped (hook delivery adds the bridge's own wait tool).
+      const others = (tools: Tool[]) => tools.filter((t) => t.name !== "bellman_start" && t.name !== "bellman_wait");
+      expect(others(listed)).toEqual(others(served));
+    },
+  );
+
+  it("edits a copy, so the server's list is left as it was and listing twice says the same", async () => {
+    const served = deepFreeze(structuredClone(await servedTools(DEV_KEY.jesse)));
+    const a = await open(DEV_KEY.jesse, "channel", async () => ({
+      // The very same frozen objects every time, as a client that caches its list would hand them back.
+      listTools: async () => ({ tools: served }),
+      callTool: async () => { throw new Error("nothing here calls a tool"); },
+      close: async () => {},
+    }));
+
+    const first = (await a.client.listTools()).tools;
+    const second = (await a.client.listTools()).tools;
+
+    expect(startOf(first).inputSchema.required).not.toContain("manifest");
+    expect(second).toEqual(first);
+    expect(startOf(served).inputSchema.required).toContain("manifest");
+  });
+});
+
+describe("room.yaml", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-room-"));
+    await fs.mkdir(path.join(dir, ".bellman"), { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("returns null when there is no room.yaml", () => {
+    expect(loadRoomManifest(dir)).toBeNull();
+  });
+
+  it("parses a preset manifest into the object form", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      "room: payments-migration\npurpose: Port v2 to v3\npreset: review\n",
+    );
+    expect(loadRoomManifest(dir)).toEqual({
+      room: "payments-migration",
+      purpose: "Port v2 to v3",
+      preset: "review",
+    });
+  });
+
+  it("parses an authored manifest with roles", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      [
+        "room: custom",
+        "mode: swarm",
+        "roles:",
+        "  lead:",
+        "    can: [send, invite]",
+        "  helper:",
+        "    can: [send]",
+        "default_role: helper",
+        "creator_role: lead",
+      ].join("\n"),
+    );
+    const m = loadRoomManifest(dir) as Record<string, unknown>;
+    expect(m.mode).toBe("swarm");
+    expect((m.roles as Record<string, { can: string[] }>).lead.can).toEqual(["send", "invite"]);
+  });
+
+  it("throws a located error on malformed YAML rather than sending it", async () => {
+    await fs.writeFile(
+      path.join(dir, ".bellman", "room.yaml"),
+      "room: broken\n  preset: [unclosed\n",
+    );
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml/);
+  });
+
+  it("throws when the file parses to something that is not a mapping", async () => {
+    await fs.writeFile(path.join(dir, ".bellman", "room.yaml"), "- just\n- a list\n");
+    expect(() => loadRoomManifest(dir)).toThrow(/mapping/);
+  });
+
+  it("calls an empty file empty, not an object", async () => {
+    await fs.writeFile(path.join(dir, ".bellman", "room.yaml"), "# nothing here yet\n");
+    expect(() => loadRoomManifest(dir)).toThrow(/mapping, got an empty document/);
+  });
+
+  // What the loader must refuse without reading. Before it checked the descriptor it had opened, a directory
+  // came back as "not valid YAML: EISDIR", a fifo blocked bellman_start forever, size was unbounded, and a
+  // link was followed to wherever it pointed.
+  const room = () => path.join(dir, ".bellman", "room.yaml");
+  // chmod cannot keep root out, and Windows has no such modes.
+  const permissionsEnforced = process.platform !== "win32" && process.getuid?.() !== 0;
+  // Valid YAML of exactly `bytes` bytes, so that only its size can be a reason to refuse it.
+  const yamlOfSize = (bytes: number) => {
+    const head = "room: x\n# ";
+    return head + "a".repeat(bytes - head.length - 1) + "\n";
+  };
+
+  it("refuses a directory named room.yaml as not a regular file", async () => {
+    await fs.mkdir(room());
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is not a regular file/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a fifo instead of blocking on it", async () => {
+    execFileSync("mkfifo", [room()]);
+    // Opening a fifo waits for its other end, and a blocked openSync freezes the whole thread, out of reach
+    // of vitest's timeout. So there is a writer, but a late one: it frees a loader that waits, so a regression
+    // fails the assertions below instead of hanging, and only a loader that did NOT wait can beat it. (An
+    // early writer would prove nothing: once the fifo is open, fstat refuses it either way.)
+    const lateMs = 3000;
+    const writer = spawn(
+      "sh", ["-c", 'sleep "$2"; printf "room: x\\n" > "$1"', "sh", room(), String(lateMs / 1000)],
+      { stdio: "ignore" },
+    );
+    const started = performance.now();
+    try {
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is not a regular file/);
+      expect(performance.now() - started).toBeLessThan(lateMs / 2);
+    } finally {
+      writer.kill("SIGKILL");
+    }
+  });
+
+  // A repository chooses what its own .bellman/ holds, links included. Followed, a link sends whatever it
+  // points at to a server that rejects a stranger's YAML only after the bytes have left. (Windows needs
+  // privileges to make a link at all, and has no O_NOFOLLOW to refuse one with.)
+  it.skipIf(process.platform === "win32")("refuses a room.yaml that links to YAML elsewhere, and says why", async () => {
+    const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-elsewhere-"));
+    try {
+      // A mapping, so being a link is the only reason to refuse it: a private key would fail the mapping check anyway.
+      await fs.writeFile(path.join(elsewhere, "secrets.yaml"), "api_key: not-for-the-server\n");
+      await fs.symlink(path.join(elsewhere, "secrets.yaml"), room());
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is a symbolic link, and the bridge will not follow one/);
+    } finally {
+      await fs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link to nothing rather than calling it no file", async () => {
+    // Followed, a dangling link is ENOENT, which reads as "no room.yaml" and lets the call through unchanged.
+    await fs.symlink(path.join(dir, "not-there.yaml"), room());
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is a symbolic link, and the bridge will not follow one/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a .bellman that is a link, as it does a room.yaml that is", async () => {
+    // O_NOFOLLOW guards only the last component of the path, and .bellman is the other part a repository supplies.
+    const shared = path.join(dir, "shared");
+    await fs.mkdir(shared);
+    await fs.writeFile(path.join(shared, "room.yaml"), "room: x\npreset: pair\n");
+    await fs.rm(path.join(dir, ".bellman"), { recursive: true });
+    await fs.symlink(shared, path.join(dir, ".bellman"));
+    expect(() => loadRoomManifest(dir)).toThrow(/\.bellman is a symbolic link, and the bridge will not follow one/);
+  });
+
+  it("loads a file exactly at the 64 KB limit", async () => {
+    await fs.writeFile(room(), yamlOfSize(64 * 1024));
+    expect(loadRoomManifest(dir)).toEqual({ room: "x" });
+  });
+
+  it("refuses a file one byte over the limit as too large, before parsing it", async () => {
+    await fs.writeFile(room(), yamlOfSize(64 * 1024 + 1));
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is too large/);
+  });
+
+  it.skipIf(!permissionsEnforced)("calls an unreadable file unreadable, not bad YAML", async () => {
+    await fs.writeFile(room(), "room: x\npreset: pair\n", { mode: 0o000 });
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml could not be read: EACCES/);
+  });
+
+  it.skipIf(!permissionsEnforced)("reports a room.yaml it cannot reach rather than treating it as absent", async () => {
+    await fs.writeFile(room(), "room: x\npreset: pair\n");
+    await fs.chmod(path.join(dir, ".bellman"), 0o000);
+    try {
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml could not be read: EACCES/);
+    } finally {
+      await fs.chmod(path.join(dir, ".bellman"), 0o755); // afterEach has to be able to remove it
+    }
+  });
+
+  it("treats a .bellman that is a file, not a directory, as no room.yaml", async () => {
+    await fs.rm(path.join(dir, ".bellman"), { recursive: true });
+    await fs.writeFile(path.join(dir, ".bellman"), "not a directory");
+    expect(loadRoomManifest(dir)).toBeNull();
+  });
+
+  // Every refusal that comes after the open owes a close. A descriptor left behind is one lost per
+  // bellman_start, and nothing else would notice until the process ran out.
+  it.skipIf(!existsSync("/dev/fd"))("closes its descriptor on every path, refusals included", async () => {
+    const openFds = () => readdirSync("/dev/fd").length;
+    const before = openFds();
+    const cases: Array<() => Promise<void>> = [
+      () => fs.writeFile(room(), "room: x\n"), // opened, read, parsed
+      () => fs.mkdir(room()), // opened, then refused as not a regular file
+      () => fs.writeFile(room(), yamlOfSize(64 * 1024 + 1)), // opened, then refused as too large
+    ];
+    for (const setUp of cases) {
+      await setUp();
+      for (let i = 0; i < 100; i++) {
+        try {
+          loadRoomManifest(dir);
+        } catch {
+          // The refusals are expected; only what they leave open is under test.
+        }
+      }
+      await fs.rm(room(), { recursive: true, force: true });
+    }
+    // A leak on any of these paths is a hundred descriptors or more; the slack is for the runner's own.
+    expect(openFds() - before).toBeLessThan(10);
+  });
+});
+
+describe("bellman_start with a room.yaml", () => {
+  const silenceStderr = () => vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  let dir: string;
+  let stderr: ReturnType<typeof silenceStderr>;
+  const said = () => stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+  const writeRoom = (yaml: string) => fs.writeFile(path.join(dir, ".bellman", "room.yaml"), yaml);
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-room-"));
+    await fs.mkdir(path.join(dir, ".bellman"), { recursive: true });
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+    stderr = silenceStderr();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("sends the file's manifest when the call carries none, and says so on stderr", async () => {
+    await writeRoom("room: payments-migration\npurpose: Port v2 to v3\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    // The joiner's preview is where the room the server actually stored shows up.
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect(preview.data.room).toMatchObject({
+      preset: "review",
+      mode: "pair",
+      your_role: "reviewer",
+      text: { data: { room: "payments-migration", purpose: "Port v2 to v3" } },
+    });
+    expect(said()).toBe(`bellman: using room manifest from ${join(".bellman", "room.yaml")}\n`);
+  });
+
+  it("can be called by a host that enforces the listed schema, since that no longer requires a manifest", async () => {
+    await writeRoom("room: payments-migration\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const args = { brief: brief(), capabilities: caps };
+    // What such a host does before it sends anything: check the arguments against the schema it was shown.
+    const accepts = (tool: Tool) => new AjvJsonSchemaValidator().getValidator(tool.inputSchema)(args).valid;
+
+    // The server's own listing would have stopped this call where it stood; the bridge's does not.
+    expect(accepts(startOf(await servedTools(DEV_KEY.jesse)))).toBe(false);
+    expect(accepts(startOf((await a.client.listTools()).tools))).toBe(true);
+
+    const started = await a.call("bellman_start", args);
+    expect(started.isError, started.text).toBe(false);
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "review", text: { data: { room: "payments-migration" } } });
+  });
+
+  it("accepts the README's authored-roles example end to end", async () => {
+    await writeRoom([
+      "room: payments-migration",
+      "mode: swarm",
+      "roles:",
+      "  lead:",
+      "    can: [send, invite, revoke, request_actions, respond_actions]",
+      "  helper:",
+      "    can: [send, request_actions, respond_actions]",
+      "  observer:",
+      "    can: []",
+      "default_role: helper",
+      "creator_role: lead",
+    ].join("\n"));
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    expect(preview.data.room).toMatchObject({
+      preset: null,
+      mode: "swarm",
+      creator_role: "lead",
+      your_role: "helper",
+      your_verbs: ["send", "request_actions", "respond_actions"],
+    });
+  });
+
+  it("leaves an explicit manifest alone even when the file exists", async () => {
+    await writeRoom("room: from-file\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "pair" });
+    expect(said()).toBe("");
+  });
+
+  it("forwards unchanged when there is no file, so the server's own error stands", async () => {
+    const a = await open(DEV_KEY.jesse);
+
+    const res = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("expected object, received undefined at manifest");
+    expect(said()).toBe("");
+  });
+
+  it("fails locally on a malformed file, before anything is sent", async () => {
+    await writeRoom("room: broken\n  preset: [unclosed\n");
+    const sent: string[] = [];
+    const a = await open(DEV_KEY.jesse, "channel", async () => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return { ...real, callTool: (params) => { sent.push(params.name); return real.callTool(params); } };
+    });
+
+    const res = await a.call("bellman_start", { brief: brief(), capabilities: caps });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toMatch(/^Error: .*room\.yaml is not valid YAML/);
+    expect(sent).toEqual([]);
+    expect(said()).toBe("");
+  });
+
+  it("never reads the file for any other tool", async () => {
+    await writeRoom("- not\n- a mapping\n");
+    const a = await open(DEV_KEY.jesse);
+
+    const res = await a.call("bellman_connect", { join_code: "BELL-0000-00" });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).not.toContain("room.yaml");
+    expect(said()).toBe("");
+  });
+
+  it("still honors an explicit manifest when the file is malformed", async () => {
+    await writeRoom("room: broken\n  preset: [unclosed\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+
+    const started = await a.call("bellman_start", { manifest: manifestFixture(), brief: brief(), capabilities: caps });
+    expect(started.isError, started.text).toBe(false);
+
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "pair" });
+    expect(said()).toBe("");
+  });
+
+  it("never mutates the arguments it is handed", async () => {
+    await writeRoom("room: payments-migration\npreset: review\n");
+    // The SDK gives a handler a parsed copy of every request, so through a client an in-place write would
+    // be invisible. Capture the raw handler and call it with an object this test still holds.
+    const handlers = new Map<unknown, (request: unknown, extra: unknown) => Promise<unknown>>();
+    vi.spyOn(Server.prototype, "setRequestHandler").mockImplementation((schema: unknown, handler: unknown) => {
+      handlers.set(schema, handler as (request: unknown, extra: unknown) => Promise<unknown>);
+    });
+    const sent: Record<string, unknown>[] = [];
+    const bridge = createBridge({
+      delivery: "channel",
+      remote: async () => ({
+        listTools: async () => ({ tools: [] }),
+        callTool: async (params) => {
+          sent.push(params.arguments ?? {});
+          return { content: [{ type: "text", text: "ok" }] };
+        },
+        close: async () => {},
+      }),
+    });
+
+    const handed = { brief: brief(), capabilities: caps };
+    await handlers.get(CallToolRequestSchema)!(
+      { method: "tools/call", params: { name: "bellman_start", arguments: handed } },
+      {},
+    );
+
+    expect(handed).not.toHaveProperty("manifest");
+    expect(sent[0]).toHaveProperty("manifest");
+    await bridge.close();
   });
 });

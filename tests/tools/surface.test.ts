@@ -1,11 +1,15 @@
 /**
- * INVARIANT 9: the tool surface stays at 7.
+ * INVARIANT 9: the tool surface stays at 8. Every addition is deliberate: this
+ *              list is where a new tool has to be noticed, so adding one means
+ *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: lowest-common-denominator MCP — tools only, text-first
  *              responses, long-poll capped at 25s.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { ENTITLEMENTS } from "../../src/auth.js";
+import { VERBS } from "../../src/manifest.js";
 
 const EXPECTED_TOOLS = [
   "bellman_start",
@@ -32,9 +36,12 @@ describe("tool surface", () => {
   });
 
   /** INVARIANT 9 */
-  it("registers exactly the 7 Bellman tools", async () => {
+  it(`registers exactly the ${EXPECTED_TOOLS.length} Bellman tools`, async () => {
     const { tools } = await jesse.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
+    // The invariant's number as an assertion, not prose. This file once said 7
+    // over a list of 8 and nothing failed. Keep it equal to the header's.
+    expect(EXPECTED_TOOLS).toHaveLength(8);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -44,6 +51,91 @@ describe("tool surface", () => {
       expect(tool.inputSchema, tool.name).toBeTruthy();
       expect(tool.inputSchema.type, tool.name).toBe("object");
     }
+  });
+
+  // A description is the only documentation a caller has, and bellman_start's went
+  // stale on this branch: its Errors line omitted the likeliest error (a bad
+  // manifest), and the member counts left with the `mode` argument. Each rejection
+  // below is provoked, and the handler's message and the description must carry the
+  // same words, so neither can change without this failing.
+  it("documents bellman_start's rejections, returned fields and member counts in the handler's own words", async () => {
+    const { tools } = await jesse.listTools();
+    const doc = tools.find((t) => t.name === "bellman_start")!.description!;
+    const flat = doc.replace(/\s+/g, " ");
+
+    const peer = await h.connect(DEV_KEY.peer); // free plan
+    const teamless = await h.connectAs({
+      userId: "u_teamless", orgId: null, plan: "team", role: "admin", label: "teamless",
+    });
+    for (let i = 0; i < ENTITLEMENTS.free.monthlyCreates; i++) {
+      await h.store.recordCreate("u_spent");
+    }
+    const spent = await h.connectAs({
+      userId: "u_spent", orgId: null, plan: "free", role: "member", label: "spent",
+    });
+    const dangling = {
+      room: "r", mode: "pair", roles: { lead: { can: ["send"] } },
+      default_role: "ghost", creator_role: "lead",
+    };
+
+    const rejections: [string, Peer, Record<string, unknown>][] = [
+      ["invalid manifest — ", jesse, { manifest: dangling }],
+      ["swarm mode requires", peer, { manifest: manifestFixture({ preset: "swarm" }) }],
+      ["org_only sessions require", peer, { manifest: manifestFixture(), org_only: true }],
+      ["org_only was set but", teamless, { manifest: manifestFixture(), org_only: true }],
+      ["monthly session limit", spent, { manifest: manifestFixture() }],
+    ];
+    for (const [words, who, args] of rejections) {
+      const res = await who.call("bellman_start", { brief: brief(), ...args });
+      expect(res.isError, words).toBe(true);
+      expect(res.text, `handler says: ${words}`).toContain(words);
+      expect(flat, `description says: ${words}`).toContain(words);
+    }
+
+    // Everything the handler returns is named on the Returns line. The one
+    // exception is share_instructions, which no tool lists: it is guidance for a
+    // human, not data.
+    const started = await jesse.call("bellman_start", { brief: brief(), manifest: manifestFixture() });
+    const from = flat.indexOf("Returns:");
+    const to = flat.indexOf("Keep member_id");
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    for (const key of Object.keys(started.data).filter((k) => k !== "share_instructions")) {
+      expect(flat.slice(from, to), `Returns line names ${key}`).toContain(key);
+    }
+
+    // What each mode holds is what a caller chooses a preset by.
+    expect(flat).toContain('"pair" room holds exactly 2 members');
+    expect(flat).toContain("up to your plan's member limit");
+  });
+
+  // A joiner's human decides on the verbs a room declares, and nothing enforces
+  // them at call time yet. Each tool that returns the room block says so. When #2
+  // enforces verbs, the trip-wire in exchange.test.ts fails first, and these
+  // sentences (and the README's) go with it.
+  it("says on every tool that shows a room's verbs that they are declared, not yet enforced", async () => {
+    const { tools } = await jesse.listTools();
+    const showsVerbs = ["bellman_confirm", "bellman_connect", "bellman_start"];
+    for (const name of showsVerbs) {
+      const doc = tools.find((t) => t.name === name)!.description!.replace(/\s+/g, " ");
+      expect(doc, name).toContain("not yet enforced at call time");
+    }
+    // No other tool mentions verbs, so none can be showing them unqualified.
+    for (const t of tools.filter((t) => !showsVerbs.includes(t.name))) {
+      expect(t.description, t.name).not.toMatch(/verbs/i);
+    }
+  });
+
+  // The one place a caller reads which verbs it may author is this line, and it is prose beside an enum
+  // it can outlive without anything noticing: it went on saying `audit, close_room` after the enum
+  // dropped them, so every model was told to author verbs the server rejects while the suite stayed
+  // green. Compared with the enum itself, neither can change without this failing.
+  it("lists in bellman_start's description exactly the verbs a manifest may hold", async () => {
+    const { tools } = await jesse.listTools();
+    const doc = tools.find((t) => t.name === "bellman_start")!.description!;
+    const listed = /^\s*Verbs: (.+)\.$/m.exec(doc)?.[1];
+    expect(listed, "bellman_start's description has a `Verbs:` line").toBeDefined();
+    expect(listed!.split(", ").sort()).toEqual([...VERBS].sort());
   });
 
   /** INVARIANT 4: tools only — no resources, prompts, sampling or elicitation. */
@@ -58,7 +150,7 @@ describe("tool surface", () => {
 
   /** INVARIANT 4: text-first, structuredContent as enhancement. */
   it("answers with a text block on both success and failure", async () => {
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     expect(started.text).not.toBe("");
     expect(started.data.session_id).toBeTruthy();
 
@@ -78,7 +170,7 @@ describe("tool surface", () => {
     expect(waitSchema.maximum).toBe(25);
     expect(waitSchema.minimum).toBe(0);
 
-    const started = await jesse.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const over = await jesse.call("bellman_sync", {
       session_id: String(started.data.session_id),
       member_id: String(started.data.member_id),

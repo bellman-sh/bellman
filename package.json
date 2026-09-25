@@ -47,7 +47,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.test.json",
     "smoke": "tsx scripts/smoke.ts",
-    "verify": "npm run typecheck && npm run build && npm test",
+    "verify": "npm run typecheck && npm run typecheck:worker && npm run build && npm test",
     "typecheck:worker": "tsc -p tsconfig.worker.json",
     "dev:worker": "wrangler dev",
     "deploy": "wrangler deploy",
@@ -58,6 +58,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "express": "^5.2.1",
+    "yaml": "^2.9.1",
     "zod": "^4.5.4"
   },
   "devDependencies": {

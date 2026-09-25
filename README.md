@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief, confirms with its own, and the two sessions become members of each other's work.
+One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
 
 ## Why MCP as the rendezvous
 
@@ -17,8 +17,8 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 | Tool | Purpose |
 |---|---|
-| `bellman_start` | Create a room, get join code + `member_id`. Entitlement-gated. |
-| `bellman_connect` | Phase 1: preview the creator's brief. **Nothing of yours ships yet.** |
+| `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
+| `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are declared, not yet enforced). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
@@ -28,8 +28,8 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 ## Trust model
 
-- **Two-phase connect**: joiners see the creator's brief before their own context crosses. Codes are single-use and expire in 15 minutes unused.
-- **Untrusted envelopes**: every peer-originated payload arrives wrapped `{ trust: "untrusted", origin, data }` with an explicit preamble instructing the receiving agent to treat it as data, not instructions. Cross-provider makes this load-bearing: it's a GPT agent's output landing in a Claude context, and vice versa.
+- **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists and the one they would get; verbs are declared, not yet enforced) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
+- **Untrusted envelopes**: peer-written briefs, messages and artifacts arrive wrapped `{ trust: "untrusted", origin, data }`, and a response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions. `structuredContent` has none, so there `trust` is the only marker; role names, modes, verbs and agent fields ship unwrapped.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
 
@@ -149,6 +149,59 @@ Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscr
 **A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
 
 Billing only ever touches grants it wrote. An operator override in `BELLMAN_USERS` beats a purchase outright — `/upgrade` stops before Stripe rather than take money that would change nothing — and a grant an admin wrote by hand is left alone, with the clash logged for a human. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
+
+### Declaring a room in your repo
+
+Put a manifest at `.bellman/room.yaml` and `bellman_start` picks it up
+automatically when called through the bridge:
+
+```yaml
+room: payments-migration
+purpose: Port Stripe v2 to v3
+preset: review          # pair | swarm | review
+```
+
+Or author the roles yourself:
+
+```yaml
+room: payments-migration
+mode: swarm
+roles:
+  lead:
+    can: [send, invite, revoke, request_actions, respond_actions]
+  helper:
+    can: [send, request_actions, respond_actions]
+  observer:
+    can: []
+default_role: helper
+creator_role: lead
+```
+
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`.
+Every member can always sync and leave.
+
+Verbs are declared, not yet enforced: the server records them and shows
+them to joiners but does not check them when a call is made, so read
+them as the creator's stated intent, not a guarantee.
+
+The bridge reads the file from the directory Claude Code was started in
+(it does not search parent directories) and logs
+`bellman: using room manifest from .bellman/room.yaml` to stderr when it
+uses one. A `manifest` argument passed to `bellman_start` always wins
+over the file. The bridge lists `bellman_start` with `manifest` optional
+(the server itself requires it), so a client that checks arguments
+against the listed schema can still leave it out and let the file
+supply it. A file that is malformed, unreadable, over 64 KB, not a
+regular file, or a symlink fails locally, before anything is sent; with no file and no
+argument, the server's own validation error comes back.
+
+Those local checks are about the FILE, not the manifest. The bridge does
+not know the schema — the server owns that, and has exactly one copy of
+it. So a file that is valid YAML and parses to a mapping is sent even
+when the manifest inside it is wrong: an unknown key, an invalid preset,
+a `default_role` naming no role are all reported by the server, which
+means that request does cross the wire and comes back an error. Only the
+parsed object reaches the server, which has no YAML parser.
 
 ### When a plan lapses
 

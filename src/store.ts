@@ -142,23 +142,6 @@ export interface BellmanStore {
   sweep(now: number): Promise<void>;
 }
 
-/**
- * Fill in fields that were added after a stored record was written.
- *
- * `frozenAt` did not exist when the sessions now in production were created,
- * so their records have no such property. Every guard is written
- * `frozenAt !== null`, and `undefined !== null` — so without this, deploying
- * reports every existing room as frozen and refuses every write in it.
- *
- * It lives here, rather than inline in the Durable Object, because nothing can
- * import that file into a test. Same reason as grant-index.ts.
- */
-export function hydrateSession<T extends { frozenAt?: number | null }>(
-  stored: T
-): T & { frozenAt: number | null } {
-  return { ...stored, frozenAt: stored.frozenAt ?? null };
-}
-
 function detach<T>(value: T): T {
   return structuredClone(value);
 }

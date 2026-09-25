@@ -6,7 +6,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, manifestFixture } from "../helpers/fixtures.js";
 import type { Identity } from "../../src/types.js";
 
 let h: Harness;
@@ -18,7 +18,7 @@ const teamAdmin = (userId: string, orgId: string): Identity => ({
   userId, orgId, plan: "team", role: "admin", label: `${userId}@${orgId}`,
 });
 
-interface AuditRow { action: string; session_id: string; actor: string }
+interface AuditRow { action: string; session_id: string; actor: string; detail: Record<string, unknown> }
 
 function rows(data: Record<string, unknown>): AuditRow[] {
   return (data.entries ?? []) as AuditRow[];
@@ -109,8 +109,8 @@ describe("what the audit trail records", () => {
     const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
     const other = await h.connectAs(teamAdmin("u_other", "org_other"));
 
-    await acme.call("bellman_start", { mode: "pair", brief: brief() });
-    await other.call("bellman_start", { mode: "pair", brief: brief() });
+    await acme.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    await other.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
 
     const acmeLog = await acme.call("bellman_audit", { limit: 100 });
     const otherLog = await other.call("bellman_audit", { limit: 100 });
@@ -121,12 +121,34 @@ describe("what the audit trail records", () => {
     expect(rows(otherLog.data)).toHaveLength(1);
   });
 
+  it("records the mode and preset a room was created with", async () => {
+    const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
+    const cited = await acme.call("bellman_start", {
+      manifest: manifestFixture({ preset: "review" }), brief: brief(),
+    });
+    const authored = await acme.call("bellman_start", {
+      manifest: {
+        room: "authored", mode: "swarm",
+        roles: { boss: { can: ["send"] } }, default_role: "boss", creator_role: "boss",
+      },
+      brief: brief(),
+    });
+
+    const log = rows((await acme.call("bellman_audit", { limit: 100 })).data);
+    const createdDetail = (started: { data: Record<string, unknown> }) =>
+      log.find((e) => e.action === "session_created" && e.session_id === String(started.data.session_id))?.detail;
+
+    expect(createdDetail(cited)).toMatchObject({ mode: "pair", preset: "review" });
+    // A room built from authored roles cites no preset.
+    expect(createdDetail(authored)).toMatchObject({ mode: "swarm", preset: null });
+  });
+
   /** The enterprise promise: a crossing shows up on both sides of the boundary. */
   it("writes a cross-org session into both orgs' streams", async () => {
     const acme = await h.connectAs(teamAdmin("u_acme", "org_acme"));
     const other = await h.connectAs(teamAdmin("u_other", "org_other"));
 
-    const started = await acme.call("bellman_start", { mode: "pair", brief: brief() });
+    const started = await acme.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const preview = await other.call("bellman_connect", {
       join_code: String(started.data.join_code),
@@ -154,7 +176,7 @@ describe("what the audit trail records", () => {
     const bystander = await h.connectAs(teamAdmin("u_bystander", "org_bystander"));
 
     await bystander.call("bellman_start", {
-      mode: "pair", brief: brief({ goal: "unrelated org business" }),
+      manifest: manifestFixture(), brief: brief({ goal: "unrelated org business" }),
     });
 
     const acmeLog = await acme.call("bellman_audit", { limit: 100 });
@@ -166,7 +188,7 @@ describe("what the audit trail records", () => {
     const outsider = await h.connect(DEV_KEY.outsider);
     const jesse = await h.connect(DEV_KEY.jesse);
 
-    await outsider.call("bellman_start", { mode: "pair", brief: brief() });
+    await outsider.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
 
     const log = await jesse.call("bellman_audit", { limit: 100 });
     expect(rows(log.data)).toHaveLength(0);

@@ -1,12 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { hydrateSession } from "./store.js";
 import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, MemberPatch } from "./store.js";
+import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -36,9 +36,6 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
-/** The session record as stored — events live under their own keys. */
-type StoredSession = Omit<Session, "events">;
-
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -48,18 +45,14 @@ export class SessionDO extends DurableObject {
   private waiters: Waiter[] = [];
 
   /**
-   * The stored session, with fields added after it was written filled in.
-   *
-   * `frozenAt` did not exist when the sessions currently in production were
-   * created, so their records have no such property. Every guard is written
-   * `frozenAt !== null`, and `undefined !== null` — so without this default,
-   * deploying would report every existing room as frozen and refuse every
-   * write in it. Defaulting on read is what keeps the type honest for records
-   * written before the type said so.
+   * The one raw read of the "session" record. Everything in this class reads it
+   * through here, so hydrateStoredSession's rules reach all of it: getSession
+   * (and the facade's getSession and getSessionByJoinCode with it), every
+   * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
+   * one predating frozenAt reads as not frozen. Nothing rewrites either.
    */
   private async stored(): Promise<StoredSession | undefined> {
-    const s = await this.ctx.storage.get<StoredSession>("session");
-    return s && hydrateSession(s);
+    return hydrateStoredSession(await this.ctx.storage.get("session"));
   }
 
   private async events(after = 0): Promise<SessionEvent[]> {

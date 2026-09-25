@@ -714,15 +714,27 @@ export function signedInAs(
   serverUrl: string,
   opts: { configDir?: string; log?: (message: string) => void } = {}
 ): WhoAmI {
-  let identity;
+  let cred: ServerCredential;
   try {
-    identity = readServer(opts.configDir ?? credentialsDir(), serverUrl).identity;
+    cred = readServer(opts.configDir ?? credentialsDir(), serverUrl);
   } catch (error) {
     opts.log?.(
       `cannot read the cached sign-in: ${error instanceof Error ? error.message : String(error)}`
     );
     return { source: "unknown", label: null };
   }
+  /**
+   * The tokens gate the identity, and not the other way round. An identity is
+   * only ever a fact about the access token it was decoded from — carried past
+   * one it names an account the bridge will not be signing in as, silently.
+   * Nothing the code WRITES can produce that pair any more, but readServer
+   * deliberately tolerates a hand-edited file, and this is the one reader that
+   * turns the field into "Signed in as" for a person. Same gate connectSignedIn
+   * uses to decide there is a credential worth trying, so the two agree about
+   * what counts as one; deliberately not tokensUsable, whose expiry rule would
+   * report unknown for a sign-in that will refresh itself perfectly well.
+   */
+  const identity = cred.tokens?.access_token ? cred.identity : undefined;
   if (!identity) return { source: "unknown", label: null };
   return {
     source: "oauth",

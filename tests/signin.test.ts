@@ -1903,6 +1903,13 @@ describe("signedInAs", () => {
     ["the entry is only a registered client", () => {
       writeServer(dir, WHO, { client: { client_id: "c_1" } });
     }],
+    // An identity is only ever a fact about the tokens it was decoded from. Past
+    // them it names an account the bridge will NOT be signing in as — the read-side
+    // twin of the merge bug that let an old identity outlive its tokens. The code
+    // cannot write this pair any more, but readServer tolerates a hand-edited file.
+    ["the identity has outlived the tokens it was read from", () => {
+      writeServer(dir, WHO, { client: { client_id: "c_1" }, identity });
+    }],
   ];
 
   it.each(nothingToReport)("reports unknown, never env, when %s", (_what, arrange) => {

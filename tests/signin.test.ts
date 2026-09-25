@@ -1619,4 +1619,37 @@ describe("concurrent bridges", () => {
       for (const remote of remotes) await remote.close();
     }
   });
+
+  // The branch the tests above never reach: the cached attempt finds the refresh token
+  // dead and has to hand the sign-in to a browser. Under concurrency that has to happen
+  // once, and it has to keep the client the credential already holds.
+  it("opens ONE browser, and registers nothing new, when three bridges wake to a dead refresh token", async () => {
+    const bellman = fakeBellman();
+    await (await connect(watch("first", bellman))).close(); // sign in once, to have a client and a credential
+    const seeded = readServer(dir, RESOURCE);
+    // A refresh token the server no longer knows: rotated away by another window, or
+    // revoked. The access token is refused too (see STALE), so the cached attempt has to
+    // spend the refresh token, be told no, and escalate.
+    writeServer(dir, RESOURCE, {
+      ...seeded,
+      tokens: { access_token: STALE, refresh_token: "dead", expires_at: Date.now() - 1 },
+    });
+
+    const site = watch("bellman", bellman);
+    const remotes = await all([connect(site), connect(site), connect(site)]);
+    try {
+      // The winner spends the dead token once, is refused, and signs in properly on the
+      // client it already had, so nothing new is registered. The two rivals came in on
+      // the winner's tokens: neither spent the dead one again nor opened a browser.
+      expect(ledger(site)).toEqual({
+        browsers: 1,
+        registrations: 0,
+        grants: ["refresh_token:400", "authorization_code:200"],
+        refused: 1,
+      });
+      for (const remote of remotes) expect(await toolsOf(remote)).toContain("bellman_start");
+    } finally {
+      for (const remote of remotes) await remote.close();
+    }
+  });
 });

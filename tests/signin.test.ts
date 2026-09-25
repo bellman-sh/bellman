@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CALLBACK_PORTS, connectSignedIn, listenForCallback, loopbackRedirects, openBrowser, page,
-  SignInCancelled, type Listener, type SignInOptions,
+  signedInAs, SignInCancelled, type Listener, type SignInOptions,
 } from "../src/signin.js";
 import type { Remote } from "../src/bridge.js";
 import { acquireLock, readServer, writeServer } from "../src/credentials.js";
@@ -1850,5 +1850,118 @@ describe("concurrent bridges", () => {
     } finally {
       for (const remote of remotes) await remote.close();
     }
+  });
+});
+
+/**
+ * The read side of the credential, and the source bellman_whoami answers from
+ * when there is no BELLMAN_KEY. Which is the whole hazard: everything here runs
+ * only on the keyless path, so "env" is never a true answer, however tempting it
+ * is as a default.
+ */
+describe("signedInAs", () => {
+  let dir: string;
+  const WHO = "https://bellman.example/mcp";
+  const identity: Identity = {
+    userId: "u_jesse", orgId: "org_codenerd", plan: "team", role: "admin", label: "jesse@github",
+  };
+
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bellman-whoami-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("reports the account the cached credential names", () => {
+    writeServer(dir, WHO, { tokens: { access_token: "t" }, identity });
+
+    expect(signedInAs(WHO, { configDir: dir })).toEqual({
+      source: "oauth", label: "jesse@github", plan: "team", role: "admin", org_id: "org_codenerd",
+    });
+  });
+
+  it("carries a null org through as a null org, not as a missing one", () => {
+    writeServer(dir, WHO, { tokens: { access_token: "t" }, identity: { ...identity, orgId: null } });
+
+    expect(signedInAs(WHO, { configDir: dir })).toEqual({
+      source: "oauth", label: "jesse@github", plan: "team", role: "admin", org_id: null,
+    });
+  });
+
+  /**
+   * Every one of these is a user with no BELLMAN_KEY — signedInAs is only ever
+   * called when there is none. Answering "env" would tell them they hold a key
+   * they do not have, and send them hunting for an environment variable nobody
+   * ever set. The logs go in the same assertion: these are ordinary states, not
+   * failures, and none of them should say anything.
+   */
+  const nothingToReport: [string, () => void][] = [
+    ["there is no credential file at all", () => undefined],
+    ["the file has an entry for a different server", () => {
+      writeServer(dir, "https://other.example/mcp", { tokens: { access_token: "t" }, identity });
+    }],
+    ["the entry has tokens but no identity beside them", () => {
+      writeServer(dir, WHO, { tokens: { access_token: "not.a.jwt" } });
+    }],
+    ["the entry is only a registered client", () => {
+      writeServer(dir, WHO, { client: { client_id: "c_1" } });
+    }],
+  ];
+
+  it.each(nothingToReport)("reports unknown, never env, when %s", (_what, arrange) => {
+    const logs: string[] = [];
+    arrange();
+
+    expect({ who: signedInAs(WHO, { configDir: dir, log: (m) => logs.push(m) }), logs })
+      .toEqual({ who: { source: "unknown", label: null }, logs: [] });
+  });
+
+  /**
+   * credentialsDir() throws where there is no absolute home directory and no
+   * passwd entry — a container, CI — which is precisely the machine that has
+   * never signed in, and precisely when whoami is asked. It is called inside a
+   * tool handler, so a throw would reach the person as a raw protocol error.
+   *
+   * createBridge guards the callback too. Both halves hold on purpose: that one
+   * catches any callback, this one names which failure it was.
+   */
+  it("reports unknown, with the reason in the log, when there is no usable config directory", async () => {
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    delete process.env.XDG_CONFIG_HOME;
+    vi.resetModules();
+    vi.doMock("node:os", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:os")>();
+      return { ...real, homedir: () => "", userInfo: () => ({ ...real.userInfo(), homedir: "" }) };
+    });
+    try {
+      const mocked = await import("../src/signin.js");
+      const logs: string[] = [];
+
+      // No configDir: the real credentialsDir() has to run, and throw.
+      expect({ who: mocked.signedInAs(WHO, { log: (m) => logs.push(m) }), logs }).toEqual({
+        who: { source: "unknown", label: null },
+        logs: [expect.stringMatching(/^cannot read the cached sign-in: .*home directory/)],
+      });
+    } finally {
+      vi.doUnmock("node:os");
+      vi.resetModules();
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedXdg;
+    }
+  });
+
+  /**
+   * The fields are NOT re-checked here. They are an access token's `bellman`
+   * claim, returned verbatim, so any of them can be missing — and settle() in
+   * createBridge is the one place that judges that, with the tests to match. A
+   * second copy of the rule here would drift from it. This pins that division:
+   * signedInAs hands the claim over as it found it.
+   */
+  it("hands a malformed claim on unchanged, for settle() in the bridge to judge", () => {
+    writeServer(dir, WHO, {
+      tokens: { access_token: "t" },
+      identity: { label: "", plan: "free" } as unknown as Identity,
+    });
+
+    expect(signedInAs(WHO, { configDir: dir })).toEqual({
+      source: "oauth", label: "", plan: "free", role: undefined, org_id: undefined,
+    });
   });
 });

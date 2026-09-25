@@ -64,9 +64,25 @@ That puts three commands on your PATH: `bellman-channel` (the bridge Claude Code
 **Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- bellman-channel
+claude mcp add --scope user bellman -- bellman-channel
 bellman-claude                # start Claude Code with the channel loaded
 ```
+
+No key. On the **first launch after you install it**, the bridge registers
+itself with Bellman, opens a browser to sign you in, and caches the result under
+`~/.config/bellman/` at mode 600. Every launch after that is silent.
+
+That happens at *launch*, not at your first `bellman_*` call: Claude Code lists a
+server's tools as soon as it connects, and listing Bellman's tools is already a
+call to Bellman. So expect one tab, once, while Claude Code is starting — and
+expect it again anywhere the cache is not, which makes a fresh CI container or
+devcontainer a first launch every single time. Ask the agent for
+`bellman_whoami` to see which account a room will show peers.
+
+On a headless machine set `BELLMAN_NO_BROWSER=1`, and the bridge prints the
+sign-in URL for you to open elsewhere instead of launching anything. For CI and
+`npm run smoke`, set `BELLMAN_KEY=<key>` — an explicitly set key still wins and
+skips sign-in entirely.
 
 Channels are a Claude Code research preview: a custom channel is not on Anthropic's allowlist, so every launch needs `claude --dangerously-load-development-channels server:bellman`. Miss the flag and the session starts normally but nothing is ever pushed into it, which reads as Bellman being broken — `bellman-claude` exists so you can't forget. It passes your other arguments straight through (`bellman-claude --resume`), and `BELLMAN_CHANNEL_SERVER` / `BELLMAN_CHANNEL_FLAG` override the entry and the flag once the channel reaches an org allowlist.
 
@@ -75,7 +91,7 @@ Team and Enterprise orgs must also turn on `channelsEnabled`.
 **Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVERY=hook -- bellman-channel
+claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel
 ```
 
 ```json

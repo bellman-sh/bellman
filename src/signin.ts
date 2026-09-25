@@ -10,7 +10,7 @@ import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Remote } from "./bridge.js";
+import type { Remote, WhoAmI } from "./bridge.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockOptions, type ServerCredential,
@@ -686,6 +686,51 @@ function withAbort(base: typeof fetch | undefined, signal: AbortSignal | undefin
       theirs?.removeEventListener("abort", fromThem);
     });
   }) as typeof fetch;
+}
+
+/**
+ * Who the cached credential says this bridge is, for bellman_whoami. The read
+ * side of what connectSignedIn writes, and the only one the tool needs: a room
+ * shows your label to peers, and answering that must not cost a round trip.
+ *
+ * NEVER "env". This is the path taken when there is no BELLMAN_KEY, so "env"
+ * would tell a user with no key that they hold one — and send them looking for
+ * an environment variable that was never set. No credential, no identity beside
+ * the tokens, or no readable config directory is "unknown", which is true in all
+ * three cases and actionable in none of the wrong ways.
+ *
+ * It does not re-check the identity's fields. They come from an access token's
+ * `bellman` claim, which decodeIdentity returns verbatim, so `label` is a hope
+ * rather than a fact — and settle() in createBridge is the one place that judges
+ * it. A second copy of that rule here would drift from the one with the tests.
+ *
+ * It does catch, though. credentialsDir() throws where there is no absolute home
+ * directory and no passwd entry — a container, CI — which is exactly the state
+ * before a first sign-in, and exactly when this tool is asked. createBridge
+ * guards the callback as well, and both halves should hold: the guard there
+ * catches any callback, the catch here names which failure it was.
+ */
+export function signedInAs(
+  serverUrl: string,
+  opts: { configDir?: string; log?: (message: string) => void } = {}
+): WhoAmI {
+  let identity;
+  try {
+    identity = readServer(opts.configDir ?? credentialsDir(), serverUrl).identity;
+  } catch (error) {
+    opts.log?.(
+      `cannot read the cached sign-in: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return { source: "unknown", label: null };
+  }
+  if (!identity) return { source: "unknown", label: null };
+  return {
+    source: "oauth",
+    label: identity.label,
+    plan: identity.plan,
+    role: identity.role,
+    org_id: identity.orgId,
+  };
 }
 
 /**

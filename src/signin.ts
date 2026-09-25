@@ -13,7 +13,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Remote, WhoAmI } from "./bridge.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
-  type LockOptions, type ServerCredential,
+  type LockHandle, type LockOptions, type ServerCredential,
 } from "./credentials.js";
 
 /**
@@ -284,6 +284,17 @@ export function openBrowser(
      * user always gets the URL.
      */
     child.on("error", fallback);
+    /**
+     * In full, including the query, and that is worth defending because the
+     * `state` in it reaches Claude Code's persisted log. PKCE already stops a
+     * leaked state being redeemed, so trimming it would be defence in depth —
+     * but on Windows this line is not a diagnostic, it is the fallback.
+     * rundll32 reports a successful spawn whether or not a browser ever appears,
+     * so there is no 'error' event to trigger the "Sign in here" path below, and
+     * this is the only place the user can get the URL to open by hand. A trimmed
+     * one is unusable. Somewhere to sign in beats a state kept out of a log file
+     * that already holds every other thing this bridge says.
+     */
     child.once("spawn", () => log(`opened a browser to sign in: ${target}`));
     child.unref();
   } catch {
@@ -616,6 +627,49 @@ function makePersist(
  * while a write that happens INSIDE connectSignedIn passes one, because an
  * uninterruptible wait there is a shutdown the process cannot complete.
  */
+/** What a credential that could not be saved costs, said the same way everywhere. */
+const saveFailed = (dir: string, error: unknown): string =>
+  `could not save the sign-in under ${dir}: ${error instanceof Error ? error.message : String(error)}. ` +
+  `This session is signed in and keeps working; the next start will sign in again.`;
+
+/**
+ * Write the credential, and never let failing to write cost a session that is
+ * already signed in.
+ *
+ * writeServer throws by design: it refuses to leave a credential at loose
+ * permissions, so a chmod it cannot do is a write it does not make. That is
+ * right, and it leaves every caller the question "what is this failure worth?".
+ * On every path in this module the answer is the same — nothing. By the time we
+ * write, the browser flow has finished or a refresh has already succeeded: the
+ * tokens in memory are live and the Remote about to be returned works. Throwing
+ * discards a working authenticated session because a file could not be saved,
+ * and the user gets a fresh tab on every launch, forever, with the reason never
+ * printed because the log line comes after the write.
+ *
+ * Mid-session it is worse than losing the session. This runs inside saveTokens,
+ * which the SDK calls from auth(), and the SDK answers a throwing saveTokens
+ * with UnauthorizedError — so a full disk reaches the bridge wearing an auth
+ * failure's clothes. unauthorized() says true, the connection is retired as
+ * "Bellman rejected this connection", and the next tool call opens a browser at
+ * someone whose credential was never the problem: the exact outcome
+ * unauthorized() is kept narrow to prevent, defeated from underneath.
+ *
+ * So it is logged and stepped over. One browser tab at the next start is what an
+ * unsaved credential has always cost.
+ */
+function saveOrCarryOn(
+  dir: string,
+  serverUrl: string,
+  cred: ServerCredential,
+  log: (message: string) => void
+): void {
+  try {
+    writeServer(dir, serverUrl, cred);
+  } catch (error) {
+    log(saveFailed(dir, error));
+  }
+}
+
 async function writeMerged(
   dir: string,
   serverUrl: string,
@@ -623,8 +677,16 @@ async function writeMerged(
   lockOpts: LockOptions,
   log: (message: string) => void
 ): Promise<void> {
-  {
-    const held = await acquireLock(dir, lockOpts);
+  /**
+   * Held outside the try so the finally can release it, and the try starts
+   * BEFORE the acquire on purpose: acquireLock throws too, on anything that is
+   * not contention — EACCES on a directory it cannot write, ENOSPC, EROFS — and
+   * a full disk fails the lock file and the credential file alike. Catching only
+   * around the write would leave the same hole one line higher up.
+   */
+  let held: LockHandle | undefined;
+  try {
+    held = await acquireLock(dir, lockOpts);
     if (!held) {
       // Degrade, never throw: this runs inside a live session's tool call, and
       // ending the session is strictly worse than a rotation that did not reach
@@ -632,7 +694,6 @@ async function writeMerged(
       log("could not take the credential lock to save the refreshed sign-in; it stays in memory for this session");
       return;
     }
-    try {
       // Field by field, so a client we did not re-register survives rather than
       // being blanked by an undefined.
       //
@@ -643,15 +704,18 @@ async function writeMerged(
       // the tokens it had just replaced, and the file named the wrong account. An
       // invalidation that emptied our tokens in memory still cannot blank the
       // file — it holds none, so it takes the file's whole pair.
-      const onDisk = readServer(dir, serverUrl);
-      writeServer(dir, serverUrl, {
-        client: cred.client ?? onDisk.client,
-        tokens: cred.tokens ?? onDisk.tokens,
-        identity: cred.tokens ? cred.identity : onDisk.identity,
-      });
-    } finally {
-      held.release();
-    }
+    const onDisk = readServer(dir, serverUrl);
+    writeServer(dir, serverUrl, {
+      client: cred.client ?? onDisk.client,
+      tokens: cred.tokens ?? onDisk.tokens,
+      identity: cred.tokens ? cred.identity : onDisk.identity,
+    });
+  } catch (error) {
+    // Same degrade as the no-lock branch above, for the same reason: this is on
+    // a live session's call path, and no write failure is worth the session.
+    log(saveFailed(dir, error));
+  } finally {
+    held?.release();
   }
 }
 
@@ -732,7 +796,9 @@ export function signedInAs(
    * turns the field into "Signed in as" for a person. Same gate connectSignedIn
    * uses to decide there is a credential worth trying, so the two agree about
    * what counts as one; deliberately not tokensUsable, whose expiry rule would
-   * report unknown for a sign-in that will refresh itself perfectly well.
+   * report unknown for a sign-in that will refresh itself perfectly well. That
+   * choice is written up on tokensUsable itself, where someone wondering why
+   * nothing calls it will look.
    */
   const identity = cred.tokens?.access_token ? cred.identity : undefined;
   if (!identity) return { source: "unknown", label: null };
@@ -861,8 +927,9 @@ export async function connectSignedIn(options: SignInOptions): Promise<Remote> {
       if (attempt.remote) {
         // A refresh may have just happened, under the lock we are holding, so
         // the one write belongs here — the same shape signIn uses, and for the
-        // same reason: one atomic write while nobody else can be writing.
-        writeServer(dir, opts.serverUrl, attempt.provider.cred);
+        // same reason: one atomic write while nobody else can be writing. It
+        // must not cost us the connection we are about to return.
+        saveOrCarryOn(dir, opts.serverUrl, attempt.provider.cred, log);
         arm = attempt.provider;
         return attempt.remote;
       }
@@ -1022,14 +1089,19 @@ async function signIn(
         // nothing can sign in as, for however long the browser takes — or for good, if
         // nobody finishes it.
         current = withIdentityFromTokens({ ...current, tokens: undefined });
-        writeServer(dir, opts.serverUrl, current);
+        // Failing to clear them is not worth abandoning the sign-in that is
+        // about to replace them anyway.
+        saveOrCarryOn(dir, opts.serverUrl, current, log);
         log("the saved sign-in was rejected; signing in again");
         continue;
       }
       throw err;
     }
 
-    writeServer(dir, opts.serverUrl, provider.cred);
+    // The browser flow is finished and these tokens are live. A file we cannot
+    // write is not worth throwing that away, and throwing here would do it
+    // before the "signed in as" line below ever prints.
+    saveOrCarryOn(dir, opts.serverUrl, provider.cred, log);
     /**
      * decodeIdentity returns the token's `bellman` claim verbatim, with no field
      * checks, so a malformed claim can be an object carrying no label at all.

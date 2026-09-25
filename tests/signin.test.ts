@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer, type Server as NetServer } from "node:net";
@@ -1192,6 +1192,78 @@ describe("connectSignedIn", () => {
     await call;
 
     expect(readServer(dir, RESOURCE).tokens?.refresh_token).not.toBe(before.refresh_token);
+  });
+
+  /**
+   * A credential file that cannot be WRITTEN, as opposed to a lock that cannot
+   * be taken. writeServer throws by design — it will not leave a credential at
+   * loose permissions — so ENOSPC, a disk quota, a root-owned credentials.json
+   * from one sudo run, or an immutable flag all arrive here as an exception on
+   * a path where the tokens in hand are live and the session already works.
+   *
+   * A directory standing where the file should be is the cheapest real version
+   * of that, and needs no mock: every write to it is EISDIR.
+   */
+  it("hands back a working session when the credential cannot be written at all", async () => {
+    mkdirSync(join(dir, "credentials.json"));
+    const bellman = fakeBellman();
+    const calls: URL[] = [];
+
+    const remote = await connect(bellman, calls);
+    const tools = (await remote.listTools()).tools.map((t) => t.name);
+    await remote.close();
+
+    expect({
+      browsers: calls.length,
+      authenticated: tools.includes("bellman_start"),
+      saidWhy: logs.some((m) => m.startsWith("could not save the sign-in under ")),
+      saidSignedIn: logs.some((m) => m.startsWith("signed in")),
+    }).toEqual({
+      browsers: 1,
+      // The user authorized, the page said so, and the session is live. Throwing
+      // here discarded exactly this and asked for a new tab on every launch.
+      authenticated: true,
+      saidWhy: true,
+      // The line that was unreachable, because the write came before it.
+      saidSignedIn: true,
+    });
+  });
+
+  /**
+   * The same failure mid-session, which is worse, and not only because a
+   * session is lost. This write runs inside saveTokens, which the SDK calls from
+   * auth(), and the SDK answers a throwing saveTokens with UnauthorizedError —
+   * so a full disk reaches the bridge dressed as an auth failure. The bridge
+   * then retires the connection as "rejected" and the next tool call opens a
+   * browser at someone whose credential was never the problem.
+   */
+  it("keeps the session alive, and out of the browser, when a refresh cannot be written", async () => {
+    const bellman = fakeBellman();
+    const { fetchImpl, expireOnce } = aging(bellman);
+    const calls: URL[] = [];
+    await (await connect(bellman, calls)).close(); // sign in once, to fill the file
+    const remote = await connect(bellman, calls, { fetchImpl });
+    expect(calls).toHaveLength(1);
+
+    // Only now does the disk go bad, with a live session already in hand.
+    rmSync(join(dir, "credentials.json"));
+    mkdirSync(join(dir, "credentials.json"));
+
+    expireOnce();
+    const tools = (await remote.listTools()).tools.map((t) => t.name);
+    await remote.close();
+
+    expect({
+      answered: tools.includes("bellman_start"),
+      browsers: calls.length,
+      saidWhy: logs.some((m) => m.startsWith("could not save the sign-in under ")),
+    }).toEqual({
+      // The refresh itself worked. Only saving it did not, and that is not the
+      // tool call's problem — it used to fail with "Unauthorized".
+      answered: true,
+      browsers: 1,
+      saidWhy: true,
+    });
   });
 
   /**

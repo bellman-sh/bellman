@@ -1,4 +1,4 @@
-import { readFileSync, statSync, type Stats } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -44,7 +44,8 @@ export type Delivery = "channel" | "hook";
 
 const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
-const ROOM_FILE = join(".bellman", "room.yaml");
+const ROOM_DIR = ".bellman";
+const ROOM_FILE = join(ROOM_DIR, "room.yaml");
 /**
  * The schema allows at most 16 roles with 300-character descriptions: about 20 KB in the very worst
  * case. A room.yaml over this is a mistake (a wrong path, a log, a build artifact), and refusing it
@@ -137,13 +138,33 @@ function textOf(result: CallToolResult): string {
     .join("\n");
 }
 
+/** Whether `path` is itself a symbolic link. A path that cannot be examined is left to the open to report. */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The bridge sends what it reads to a server, so following a link would send whatever it points at. The
+ * target is deliberately not named: it is text the repository chose, on its way into the agent's context.
+ */
+function linkRefused(path: string, kind: "file" | "directory"): Error {
+  return new Error(
+    `${path} is a symbolic link, and the bridge will not follow one: whatever it points at would be read ` +
+      `and sent to the server. Replace the link with the ${kind} itself, or pass the manifest to bellman_start directly.`
+  );
+}
+
 /**
  * Read `.bellman/room.yaml` and return it as the object `bellman_start`
  * expects. Returns null when the file is absent — that is not an error, it
  * just means this room is declared inline. Anything else that keeps the file
- * from being used throws, and the message names what is wrong: it is not a
- * regular file, it is too large, it cannot be read, or it is not YAML that
- * holds a mapping.
+ * from being used throws, and the message names what is wrong: it, or
+ * `.bellman`, is a symbolic link; it is not a regular file; it is too large;
+ * it cannot be read; or it is not YAML that holds a mapping.
  *
  * Parsing lives here and never on the server: the server has exactly one
  * schema, and the Workers bundle never carries a YAML parser.
@@ -151,28 +172,50 @@ function textOf(result: CallToolResult): string {
 export function loadRoomManifest(cwd: string): Record<string, unknown> | null {
   const file = join(cwd, ROOM_FILE);
 
-  // One stat answers three questions before anything is opened: is there a file, is it the kind that
-  // is safe to read, and is it a sane size. Opening a fifo, for one, blocks bellman_start forever.
-  let info: Stats;
+  // A repository supplies two parts of this path, `.bellman` and `room.yaml`, and the bridge sends what
+  // it reads to a server: it reads what the repository holds, never what a link in it points at. The open
+  // below refuses a link at room.yaml, but nothing there can refuse one at `.bellman`, so that is asked
+  // first. It is not atomic, yet a link that arrived with a clone is already in place, and swapping one in
+  // behind the bridge takes a local attacker who has no need of it.
+  if (isSymlink(join(cwd, ROOM_DIR))) throw linkRefused(ROOM_DIR, "directory");
+
+  // Everything else is learned from the one descriptor that is then read, so nothing can change between
+  // the check and the read.
+  //   O_NOFOLLOW  fails with ELOOP when room.yaml is a link, whether or not its target exists. Where a
+  //               platform has no such flag (Windows) the constant is undefined, `|` reads it as 0, and a
+  //               link is followed.
+  //   O_NONBLOCK  makes opening a fifo return at once. Without it the open waits for a writer that never
+  //               comes and freezes bellman_start; with it, fstat names the fifo. Regular files ignore it.
+  let fd: number;
   try {
-    info = statSync(file);
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
   } catch (e) {
-    // ENOTDIR: `.bellman` is itself a file, so nothing lives under it either.
     const code = (e as { code?: string }).code;
+    // ENOTDIR: `.bellman` is itself a file, so nothing lives under it either.
     if (code === "ENOENT" || code === "ENOTDIR") return null;
+    if (code === "ELOOP") throw linkRefused(ROOM_FILE, "file");
     throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
-  }
-  if (!info.isFile()) throw new Error(`${ROOM_FILE} is not a regular file`);
-  if (info.size > MAX_ROOM_FILE_BYTES) {
-    throw new Error(`${ROOM_FILE} is too large: ${info.size} bytes, and the limit is ${MAX_ROOM_FILE_BYTES}`);
   }
 
-  let text: string;
+  // Judge the descriptor before reading it, and close it on every way out. A refusal is only recorded
+  // inside the try and raised once the descriptor is closed, so the catch below sees only fs errors.
+  let text = "";
+  let refusal: string | undefined;
   try {
-    text = readFileSync(file, "utf8");
+    const info = fstatSync(fd);
+    if (!info.isFile()) {
+      refusal = "is not a regular file";
+    } else if (info.size > MAX_ROOM_FILE_BYTES) {
+      refusal = `is too large: ${info.size} bytes, and the limit is ${MAX_ROOM_FILE_BYTES}`;
+    } else {
+      text = readFileSync(fd, "utf8");
+    }
   } catch (e) {
     throw new Error(`${ROOM_FILE} could not be read: ${(e as Error).message}`);
+  } finally {
+    closeSync(fd);
   }
+  if (refusal) throw new Error(`${ROOM_FILE} ${refusal}`);
 
   let parsed: unknown;
   try {

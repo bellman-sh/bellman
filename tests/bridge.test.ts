@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os, { tmpdir } from "node:os";
 import path, { join } from "node:path";
@@ -350,8 +350,9 @@ describe("room.yaml", () => {
     expect(() => loadRoomManifest(dir)).toThrow(/mapping, got an empty document/);
   });
 
-  // What the loader must refuse without reading. Before the single statSync a directory came back as
-  // "not valid YAML: EISDIR", a fifo blocked bellman_start forever, and size was unbounded.
+  // What the loader must refuse without reading. Before it checked the descriptor it had opened, a directory
+  // came back as "not valid YAML: EISDIR", a fifo blocked bellman_start forever, size was unbounded, and a
+  // link was followed to wherever it pointed.
   const room = () => path.join(dir, ".bellman", "room.yaml");
   // chmod cannot keep root out, and Windows has no such modes.
   const permissionsEnforced = process.platform !== "win32" && process.getuid?.() !== 0;
@@ -368,14 +369,53 @@ describe("room.yaml", () => {
 
   it.skipIf(process.platform === "win32")("refuses a fifo instead of blocking on it", async () => {
     execFileSync("mkfifo", [room()]);
-    // Opening a fifo waits for its other end, and readFileSync would freeze the whole thread, out of reach
-    // of vitest's timeout. Hand it a writer so a regression fails the assertion below instead of hanging.
-    const writer = spawn("sh", ["-c", 'printf "room: x\\n" > "$1"', "sh", room()], { stdio: "ignore" });
+    // Opening a fifo waits for its other end, and a blocked openSync freezes the whole thread, out of reach
+    // of vitest's timeout. So there is a writer, but a late one: it frees a loader that waits, so a regression
+    // fails the assertions below instead of hanging, and only a loader that did NOT wait can beat it. (An
+    // early writer would prove nothing: once the fifo is open, fstat refuses it either way.)
+    const lateMs = 3000;
+    const writer = spawn(
+      "sh", ["-c", 'sleep "$2"; printf "room: x\\n" > "$1"', "sh", room(), String(lateMs / 1000)],
+      { stdio: "ignore" },
+    );
+    const started = performance.now();
     try {
       expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is not a regular file/);
+      expect(performance.now() - started).toBeLessThan(lateMs / 2);
     } finally {
       writer.kill("SIGKILL");
     }
+  });
+
+  // A repository chooses what its own .bellman/ holds, links included. Followed, a link sends whatever it
+  // points at to a server that rejects a stranger's YAML only after the bytes have left. (Windows needs
+  // privileges to make a link at all, and has no O_NOFOLLOW to refuse one with.)
+  it.skipIf(process.platform === "win32")("refuses a room.yaml that links to YAML elsewhere, and says why", async () => {
+    const elsewhere = await fs.mkdtemp(path.join(os.tmpdir(), "bellman-elsewhere-"));
+    try {
+      // A mapping, so being a link is the only reason to refuse it: a private key would fail the mapping check anyway.
+      await fs.writeFile(path.join(elsewhere, "secrets.yaml"), "api_key: not-for-the-server\n");
+      await fs.symlink(path.join(elsewhere, "secrets.yaml"), room());
+      expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is a symbolic link, and the bridge will not follow one/);
+    } finally {
+      await fs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a link to nothing rather than calling it no file", async () => {
+    // Followed, a dangling link is ENOENT, which reads as "no room.yaml" and lets the call through unchanged.
+    await fs.symlink(path.join(dir, "not-there.yaml"), room());
+    expect(() => loadRoomManifest(dir)).toThrow(/room\.yaml is a symbolic link, and the bridge will not follow one/);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a .bellman that is a link, as it does a room.yaml that is", async () => {
+    // O_NOFOLLOW guards only the last component of the path, and .bellman is the other part a repository supplies.
+    const shared = path.join(dir, "shared");
+    await fs.mkdir(shared);
+    await fs.writeFile(path.join(shared, "room.yaml"), "room: x\npreset: pair\n");
+    await fs.rm(path.join(dir, ".bellman"), { recursive: true });
+    await fs.symlink(shared, path.join(dir, ".bellman"));
+    expect(() => loadRoomManifest(dir)).toThrow(/\.bellman is a symbolic link, and the bridge will not follow one/);
   });
 
   it("loads a file exactly at the 64 KB limit", async () => {
@@ -407,6 +447,31 @@ describe("room.yaml", () => {
     await fs.rm(path.join(dir, ".bellman"), { recursive: true });
     await fs.writeFile(path.join(dir, ".bellman"), "not a directory");
     expect(loadRoomManifest(dir)).toBeNull();
+  });
+
+  // Every refusal that comes after the open owes a close. A descriptor left behind is one lost per
+  // bellman_start, and nothing else would notice until the process ran out.
+  it.skipIf(!existsSync("/dev/fd"))("closes its descriptor on every path, refusals included", async () => {
+    const openFds = () => readdirSync("/dev/fd").length;
+    const before = openFds();
+    const cases: Array<() => Promise<void>> = [
+      () => fs.writeFile(room(), "room: x\n"), // opened, read, parsed
+      () => fs.mkdir(room()), // opened, then refused as not a regular file
+      () => fs.writeFile(room(), yamlOfSize(64 * 1024 + 1)), // opened, then refused as too large
+    ];
+    for (const setUp of cases) {
+      await setUp();
+      for (let i = 0; i < 100; i++) {
+        try {
+          loadRoomManifest(dir);
+        } catch {
+          // The refusals are expected; only what they leave open is under test.
+        }
+      }
+      await fs.rm(room(), { recursive: true, force: true });
+    }
+    // A leak on any of these paths is a hundred descriptors or more; the slack is for the runner's own.
+    expect(openFds() - before).toBeLessThan(10);
   });
 });
 

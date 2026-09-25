@@ -186,6 +186,17 @@ export interface LockOptions {
   heartbeatMs?: number;
   staleMs?: number;
   pidAlive?: (pid: number) => boolean;
+  /**
+   * Gives up waiting early. waitMs is six minutes, and a bridge shutting down
+   * while another holds the lock would otherwise sit here long past the point
+   * Claude Code stops waiting and force-terminates it — which is precisely how
+   * a lock gets leaked, the failure the exit handler below exists to prevent.
+   *
+   * Aborting is a way of giving up, so it resolves undefined like every other
+   * give-up rather than throwing: the caller already has to handle "no lock",
+   * and only the caller knows whether being cancelled is an error.
+   */
+  signal?: AbortSignal;
 }
 
 function livePid(pid: number): boolean {
@@ -230,6 +241,10 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
   const deadline = Date.now() + waitMs;
 
   for (;;) {
+    // Checked every pass, not only beside the deadline: a reclaim `continue`s
+    // without ever reaching that branch, so a shutdown could otherwise keep
+    // going round while stale locks kept appearing.
+    if (opts.signal?.aborted) return undefined;
     let fd: number;
     try {
       fd = openSync(path, "wx", 0o600); // O_EXCL: fails if it already exists

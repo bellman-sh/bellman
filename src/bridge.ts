@@ -27,7 +27,9 @@ import {
  *   - It proxies the remote bellman_* tools unchanged, so the agent uses
  *     Bellman exactly as it would over HTTP. The one exception is
  *     bellman_start: called with no manifest, it sends the one from
- *     .bellman/room.yaml when that file exists, and says so on stderr.
+ *     .bellman/room.yaml when that file exists, and says so on stderr. Its
+ *     listing says the same and marks manifest optional, because a host that
+ *     honours the schema it is shown would otherwise never make that call.
  *   - It watches the tool results go by. Whenever a call reveals a membership
  *     (start, confirm, or a send/sync after a restart), it arms a watcher that
  *     long-polls bellman_sync for that member.
@@ -44,6 +46,17 @@ export type Delivery = "channel" | "hook";
 
 const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
+/** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
+const START_TOOL = "bellman_start";
+/**
+ * What the bridge adds to that tool's description, after the server's own words. The server describes
+ * manifest as required, because to the server it is; through this bridge it is not.
+ */
+const START_NOTE =
+  "Through the local Bellman bridge, manifest is optional: leave it out and the bridge sends " +
+  ".bellman/room.yaml, read from the directory this session was started in, as the manifest (the same " +
+  "object, written as YAML). A manifest you pass wins over the file. With no such file and no manifest " +
+  "the call fails, so pass one.";
 const ROOM_DIR = ".bellman";
 const ROOM_FILE = join(ROOM_DIR, "room.yaml");
 /**
@@ -136,6 +149,25 @@ function textOf(result: CallToolResult): string {
   return (result.content ?? [])
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("\n");
+}
+
+/**
+ * What the bridge lists for a tool the server listed. The server requires a manifest, and a host that
+ * honours the schema it is shown will not make a call that leaves a required argument out: shown the
+ * server's own listing, it would refuse the very call .bellman/room.yaml exists to make possible, and the
+ * file would work only through hosts that ignore the schema. So bellman_start alone is listed with manifest
+ * optional and with the fallback described. Nothing else about it changes, and no other tool is touched.
+ * It is edited as a copy: the list is the remote's, and may be handed back again on the next request.
+ */
+function advertised(tool: Tool): Tool {
+  if (tool.name !== START_TOOL) return tool;
+  const { required, ...schema } = tool.inputSchema;
+  const stillRequired = (required ?? []).filter((key) => key !== "manifest");
+  return {
+    ...tool,
+    description: [tool.description, START_NOTE].filter(Boolean).join("\n\n"),
+    inputSchema: stillRequired.length > 0 ? { ...schema, required: stillRequired } : schema,
+  };
 }
 
 /** Whether `path` is itself a symbolic link. A path that cannot be examined is left to the open to report. */
@@ -267,7 +299,8 @@ export function createBridge(opts: BridgeOptions) {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const { tools } = await (await remote()).listTools();
-    return { tools: delivery === "hook" ? [...tools, WAIT_TOOL] : tools };
+    const listed = tools.map(advertised);
+    return { tools: delivery === "hook" ? [...listed, WAIT_TOOL] : listed };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -276,7 +309,7 @@ export function createBridge(opts: BridgeOptions) {
     if (name === WAIT_TOOL.name && delivery === "hook") return waitForQueued(args);
 
     // The one place the bridge transforms a call instead of relaying it.
-    if (name === "bellman_start" && args.manifest === undefined) {
+    if (name === START_TOOL && args.manifest === undefined) {
       try {
         const fromFile = loadRoomManifest(process.cwd());
         if (fromFile) {

@@ -188,7 +188,10 @@ The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it
 uses one. A `manifest` argument passed to `bellman_start` always wins
-over the file. A file that is malformed, unreadable, over 64 KB, not a
+over the file. The bridge lists `bellman_start` with `manifest` optional
+(the server itself requires it), so a client that checks arguments
+against the listed schema can still leave it out and let the file
+supply it. A file that is malformed, unreadable, over 64 KB, not a
 regular file, or a symlink fails locally, before anything is sent; with no file and no
 argument, the server's own validation error comes back.
 

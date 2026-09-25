@@ -7,7 +7,8 @@ import path, { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { CallToolRequestSchema, type CallToolResult, type Notification } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, type CallToolResult, type Notification, type Tool } from "@modelcontextprotocol/sdk/types.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, loadRoomManifest, type Delivery, type Remote } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
@@ -51,6 +52,18 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000):
   while (!(await check())) {
     if (Date.now() > deadline) throw new Error("condition not met in time");
     await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+const startOf = (tools: Tool[]) => tools.find((t) => t.name === "bellman_start")!;
+
+/** The tools the server itself lists, before the bridge has touched them. */
+async function servedTools(key: string): Promise<Tool[]> {
+  const remote = await remoteFor(store, key);
+  try {
+    return (await remote.listTools()).tools;
+  } finally {
+    await remote.close();
   }
 }
 
@@ -284,6 +297,65 @@ describe("hook delivery (the fallback)", () => {
   });
 });
 
+describe("the tools the bridge lists", () => {
+  const deepFreeze = <T>(value: T): T => {
+    if (value && typeof value === "object") {
+      Object.values(value).forEach(deepFreeze);
+      Object.freeze(value);
+    }
+    return value;
+  };
+
+  // The server requires a manifest, and a host that honours the listed schema will not make a call that
+  // leaves a required argument out. That would leave .bellman/room.yaml, which exists so that the call CAN
+  // leave it out, reachable only through hosts that ignore the schema. The SDK's own client is one of them:
+  // it validates a tool's output and never its input, which is why nothing else in this file could see it.
+  it.each<Delivery>(["channel", "hook"])(
+    "lists bellman_start with manifest optional, and every other tool as the server sent it (%s)",
+    async (delivery) => {
+      const a = await open(DEV_KEY.jesse, delivery);
+      const served = await servedTools(DEV_KEY.jesse);
+      const listed = (await a.client.listTools()).tools;
+
+      // The premise: the server does require it. If that stops being true, this rewrite is moot.
+      expect(startOf(served).inputSchema.required).toContain("manifest");
+      expect(startOf(listed).inputSchema.required).not.toContain("manifest");
+
+      // That is the whole change to the schema: the same properties and the same other requirements.
+      expect(startOf(listed).inputSchema).toEqual({
+        ...startOf(served).inputSchema,
+        required: startOf(served).inputSchema.required!.filter((key) => key !== "manifest"),
+      });
+      // The tool keeps everything else, and its description keeps the server's words and adds the fallback.
+      const withoutText = (tool: Tool) => ({ ...tool, inputSchema: undefined, description: undefined });
+      expect(withoutText(startOf(listed))).toEqual(withoutText(startOf(served)));
+      expect(startOf(listed).description!.startsWith(startOf(served).description!)).toBe(true);
+      expect(startOf(listed).description).toContain(".bellman/room.yaml");
+
+      // No other tool is edited, added or dropped (hook delivery adds the bridge's own wait tool).
+      const others = (tools: Tool[]) => tools.filter((t) => t.name !== "bellman_start" && t.name !== "bellman_wait");
+      expect(others(listed)).toEqual(others(served));
+    },
+  );
+
+  it("edits a copy, so the server's list is left as it was and listing twice says the same", async () => {
+    const served = deepFreeze(structuredClone(await servedTools(DEV_KEY.jesse)));
+    const a = await open(DEV_KEY.jesse, "channel", async () => ({
+      // The very same frozen objects every time, as a client that caches its list would hand them back.
+      listTools: async () => ({ tools: served }),
+      callTool: async () => { throw new Error("nothing here calls a tool"); },
+      close: async () => {},
+    }));
+
+    const first = (await a.client.listTools()).tools;
+    const second = (await a.client.listTools()).tools;
+
+    expect(startOf(first).inputSchema.required).not.toContain("manifest");
+    expect(second).toEqual(first);
+    expect(startOf(served).inputSchema.required).toContain("manifest");
+  });
+});
+
 describe("room.yaml", () => {
   let dir: string;
 
@@ -512,6 +584,24 @@ describe("bellman_start with a room.yaml", () => {
       text: { data: { room: "payments-migration", purpose: "Port v2 to v3" } },
     });
     expect(said()).toBe(`bellman: using room manifest from ${join(".bellman", "room.yaml")}\n`);
+  });
+
+  it("can be called by a host that enforces the listed schema, since that no longer requires a manifest", async () => {
+    await writeRoom("room: payments-migration\npreset: review\n");
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const args = { brief: brief(), capabilities: caps };
+    // What such a host does before it sends anything: check the arguments against the schema it was shown.
+    const accepts = (tool: Tool) => new AjvJsonSchemaValidator().getValidator(tool.inputSchema)(args).valid;
+
+    // The server's own listing would have stopped this call where it stood; the bridge's does not.
+    expect(accepts(startOf(await servedTools(DEV_KEY.jesse)))).toBe(false);
+    expect(accepts(startOf((await a.client.listTools()).tools))).toBe(true);
+
+    const started = await a.call("bellman_start", args);
+    expect(started.isError, started.text).toBe(false);
+    const preview = await b.call("bellman_connect", { join_code: started.data.join_code });
+    expect(preview.data.room).toMatchObject({ preset: "review", text: { data: { room: "payments-migration" } } });
   });
 
   it("accepts the README's authored-roles example end to end", async () => {

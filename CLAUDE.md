@@ -20,6 +20,7 @@ npm run dev:worker    # wrangler dev, real Durable Objects
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.
+- `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` — the Claude Code client side.
 - `src/worker.ts` — Workers entry. `src/index.ts` + `src/app.ts` — the Node one.
 

@@ -1,5 +1,7 @@
 import { entitlementsFor } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
+import { isLinkableUserId } from "../billing/stripe.js";
+import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { BellmanStore } from "../store.js";
 import type { Identity, PlanGrant } from "../types.js";
 import {
@@ -32,6 +34,21 @@ export interface OAuthConfig {
   store: AuthStorage;
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
+  /**
+   * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
+   * /upgrade/<name> signs the human in and sends them to the link tagged with
+   * their user id, which is how the webhook knows whose plan to change.
+   *
+   * Billing itself is not here. A purchase becomes a grant, so it resolves
+   * through `plans` like every other plan — there is no second source to wire.
+   */
+  paymentLinks?: Record<string, string>;
+  /**
+   * Whether purchased plans count. False makes BELLMAN_BILLING a real switch:
+   * with it off, grants Stripe wrote earlier stop resolving instead of quietly
+   * carrying on, and the ones an operator or admin wrote are untouched.
+   */
+  honourPurchases?: boolean;
   /** Runtime plan grants. Absent means only BELLMAN_USERS decides a plan. */
   plans?: PlanStore;
   fetchImpl?: typeof fetch;
@@ -65,14 +82,16 @@ export type PlanSource = "operator" | "grant" | "default";
  */
 export async function resolvePlan(
   profile: ProviderProfile,
-  config: Pick<OAuthConfig, "overrides" | "plans">
-): Promise<{ identity: Identity; source: PlanSource; keys: string[] }> {
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
+): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[] }> {
   const keys = identityKeys(profile);
   for (const key of keys) {
     const override = config.overrides?.[key];
     if (override) return { identity: override, source: "operator", keys };
   }
-  const match = config.plans ? await firstGrant(config.plans, keys) : undefined;
+  const match = config.plans
+    ? await firstGrant(config.plans, keys, config.honourPurchases !== false)
+    : undefined;
   if (match) {
     // Sign-in is the only place with the profile, so it is the only place that
     // can pin an address-keyed grant to the subject behind it.
@@ -81,6 +100,10 @@ export async function resolvePlan(
     return {
       identity: { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId },
       source: "grant",
+      // `source` says a stored grant decided this; `grantSource` says who wrote
+      // it. /upgrade needs the second: a purchase may replace a purchase, and
+      // must not replace one an admin wrote by hand.
+      grantSource: grant.source,
       keys,
     };
   }
@@ -100,7 +123,7 @@ export async function resolvePlan(
 export async function replanOnRefresh(
   stored: Identity,
   keys: string[],
-  config: Pick<OAuthConfig, "overrides" | "plans">
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
 ): Promise<{ identity: Identity; source: PlanSource }> {
   const base: Identity = { ...stored, plan: "free", role: "member", orgId: null };
   // The subject and nothing else. These keys were written down at sign-in and
@@ -126,7 +149,9 @@ export async function replanOnRefresh(
   // sign-in, so one that legitimately applies to this human is already filed
   // under a key this sees; one that is not is a grant for whoever holds that
   // address now, and this token is not them.
-  const match = config.plans ? await firstGrant(config.plans, durable) : undefined;
+  const match = config.plans
+    ? await firstGrant(config.plans, durable, config.honourPurchases !== false)
+    : undefined;
   if (match) {
     const { grant } = match;
     return {
@@ -151,12 +176,15 @@ export async function replanOnRefresh(
  */
 async function firstGrant(
   plans: PlanStore,
-  keys: string[]
+  keys: string[],
+  honourPurchases: boolean
 ): Promise<{ grant: PlanGrant; key: string } | undefined> {
   const stable = grantKeys(keys);
   const found = await Promise.all(stable.map((key) => plans.getGrant(key)));
   for (const [i, grant] of found.entries()) {
-    if (usableGrant(grant)) return { grant, key: stable[i] };
+    if (usableGrant(grant) && (honourPurchases || grant.source !== PURCHASE)) {
+      return { grant, key: stable[i] };
+    }
   }
   return undefined;
 }
@@ -233,6 +261,7 @@ function storedIdentityKeys(stored: { identity_keys?: string[] }): string[] | nu
 }
 
 const STATE_AUDIENCE = "bellman:authorize-state";
+const UPGRADE_AUDIENCE = "bellman:upgrade-state";
 const SCOPE = "bellman";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -282,6 +311,71 @@ interface AuthorizeRequest {
   code_challenge: string;
   resource: string;
   state?: string;
+}
+
+/** A configured Payment Link by name. Own keys only: /upgrade/constructor is not a plan. */
+function paymentLink(config: OAuthConfig, name: string): string | undefined {
+  const links = config.paymentLinks;
+  return links && Object.hasOwn(links, name) ? links[name] : undefined;
+}
+
+/** Carried through the provider round trip when signing in to pay. */
+interface UpgradeRequest {
+  link: string;
+}
+
+/** Send a signed-in human to the Payment Link, tagged so the webhook can credit them. */
+async function finishUpgrade(
+  url: URL,
+  name: ProviderName,
+  creds: ProviderCredentials,
+  pending: UpgradeRequest,
+  config: OAuthConfig
+): Promise<Response> {
+  const target = paymentLink(config, pending.link);
+  const code = url.searchParams.get("code");
+  if (!target || !code) {
+    return html(`<h1>Sign-in did not finish</h1><p>Nothing was charged. Start the upgrade again.</p>`, 400);
+  }
+  let resolved: Awaited<ReturnType<typeof resolvePlan>>;
+  let email: string | undefined;
+  try {
+    const profile = await PROVIDERS[name].exchange(creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl);
+    resolved = await resolvePlan(profile, config);
+    email = profile.email;
+  } catch (err) {
+    console.error(`${name} sign-in for upgrade failed:`, err);
+    return html(`<h1>Sign-in failed</h1><p>Nothing was charged. Start the upgrade again.</p>`, 502);
+  }
+  const { identity } = resolved;
+  // Stop before Stripe rather than take money for a plan that will not apply.
+  //
+  // Two ways that happens. An operator override outranks anything paid for. And
+  // a stored grant an *admin* wrote is one billing may not touch — reconciling
+  // would call putGrantIfSource(…, "purchase"), get "conflict", and leave the
+  // buyer charged with nothing changed. A purchase grant is fine: a purchase is
+  // allowed to replace one it already owns, which is what an upgrade is.
+  const blockedByGrant = resolved.source === "grant" && resolved.grantSource !== PURCHASE;
+  if (resolved.source === "operator" || blockedByGrant) {
+    return html(
+      `<h1>Your plan is set by an administrator</h1>` +
+        `<p>This account is on <strong>${escape(identity.plan)}</strong>, assigned directly rather than bought. ` +
+        `Paying wouldn't change it, so nothing was charged. Ask whoever runs this Bellman server to change your plan.</p>`
+    );
+  }
+  // Both questions, before any money moves: can this id survive the trip
+  // through Stripe, and can a purchase actually be applied to it afterwards?
+  // An operator-named id like u_jesse passes the first and fails the second,
+  // and taking payment for a grant that will be refused is the worst outcome
+  // available here.
+  if (!isLinkableUserId(identity.userId) || !canPurchaseAs(identity.userId)) {
+    console.error(`upgrade: no purchase can be applied to user id ${identity.userId}`);
+    return html(`<h1>This account can't be upgraded here</h1><p>Nothing was charged. Contact the operator.</p>`, 409);
+  }
+  const checkout = new URL(target);
+  checkout.searchParams.set("client_reference_id", identity.userId);
+  if (email) checkout.searchParams.set("prefilled_email", email);
+  return Response.redirect(checkout.toString(), 302);
 }
 
 export async function handleOAuth(
@@ -421,6 +515,33 @@ export async function handleOAuth(
     );
   }
 
+  // --------------------------------------------------------- /upgrade/<link>
+  // Paying needs to know who is paying, so it starts with the same sign-in.
+  const upgradeMatch = /^\/upgrade\/([a-z0-9_]{1,64})$/.exec(path);
+  if (method === "GET" && upgradeMatch) {
+    const link = upgradeMatch[1];
+    if (!paymentLink(config, link)) {
+      return html(`<h1>Unknown plan</h1><p>There is no plan called <code>${escape(link)}</code>.</p>`, 404);
+    }
+    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    if (available.length === 0) {
+      return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
+    }
+    const stateToken = await signJwt(
+      { iss: config.issuer, sub: "upgrade", aud: UPGRADE_AUDIENCE, bellman: { link } as never },
+      config.secret,
+      STATE_TTL_SECONDS
+    );
+    const buttons = available
+      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
+      .join("");
+    return html(
+      `<h1>Upgrade Bellman</h1>` +
+        `<p>Sign in with the account you use Bellman with, so the plan lands on it. Then you'll pay on Stripe.</p>` +
+        buttons
+    );
+  }
+
   // ------------------------------------------- hand off to a provider
   const startMatch = /^\/authorize\/([a-z]+)$/.exec(path);
   if (method === "GET" && startMatch) {
@@ -430,7 +551,11 @@ export async function handleOAuth(
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
     const req = url.searchParams.get("req") ?? "";
-    const claims = await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
+    // Either audience: the same provider hand-off serves connecting a client
+    // and signing in to pay, and only the callback needs to tell them apart.
+    const claims =
+      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE })) ??
+      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE }));
     if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
 
     return Response.redirect(
@@ -449,7 +574,13 @@ export async function handleOAuth(
 
     const state = url.searchParams.get("state") ?? "";
     const claims = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
-    if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    if (!claims) {
+      // An upgrade came back through the same callback; it ends at Stripe
+      // rather than at an authorization code.
+      const upgrade = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE });
+      if (upgrade) return finishUpgrade(url, name, creds, upgrade.bellman as unknown as UpgradeRequest, config);
+      return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    }
     const pending = claims.bellman as unknown as AuthorizeRequest;
 
     const upstreamError = url.searchParams.get("error");
@@ -635,6 +766,26 @@ export async function handleOAuth(
     const { identity } = who;
     if (!entitlementsFor(identity).audit || identity.role !== "admin" || !identity.orgId) {
       return oauthError("insufficient_scope", "granting plans requires a team admin", 403);
+    }
+    // Writing is for admins the operator made, not admins a purchase made.
+    //
+    // Buying team makes you admin of your own org. If that also let you write
+    // grants, one month of team would buy permanent team: an admin can write a
+    // grant for their own key, billing only ever removes grants it wrote
+    // itself, and the self-written one would survive the cancellation. Granting
+    // a second identity into the org does the same thing one step removed.
+    //
+    // Closing that properly means org membership with a lifetime tied to the
+    // purchase, which is not built — the README already says adding people to
+    // a purchased org is not a feature yet. Until it is, a purchased admin gets
+    // the plan and the org scoping and reads the grant list, and nothing else.
+    const writing = method !== "GET";
+    if (writing && who.planSource !== "operator") {
+      return oauthError(
+        "insufficient_scope",
+        "writing grants is limited to admins the operator granted; a purchased team admin cannot",
+        403
+      );
     }
     if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
 

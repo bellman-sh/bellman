@@ -157,7 +157,24 @@ export function decodeIdentity(accessToken: string): Identity | undefined {
   }
 }
 
-/** Can this credential be used right now, without refreshing? */
+/**
+ * Can this credential be used right now, without refreshing?
+ *
+ * The canonical 60-second skew rule, and **currently called by no production
+ * code** — do not take that as a reason to delete it. It is the one written
+ * statement of when a token is too close to expiry to spend, and the reason
+ * nothing calls it is that no caller has yet needed that question:
+ *
+ *   - connectSignedIn asks a broader one, "is there any token worth trying",
+ *     because with the provider in play the SDK refreshes a stale one itself.
+ *   - signedInAs asks a different one, "whose account is this", and must NOT
+ *     apply the skew rule: a token ten minutes old that the SDK will refresh
+ *     without anyone noticing still names the right person, and reporting
+ *     "unknown" for it would be a false answer in the common case.
+ *
+ * A caller that needs "spendable right now" belongs here rather than deriving
+ * it again, which is the drift this exists to prevent.
+ */
 export function tokensUsable(tokens: StoredTokens | undefined, now = Date.now()): boolean {
   if (!tokens?.access_token) return false;
   // No expiry recorded means the server did not say; assume usable and let a
@@ -236,7 +253,14 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
   const staleMs = opts.staleMs ?? STALE_MS;
   const pidAlive = opts.pidAlive ?? livePid;
 
+  // Both, exactly as writeServer does: the `mode` option only applies to a
+  // directory this call creates, and a ~/.config/bellman left at 0755 by an
+  // older build or a stray mkdir would otherwise stay 0755 until the first
+  // writeServer happened to tighten it. No credential is exposed either way —
+  // writeServer tightens before it writes — but the rule lives in two places
+  // and this was the copy that had not been fixed.
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
   const path = join(dir, LOCK_FILE);
   const deadline = Date.now() + waitMs;
 
@@ -299,9 +323,12 @@ export async function acquireLock(dir: string, opts: LockOptions = {}): Promise<
     // registering one replaces Node's default of terminating, so Ctrl-C would stop
     // killing the process unless every handler re-raised. Taken off again by
     // release(), so concurrent locks cannot trip MaxListenersExceededWarning.
-    const onExit = (): void => {
+    // A declaration, not a `const`: release() above closes over this name, and
+    // with a const the two are one reorder away from a ReferenceError thrown out
+    // of release() — at process exit, where it has nowhere to be reported.
+    function onExit(): void {
       try { release(); } catch { /* going away: a failure here has nowhere useful to go */ }
-    };
+    }
     process.on("exit", onExit);
     return { release };
   }

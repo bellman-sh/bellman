@@ -313,6 +313,26 @@ describe("credentialsDir", () => {
 });
 
 describe("the lock", () => {
+  /**
+   * The same rule writeServer has, in the other place that creates this
+   * directory. A ~/.config/bellman left at 0755 by an older build stayed 0755
+   * until some later writeServer happened to tighten it — no credential was ever
+   * exposed, because writeServer tightens before it writes, but the rule lived
+   * in two copies and only one had been fixed.
+   */
+  it("tightens a directory that already exists, not only one it creates", async () => {
+    const loose = mkdtempSync(join(tmpdir(), "bellman-loose-"));
+    chmodSync(loose, 0o755);
+    const handle = (await acquireLock(loose, { heartbeatMs: 50 }))!;
+    try {
+      expect({ dir: statSync(loose).mode & 0o777, took: Boolean(handle) })
+        .toEqual({ dir: 0o700, took: true });
+    } finally {
+      handle.release();
+      rmSync(loose, { recursive: true, force: true });
+    }
+  });
+
   const fast = { waitMs: 2_000, heartbeatMs: 20, staleMs: 200 };
 
   it("is exclusive, and released so the next holder gets it", async () => {

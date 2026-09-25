@@ -98,8 +98,8 @@ It also gives the scribe its own verb mapping to its own handler, which is
 exactly the shape #2's per-handler guards want.
 
 **Cost, stated plainly:** `INVARIANT 9` in `tests/tools/surface.test.ts` pins
-the tool surface at 7 and ties it to a stated value — "lowest-common-denominator
-MCP". This makes it 8. That test exists to force this decision to be noticed,
+the tool surface and ties it to a stated value — "lowest-common-denominator
+MCP". Issue #1 took it from 7 to 8; this makes it 9. That test exists to force this decision to be noticed,
 which it did; its count and its comment both change.
 
 ### D5 — Authority is an ownership check, not verb enforcement.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer as createNetServer, type Server as NetServer } from "node:net";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -12,6 +13,9 @@ import { createBridge, type BridgeOptions, type Delivery, type Remote, type WhoA
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { readServer, writeServer } from "../src/credentials.js";
+import { connectSignedIn } from "../src/signin.js";
+import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
@@ -51,6 +55,35 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000):
     if (Date.now() > deadline) throw new Error("condition not met in time");
     await new Promise((r) => setTimeout(r, 20));
   }
+}
+
+/**
+ * Three consecutive free loopback ports. Same reasoning as tests/signin.test.ts:
+ * the base is random rather than from bind(0), because the OS hands ephemeral
+ * ports out in sequence and two suites starting together get neighbouring
+ * triples. 10000-31999 is below every ephemeral range and clear of the real
+ * bridge's 51004-51008, so a developer's live bridge is untouched.
+ */
+async function freePorts(): Promise<number[]> {
+  const claim = (port: number) =>
+    new Promise<NetServer>((resolve, reject) => {
+      const server = createNetServer();
+      server.once("error", reject);
+      server.listen(port, "127.0.0.1", () => resolve(server));
+    });
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const base = 10_000 + Math.floor(Math.random() * 22_000);
+    const held: NetServer[] = [];
+    try {
+      for (const port of [base, base + 1, base + 2]) held.push(await claim(port));
+      return [base, base + 1, base + 2];
+    } catch {
+      // One of the three is taken. Pick again.
+    } finally {
+      await Promise.all(held.map((s) => new Promise<void>((r) => s.close(() => r()))));
+    }
+  }
+  throw new Error("no three consecutive free loopback ports after 50 tries");
 }
 
 const opened: Session[] = [];
@@ -652,11 +685,14 @@ describe("a connection Bellman stops accepting", () => {
   });
 
   /**
-   * The watcher is the case that hurts. It is the only caller that runs with
-   * nobody watching, so a Remote it can never re-make is a session that silently
-   * stops delivering peer events for as long as Claude Code stays open.
+   * The watcher is the one caller that runs with nobody watching, and that is
+   * exactly why it must NOT reconnect. A reconnect on the signed-in path
+   * re-enters connectSignedIn, which is what opens a browser — and a sign-in
+   * page appearing while someone reads their email, with no action of theirs to
+   * explain it, is worse than any failed tool call. It gives up instead, and
+   * the next tool call, being something a person did, signs in again.
    */
-  it("a watcher whose poll is rejected reconnects and goes on delivering", async () => {
+  it("a watcher whose poll is rejected gives up rather than reconnect, and a tool call recovers it", async () => {
     const logs: string[] = [];
     const conns: { closed: boolean }[] = [];
     const remote = async (): Promise<Remote> => {
@@ -665,8 +701,8 @@ describe("a connection Bellman stops accepting", () => {
       const id = conns.push(conn) - 1;
       return {
         listTools: () => real.listTools(),
-        // EVERY sync on the first connection, not just one: a bridge that keeps
-        // a dead Remote must never deliver, or this test passes without the fix.
+        // Every sync on the first connection: a bridge that quietly reconnects
+        // in the background would otherwise recover here and look correct.
         callTool: (p) =>
           id === 0 && p.name === "bellman_sync"
             ? Promise.reject(new UnauthorizedError())
@@ -680,23 +716,177 @@ describe("a connection Bellman stops accepting", () => {
 
     const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
     const joiner = await open(DEV_KEY.peer);
-    const { sessionId, joinerMember } = await pair(creator, joiner);
+    const { sessionId, creatorMember, joinerMember } = await pair(creator, joiner);
+    await until(() => logs.some((m) => m.startsWith("stopped watching")));
+    // Longer than the 1000ms first backoff, so a watcher that meant to retry has
+    // had its chance: without this the "no second connection" half is free.
+    await new Promise((r) => setTimeout(r, 1_500));
+
+    const gaveUp = {
+      connections: conns.length,
+      watching: creator.bridge.watching().length,
+      events: channelEvents(creator).length,
+    };
+
+    // A person doing something. THIS is allowed to sign in again.
+    const resumed = await creator.call("bellman_sync", {
+      session_id: sessionId, member_id: creatorMember, since_cursor: 0,
+    });
     const sent = await joiner.call("bellman_send", {
       session_id: sessionId, member_id: joinerMember, type: "message", payload: { text: "still there?" },
     });
     expect(sent.isError, sent.text).toBe(false);
-
     await until(() => channelEvents(creator).some((e) => e.meta.type === "message"));
 
     expect({
-      conns,
-      events: channelEvents(creator).map((e) => e.meta.type),
-      retirements: logs.filter((m) => m === RETIRED),
+      gaveUp,
+      resumed: resumed.isError,
+      afterTheToolCall: { connections: conns.length, watching: creator.bridge.watching().length },
+      closed: conns.map((c) => c.closed),
+      logs: logs.filter((m) => m === RETIRED || m.startsWith("stopped watching")),
     }).toEqual({
-      conns: [{ closed: true }, { closed: false }],
-      // The join the dead connection never got to report, and the message after it.
+      // It stopped: one connection ever, no watch left, and nothing delivered.
+      gaveUp: { connections: 1, watching: 0, events: 0 },
+      resumed: false,
+      // And the tool call made the second connection, and re-armed the watch.
+      afterTheToolCall: { connections: 2, watching: 1 },
+      closed: [true, false],
+      logs: [
+        RETIRED,
+        "stopped watching " + creatorMember + ": Bellman no longer accepts this connection. " +
+          "Peer events will not arrive until the next Bellman tool call signs in again.",
+      ],
+    });
+  });
+
+  /**
+   * The same property counted where a browser actually opens, rather than where
+   * the bridge decides to reconnect. `remote` here is a real connectSignedIn
+   * against a real authorization server, so the browser call is the SDK's own
+   * escalation and not a stand-in; the Bellman tools beside it are the real
+   * handlers, because the fake serves no tools/call and a watch has to be armed
+   * by a genuine bellman_start.
+   */
+  it("a rejected poll opens no browser, and the tool call after it opens exactly one", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bellman-watch-signin-"));
+    const bellman = fakeBellman();
+    const ports = await freePorts();
+    const browserOpens: URL[] = [];
+    const conns: { closed: boolean }[] = [];
+    const logs: string[] = [];
+
+    const remote = async (): Promise<Remote> => {
+      const signedIn = await connectSignedIn({
+        serverUrl: RESOURCE,
+        configDir: dir,
+        fetchImpl: bellman.fetch,
+        ports,
+        lock: { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 },
+        callbackTimeoutMs: 5_000,
+        browser: async (url) => {
+          browserOpens.push(url);
+          await bellman.browser(url);
+        },
+      });
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      const conn = { closed: false };
+      const id = conns.push(conn) - 1;
+      return {
+        listTools: () => real.listTools(),
+        callTool: (p) =>
+          id === 0 && p.name === "bellman_sync"
+            ? Promise.reject(new UnauthorizedError())
+            : real.callTool(p),
+        close: async () => {
+          conn.closed = true;
+          await Promise.all([signedIn.close(), real.close()]);
+        },
+      };
+    };
+
+    try {
+      const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+      const joiner = await open(DEV_KEY.peer);
+      // Nothing cached, so starting up signs in for real: one browser, the baseline.
+      const { sessionId, creatorMember } = await pair(creator, joiner);
+      const afterStartup = browserOpens.length;
+
+      await until(() => logs.some((m) => m.startsWith("stopped watching")));
+      await new Promise((r) => setTimeout(r, 1_500));
+      const afterTheWatcherWasRefused = browserOpens.length;
+
+      // Put the credential beyond refreshing, so the next connect can only get
+      // there through a browser. Now the count answers a real question.
+      // Keeping the registered client: a client_id the server never issued is
+      // refused at /authorize, which would fail for the wrong reason entirely.
+      writeServer(dir, RESOURCE, {
+        client: readServer(dir, RESOURCE).client,
+        tokens: { access_token: "stale.not.a.jwt" },
+      });
+      const byHand = await creator.call("bellman_sync", {
+        session_id: sessionId, member_id: creatorMember, since_cursor: 0,
+      });
+
+      expect({
+        afterStartup,
+        afterTheWatcherWasRefused,
+        afterAToolCall: browserOpens.length,
+        byHand: byHand.isError,
+      }).toEqual({
+        afterStartup: 1,
+        // The whole point: a background poll being refused opens nothing.
+        afterTheWatcherWasRefused: 1,
+        // And a person's tool call is what is allowed to.
+        afterAToolCall: 2,
+        byHand: false,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The other side of the same fork, and the reason it is a fork at all. Giving
+   * up is right for a credential a human has to fix and wrong for everything
+   * else: a socket hang-up, a 500, a laptop lid. Treating those the same way
+   * would let one blip end peer delivery for the rest of the session.
+   */
+  it("a watcher whose poll fails for any other reason keeps trying, and keeps its watch", async () => {
+    const logs: string[] = [];
+    let blipped = false;
+    const remote = async (): Promise<Remote> => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return {
+        listTools: () => real.listTools(),
+        callTool: (p) => {
+          if (p.name === "bellman_sync" && !blipped) {
+            blipped = true;
+            return Promise.reject(new Error("socket hang up"));
+          }
+          return real.callTool(p);
+        },
+        close: () => real.close(),
+      };
+    };
+
+    const creator = await open(DEV_KEY.jesse, "channel", { remote, log: (m) => logs.push(m) });
+    const joiner = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(creator, joiner);
+    const sent = await joiner.call("bellman_send", {
+      session_id: sessionId, member_id: joinerMember, type: "message", payload: { text: "after the blip" },
+    });
+    expect(sent.isError, sent.text).toBe(false);
+    await until(() => channelEvents(creator).some((e) => e.meta.type === "message"));
+
+    expect({
+      watching: creator.bridge.watching().length,
+      events: channelEvents(creator).map((e) => e.meta.type),
+      logs: logs.filter((m) => m.includes("sync failed") || m.includes("stopped watching") || m === RETIRED),
+    }).toEqual({
+      // Still armed, still delivering, and the connection was never retired.
+      watching: 1,
       events: ["member_joined", "message"],
-      retirements: [RETIRED],
+      logs: [expect.stringMatching(/^sync failed for m_[0-9a-f]+: socket hang up; retrying in 1000ms$/)],
     });
   });
 

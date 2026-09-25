@@ -371,6 +371,34 @@ export function createBridge(opts: BridgeOptions) {
         });
       } catch (err) {
         if (closed || !w.active) return;
+        /**
+         * A rejected poll is the ONE error here that must not be retried, and
+         * the reason is that retrying it would reconnect.
+         *
+         * A reconnect on the signed-in path re-enters connectSignedIn, and that
+         * is what opens a browser. From a tool call that is defensible — a
+         * person just asked for something. From here there is no turn at all:
+         * someone is reading their email and a sign-in page appears, with
+         * nothing they did to explain it. A failed tool call is the better
+         * trade, and a sign-in page nobody asked for is the worse one.
+         *
+         * Nothing is lost by stopping, either. Everything a reconnect could
+         * recover has already been tried inside the connection we have: the
+         * transport refreshes a 401 itself and retries transparently, and
+         * BridgeAuth.invalidateCredentials("tokens") re-reads the file and
+         * adopts a newer refresh token another bridge wrote, before auth() will
+         * so much as redirect. Reaching here means the file held nothing newer
+         * and a human is genuinely needed — which the next tool call, being an
+         * action someone took, is allowed to ask for.
+         */
+        if (unauthorized(err)) {
+          log(
+            `stopped watching ${w.memberId}: Bellman no longer accepts this connection. ` +
+              `Peer events will not arrive until the next Bellman tool call signs in again.`
+          );
+          disarm(w.memberId);
+          return;
+        }
         log(`sync failed for ${w.memberId}: ${(err as Error).message}; retrying in ${backoff}ms`);
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);

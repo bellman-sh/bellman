@@ -61,6 +61,24 @@ export interface RefreshToken {
 export type Admission = "ok" | "rate_limited" | "full";
 
 export const CLIENT_COUNT_KEY = "clients:count";
+export const PURGE_IDLE_KEY = "clients:purgeIdleUntil";
+
+/** How long to stop scanning after a pass that reclaimed nothing. */
+export const PURGE_BACKOFF_MS = 60 * 1000;
+
+/**
+ * Whether a purge is worth running.
+ *
+ * Refusing a registration for a full registry writes no per-IP state, so that
+ * path sits outside the 20/hour limit and an address can retry it freely. What
+ * must not be unbounded is the *work* each retry costs, and that was a purge
+ * scan per request. Backing off only after a pass that reclaimed nothing keeps
+ * draining at full speed while there is junk to drop and stops scanning once
+ * there is none, so the throttle lands on exactly the fruitless case.
+ */
+export function purgeDue(idleUntil: number | undefined, now: number): boolean {
+  return idleUntil === undefined || now >= idleUntil;
+}
 
 /**
  * The slice of key-value storage the client counter needs. Kept as an adapter
@@ -153,6 +171,8 @@ export class MemoryAuthStore implements AuthStorage {
   private codes = new Map<string, AuthCode>();
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
+  /** Set after a purge that reclaimed nothing; see purgeDue. */
+  private purgeIdleUntil: number | undefined;
 
   async registerClient(client: RegisteredClient): Promise<void> {
     this.clients.set(client.client_id, client);
@@ -182,8 +202,17 @@ export class MemoryAuthStore implements AuthStorage {
     if (ip && inWindow(this.registrations.get(ip) ?? []).length >= REGISTRATIONS_PER_HOUR) {
       return "rate_limited";
     }
-    this.reclaim(now);
-    if (this.clients.size >= CLIENT_CAP) return "full";
+
+    // Only scan when the cap is actually in the way, and only when the last
+    // scan found something — a full registry is retryable without limit, so the
+    // work each retry costs is what has to stay bounded.
+    if (this.clients.size >= CLIENT_CAP) {
+      if (purgeDue(this.purgeIdleUntil, now)) {
+        const { clients, buckets } = this.reclaim(now);
+        this.purgeIdleUntil = clients + buckets === 0 ? now + PURGE_BACKOFF_MS : undefined;
+      }
+      if (this.clients.size >= CLIENT_CAP) return "full";
+    }
 
     this.clients.set(client.client_id, client);
     if (ip) this.registrations.set(ip, [...inWindow(this.registrations.get(ip) ?? []), now]);
@@ -197,7 +226,11 @@ export class MemoryAuthStore implements AuthStorage {
   }
 
   async purgeStale(now: number): Promise<Reclaimed> {
-    return this.reclaim(now);
+    const reclaimed = this.reclaim(now);
+    // An explicit purge that freed something un-sticks admission immediately,
+    // rather than leaving it waiting out a backoff that is no longer true.
+    if (reclaimed.clients + reclaimed.buckets > 0) this.purgeIdleUntil = undefined;
+    return reclaimed;
   }
 
   private reclaim(now: number): Reclaimed {

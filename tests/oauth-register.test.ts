@@ -6,8 +6,10 @@ import {
   MemoryAuthStore,
   REGISTRATIONS_PER_HOUR,
   REGISTRATION_WINDOW_MS,
+  PURGE_BACKOFF_MS,
   UNUSED_CLIENT_TTL_MS,
   clientCount,
+  purgeDue,
   type CounterStorage,
 } from "../src/oauth/storage.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
@@ -343,5 +345,80 @@ describe("the client cap", () => {
     await Promise.all(Array.from({ length: 15 }, (_, i) => register(`198.51.100.${i}`)));
 
     expect(await config.store.countClients()).toBeLessThanOrEqual(CLIENT_CAP);
+  });
+});
+
+/**
+ * Refusing for a full registry happens before any per-IP state is written, so
+ * that path is not covered by the 20/hour limit. Writing a timestamp for every
+ * refused attempt would fix the accounting and reintroduce the leak just closed:
+ * one bucket per attacking address, created on demand. So refusal stays free of
+ * per-IP writes, and is made cheap instead — the repeated work was a fruitless
+ * purge scan per request.
+ */
+describe("a full registry refuses cheaply", () => {
+  const fillUsed = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      await config.store.registerClient({
+        client_id: `c_${i}`,
+        redirect_uris: [REDIRECT],
+        created_at: Date.now(),
+        expires_at: null,
+      });
+    }
+  };
+
+  it("refuses without charging the address for it", async () => {
+    await fillUsed(CLIENT_CAP);
+
+    expect((await register()).status).toBe(429);
+    expect(await config.store.countRecentRegistrations(IP, 0)).toBe(0);
+  });
+
+  it("keeps refusing, and still writes no per-IP state", async () => {
+    await fillUsed(CLIENT_CAP);
+
+    const statuses = await registerMany(REGISTRATIONS_PER_HOUR + 10);
+
+    expect(new Set(statuses)).toEqual(new Set([429]));
+    expect(await config.store.countRegistrationBuckets()).toBe(0);
+  });
+
+  /**
+   * Once room frees up the same address is served normally: the refusals did
+   * not silently consume its allowance.
+   */
+  it("serves the address normally once there is room again", async () => {
+    await fillUsed(CLIENT_CAP);
+    expect((await register()).status).toBe(429);
+
+    await config.store.purgeStale(Date.now());
+    for (let i = 0; i < 10; i++) await config.store.markClientUsed(`c_${i}`);
+    await config.store.registerClient({
+      client_id: "c_0", redirect_uris: [REDIRECT], created_at: Date.now(),
+      expires_at: Date.now() - 1,
+    });
+    await config.store.purgeStale(Date.now());
+
+    expect((await register()).status).toBe(201);
+  });
+});
+
+/**
+ * A scan that reclaims nothing is the part worth not repeating. Backing off only
+ * after an empty pass keeps draining fast while there is junk to drop, and stops
+ * scanning once there is not.
+ */
+describe("purge backoff", () => {
+  it("purges when nothing has been tried yet", () => {
+    expect(purgeDue(undefined, 1_000)).toBe(true);
+  });
+
+  it("holds off until the backoff has elapsed", () => {
+    const idleUntil = 1_000 + PURGE_BACKOFF_MS;
+
+    expect(purgeDue(idleUntil, 1_000)).toBe(false);
+    expect(purgeDue(idleUntil, idleUntil - 1)).toBe(false);
+    expect(purgeDue(idleUntil, idleUntil)).toBe(true);
   });
 });

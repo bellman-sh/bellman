@@ -1,7 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import {
-  CLIENT_CAP, CLIENT_COUNT_KEY, REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, clientCount,
+  CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, PURGE_IDLE_KEY,
+  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, clientCount, purgeDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage, type Reclaimed,
   type RefreshToken, type RegisteredClient,
 } from "./storage.js";
@@ -88,8 +89,19 @@ export class AuthDO extends DurableObject {
 
     // Evict before testing the cap, or anyone who fills the table with clients
     // they never signed in with blocks every real client until the next purge.
+    //
+    // Only when the cap is in the way, and only when the last scan found
+    // something. A full registry is refused without writing per-IP state, so it
+    // can be retried without limit — what has to stay bounded is the work each
+    // retry costs, which was a scan per request.
     if ((await this.clientCount()) >= CLIENT_CAP) {
-      await this.purgeStale(now);
+      const idleUntil = await this.ctx.storage.get<number>(PURGE_IDLE_KEY);
+      if (purgeDue(idleUntil, now)) {
+        const { clients, buckets } = await this.purgeStale(now);
+        if (clients + buckets === 0) {
+          await this.ctx.storage.put(PURGE_IDLE_KEY, now + PURGE_BACKOFF_MS);
+        }
+      }
       if ((await this.clientCount()) >= CLIENT_CAP) return "full";
     }
 
@@ -176,6 +188,10 @@ export class AuthDO extends DurableObject {
       else if (recent.length !== stamps.length) await this.ctx.storage.put(key, recent);
     }
     if (empty.length > 0) await this.ctx.storage.delete(empty);
+
+    // Freeing something un-sticks admission immediately, rather than leaving it
+    // waiting out a backoff that is no longer true.
+    if (expired.length + empty.length > 0) await this.ctx.storage.delete(PURGE_IDLE_KEY);
 
     return { clients: expired.length, buckets: empty.length };
   }

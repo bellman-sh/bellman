@@ -7,6 +7,8 @@ import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { canonicalResource } from "./oauth/tokens.js";
+import { handleStripeWebhook } from "./billing/stripe.js";
+import { billingSettings } from "./billing/config.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -34,6 +36,14 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
+  /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
+  BELLMAN_BILLING?: string;
+  /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
+  STRIPE_WEBHOOK_SECRET?: string;
+  /** Restricted key (rk_…) with read access to subscriptions only. */
+  STRIPE_API_KEY?: string;
+  /** Optional JSON: link name -> Stripe Payment Link URL, served at /upgrade/<name>. */
+  STRIPE_PAYMENT_LINKS?: string;
 }
 
 /**
@@ -41,7 +51,11 @@ export interface WorkerEnv extends BellmanEnv {
  * hostname actually being used, so a token minted for mcp.bellman.sh is not
  * accepted on any other hostname this Worker answers.
  */
-function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined {
+function oauthConfig(
+  request: Request,
+  env: WorkerEnv,
+  plans: DurableObjectStore
+): OAuthConfig | undefined {
   if (!env.BELLMAN_TOKEN_SECRET || !env.AUTH) return undefined;
   const origin = new URL(request.url).origin;
   const credentials: Partial<Record<ProviderName, ProviderCredentials>> = {};
@@ -58,8 +72,19 @@ function oauthConfig(request: Request, env: WorkerEnv): OAuthConfig | undefined 
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
+    plans,
+    paymentLinks: billingSettings(env).paymentLinks,
+    // The switch has to reach plans already stored, or it only stops new
+    // purchases and every earlier one keeps issuing paid tokens.
+    honourPurchases: billingSettings(env).applyPlans,
   };
 }
+
+/**
+ * Shadow mode: everything runs, nothing is granted. The ledger still records
+ * what Stripe says, so the webhook can be exercised against real purchases
+ * before a plan depends on it.
+ */
 
 const unauthorized = (oauth?: OAuthConfig) =>
   Response.json(
@@ -76,7 +101,31 @@ const unauthorized = (oauth?: OAuthConfig) =>
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
-    const oauth = oauthConfig(request, env);
+    const store = new DurableObjectStore(env);
+    const oauth = oauthConfig(request, env, store);
+
+    // Ahead of the OAuth routes: Stripe signs its own requests and carries no
+    // bearer token, so it must not fall through anything expecting one.
+    if (url.pathname === "/stripe/webhook") {
+      const { webhookSecret, apiKey } = billingSettings(env);
+      if (!webhookSecret || !apiKey || !env.AUTH) {
+        return new Response("Billing is off", { status: 503 });
+      }
+      return handleStripeWebhook(request, {
+        secret: webhookSecret,
+        apiKey,
+        billing: new AuthStore(env.AUTH),
+        // Grants are written in every mode, including shadow. What `shadow`
+        // withholds is honouring them, which happens at resolution time via
+        // honourPurchases above — so the store stays a true record of what
+        // Stripe has said, and the switch works in both directions: turning
+        // billing on activates purchases already seen, and turning it off and
+        // on again does not leave a stale grant behind. Withholding the write
+        // instead meant a purchase seen during shadow stayed invisible until
+        // Stripe happened to send another event about it, which it may never do.
+        plans: store,
+      });
+    }
 
     if (oauth) {
       const handled = await handleOAuth(request, oauth);
@@ -129,7 +178,7 @@ export default {
     if (!identity) return unauthorized(oauth);
 
     try {
-      const server = buildServer(identity, new DurableObjectStore(env));
+      const server = buildServer(identity, store);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

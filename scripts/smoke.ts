@@ -66,7 +66,7 @@ async function main(): Promise<void> {
 
   console.log("\n— session creation + entitlements —");
   const started = await call(jesse, "bellman_start", {
-    mode: "pair", brief: jesseBrief, org_only: true,
+    manifest: { room: "smoke", preset: "pair" }, brief: jesseBrief, org_only: true,
     capabilities: ["read_context", "receive_messages", "request_actions"],
   });
   assert(!started.isError, "team admin starts org-only pair session");
@@ -75,7 +75,7 @@ async function main(): Promise<void> {
   const jMember = String(started.data.member_id);
   console.log(`   join code: ${joinCode}`);
 
-  const gated = await call(peer, "bellman_start", { mode: "swarm", brief: peerBrief });
+  const gated = await call(peer, "bellman_start", { manifest: { room: "smoke", preset: "swarm" }, brief: peerBrief });
   assert(gated.isError && gated.text.includes("pro or team"), "free plan blocked from swarm (create-side gating)");
 
   console.log("\n— join flow: preview → confirm —");

@@ -32,6 +32,7 @@ export interface Member {
   label: string;
   orgId: string | null;
   capabilities: Capability[];
+  roomRole: string; // the manifest role this member holds — NOT Identity.role (admin/member)
   brief: Brief;
   joinedAt: number;
   leftAt: number | null;
@@ -62,7 +63,9 @@ export interface SessionEvent {
 
 export interface Session {
   id: string;
-  mode: SessionMode;
+  // There is no `mode` here: read session.manifest.mode. Two fields for one fact
+  // could disagree.
+  manifest: RoomManifest; // immutable after createSession — the store has no way to change it
   createdBy: string;
   orgId: string | null;
   orgOnly: boolean;
@@ -73,6 +76,13 @@ export interface Session {
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
+  /**
+   * Set when the plan behind this session lapsed. Frozen is not closed:
+   * members stay, history stays readable, and only writes are refused, until
+   * the plan is restored. Losing the room would be the wrong punishment for a
+   * failed card.
+   */
+  frozenAt: number | null;
 }
 
 export interface PendingConnect {
@@ -92,6 +102,26 @@ export interface AuditEntry {
   detail: Record<string, unknown>;
 }
 
+/**
+ * A plan granted to an upstream identity at runtime.
+ *
+ * It carries plan, role and org only — never a userId or label. Those are
+ * derived from the provider profile at sign-in, so a grant can never orphan the
+ * sessions a human already created under u_<provider>_<subject>.
+ */
+export interface PlanGrant {
+  key: string; // upstream identity key, e.g. "github:4242"
+  plan: Plan;
+  role: Role;
+  orgId: string | null;
+  /** Where it came from: "purchase", "operator", ... */
+  source: string;
+  grantedAt: number;
+  grantedBy: string;
+  /** Epoch ms after which it stops applying. null means it does not lapse. */
+  expiresAt: number | null;
+}
+
 export interface Entitlements {
   modes: SessionMode[];
   maxMembers: number;
@@ -99,4 +129,29 @@ export interface Entitlements {
   monthlyCreates: number;
   orgScoping: boolean;
   audit: boolean;
+}
+
+// The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
+export type Verb =
+  | "send"
+  | "invite"
+  | "revoke"
+  | "request_actions"
+  | "respond_actions";
+
+export type PresetName = "pair" | "swarm" | "review";
+
+export interface RoleDef {
+  can: Verb[];
+  description: string | null;
+}
+
+export interface RoomManifest {
+  room: string;
+  purpose: string | null;
+  mode: SessionMode;
+  roles: Record<string, RoleDef>;
+  defaultRole: string;
+  creatorRole: string;
+  preset: PresetName | null;
 }

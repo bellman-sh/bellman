@@ -6,5 +6,8 @@
     "moduleResolution": "Bundler",
     "types": ["@cloudflare/workers-types"]
   },
+  // exclude is inherited from tsconfig.json, where it hides exactly the files
+  // this program exists to check. Reset it: here the Workers files ARE the point.
+  "exclude": [],
   "include": ["src"]
 }

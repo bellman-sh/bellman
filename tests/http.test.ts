@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
-import { brief, openaiAgent } from "./helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 
 let http: Server;
 let store: BellmanStore;
@@ -99,7 +99,7 @@ describe("cross-provider pairing over the wire", () => {
     const peer = await mcpClient("qk_dev_peer");
 
     const started = await call(jesse, "bellman_start", {
-      mode: "pair", brief: brief(), org_only: true,
+      manifest: manifestFixture(), brief: brief(), org_only: true,
       capabilities: ["read_context", "receive_messages", "request_actions"],
     });
     expect(started.isError, started.text).toBe(false);
@@ -144,7 +144,7 @@ describe("cross-provider pairing over the wire", () => {
   /** INVARIANT 5: nothing lives in the transport. */
   it("keeps session state across separate connections with the same key", async () => {
     const first = await mcpClient("qk_dev_jesse");
-    const started = await call(first, "bellman_start", { mode: "pair", brief: brief() });
+    const started = await call(first, "bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const memberId = String(started.data.member_id);
     await first.close();
@@ -163,7 +163,7 @@ describe("cross-provider pairing over the wire", () => {
     const jesse = await mcpClient("qk_dev_jesse");
     const peer = await mcpClient("qk_dev_peer");
 
-    const started = await call(jesse, "bellman_start", { mode: "pair", brief: brief() });
+    const started = await call(jesse, "bellman_start", { manifest: manifestFixture(), brief: brief() });
     const sessionId = String(started.data.session_id);
     const jesseMember = String(started.data.member_id);
 

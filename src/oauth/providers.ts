@@ -145,26 +145,77 @@ export function isProviderName(value: string): value is ProviderName {
 }
 
 /**
- * Map an authenticated human onto a Bellman identity.
+ * Every key an identity may be filed under, most specific first.
  *
- * BELLMAN_USERS names the people who get more than the default: a plan, a
- * role, an org. Everyone else signs in and gets a free identity, which is the
- * monetization model working as designed — creating sessions is gated, joining
- * never is, so a new signer-in can be invited into a room immediately.
+ * No label. A GitHub login is renameable and the vacated one reclaimable; a
+ * Google display name is an arbitrary string its owner picks, unique in no
+ * sense at all. Keeping labels for operator convenience produced a security
+ * bug on the grant path and then a second one on the refresh path, so they are
+ * gone from key resolution entirely. Operators key BELLMAN_USERS by subject.
  */
-export function identityFor(
-  profile: ProviderProfile,
-  overrides: Record<string, Identity> = {}
-): Identity {
-  const keys = [
-    `${profile.provider}:${profile.subject}`,
-    `${profile.provider}:${profile.label}`,
-    ...(profile.email ? [`${profile.provider}:${profile.email}`, `email:${profile.email}`] : []),
-  ];
-  for (const key of keys) {
-    const match = overrides[key];
-    if (match) return match;
-  }
+export function identityKeys(profile: ProviderProfile): string[] {
+  const keys = [`${profile.provider}:${profile.subject}`];
+  if (profile.email) keys.push(`${profile.provider}:${profile.email}`, `email:${profile.email}`);
+  return keys;
+}
+
+/**
+ * The keys that cannot have changed hands since they were written down.
+ *
+ * Only the provider's subject qualifies. A verified address is safe at
+ * sign-in, because the provider just confirmed the human holds it — but a
+ * stored key list is a snapshot, and by the time a refresh replays it the
+ * address may belong to somebody else. Resolving a plan from a stale mutable
+ * key is how a token inherits a stranger's plan and org.
+ */
+export function immutableKeys(keys: string[]): string[] {
+  return keys.filter((key) => /^(?:github|google):\d+$/.test(key));
+}
+
+/**
+ * Whether a key names a human and keeps naming them.
+ *
+ * A label does not. A GitHub login can be renamed and the vacated one claimed
+ * by someone else; a Google display name is not an identifier in any sense.
+ * Keying a plan to one means whoever holds that label next inherits the plan,
+ * the role and the org.
+ *
+ * That was survivable while BELLMAN_USERS — a Worker secret only the operator
+ * can edit — was the only thing that could file a key. /admin/grants puts the
+ * same power in the hands of every team admin, so grants are restricted to the
+ * provider's stable subject or a verified email address. Overrides still
+ * accept a label, because the operator is trusted by definition and it is
+ * their own foot.
+ */
+export function isStableIdentityKey(key: string): boolean {
+  const separator = key.indexOf(":");
+  if (separator < 0) return false;
+  const provider = key.slice(0, separator);
+  const value = key.slice(separator + 1);
+  if (!value) return false;
+  if (provider === "email") return value.includes("@");
+  if (!isProviderName(provider)) return false;
+  // Both providers hand out numeric subjects — GitHub a database id, Google a
+  // string of digits — and an address only reaches this list after the
+  // provider said it was verified. A third provider with opaque subjects would
+  // need this rule widened, and grants would silently stop resolving until it
+  // was, so: assumption stated out loud.
+  return /^\d+$/.test(value) || value.includes("@");
+}
+
+/** The subset of a stored key list that a grant may be resolved against. */
+export function grantKeys(keys: string[]): string[] {
+  return keys.filter(isStableIdentityKey);
+}
+
+/**
+ * Who this human is before any plan is applied.
+ *
+ * userId is derived from the provider subject and nothing else. That is what
+ * lets a plan be granted, changed or revoked without orphaning the sessions
+ * they already created.
+ */
+export function defaultIdentity(profile: ProviderProfile): Identity {
   return {
     userId: `u_${profile.provider}_${profile.subject}`,
     orgId: null,
@@ -172,6 +223,22 @@ export function identityFor(
     role: "member",
     label: profile.email ?? `${profile.label}@${profile.provider}`,
   };
+}
+
+/**
+ * Map an authenticated human onto a Bellman identity using the operator's
+ * BELLMAN_USERS map alone. Runtime grants are resolved in routes.ts, which has
+ * the store; this is the secret-only path and the one the tests pin.
+ */
+export function identityFor(
+  profile: ProviderProfile,
+  overrides: Record<string, Identity> = {}
+): Identity {
+  for (const key of identityKeys(profile)) {
+    const match = overrides[key];
+    if (match) return match;
+  }
+  return defaultIdentity(profile);
 }
 
 export function parseOverrides(raw: string | undefined): Record<string, Identity> {

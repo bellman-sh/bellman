@@ -5,6 +5,12 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  "exclude": ["src/worker.ts", "src/store-do.ts", "src/oauth/store.ts"],
+  // tests/store-do-wiring.test.ts is the one test that imports src/store-do.ts. That
+  // import pulls @cloudflare/workers-types into this `types: ["node"]` program and
+  // breaks an unrelated file (scripts/rotate-key.ts:42, TS2554 on randomBytes); keeping
+  // store-do.ts itself out of this program avoids the same clash. Vitest still runs the
+  // test; only tsc skips it. Delete that last entry when #12 gives Worker-side tests
+  // their own tsconfig project.
+  "exclude": ["src/worker.ts", "src/store-do.ts", "src/oauth/store.ts", "tests/store-do-wiring.test.ts"],
   "include": ["src", "tests", "scripts", "vitest.config.ts"]
 }

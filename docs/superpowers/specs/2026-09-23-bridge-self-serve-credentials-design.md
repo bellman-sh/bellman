@@ -3,6 +3,42 @@
 Design for [#36](https://github.com/bellman-sh/bellman/issues/36) — self-serve
 credentials for the Claude Code bridge.
 
+> **This is the design as proposed, and the implementation diverged from it in
+> three places.** It is kept as written rather than corrected, because what the
+> plan expected and what the build found are both worth having. The section
+> below names the divergences; the text after it is the original proposal, and
+> where the two disagree the code is what shipped. `README.md` describes the
+> behaviour as built.
+
+## What changed during implementation
+
+- **Sign-in happens at Claude Code launch, not on the first tool call.**
+  (Contradicts the "lazily, on the first tool call" decision, and
+  "a session that never touches Bellman never opens a tab".) The bridge's
+  `tools/list` handler connects in order to list the remote tools, and Claude
+  Code lists a server's tools as soon as it connects — so listing is already a
+  call to Bellman. Accepted and reframed rather than worked around: one tab on
+  the first launch after install, silent thereafter on a cached credential. A
+  fresh CI container or devcontainer is a first launch every time.
+
+- **`src/bridge.ts` did change.** (Contradicts "`src/bridge.ts` does not
+  change"; the `remote` seam did hold, but the file gained work of its own.) It
+  grew the local `bellman_whoami` tool and a `whoami` option, because identity
+  had to be answerable before the first call — which is exactly when a
+  wrong-account sign-in bites. It also grew `retiring()`, which drops a
+  connection the moment Bellman stops accepting it: a credential dies
+  mid-session far more often than at the start of one, and a cached dead
+  connection is indistinguishable from Bellman being down until a restart.
+
+- **There is no plain-header fallback for busy loopback ports.** (Removes step 2
+  of the flow and the "all five loopback ports busy" row's first branch.) A
+  connection carrying a bare `Authorization` header has no `authProvider`, and
+  the SDK's 401 handler is guarded on one — so a token expiring ten minutes in
+  became a bare `StreamableHTTPError` with no refresh, capping every such
+  session at one access-token lifetime. Since this was the commonest path, it
+  was replaced by `connectCached`, which uses the same auth provider as the
+  browser path with no listener bound, and so can refresh.
+
 ## The problem
 
 A new user of the bridge cannot start without an operator. They need a key

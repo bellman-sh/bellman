@@ -1,6 +1,6 @@
 import {
-  chmodSync, closeSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, rmSync, statSync,
-  writeFileSync, writeSync,
+  chmodSync, closeSync, fstatSync, ftruncateSync, mkdirSync, openSync, readFileSync, renameSync, rmSync,
+  statSync, writeFileSync, writeSync,
 } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -149,8 +149,49 @@ export function writeServer(dir: string, serverUrl: string, cred: ServerCredenti
   }
   const file = readFile(dir);
   file.servers[serverUrl] = cred;
-  writeFileSync(path, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  replaceFile(dir, path, `${JSON.stringify(file, null, 2)}\n`);
+}
+
+/**
+ * Put `body` at `path` by replacing the file, never by truncating it.
+ *
+ * Writing straight to `path` opens it with O_TRUNC: the moment the open
+ * succeeds the old contents are gone, and a write that then fails — ENOSPC, a
+ * quota, an I/O error — leaves an empty or half-written credentials.json behind.
+ * That is worse than it sounds, because of what the callers promise. Both of
+ * them catch a save failure and carry on, telling the person their session still
+ * works and the credential will be there next time; the truncating write can
+ * make that a lie, and take EVERY server's credential with it, including ones
+ * this call was not touching.
+ *
+ * So: a temp file, then rename. rename(2) is atomic and never destroys the
+ * destination on failure, so a reader sees either the old file or the new one
+ * and the failure costs nothing that was already saved. The temp file is a
+ * sibling because rename is only atomic WITHIN one filesystem; a temp in
+ * os.tmpdir() can land on a different mount and degrade to copy-then-delete.
+ *
+ * Named for the process, like inbox.ts's writeAtomic, so two bridges writing at
+ * once cannot land on each other's temp file. Both modes are set for the same
+ * reason writeServer sets both: the option covers creation, the chmod covers a
+ * temp file that somehow already existed, and neither leaves a token at 0644
+ * even for the moment before the rename.
+ */
+function replaceFile(dir: string, path: string, body: string): void {
+  const tmp = join(dir, `.${FILE}.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmp, body, { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, path);
+  } catch (err) {
+    // Leave nothing behind, and let the real failure be the one that propagates:
+    // a cleanup that also fails must not replace ENOSPC with its own error.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Nothing to do about it, and it is not what the caller needs to hear.
+    }
+    throw err;
+  }
 }
 
 /**

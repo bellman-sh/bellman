@@ -612,8 +612,14 @@ Remove the line. Then do the same for the check order: move the `frozenAt` check
 
 - [ ] **Step 7: Commit**
 
+`npm run verify` would fail here, and is expected to: adding `appendEventOnce`
+to `BellmanStore` makes `DurableObjectStore` (`src/store-do.ts:518`, which
+declares `implements BellmanStore`) non-conforming until Task 3 supplies it.
+`typecheck:worker` is knowingly red for exactly this one task. Run the Node
+half, and let Task 3 restore the whole thing.
+
 ```bash
-npm run verify
+npm run typecheck && npm test
 git add src/store.ts tests/helpers/store-contract.ts
 git commit -m "feat: appendEventOnce, so a retried append is not a duplicate
 
@@ -661,7 +667,10 @@ function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
 }
 ```
 
-Add at the end of the file:
+Add at the end of the file, using the file's existing static `storeDo` binding
+rather than a fresh `await import("../src/store-do.js")`: dynamic import there
+is reserved for `loadStoreDoWithoutGuard()`, which resets the module graph on
+purpose.
 
 ```ts
 /**
@@ -677,7 +686,6 @@ describe("SessionDO.appendEventOnce", () => {
   });
 
   it("appends once and replays the same cursor", async () => {
-    const storeDo = await import("../src/store-do.js");
     const { store } = await worldOn(storeDo, currentRow());
 
     const first = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
@@ -690,7 +698,6 @@ describe("SessionDO.appendEventOnce", () => {
   });
 
   it("refuses a key reused for different content", async () => {
-    const storeDo = await import("../src/store-do.js");
     const { store } = await worldOn(storeDo, currentRow());
     await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
 
@@ -703,7 +710,6 @@ describe("SessionDO.appendEventOnce", () => {
   });
 
   it("returns frozen for a fresh key and replays a written one", async () => {
-    const storeDo = await import("../src/store-do.js");
     const { store } = await worldOn(storeDo, currentRow());
     await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
     await store.freezeSession(LEGACY_ID, Date.now());
@@ -723,7 +729,6 @@ describe("SessionDO.appendEventOnce", () => {
    * reason, so one `put` is the assertion.
    */
   it("writes the key row in the same put as the event", async () => {
-    const storeDo = await import("../src/store-do.js");
     const { store, legacyStorage } = await worldOn(storeDo, currentRow());
 
     const before = legacyStorage.writes;
@@ -738,7 +743,6 @@ describe("SessionDO.appendEventOnce", () => {
   });
 
   it("namespaces the key row per member", async () => {
-    const storeDo = await import("../src/store-do.js");
     const { store, legacyStorage } = await worldOn(storeDo, currentRow());
 
     await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
@@ -863,6 +867,10 @@ Replace the single `writeEvent` call with two separate writes:
 Re-run. Expected: "writes the key row in the same put as the event" FAILS with 4 writes rather than 3. Restore the single call.
 
 - [ ] **Step 7: Commit**
+
+Full `npm run verify` here, including `typecheck:worker` — this task is what
+closes the gap Task 2 opened. If `typecheck:worker` still fails, the facade
+method or the `SessionDO` method does not match the interface.
 
 ```bash
 npm run verify
@@ -1019,22 +1027,33 @@ describe("bellman_send with an idempotency_key", () => {
     expect(events.filter((e) => e.type === "brief_update")).toHaveLength(1);
   });
 
-  /** D9: an append the room refuses must not leave the brief written. */
-  it("leaves the brief alone when the room is frozen", async () => {
+  /**
+   * D9, and the one case that actually reaches the brief write.
+   *
+   * A frozen room is refused by the third guard in the handler, before the
+   * brief write — so freezing proves nothing about this ordering. A reused key
+   * is different: every guard passes, the brief is written under the old
+   * ordering, and only then does the store report the conflict. This test is
+   * red without the fix and green with it.
+   */
+  it("leaves the brief alone when the key is reused for different content", async () => {
     const p = await pairUp(h);
-    const before = (await h.store.getSession(p.sessionId))!
-      .members.find((m) => m.memberId === p.joinerMemberId)!.brief.goal;
-    await h.store.freezeSession(p.sessionId, Date.now());
-
-    const refused = await p.joiner.call("bellman_send", {
+    await p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "brief_update", payload: brief({ goal: "should not land" }),
+      type: "brief_update", payload: brief({ goal: "the first goal" }),
+      idempotency_key: KEY,
     });
 
-    expect(refused.isError).toBe(true);
-    const after = (await h.store.getSession(p.sessionId))!
-      .members.find((m) => m.memberId === p.joinerMemberId)!.brief.goal;
-    expect(after).toBe(before);
+    const clash = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "brief_update", payload: brief({ goal: "should not land" }),
+      idempotency_key: KEY,
+    });
+
+    expect(clash.isError).toBe(true);
+    const me = (await h.store.getSession(p.sessionId))!
+      .members.find((m) => m.memberId === p.joinerMemberId)!;
+    expect(me.brief.goal).toBe("the first goal");
   });
 
   /** REVIEW FOCUS 4: the zod bounds, which no other test reaches. */
@@ -1145,9 +1164,10 @@ Keep every guard above unchanged. Replace the `brief_update` block with validati
 
 ```ts
       // Validated here so an invalid brief never appends an event; applied
-      // after the append, because a refused or replayed send must not leave a
-      // brief written. Before this, a frozen room wrote the brief and then
-      // threw FrozenError.
+      // after the append, because a send the store refuses must not leave a
+      // brief written. The frozen guard above catches the common case, but a
+      // reused key does not reach the store until the append, and neither does
+      // a freeze that lands after that guard's read.
       let updatedBrief: Brief | undefined;
       if (type === "brief_update") {
         const parsed = BriefShape.safeParse(payload);
@@ -1226,7 +1246,10 @@ Expected: PASS. `tests/tools/exchange.test.ts`, `freeze.test.ts`, `audit.test.ts
 Move the `audit(...)` call outside the `if (!replayed)` block and re-run `npx vitest run tests/tools/idempotency.test.ts`.
 Expected: "writes one audit line, not two" FAILS with 3 lines. Restore it.
 
-Then delete the `if (!replayed)` guard around the brief write and confirm "applies a replayed brief_update once" still passes — it will, because writing the same brief twice is the same state. That test does not pin the guard; the reason for the guard is the needless write, not a wrong value. Note this in the commit rather than pretending the test proves more than it does.
+Then move the brief write back above the append — where it sat before this task — and re-run.
+Expected: "leaves the brief alone when the key is reused for different content" FAILS, with the brief reading `"should not land"`. Restore the ordering.
+
+Note what the other brief test does NOT prove: "applies a replayed brief_update once" passes with or without the `if (!replayed)` guard, because writing the same brief twice leaves the same state. That guard's justification is the needless write, not a wrong value, and only the conflict test above is evidence for the ordering.
 
 - [ ] **Step 8: Commit**
 

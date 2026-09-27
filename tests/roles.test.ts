@@ -18,25 +18,46 @@ describe("verbsOfRole", () => {
   });
 
   it("returns an empty list for a role defined with no verbs", () => {
+    // Without this, a preset that dropped `observer` would return the same []
+    // through the fail-closed branch and this test would pass for the wrong reason.
+    expect(swarm.roles).toHaveProperty("observer");
     expect(verbsOfRole(swarm, "observer")).toEqual([]);
   });
 
-  // THE load-bearing assertion in this describe: an unguarded
-  // `manifest.roles[role].can` throws a TypeError here.
+  // An unguarded `manifest.roles[role].can` throws a TypeError here. It is one of
+  // several tests that catch a bare lookup, not the only one: the cases below it
+  // and the ghost `denyVerb` test fail under it too.
   it("fails closed for a role the manifest does not define", () => {
     expect(verbsOfRole(swarm, "ghost")).toEqual([]);
   });
 
-  // A regression guard, NOT proof that Object.hasOwn is load-bearing: for every
-  // name reachable on Object.prototype the value has no `can`, so `?.can ?? []`
-  // would return [] too. It is here so that a future rewrite reaching for a bare
-  // lookup still returns a list rather than an inherited function.
+  // This block kills the truthiness rewrite `roles[r] ? roles[r].can : []`. That
+  // returns [] for an undefined role, so the unknown-role case above cannot see
+  // it; but "constructor", "toString", "__proto__" and "valueOf" all resolve to
+  // something truthy that has no `can`, so it returns undefined for them.
+  // ("prototype" resolves to undefined on a plain object and slips past that
+  // rewrite. A bare `roles[r].can` gives undefined for the other four and throws a
+  // TypeError on "prototype" — undefined, never an inherited function.)
+  //
+  // It does NOT pin Object.hasOwn: none of these values has a `can`, so
+  // `roles[r]?.can ?? []` returns [] for every one. The inherited-role test below
+  // is what separates them.
   it.each(["constructor", "prototype", "toString", "__proto__", "valueOf"])(
     "fails closed for %s rather than reaching an inherited property",
     (name) => {
       expect(verbsOfRole(swarm, name)).toEqual([]);
     },
   );
+
+  // Object.hasOwn is what makes this an OWN-property lookup, and nothing else in
+  // this file pins it: every name on Object.prototype happens to have no `can`,
+  // so a `?.can ?? []` variant returns [] for all of them too. An inherited role
+  // that DOES have a `can` separates the two — hasOwn returns [], the optional
+  // chain returns ["send"].
+  it("ignores a role inherited from the prototype chain", () => {
+    const inherited = { ...swarm, roles: Object.create({ inherited: { can: ["send"] } }) };
+    expect(verbsOfRole(inherited, "inherited")).toEqual([]);
+  });
 });
 
 describe("denyVerb", () => {
@@ -57,6 +78,9 @@ describe("denyVerb", () => {
   });
 
   it('says "none" rather than an empty list for a verbless seat', () => {
+    // The unknown-role branch produces the same "(it holds: none)", so pin that
+    // this is the defined-but-verbless seat and not that branch.
+    expect(swarm.roles).toHaveProperty("observer");
     const observer = member({ roomRole: "observer" });
     expect(denyVerb(swarmSession, observer, "send")).toBe(
       'your role "observer" does not hold the verb "send" (it holds: none).',
@@ -73,8 +97,12 @@ describe("denyVerb", () => {
   });
 
   // D2, as a type-level fact rather than a runtime one: the signature takes a
-  // Session and a Member. If someone adds an Identity parameter this stops
-  // compiling, and `npm run verify` typechecks before it tests.
+  // Session and a Member. Adding a REQUIRED Identity parameter stops this
+  // compiling, and `npm run verify` typechecks before it tests. An OPTIONAL
+  // trailing `id?: Identity` does not: a function with extra optional parameters
+  // is still assignable to the shorter type below. The comment-stripped source
+  // scan in tests/tools/verbs.test.ts (added by a later task) is the only
+  // backstop for that case.
   it("is callable with only a session and a member", () => {
     const fn: (s: ReturnType<typeof session>, m: ReturnType<typeof member>, v: "send") => string | null = denyVerb;
     expect(fn(session({ manifest: roomManifest() }), member(), "send")).toBeNull();

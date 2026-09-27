@@ -3,12 +3,12 @@
 Design for [#36](https://github.com/bellman-sh/bellman/issues/36) — self-serve
 credentials for the Claude Code bridge.
 
-> **This is the design as proposed, and the implementation diverged from it in
-> three places.** It is kept as written rather than corrected, because what the
-> plan expected and what the build found are both worth having. The section
-> below names the divergences; the text after it is the original proposal, and
-> where the two disagree the code is what shipped. `README.md` describes the
-> behaviour as built.
+> **This is the design as proposed. The implementation diverged from it in
+> three places, and one claim in it was wrong.** It is kept as written rather
+> than corrected, because what the plan expected and what the build found are
+> both worth having. The section below names the divergences; the text after it
+> is the original proposal, and where the two disagree the code is what
+> shipped. `README.md` describes the behaviour as built.
 
 ## What changed during implementation
 
@@ -38,6 +38,17 @@ credentials for the Claude Code bridge.
   session at one access-token lifetime. Since this was the commonest path, it
   was replaced by `connectCached`, which uses the same auth provider as the
   browser path with no listener bound, and so can refresh.
+
+- **`BELLMAN_NO_BROWSER` is not the SSH or headless path.** (Contradicts "SSH,
+  headless boxes". Unlike the three above, this is not a different shape: the
+  design claimed a capability the flag never had.) The registered redirect is
+  `http://127.0.0.1:<port>/callback` and the listener binds loopback on the
+  bridge's machine, so a browser on another machine posts the code to its own
+  loopback and the bridge never sees it. The flag only prints the URL instead
+  of launching a browser, which suits a browser on the same machine that you
+  would rather open yourself. What works over SSH is forwarding the callback
+  port; with no browser at all it is `BELLMAN_KEY`. `README.md` has the current
+  instructions.
 
 ## The problem
 

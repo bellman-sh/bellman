@@ -152,11 +152,11 @@ function publicMember(m: Member) {
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
  *
- * `your_verbs` goes through verbsOfRole — the same accessor the guards in
- * bellman_send and bellman_invite call — so what a joiner is SHOWN and what is
- * ENFORCED are one computation and cannot drift apart. Do not inline the lookup
- * back into this function: a preview that over-promised by a single verb is the
- * failure this whole design exists to prevent.
+ * `your_verbs` goes through verbsOfRole, and so does denyVerb, which the guards
+ * in bellman_send and bellman_invite call — so what a joiner is SHOWN and what
+ * is ENFORCED are one computation and cannot drift apart. Do not inline the
+ * lookup back into this function: a preview that over-promised by a single verb
+ * is the failure this whole design exists to prevent.
  */
 function roomPreview(session: Session, viewerRole: string) {
   const m = session.manifest;

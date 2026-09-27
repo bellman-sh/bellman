@@ -23,7 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
-| `bellman_invite` | Issue a fresh join code at any time, or revoke the current one. Needs the `invite` verb (`revoke` to close the door). |
+| `bellman_invite` | Issue a fresh join code at any time, or revoke the current one. Issuing needs the `invite` verb; revoking needs `revoke`. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
 ## Trust model
@@ -182,7 +182,7 @@ Every member can always sync and leave.
 
 Verbs are enforced by the server. A call a seat's role does not permit is
 refused with an error naming the verb it lacks, and nothing is delivered or
-recorded. The verbs shown in a connect preview and the verbs enforced come
+recorded. The `your_verbs` in a connect preview and the verbs enforced come
 from one accessor (`src/roles.ts`), so a preview cannot over-promise a verb.
 
 A room role is not `Identity.role`. The latter is `member` | `admin` over an

@@ -1344,12 +1344,19 @@ One of those cases — two concurrent calls with the same key must produce one
 event — **cannot be satisfied by pointing this suite at `DurableObjectStore`
 with the existing `fakeStorage`** in `tests/store-do-wiring.test.ts`. Its
 `put`/`get` are plain async functions with no queuing, so they do not model the
-Durable Object input gate that makes the real thing atomic. The case would pass
-without the property it tests for: a false green on the single case that matters
-most.
+Durable Object input gate that makes the real thing atomic.
 
-Whatever #12 does here needs either a fake that serialises access per object, or
-that case explicitly excluded with this reason recorded beside the exclusion.
+Run against that fake, the case *fails*, and how it fails is the trap. Both calls
+return `appended`, both are assigned `cursor: 1`, and both write
+`e:000000000001` — so the second clobbers the first. The outcome assertion goes
+red, but `toHaveLength(1)` goes **green off a lost message**. The cheap way to
+get a passing suite is therefore to drop the outcome assertion and keep the
+count, which yields a permanently green test sitting on a clobbered write.
+
+This is not a production bug: workerd's input gate serialises invocations, which
+is exactly what the fake omits. But #12 needs a fake that models per-object
+serialisation before this case means anything, or the case explicitly excluded
+with this reason recorded beside the exclusion.
 BODY
 )"
 ```

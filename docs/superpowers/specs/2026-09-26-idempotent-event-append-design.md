@@ -53,11 +53,11 @@ content. Widening the return reaches all five existing call sites and every
 `appendEvent` assertion in the contract suite, to serve one of them.
 
 ```ts
-export interface EventWrite {
-  outcome: "appended" | "replayed" | "frozen" | "conflict";
-  /** Set for "appended" and "replayed". Absent otherwise. */
-  event?: SessionEvent;
-}
+export type EventWrite =
+  | { outcome: "appended"; event: SessionEvent }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "frozen" }
+  | { outcome: "conflict" };
 
 appendEventOnce(
   sessionId: string,
@@ -75,11 +75,18 @@ a caller that does not want the guarantee calls the other method.
 ### D2 — The key namespace is per-member, not per-session.
 
 Scoped to `(sessionId, fromMemberId)`. Clients generate keys locally with no
-coordination between them. Under a session-wide namespace, two peers that both
-number their sends from 1 collide on their first message: B's send returns A's
-event, B believes it was delivered, and the failure presents as a lost message
-rather than as an error. The store scopes internally — the event already carries
-`fromMemberId`, so nothing is added to the signature.
+coordination between them, so under a session-wide namespace two peers that both
+number their sends from 1 collide on their first message. The store scopes
+internally — the event already carries `fromMemberId`, so nothing is added to the
+signature.
+
+The collision is a refusal, not a silent loss. An earlier draft of this section
+said B would receive A's event and believe its own was delivered; D4 rules that
+out, because the print covers `fromMemberId` and two members' sends can never
+fingerprint alike. What a shared namespace actually produces is `conflict` on B's
+first message — an error B cannot resolve, since it did nothing wrong and has no
+way to learn the key was taken. Still worth preventing, for a weaker reason than
+first written.
 
 ### D3 — A reused key with a different payload is an error.
 
@@ -270,3 +277,23 @@ Two follow-ups, both named in #79 and neither blocked by this:
 - **Idempotent `putGrant`** keyed by the Stripe event id, which retires the
   `samePlan` comparison in `src/billing/grants.ts`.
 - **#59's outbox marker**, if it wants this generalised beyond events.
+
+## Amendments after review
+
+Two changes were made during implementation that this spec did not anticipate,
+both from review findings, recorded here because they alter behaviour a reader
+would otherwise not expect.
+
+**A depth bound on the fingerprint.** `canonical()` recursed without limit, and
+an unguarded run overflows the stack at 2,199 nested arrays — 4,407 characters,
+well inside `MAX_PAYLOAD_CHARS` (20,000). `fingerprint` now throws
+`PayloadTooDeepError` above `MAX_PAYLOAD_DEPTH` (64). It throws rather than
+truncating: a print that dropped everything below some depth would make two
+different payloads agree, which is the collision D3 exists to catch.
+
+**`bellman_send` maps that error to a refusal**, which creates an asymmetry the
+spec should state plainly: a payload nested deeper than 64 is refused WITH an
+`idempotency_key` and accepted WITHOUT one, because only the keyed path needs a
+print. Two tests pin it. Above roughly 6,842 nested arrays both paths fail
+anyway, on `JSON.stringify` in the payload-size check — pre-existing, and not
+made worse here.

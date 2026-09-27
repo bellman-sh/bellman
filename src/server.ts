@@ -9,6 +9,7 @@ import {
   generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
 } from "./codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
+import { denyVerb } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
 const SERVER_NAME = "bellman-mcp-server";
@@ -615,6 +616,21 @@ Errors: capability errors name the member lacking the grant.`,
       if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
+
+      // Authority first: before the payload, before who is listening. A seat that
+      // may not act hears why, rather than being sent off to shorten a message it
+      // was never allowed to send or learning who is present by probing.
+      //
+      // brief_update needs `send` because it appends an event that puts this
+      // member's prose into every peer's context. A seat that may not speak may
+      // not restate itself either — which is exactly what `observer` promises its
+      // readers. Verbs do not compose: each kind maps to one verb and no other.
+      const needed: Verb =
+        type === "action_request" ? "request_actions" :
+        type === "action_response" ? "respond_actions" :
+        "send";
+      const denial = denyVerb(session, me, needed);
+      if (denial) return fail(denial);
 
       const serialized = JSON.stringify(payload);
       if (serialized.length > MAX_PAYLOAD_CHARS) {

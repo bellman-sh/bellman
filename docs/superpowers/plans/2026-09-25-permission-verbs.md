@@ -536,13 +536,32 @@ In the `bellman_send` handler, immediately after the existing member check and *
       // member's prose into every peer's context. A seat that may not speak may
       // not restate itself either — which is exactly what `observer` promises its
       // readers. Verbs do not compose: each kind maps to one verb and no other.
-      const needed: Verb =
-        type === "action_request" ? "request_actions" :
-        type === "action_response" ? "respond_actions" :
-        "send";
-      const denial = denyVerb(session, me, needed);
+      const denial = denyVerb(session, me, SEND_VERB[type]);
       if (denial) return fail(denial);
 ```
+
+with `SEND_VERB` at module scope, sharing one source of truth with the `inputSchema` enum so a sixth kind cannot compile without declaring its verb:
+
+```ts
+const SEND_KINDS = ["message", "artifact", "action_request", "action_response", "brief_update"] as const;
+type SendKind = (typeof SEND_KINDS)[number];
+
+/**
+ * Which verb each send kind needs. A Record rather than a ternary with a default
+ * arm: a sixth kind must declare its verb here or this stops compiling. A default
+ * would hand it `send` silently, and a closed enum exists so that every guard is
+ * one somebody chose.
+ */
+const SEND_VERB = {
+  message: "send",
+  artifact: "send",
+  brief_update: "send",
+  action_request: "request_actions",
+  action_response: "respond_actions",
+} as const satisfies Record<SendKind, Verb>;
+```
+
+and `type: z.enum(SEND_KINDS)` in the `inputSchema`.
 
 `Verb` is already imported in `src/server.ts` (`roomPreview` uses it). If it is not, add it to the existing `import type { ... } from "./types.js"` line.
 
@@ -677,16 +696,39 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     expect(res.text).toContain('does not hold the verb "revoke"');
   });
 
+  // MUST be a room with spare capacity, not the default full pair. In a full room
+  // the capacity check refuses BEFORE the mint, so this test stays green even with
+  // the guard moved below the mint — it would prove nothing. The first draft of
+  // this plan made exactly that mistake; see the note under Testing.
   it("a denied invite neither mints a code nor appends an event", async () => {
-    const p = await pairUp(h, { manifest: seat([]) });
-    const before = (await h.store.getSession(p.sessionId))!;
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: {
+        room: "denied-invite-mints-nothing", mode: "swarm",
+        roles: { lead: { can: ALL_VERBS }, guest: { can: ["send"] } },
+        default_role: "guest", creator_role: "lead",
+      },
+      brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
 
-    const res = await p.joiner.call("bellman_invite", {
-      session_id: p.sessionId, member_id: p.joinerMemberId,
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: started.data.join_code });
+    const confirmed = await joiner.call("bellman_confirm", {
+      connect_token: preview.data.connect_token, brief: brief(),
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+
+    const sessionId = String(started.data.session_id);
+    const before = (await h.store.getSession(sessionId))!;
+    expect(before.joinCode, "precondition: a live code to protect").toBeTruthy();
+
+    const res = await joiner.call("bellman_invite", {
+      session_id: sessionId, member_id: String(confirmed.data.member_id),
     });
     expect(res.isError).toBe(true);
 
-    const after = (await h.store.getSession(p.sessionId))!;
+    const after = (await h.store.getSession(sessionId))!;
     expect(after.joinCode).toBe(before.joinCode);
     expect(after.events.length).toBe(before.events.length);
   });
@@ -979,33 +1021,34 @@ stay ungated for a seat with no verbs at all."
 ### Task 5: Make the words true
 
 **Files:**
-- Modify: `src/server.ts:253` (`bellman_start`), `:364` (`bellman_connect`), `:428` (`bellman_confirm`) — the three descriptions
-- Modify: `src/server.ts:100-133` — the `roomPreview` docblock
-- Modify: `src/server.ts:139-141` — `your_verbs` reads through `verbsOfRole`
-- Modify: `src/server.ts:599` — `bellman_send`'s `Errors:` line
-- Modify: `src/server.ts:518` — `bellman_invite`'s `Errors:` line
-- Modify: `src/server.ts:510` — `bellman_invite`'s **opening sentence**, which still says the code is for "a session you created"
-- Modify: `tests/tools/surface.test.ts:112-127` — invert the pin
-- Modify: `README.md:21`, `:26` ("Creator only."), `:31`, `:183-185`
+All line numbers below are **stale by design** — Tasks 2 and 3 shifted `src/server.ts` by about 24 lines. Locate each edit with the grep in the table that follows, not with these numbers.
 
-**The full set of statements this PR makes false.** Tasks 2 and 3 each found one the earlier drafts had missed, so this list is the authority — do not trust a grep alone to find them:
+- Modify: `src/server.ts` — the three tool descriptions (`bellman_start`, `bellman_connect`, `bellman_confirm`)
+- Modify: `src/server.ts` — the `roomPreview` docblock's final paragraph
+- Modify: `src/server.ts` — `your_verbs` reads through `verbsOfRole`
+- Modify: `src/server.ts` — `bellman_send`'s `Errors:` line
+- Modify: `src/server.ts` — `bellman_invite`'s `Errors:` line
+- Modify: `src/server.ts` — `bellman_invite`'s **opening sentence**, which still says the code is for "a session you created"
+- Modify: `tests/tools/surface.test.ts` — invert the enforcement pin, and its comment citing the deleted trip-wire
+- Modify: `README.md` — four places (see the table)
 
-| Location | Stale claim |
-|---|---|
-| `src/server.ts:253` | `bellman_start`: "not yet enforced at call time" |
-| `src/server.ts:364` | `bellman_connect`: "declared rules … stated intent" |
-| `src/server.ts:428` | `bellman_confirm`: "declared rules, not yet enforced" |
-| `src/server.ts:510` | `bellman_invite`: "a session you created" — now any seat holding `invite` |
-| `src/server.ts:518` | `bellman_invite` `Errors:`: "only the creator can issue" |
-| `src/server.ts:599` | `bellman_send` `Errors:`: capability errors only, no mention of verbs |
-| `src/server.ts:131-134` | `roomPreview` docblock: "Nothing enforces them at call time until #2" |
-| `tests/tools/surface.test.ts:112-115` | comment cites "the trip-wire in exchange.test.ts", deleted in Task 2 |
-| `README.md:21` | "verbs are declared, not yet enforced" |
-| `README.md:26` | "Creator only." on `bellman_invite` |
-| `README.md:31` | "verbs are declared, not yet enforced" |
-| `README.md:183-185` | "the server records them and shows them as the creator's stated intent" |
+**The full set of statements this PR makes false.** Tasks 2 and 3 each found one the earlier drafts had missed, so this table is the authority — do not trust a single grep, because these claims paraphrase each other rather than repeating one phrase.
 
-Nothing in the suite pins `server.ts:510` or `README.md:26`, so only this table catches them.
+**Keyed on text, not line numbers, on purpose.** Task 2's and Task 3's own edits moved every anchor in `src/server.ts` down by about 24 lines, which silently invalidated the first version of this table. Find each row with the grep given; the string is unique in its file.
+
+| File | Find with | Stale claim |
+|---|---|---|
+| `src/server.ts` | `grep -n 'not yet enforced at call time' src/server.ts` | three tool descriptions — `bellman_start`, `bellman_connect`, `bellman_confirm` |
+| `src/server.ts` | `grep -n 'a session you created' src/server.ts` | `bellman_invite` opening: authority is now any seat holding `invite` |
+| `src/server.ts` | `grep -n 'only the creator can issue' src/server.ts` | `bellman_invite` `Errors:` |
+| `src/server.ts` | `grep -n 'capability errors name the member' src/server.ts` | `bellman_send` `Errors:` — mentions capabilities only, never verbs |
+| `src/server.ts` | `grep -n 'Nothing enforces them at call time' src/server.ts` | `roomPreview` docblock |
+| `tests/tools/surface.test.ts` | `grep -n 'trip-wire in exchange.test.ts' tests/tools/surface.test.ts` | comment cites the trip-wire Task 2 deleted |
+| `README.md` | `grep -n 'not yet enforced' README.md` | two rows — the `bellman_connect` table row and the two-phase connect bullet |
+| `README.md` | `grep -n 'Creator only' README.md` | the `bellman_invite` table row |
+| `README.md` | `grep -n "creator's stated intent" README.md` | the verbs paragraph |
+
+**Nothing in the suite pins `a session you created` or `Creator only.`** Only this table catches those two, so work the table row by row rather than relying on Step 8's sweep.
 
 **Interfaces:**
 - Consumes: `verbsOfRole` from `./roles.js` (Task 1).
@@ -1098,6 +1141,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
 ```
 Errors: issuing needs the `invite` verb and revoking needs `revoke`; a room whose manifest gives nobody `invite` cannot be reopened by anyone. A full session refuses (the code could not be used).
 ```
+
+Add one sentence to the body, after the existing "Issuing RETIRES the previous code immediately" paragraph. Task 3's reviewer noticed the two verbs overlap and that nothing says so:
+
+```
+So `invite` already invalidates an outstanding code, because issuing retires it. `revoke` is the narrower authority: close the door and leave it closed. A seat holding `invite` but not `revoke` can still cut off a code someone is holding, by minting a new one.
+```
+
+This is disclosure, not a behavior change — a human reading `your_verbs` sees `invite` without `revoke` and could reasonably assume a live code is safe from that seat. It is not.
 
 - [ ] **Step 5: Route `your_verbs` through the accessor and fix the docblock**
 

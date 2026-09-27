@@ -392,7 +392,7 @@ describe("plan resolution", () => {
    * belongs to nobody — org scoping and the audit log both key off orgId — so
    * honouring it would hand out team limits with nothing to scope them to.
    */
-  it("skips a structurally impossible grant rather than honouring it", async () => {
+  it("skips a grant the admin route could never have written", async () => {
     await config.plans!.putGrant(grant({ plan: "team", role: "admin", orgId: null }));
 
     expect(await signedInIdentity()).toMatchObject({ plan: "free", role: "member" });

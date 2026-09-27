@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
+One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can reissue a code to add members later.
 
 ## Why MCP as the rendezvous
 

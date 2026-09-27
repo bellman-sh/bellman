@@ -72,9 +72,12 @@ export const MAX_PAYLOAD_DEPTH = 64;
  * payloads agree, which is the collision this whole module exists to avoid.
  */
 export class PayloadTooDeepError extends Error {
-  constructor(readonly depth: number) {
+  readonly depth: number;
+
+  constructor(depth: number) {
     super(`payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels`);
     this.name = "PayloadTooDeepError";
+    this.depth = depth;
   }
 }
 

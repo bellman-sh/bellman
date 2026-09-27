@@ -75,6 +75,27 @@ describe("idempotencyKey", () => {
     expect(idempotencyKey("m_aaaa1111", "send-1"))
       .toBe(idempotencyKey("m_aaaa1111", "send-1"));
   });
+
+  /**
+   * The layout itself, not just its properties. Every key already in storage
+   * spells this, so changing the format strands them: the rows stay, nothing
+   * resolves to them, and every retry in flight reads as a fresh send. Same
+   * hazard as the print's canonicalization, one level down.
+   */
+  it("spells the documented layout", () => {
+    expect(idempotencyKey("m_1a2b3c4d", "send-1")).toBe("ik:m_1a2b3c4d:send-1");
+  });
+
+  /**
+   * The client's key is the raw remainder of that layout, never encoded. It may
+   * hold a colon, a percent sign or a space, and it must come back out exactly
+   * as it went in: a stored key that held one stops resolving the day this
+   * changes. The layout test's key has nothing that needs encoding, so it
+   * cannot see this.
+   */
+  it("keeps the client's key verbatim, awkward characters included", () => {
+    expect(idempotencyKey("m_1a2b3c4d", "a:b%3A c/D")).toBe("ik:m_1a2b3c4d:a:b%3A c/D");
+  });
 });
 
 describe("fingerprint", () => {

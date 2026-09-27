@@ -252,8 +252,19 @@ describe("bellman_send with an idempotency_key", () => {
       type: "message", payload: { text: "from the creator" }, idempotency_key: KEY,
     });
 
+    // isError FIRST, and it is what makes this test able to fail. Under a
+    // session-wide namespace the second send collides on the shared key with a
+    // different payload and comes back a conflict — and on an error `data` is
+    // {}, which makes `data.replayed` undefined and `data.cursor` undefined.
+    // Without these two lines every assertion below passes against exactly the
+    // namespace this test exists to rule out.
+    expect(theirs.isError, theirs.text).toBe(false);
+    expect(mine.isError, mine.text).toBe(false);
+
     expect(theirs.data.replayed).toBeUndefined();
     expect(mine.data.replayed).toBeUndefined();
+    expect(typeof mine.data.cursor).toBe("number");
+    expect(typeof theirs.data.cursor).toBe("number");
     expect(mine.data.cursor).not.toBe(theirs.data.cursor);
   });
 

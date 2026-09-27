@@ -15,7 +15,7 @@
  * declared as the default.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { Harness, DEV_KEY } from "../helpers/harness.js";
+import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, member, roomManifest, session } from "../helpers/fixtures.js";
 
@@ -28,8 +28,8 @@ const ALL_VERBS = ["send", "invite", "revoke", "request_actions", "respond_actio
 
 /**
  * A manifest whose joiner seat holds exactly `can`. A pair unless `mode` says
- * otherwise; the invite tests ask for a swarm, because a pair is full once the
- * joiner arrives, with its join code consumed and no capacity left.
+ * otherwise; the tests that need a free seat and a live join code ask for a swarm,
+ * because a pair is full once the joiner arrives, with its code consumed.
  */
 function seat(can: string[], room = "verb-guards", mode: "pair" | "swarm" = "pair") {
   return {
@@ -435,31 +435,70 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
 // role says what you may do inside one session. An org admin is not
 // automatically anything in a room.
 describe("platform role and room role are different things", () => {
-  it("refuses an org admin seated in a verbless role", async () => {
-    // DEV_KEY.jesse is a team-plan ADMIN in org_codenerd. DEV_KEY.peer is a
-    // free-plan member, and free plans allow only `pair`, so peer creates.
-    const p = await pairUp(h, {
-      creatorKey: DEV_KEY.peer,
-      joinerKey: DEV_KEY.jesse,
-      manifest: seat([], "admin-holds-nothing"),
+  /**
+   * A pair created by `peer` and joined by `jesse`, the org admin, who lands in
+   * `manifest`'s default role. The admin has to be the JOINER: the creator takes
+   * `creator_role`, and it is the default seat that these tests declare short of a
+   * verb. `peer` is on the free plan, so the room is a pair (a swarm needs pro or
+   * team). Two facts make these tests about ADMINS, and both are asserted rather
+   * than assumed: if jesse stopped being an admin they would prove nothing about
+   * admins, and if peer moved to another org they would prove something about a
+   * FOREIGN admin, which an org-scoped exemption would never touch.
+   */
+  async function adminJoins(manifest: Record<string, unknown>) {
+    const p = await pairUp(h, { creatorKey: DEV_KEY.peer, joinerKey: DEV_KEY.jesse, manifest });
+    expect(p.joiner.identity.role, "the joiner must be an org admin").toBe("admin");
+    expect(p.creator.identity.orgId, "the creator must belong to an org").not.toBeNull();
+    expect(p.joiner.identity.orgId, "the admin must share the creator's org").toBe(p.creator.identity.orgId);
+    return p;
+  }
+
+  // Every KIND of send, not just `message`. The scan below cannot see every way to
+  // write an exemption, and these behavioural tests are what backs it: an exemption
+  // for one kind ("admins may approve") would otherwise slip past four of the five.
+  it.each([
+    ["message", "send", { text: "I administer this org" }],
+    ["artifact", "send", { name: "admin.diff", content: "x" }],
+    ["brief_update", "send", brief({ goal: "Restated with administrative authority" })],
+    ["action_request", "request_actions", { action: "rerun CI as the org admin" }],
+    ["action_response", "respond_actions", { approved: true }],
+  ] as const)("refuses an org admin's %s in a seat holding nothing", async (type, verb, payload) => {
+    const p = await adminJoins(seat([], "admin-holds-nothing"));
+    // Each row is built so that a bypassed guard would genuinely SUCCEED and flip
+    // isError, rather than be refused by something else: the creator has granted
+    // receive_messages and request_actions (pairUp's default), the brief is a valid
+    // one, and there is a real request for the response to answer.
+    const asked = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { action: "rerun CI" },
     });
-    expect(p.joiner.identity.role).toBe("admin");
+    expect(asked.isError, asked.text).toBe(false);
 
     const res = await p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "message", payload: { text: "I administer this org" },
+      type, payload, ...(type === "action_response" ? { ref_id: String(asked.data.cursor) } : {}),
     });
 
-    expect(res.isError).toBe(true);
-    expect(res.text).toContain('your role "guest" does not hold the verb "send"');
+    expect(res.isError, res.text).toBe(true);
+    expect(res.text).toContain(`your role "guest" does not hold the verb "${verb}"`);
+    expect(res.text).toContain("(it holds: none)");
   });
 
   it("refuses an org admin's invite in a room whose seat lacks it", async () => {
-    const p = await pairUp(h, {
-      creatorKey: DEV_KEY.peer,
-      joinerKey: DEV_KEY.jesse,
-      manifest: seat(["send"], "admin-cannot-invite"),
+    const p = await adminJoins(seat(["send"], "admin-cannot-invite"));
+    // The creator leaves, which frees a seat in the pair. In a full pair a bypassed
+    // guard would be refused by the capacity check instead, isError would stay true
+    // on its own, and only the text assertion below could tell the two refusals
+    // apart. With a seat free, a bypass would really mint. (seat()'s swarm is not
+    // available here: peer is on the free plan, and a free plan cannot start one.)
+    const left = await p.creator.call("bellman_leave", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
     });
+    expect(left.isError, left.text).toBe(false);
+    const before = (await h.store.getSession(p.sessionId))!;
+    expect(before.members.filter((m) => m.leftAt === null).length, "the room must have a free seat")
+      .toBeLessThan(before.maxMembers);
+
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
     });
@@ -473,11 +512,7 @@ describe("platform role and room role are different things", () => {
     // Without this, a revoke-only exemption for admins would be caught by nothing
     // but the ghost-seat test below, and only because that seat happens to belong
     // to the admin.
-    const p = await pairUp(h, {
-      creatorKey: DEV_KEY.peer,
-      joinerKey: DEV_KEY.jesse,
-      manifest: seat(["send", "invite"], "admin-cannot-revoke"),
-    });
+    const p = await adminJoins(seat(["send", "invite"], "admin-cannot-revoke"));
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId, revoke: true,
     });
@@ -543,6 +578,9 @@ describe("a seat naming no role holds nothing", () => {
     }));
 
     for (const [tool, args] of [
+      // In this one-member room a bypassed send would still be refused ("no other
+      // active members yet"), so for this row the role text below is what tells the
+      // guard from that check; isError alone cannot.
       ["bellman_send", { type: "message", payload: { text: "x" } }],
       ["bellman_invite", {}],
       ["bellman_invite", { revoke: true }],
@@ -564,10 +602,22 @@ describe("sync and leave are never gated", () => {
   it("lets a wholly verbless seat read the room and leave it", async () => {
     const p = await pairUp(h, { manifest: seat([]) });
 
+    // Something to read. A fresh pair holds only the joiner's own member_joined, and
+    // sync leaves out the caller's own events, so without this a gate that answered
+    // "nothing new" instead of refusing would still pass a test about reading.
+    const said = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "message", payload: { text: "the first word in this room" },
+    });
+    expect(said.isError, said.text).toBe(false);
+
     const synced = await p.joiner.call("bellman_sync", {
       session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
     });
     expect(synced.isError, synced.text).toBe(false);
+    expect(envelopes(synced.data.events).map((e) => e.data)).toContainEqual(
+      expect.objectContaining({ type: "message", payload: { text: "the first word in this room" } }),
+    );
 
     const left = await p.joiner.call("bellman_leave", {
       session_id: p.sessionId, member_id: p.joinerMemberId,

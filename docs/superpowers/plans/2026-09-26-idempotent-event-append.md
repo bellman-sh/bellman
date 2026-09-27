@@ -457,7 +457,7 @@ In `tests/helpers/store-contract.ts`, after the `it("throws when appending to an
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: FAIL — `store.appendEventOnce is not a function`, 13 failures.
+Expected: FAIL — `store.appendEventOnce is not a function`, 12 failures.
 
 - [ ] **Step 3: Add `EventWrite` and the interface method**
 
@@ -600,7 +600,7 @@ Replace `appendEvent` with the pair below, extracting the shared primitive:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: PASS, including all 13 new cases.
+Expected: PASS, including all 12 new cases.
 
 - [ ] **Step 6: Prove the race assertion can fail**
 
@@ -1313,7 +1313,7 @@ Replace the `#12` bullet under **Next Steps** with:
 ```markdown
 - #12: run the store contract suite against `DurableObjectStore`. It is the only
   store serving production and is verified solely by the smoke run plus
-  `tests/store-do-wiring.test.ts`. #79 added 13 contract cases that MemoryStore
+  `tests/store-do-wiring.test.ts`. #79 added 12 contract cases that MemoryStore
   alone proves.
 ```
 

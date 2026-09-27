@@ -966,6 +966,11 @@ describe("bellman_send with an idempotency_key", () => {
       });
     }
 
+    // pairUp uses DEV_KEY.jesse and DEV_KEY.peer, both in org_codenerd. If
+    // this comes back empty rather than 1, check whether `audit()` records a
+    // sent_message for this session at all before assuming the dedup failed —
+    // an org-less session has nowhere to write one, and that would be a
+    // different bug than the one under test.
     const entries = await h.store.auditForOrg("org_codenerd", 50);
     expect(entries.filter((e) => e.action === "sent_message")).toHaveLength(1);
   });
@@ -1109,8 +1114,19 @@ describe("bellman_send with an idempotency_key", () => {
       type: "message", payload: { text: "from the creator" }, idempotency_key: KEY,
     });
 
+    // isError FIRST, and it is the assertion that makes this test able to
+    // fail. Under a session-wide namespace the second send collides on the
+    // shared key with a different payload, so it comes back a conflict — and
+    // on an error `data` is {}, which makes `data.replayed` undefined and
+    // `data.cursor` undefined. Without these two lines every assertion below
+    // passes against exactly the namespace this test exists to rule out.
+    expect(theirs.isError, theirs.text).toBe(false);
+    expect(mine.isError, mine.text).toBe(false);
+
     expect(theirs.data.replayed).toBeUndefined();
     expect(mine.data.replayed).toBeUndefined();
+    expect(typeof mine.data.cursor).toBe("number");
+    expect(typeof theirs.data.cursor).toBe("number");
     expect(mine.data.cursor).not.toBe(theirs.data.cursor);
   });
 

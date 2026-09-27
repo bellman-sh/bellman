@@ -440,42 +440,6 @@ describe("send / sync / leave mechanics", () => {
 });
 
 // ---------------------------------------------------------------------------
-// TRIP-WIRE, not an invariant. bellman_start, bellman_connect, bellman_confirm and
-// the README all say a manifest's verbs are declared rules that the server does not
-// yet enforce at call time. This is what makes that sentence true, and nothing else
-// notices when it stops being. It is expected to FAIL the day #2 enforces verbs.
-// When it does, invert it and take the sentence out of those four places (the
-// pin in surface.test.ts fails too, on purpose). Do not just delete it.
-describe("a room's verbs are declared, not yet enforced", () => {
-  it("consults neither the verbs a role omits nor the verbs it lists", async () => {
-    const p = await pairUp(h, {
-      manifest: {
-        room: "declared-not-enforced",
-        mode: "pair",
-        roles: {
-          lead: { can: ["send", "invite", "revoke", "request_actions", "respond_actions"] },
-          // The joiner's seat: it omits `send` and lists `invite`.
-          guest: { can: ["invite"] },
-        },
-        default_role: "guest",
-        creator_role: "lead",
-      },
-    });
-
-    // A role that omits `send` still sends...
-    const sent = await p.joiner.call("bellman_send", {
-      session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "message", payload: { text: "sent without the send verb" },
-    });
-    expect(sent.isError, sent.text).toBe(false);
-
-    // ...and a role that lists `invite` still cannot invite. That refusal is
-    // bellman_invite's own creator-only rule. It predates manifests and reads
-    // nobody's role.
-    const invited = await p.joiner.call("bellman_invite", {
-      session_id: p.sessionId, member_id: p.joinerMemberId,
-    });
-    expect(invited.isError).toBe(true);
-    expect(invited.text).toContain("only the session creator");
-  });
-});
+// The trip-wire that lived here — "a room's verbs are declared, not yet
+// enforced" — fired as designed when #2 landed. Its replacement is
+// tests/tools/verbs.test.ts, which asserts the guards rather than their absence.

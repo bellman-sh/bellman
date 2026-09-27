@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
-import { brief } from "../helpers/fixtures.js";
+import { brief, member, roomManifest, session } from "../helpers/fixtures.js";
 
 let h: Harness;
 
@@ -416,5 +416,129 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     expect(res.text).toContain('does not hold the verb "invite"');
     // And specifically NOT the old rule, which would have let the creator through.
     expect(res.text).not.toContain("only the session creator");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D2. There are two things called "role" and they are not the same thing.
+// Identity.role ("member" | "admin") is platform authority over an org. A room
+// role says what you may do inside one session. An org admin is not
+// automatically anything in a room.
+describe("platform role and room role are different things", () => {
+  it("refuses an org admin seated in a verbless role", async () => {
+    // DEV_KEY.jesse is a team-plan ADMIN in org_codenerd. DEV_KEY.peer is a
+    // free-plan member, and free plans allow only `pair`, so peer creates.
+    const p = await pairUp(h, {
+      creatorKey: DEV_KEY.peer,
+      joinerKey: DEV_KEY.jesse,
+      manifest: seat([], "admin-holds-nothing"),
+    });
+    expect(p.joiner.identity.role).toBe("admin");
+
+    const res = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "message", payload: { text: "I administer this org" },
+    });
+
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('your role "guest" does not hold the verb "send"');
+  });
+
+  it("refuses an org admin's invite in a room whose seat lacks it", async () => {
+    const p = await pairUp(h, {
+      creatorKey: DEV_KEY.peer,
+      joinerKey: DEV_KEY.jesse,
+      manifest: seat(["send"], "admin-cannot-invite"),
+    });
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "invite"');
+  });
+
+  // The invariant behind both: no room guard consults identity.role. This is a
+  // grep, because that is the property — not any one call's outcome.
+  it("leaves identity.role used only by bellman_audit", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const hits = src.split("\n")
+      .map((line, i) => [i + 1, line] as const)
+      .filter(([, line]) => line.includes("identity.role"));
+    expect(hits.length, `identity.role at lines ${hits.map(([n]) => n).join(", ")}`).toBe(1);
+    expect(hits[0][1]).toContain("the audit log requires the admin role");
+  });
+
+  it("never names Identity in src/roles.ts's code", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../../src/roles.ts", import.meta.url), "utf8");
+    // Comments are stripped first, and must be: the docblock deliberately says
+    // "takes a Session and a Member and NOT an Identity" and "DO NOT add an
+    // Identity parameter". That warning belongs where an editor sees it, so the
+    // assertion is about the code — no import of Identity, no annotation using
+    // it — not about the prose explaining why.
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    expect(code).not.toContain("Identity");
+    // A positive control: stripping must not have eaten the whole file, or this
+    // assertion would pass against an empty string.
+    expect(code).toContain("export function denyVerb");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D5 at the tool layer. No tool path produces a seat whose roomRole names no
+// role, so this session is written straight into the store.
+describe("a seat naming no role holds nothing", () => {
+  it("refuses every gated operation", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    await h.store.createSession(session({
+      id: "qs_ghost_seat",
+      createdBy: jesse.identity.userId,
+      orgId: jesse.identity.orgId,
+      manifest: roomManifest(),
+      members: [
+        member({
+          memberId: "m_ghost",
+          userId: jesse.identity.userId,
+          label: jesse.identity.label,
+          orgId: jesse.identity.orgId,
+          roomRole: "no_such_role",
+        }),
+      ],
+    }));
+
+    for (const [tool, args] of [
+      ["bellman_send", { type: "message", payload: { text: "x" } }],
+      ["bellman_invite", {}],
+      ["bellman_invite", { revoke: true }],
+    ] as const) {
+      const res = await jesse.call(tool, {
+        session_id: "qs_ghost_seat", member_id: "m_ghost", ...args,
+      });
+      expect(res.isError, tool).toBe(true);
+      expect(res.text, tool).toContain('your role "no_such_role" does not hold the verb');
+      expect(res.text, tool).toContain("(it holds: none)");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reading is implied by membership and a member must always be able to leave, so
+// no verb gates either. A verbless seat is the case that proves it.
+describe("sync and leave are never gated", () => {
+  it("lets a wholly verbless seat read the room and leave it", async () => {
+    const p = await pairUp(h, { manifest: seat([]) });
+
+    const synced = await p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
+    });
+    expect(synced.isError, synced.text).toBe(false);
+
+    const left = await p.joiner.call("bellman_leave", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(left.isError, left.text).toBe(false);
   });
 });

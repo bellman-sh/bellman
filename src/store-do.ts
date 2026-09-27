@@ -5,7 +5,8 @@ import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
-import type { BellmanStore, MemberPatch } from "./store.js";
+import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
+import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 
 /**
@@ -75,8 +76,13 @@ export class SessionDO extends DurableObject {
    * a log whose whole job is not to drop messages, and silent: the cursors stay
    * contiguous, so nothing downstream can tell.
    */
-  private async writeEvent(e: SessionEvent): Promise<void> {
-    await this.ctx.storage.put<unknown>({ [eventKey(e.cursor)]: e, cursor: e.cursor });
+  private async writeEvent(
+    e: SessionEvent,
+    extra: Record<string, unknown> = {}
+  ): Promise<void> {
+    await this.ctx.storage.put<unknown>({
+      [eventKey(e.cursor)]: e, cursor: e.cursor, ...extra,
+    });
   }
 
   async createSession(s: Session): Promise<void> {
@@ -162,6 +168,45 @@ export class SessionDO extends DurableObject {
     await this.writeEvent(event);
     this.wake(event);
     return event;
+  }
+
+  /**
+   * Atomic without a transaction: the input gate holds every other request to
+   * this object for the duration of one invocation, which is the property #71
+   * relied on for the frozen guard. The awaits below are inside that gate.
+   */
+  async appendEventOnce(
+    e: Omit<SessionEvent, "cursor" | "at">,
+    key: string
+  ): Promise<EventWrite> {
+    const s = await this.stored();
+    if (!s) throw new Error("Unknown session");
+
+    const storageKey = idempotencyKey(e.fromMemberId, key);
+    const record = await this.ctx.storage.get<IdempotencyRecord>(storageKey);
+    const print = fingerprint(e);
+
+    if (record) {
+      if (record.print !== print) return { outcome: "conflict" };
+      const original = await this.ctx.storage.get<SessionEvent>(eventKey(record.cursor));
+      // A key naming a cursor with no event is a storage bug, not a replay.
+      if (!original) {
+        throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+      }
+      return { outcome: "replayed", event: original };
+    }
+
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+
+    const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
+    // The key row joins the event and the cursor in one put, for the reason
+    // writeEvent gives carried one step further: committed separately, an
+    // interruption leaves the event stored with no key naming it, and the
+    // retry that follows appends the duplicate this method exists to prevent.
+    const stored: IdempotencyRecord = { cursor: event.cursor, print };
+    await this.writeEvent(event, { [storageKey]: stored });
+    this.wake(event);
+    return { outcome: "appended", event };
   }
 
   async eventsAfter(cursor: number): Promise<SessionEvent[]> {
@@ -594,6 +639,14 @@ export class DurableObjectStore implements BellmanStore {
     e: Omit<SessionEvent, "cursor" | "at">
   ): Promise<SessionEvent | null> {
     return this.session(sessionId).appendEvent(e);
+  }
+
+  async appendEventOnce(
+    sessionId: string,
+    e: Omit<SessionEvent, "cursor" | "at">,
+    key: string
+  ): Promise<EventWrite> {
+    return this.session(sessionId).appendEventOnce(e, key);
   }
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {

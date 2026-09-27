@@ -117,6 +117,17 @@ function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
 }
 
 /**
+ * A session row as it is written today: a manifest, roomRole on members, and
+ * events under their own keys. legacyRow deliberately lacks the manifest, so
+ * hydrateStoredSession reads it as gone — which is right for the guard tests
+ * and useless for anything that needs the session to exist.
+ */
+function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
+  const { events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE, ...over });
+  return rest;
+}
+
+/**
  * A DurableObjectStore over real SessionDO and RegistryDO instances on fake
  * storage, with the legacy session already stored and its join code already
  * registered, as a session created just before manifests shipped would be.
@@ -292,5 +303,88 @@ describe("negative control: the same calls with the guard removed", () => {
     const rows = viaAlarm.legacyStorage.snapshot();
     expect(rows.session).toMatchObject({ closed: true, joinCode: null });
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+});
+
+/**
+ * appendEventOnce inside the real SessionDO. The contract suite proves these
+ * semantics for MemoryStore only (#12 is the work to point it here), so the
+ * parts that are this object's own — the key row, and its landing in the same
+ * put as the event — are pinned here.
+ */
+describe("SessionDO.appendEventOnce", () => {
+  const keyed = (over: Record<string, unknown> = {}) => ({
+    type: "message" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+    fromLabel: "jesse", payload: { text: "once" }, refId: null, ...over,
+  });
+
+  it("appends once and replays the same cursor", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+
+    const first = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    const again = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    expect(first.outcome).toBe("appended");
+    expect(again.outcome).toBe("replayed");
+    expect(again.outcome === "replayed" && again.event.cursor).toBe(1);
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(1);
+  });
+
+  it("refuses a key reused for different content", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    const clash = await store.appendEventOnce(
+      LEGACY_ID, keyed({ payload: { text: "different" } }), "send-0001",
+    );
+
+    expect(clash.outcome).toBe("conflict");
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(1);
+  });
+
+  it("returns frozen for a fresh key and replays a written one", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    await store.freezeSession(LEGACY_ID, Date.now());
+
+    expect((await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001")).outcome)
+      .toBe("replayed");
+    expect((await store.appendEventOnce(LEGACY_ID, keyed({ payload: { text: "new" } }), "send-0002")).outcome)
+      .toBe("frozen");
+  });
+
+  /**
+   * The key row, the event and the cursor commit together. Committed
+   * separately, an interruption between them leaves the event stored with no
+   * key naming it, and the retry that follows appends a second one — the
+   * duplicate this method exists to prevent. writeEvent already makes this
+   * argument for the event and the cursor; the key joins them for the same
+   * reason, so one `put` is the assertion.
+   */
+  it("writes the key row in the same put as the event", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    // One batched put of three entries: the event, the cursor and the key.
+    expect(legacyStorage.writes - before).toBe(3);
+    const rows = legacyStorage.snapshot();
+    const ik = Object.keys(rows).filter((k) => k.startsWith("ik:"));
+    expect(ik).toHaveLength(1);
+    expect(rows[ik[0]]).toMatchObject({ cursor: 1 });
+  });
+
+  it("namespaces the key row per member", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    await store.appendEventOnce(
+      LEGACY_ID, keyed({ fromMemberId: "m_joiner", payload: { text: "mine" } }), "send-0001",
+    );
+
+    expect(Object.keys(legacyStorage.snapshot()).filter((k) => k.startsWith("ik:")))
+      .toHaveLength(2);
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(2);
   });
 });

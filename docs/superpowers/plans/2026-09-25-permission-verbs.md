@@ -1219,10 +1219,14 @@ seat holds.
 - [ ] **Step 8: Verify no stale promise survives**
 
 ```bash
-grep -rn "not yet enforced\|stated intent\|declared rules\|until #2" src/ tests/ README.md
+grep -rn "not yet enforced\|stated intent\|declared rules\|until #2" src/ README.md
 ```
 
 Expected: no output.
+
+**`tests/` is excluded, and must be.** Step 1's new pin asserts `not.toContain("not yet enforced")` and `not.toContain("stated intent")`, so it necessarily contains both literals — a sweep including `tests/` can never come back empty. `docs/` is excluded for the same kind of reason: the design and this plan quote the old sentences to explain what changed.
+
+This sweep is a backstop, not the authority. The table above is the authority, because two of its rows are pinned by no test and matched by no phrase in this grep.
 
 - [ ] **Step 9: Run the full suite and commit**
 

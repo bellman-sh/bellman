@@ -984,8 +984,28 @@ stay ungated for a seat with no verbs at all."
 - Modify: `src/server.ts:139-141` — `your_verbs` reads through `verbsOfRole`
 - Modify: `src/server.ts:599` — `bellman_send`'s `Errors:` line
 - Modify: `src/server.ts:518` — `bellman_invite`'s `Errors:` line
+- Modify: `src/server.ts:510` — `bellman_invite`'s **opening sentence**, which still says the code is for "a session you created"
 - Modify: `tests/tools/surface.test.ts:112-127` — invert the pin
-- Modify: `README.md:21`, `:31`, `:183-185`
+- Modify: `README.md:21`, `:26` ("Creator only."), `:31`, `:183-185`
+
+**The full set of statements this PR makes false.** Tasks 2 and 3 each found one the earlier drafts had missed, so this list is the authority — do not trust a grep alone to find them:
+
+| Location | Stale claim |
+|---|---|
+| `src/server.ts:253` | `bellman_start`: "not yet enforced at call time" |
+| `src/server.ts:364` | `bellman_connect`: "declared rules … stated intent" |
+| `src/server.ts:428` | `bellman_confirm`: "declared rules, not yet enforced" |
+| `src/server.ts:510` | `bellman_invite`: "a session you created" — now any seat holding `invite` |
+| `src/server.ts:518` | `bellman_invite` `Errors:`: "only the creator can issue" |
+| `src/server.ts:599` | `bellman_send` `Errors:`: capability errors only, no mention of verbs |
+| `src/server.ts:131-134` | `roomPreview` docblock: "Nothing enforces them at call time until #2" |
+| `tests/tools/surface.test.ts:112-115` | comment cites "the trip-wire in exchange.test.ts", deleted in Task 2 |
+| `README.md:21` | "verbs are declared, not yet enforced" |
+| `README.md:26` | "Creator only." on `bellman_invite` |
+| `README.md:31` | "verbs are declared, not yet enforced" |
+| `README.md:183-185` | "the server records them and shows them as the creator's stated intent" |
+
+Nothing in the suite pins `server.ts:510` or `README.md:26`, so only this table catches them.
 
 **Interfaces:**
 - Consumes: `verbsOfRole` from `./roles.js` (Task 1).
@@ -1059,7 +1079,13 @@ with:
 The room's verbs are enforced by the server: your_verbs is what this seat may do, and nothing else.
 ```
 
-- [ ] **Step 4: Rewrite the two `Errors:` lines**
+- [ ] **Step 4: Rewrite `bellman_invite`'s opening sentence and the two `Errors:` lines**
+
+`src/server.ts:510` still opens with "Mint a fresh join code for a session you created". Creating the room is no longer what authorises this. Replace with:
+
+```
+Mint a fresh join code for a room whose seat gives you the `invite` verb — at any time, for as long as the session lives.
+```
 
 `src/server.ts:599`, `bellman_send`:
 
@@ -1115,7 +1141,9 @@ Expected: PASS.
 
 `README.md:21`, the `bellman_connect` table row — replace `verbs are declared, not yet enforced` with `verbs are enforced by the server`.
 
-`README.md:31`, the two-phase connect bullet — the same replacement.
+`README.md:26`, the `bellman_invite` table row — replace `Creator only.` with `Needs the `invite` verb (`revoke` to close the door).` The creator-only rule is gone; a manifest may seat a joiner with `invite`, and a room whose manifest gives nobody `invite` cannot be reopened by anyone.
+
+`README.md:31`, the two-phase connect bullet — the same replacement as `:21`.
 
 `README.md:183-185`, replace:
 

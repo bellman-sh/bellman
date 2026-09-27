@@ -9,7 +9,7 @@ import {
   generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
 } from "./codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
-import { denyVerb } from "./roles.js";
+import { denyVerb, verbsOfRole } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
 const SERVER_NAME = "bellman-mcp-server";
@@ -152,10 +152,11 @@ function publicMember(m: Member) {
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
  *
- * The verbs are declared rules. Nothing enforces them at call time until #2, and
- * bellman_start, bellman_connect and bellman_confirm say so in their descriptions
- * (tests/tools/surface.test.ts pins that). When #2 enforces them, those three
- * sentences and the README's go with it.
+ * `your_verbs` goes through verbsOfRole — the same accessor the guards in
+ * bellman_send and bellman_invite call — so what a joiner is SHOWN and what is
+ * ENFORCED are one computation and cannot drift apart. Do not inline the lookup
+ * back into this function: a preview that over-promised by a single verb is the
+ * failure this whole design exists to prevent.
  */
 function roomPreview(session: Session, viewerRole: string) {
   const m = session.manifest;
@@ -170,7 +171,7 @@ function roomPreview(session: Session, viewerRole: string) {
     preset: m.preset,
     mode: m.mode,
     your_role: viewerRole,
-    your_verbs: m.roles[viewerRole]?.can ?? [],
+    your_verbs: verbsOfRole(m, viewerRole),
     creator_role: m.creatorRole,
     roles,
     text: untrusted(
@@ -275,7 +276,7 @@ Args:
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions.
-    Verbs are declared, not yet enforced at call time: a role's list states your intent, not a guarantee.
+    Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
@@ -386,7 +387,7 @@ Args:
   - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
-The room's verbs are the creator's declared rules, not yet enforced at call time: read them as stated intent, not a guarantee.
+The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent. A call outside it is refused with an error naming the verb you lack.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
       annotations: {
@@ -450,7 +451,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
 
 Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
-The room's verbs are declared rules, not yet enforced at call time: stated intent, not a guarantee.
+The room's verbs are enforced by the server: your_verbs is what this seat may do, and nothing else.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       inputSchema: {
@@ -531,16 +532,18 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
     "bellman_invite",
     {
       title: "Issue a new Bellman join code",
-      description: `Mint a fresh join code for a session you created — at any time, for as long as the session lives.
+      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives.
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
 Issuing RETIRES the previous code immediately — anyone still holding it can no longer join. That is also how you revoke: pass revoke=true to kill the current code without minting another.
 
+So \`invite\` already invalidates an outstanding code, because issuing retires it. \`revoke\` is the narrower authority: close the door and leave it closed. A seat holding \`invite\` but not \`revoke\` can still cut off a code someone is holding, by minting a new one.
+
 Args: session_id, member_id (yours), revoke (default false)
 Returns: { join_code, join_code_expires_at, replaced_previous } or { revoked: true }
 Members see an invite_issued / invite_revoked event, so reopening the door is never silent.
-Errors: only the creator can issue; a full session refuses (the code could not be used).`,
+Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
@@ -624,7 +627,7 @@ Args:
   - ref_id: required for action_response
 
 Returns: { delivered_to, cursor }
-Errors: capability errors name the member lacking the grant.`,
+Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),

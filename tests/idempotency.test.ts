@@ -3,7 +3,12 @@
  * reached — it imports `cloudflare:workers`. Same reason grant-index.ts exists.
  */
 import { describe, it, expect } from "vitest";
-import { fingerprint, idempotencyKey } from "../src/idempotency.js";
+import {
+  fingerprint,
+  idempotencyKey,
+  MAX_PAYLOAD_DEPTH,
+  PayloadTooDeepError,
+} from "../src/idempotency.js";
 import type { SessionEvent } from "../src/types.js";
 
 const draft = (over: Partial<Omit<SessionEvent, "cursor" | "at">> = {}) => ({
@@ -15,6 +20,28 @@ const draft = (over: Partial<Omit<SessionEvent, "cursor" | "at">> = {}) => ({
   refId: null as string | null,
   ...over,
 });
+
+/**
+ * `levels` containers deep around `leaf`, each made by `wrap`. Built in a loop
+ * because the tests must land exactly on the bound, which a literal cannot.
+ */
+const nest = (levels: number, wrap: (inner: unknown) => unknown, leaf: unknown = 1): unknown => {
+  let value = leaf;
+  for (let i = 0; i < levels; i++) value = wrap(value);
+  return value;
+};
+const inObject = (inner: unknown) => ({ a: inner });
+const inArray = (inner: unknown) => [inner];
+
+/** What `fn` throws, or undefined if it returns normally. */
+const thrownBy = (fn: () => unknown): unknown => {
+  try {
+    fn();
+  } catch (e) {
+    return e;
+  }
+  return undefined;
+};
 
 describe("idempotencyKey", () => {
   it("namespaces by member, so two members can use the same key", () => {
@@ -29,6 +56,19 @@ describe("idempotencyKey", () => {
    */
   it("keeps a colon in the member id out of the encoding", () => {
     expect(idempotencyKey("m_a:b", "x")).not.toBe(idempotencyKey("m_a", "b:x"));
+  });
+
+  /** The separator, its escape, and look-alikes: every pair must map to its own key. */
+  it("keeps distinct (member, key) pairs distinct, colons and percent signs included", () => {
+    const members = ["m_a", "m_a:b", "m_a%3Ab", "m_a_b", ":", "%3A", ""];
+    const keys = ["x", "b:x", ":", "%3A", "", "ik:x"];
+    const seen = new Map<string, string>();
+    for (const m of members) for (const k of keys) {
+      const id = idempotencyKey(m, k);
+      const pair = JSON.stringify([m, k]);
+      expect(seen.get(id), `${pair} collides with ${seen.get(id)}`).toBeUndefined();
+      seen.set(id, pair);
+    }
   });
 
   it("is stable for the same pair", () => {
@@ -53,7 +93,7 @@ describe("fingerprint", () => {
     expect(fingerprint(a)).toBe(fingerprint(b));
   });
 
-  /** REVIEW FOCUS 3: array order is content, not layout. */
+  /** Array order is content, not layout. */
   it("does not ignore array order", () => {
     expect(fingerprint(draft({ payload: { steps: ["a", "b"] } })))
       .not.toBe(fingerprint(draft({ payload: { steps: ["b", "a"] } })));
@@ -64,7 +104,20 @@ describe("fingerprint", () => {
       .toBe(fingerprint(draft({ payload: { rows: [{ b: 2, a: 1 }] } })));
   });
 
-  /** REVIEW FOCUS 2: payload is `unknown`. A throw here breaks every send. */
+  /**
+   * The other direction of the two sort tests. Those assert "same content in a
+   * different order is equal", which a print that discarded nested content also
+   * satisfies. A difference below the top level must change the print: a false
+   * "replay" here silently drops a real message.
+   */
+  it("differs when content differs below the top level", () => {
+    const at = (payload: unknown) => fingerprint(draft({ payload }));
+    expect(at({ a: { b: { c: { d: 1 } } } })).not.toBe(at({ a: { b: { c: { d: 2 } } } }));
+    expect(at({ rows: [{ id: 1 }] })).not.toBe(at({ rows: [{ id: 2 }] }));
+    expect(at([[1]])).not.toBe(at([[2]]));
+  });
+
+  /** Payload is `unknown`. A throw here breaks every send. */
   it("handles a payload that is not a plain object", () => {
     for (const payload of [null, "text", 42, true, [1, 2]]) {
       expect(() => fingerprint(draft({ payload }))).not.toThrow();
@@ -85,11 +138,45 @@ describe("fingerprint", () => {
     expect(fingerprint(one)).not.toBe(fingerprint(two));
   });
 
+  /**
+   * Past the bound the walk stops at the first container over it, with a typed
+   * error rather than a stack overflow. 100,000 levels is far beyond where
+   * unguarded recursion overflows, so that size also pins that the guard fires
+   * on the way down, not after. Both container kinds, so a guard that counts
+   * only one of them fails.
+   */
+  it("refuses a payload nested past the bound, with a typed error", () => {
+    for (const wrap of [inObject, inArray]) {
+      for (const levels of [MAX_PAYLOAD_DEPTH + 1, 100_000]) {
+        const refused = thrownBy(() => fingerprint(draft({ payload: nest(levels, wrap) })));
+        expect(refused).toBeInstanceOf(PayloadTooDeepError);
+        expect(refused).toMatchObject({ name: "PayloadTooDeepError", depth: MAX_PAYLOAD_DEPTH + 1 });
+      }
+    }
+  });
+
+  /**
+   * Exactly at the bound is still allowed, and the print still tells two
+   * payloads apart at the deepest level: a guard that cut the walk short, or
+   * truncated instead of throwing, would let them agree.
+   */
+  it("still fingerprints at exactly the bound, and still tells payloads apart there", () => {
+    for (const wrap of [inObject, inArray]) {
+      const at = (leaf: unknown) => fingerprint(draft({ payload: nest(MAX_PAYLOAD_DEPTH, wrap, leaf) }));
+      expect(at(1)).toBe(at(1));
+      expect(at(1)).not.toBe(at(2));
+    }
+  });
+
   it("differs when type, refId or payload differ", () => {
     const base = fingerprint(draft());
     expect(fingerprint(draft({ type: "artifact" as SessionEvent["type"] }))).not.toBe(base);
     expect(fingerprint(draft({ refId: "7" }))).not.toBe(base);
     expect(fingerprint(draft({ payload: { text: "other" } }))).not.toBe(base);
+  });
+
+  it("tells a null refId from an empty one", () => {
+    expect(fingerprint(draft({ refId: "" }))).not.toBe(fingerprint(draft({ refId: null })));
   });
 
   /**

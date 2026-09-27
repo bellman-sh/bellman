@@ -39,13 +39,48 @@ export const idempotencyKey = (memberId: string, key: string): string =>
  * `fromUserId` and `fromLabel` are left out deliberately: they come from the
  * authenticated identity rather than the caller's arguments, so including them
  * would make a relabelled identity read as a conflict on an identical retry.
+ *
+ * Equal prints mean equal JSON-serialised content, and `payload` is expected
+ * to be `JSON.parse` output: a `Date` would print as `{}`, and `-0` shares a
+ * print with `0` because JSON cannot tell them apart. A payload nested deeper
+ * than `MAX_PAYLOAD_DEPTH` throws `PayloadTooDeepError`.
+ *
+ * The print is stored, and a change to canonicalization invalidates every one
+ * already written, so retries in flight across that deploy would read as
+ * conflicts — such a change needs a deliberate migration decision, not a
+ * silent edit. There is deliberately no version prefix on the print: a tag
+ * nothing branches on would describe the breakage without preventing it.
  */
 export function fingerprint(e: Omit<SessionEvent, "cursor" | "at">): string {
   return JSON.stringify([e.type, e.fromMemberId, e.refId, canonical(e.payload)]);
 }
 
 /**
- * Sorts object keys at every depth; leaves arrays and primitives alone.
+ * Deep enough that no brief, message or artifact reaches it, and far below the
+ * stack floor of any runtime this runs on — an unguarded canonical() throws
+ * from about depth 2,120 on Node 22, and Workers' V8 differs.
+ */
+export const MAX_PAYLOAD_DEPTH = 64;
+
+/**
+ * A payload nested deeper than `MAX_PAYLOAD_DEPTH`.
+ *
+ * Typed, rather than the `RangeError` an unguarded recursion would raise: the
+ * tool layer has to tell this apart from a genuine bug to refuse the send with
+ * a message that says what to change. Thrown, never truncated — a print that
+ * silently dropped everything below some depth would make two different
+ * payloads agree, which is the collision this whole module exists to avoid.
+ */
+export class PayloadTooDeepError extends Error {
+  constructor(readonly depth: number) {
+    super(`payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels`);
+    this.name = "PayloadTooDeepError";
+  }
+}
+
+/**
+ * Sorts object keys at every depth, including those of objects inside arrays;
+ * primitives pass through.
  *
  * Sorting is not cosmetic. JSON.stringify preserves insertion order, and a
  * retrying client may rebuild its payload rather than hold the original — same
@@ -53,10 +88,15 @@ export function fingerprint(e: Omit<SessionEvent, "cursor" | "at">): string {
  * which is the one outcome that tells a client to stop retrying.
  *
  * Array order survives, because there it is content rather than layout.
+ *
+ * `depth` is the nesting level of `value`, the payload's own container being
+ * level 1. A container past MAX_PAYLOAD_DEPTH throws instead of recursing
+ * until the stack gives out; PayloadTooDeepError says why it never truncates.
  */
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
+function canonical(value: unknown, depth = 1): unknown {
   if (value === null || typeof value !== "object") return value;
+  if (depth > MAX_PAYLOAD_DEPTH) throw new PayloadTooDeepError(depth);
+  if (Array.isArray(value)) return value.map((item) => canonical(item, depth + 1));
   const source = value as Record<string, unknown>;
   // Object.create(null), not {}: for k === "__proto__" a plain object's
   // `out[k] = …` invokes the prototype setter instead of creating an own
@@ -65,6 +105,6 @@ function canonical(value: unknown): unknown {
   // replay, telling the caller the wrong message was delivered. Payloads are
   // untrusted peer content, so this is not a theoretical shape.
   const out: Record<string, unknown> = Object.create(null);
-  for (const k of Object.keys(source).sort()) out[k] = canonical(source[k]);
+  for (const k of Object.keys(source).sort()) out[k] = canonical(source[k], depth + 1);
   return out;
 }

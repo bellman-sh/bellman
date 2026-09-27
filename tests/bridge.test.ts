@@ -34,6 +34,14 @@ import { DEV_KEY } from "./helpers/harness.js";
 
 const caps = ["read_context", "receive_messages", "request_actions"];
 
+/**
+ * How a sign-in in these tests takes the credential lock. A rival reclaims it only after
+ * staleMs without a beat: long, so a stalled machine cannot make a live sign-in look dead and
+ * open the second browser these tests count. Nothing here waits on a lock that is actually
+ * dead, so the length costs nothing.
+ */
+const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 5_000 };
+
 interface Session {
   /** What Claude Code sees: the bridge's tools, plus the channel events it pushed. */
   client: Client;
@@ -799,7 +807,7 @@ describe("a connection Bellman stops accepting", () => {
         configDir: dir,
         fetchImpl: bellman.fetch,
         ports,
-        lock: { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 },
+        lock: fastLock,
         callbackTimeoutMs: 5_000,
         browser: async (url) => {
           browserOpens.push(url);
@@ -930,7 +938,7 @@ describe("a connection Bellman stops accepting", () => {
         configDir: dir,
         fetchImpl: bellman.fetch,
         ports,
-        lock: { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 },
+        lock: fastLock,
         callbackTimeoutMs: 5_000,
         browser: async (url) => {
           browserOpens.push(url);

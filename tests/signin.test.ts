@@ -575,7 +575,10 @@ describe("openBrowser", () => {
 describe("connectSignedIn", () => {
   let dir: string;
   let logs: string[];
-  const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 1_000 };
+  // A rival reclaims only after staleMs without a beat. Long, so a stalled machine cannot
+  // make a live holder look dead (see the same constant under "concurrent bridges"); nothing
+  // here waits on a lock that is actually dead, so the length costs nothing.
+  const fastLock = { waitMs: 5_000, heartbeatMs: 20, staleMs: 5_000 };
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "bellman-signin-"));

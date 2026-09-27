@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, tokensUsable, writeServer,
+  type LockHandle,
 } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
 
@@ -333,7 +334,22 @@ describe("the lock", () => {
     }
   });
 
-  const fast = { waitMs: 2_000, heartbeatMs: 20, staleMs: 200 };
+  /**
+   * Quick timings for a lock test: a short give-up wait, a quick heartbeat, and a
+   * staleMs that no stall can reach.
+   *
+   * The last is the one that matters. A test that a live holder was NOT reclaimed
+   * is a race, on one event loop, between the holder's next heartbeat and the
+   * rival's staleness check, and its margin is staleMs itself, not staleMs over
+   * heartbeatMs: a stall that long (a starved core, a GC pause, a busy CI runner)
+   * makes a correct holder look dead, and takes the test with it. This was 200, and
+   * on a machine that was merely busy it failed three of the tests below.
+   *
+   * Nothing below waits for a lock to go stale. A test that needs a stale one
+   * writes it already aged and spells out the small staleMs it means, beside it, so
+   * the length costs nothing. 60s is production's own default.
+   */
+  const fast = { waitMs: 2_000, heartbeatMs: 20, staleMs: 60_000 };
 
   it("is exclusive, and released so the next holder gets it", async () => {
     const first = await acquireLock(dir, fast);
@@ -380,14 +396,38 @@ describe("the lock", () => {
    * The regression test for the bug this design started with: a fixed age
    * threshold evicts a live holder mid-sign-in, which produces exactly the
    * second browser tab the lock exists to prevent.
+   *
+   * On a fake clock, because "however long" cannot be asked of a real one. It means
+   * holding for a large multiple of staleMs, and against real time that is a race
+   * between the holder's heartbeat and the rival's look, on one event loop: a stall
+   * a little over staleMs, with the rival's poll falling due ahead of the next beat,
+   * and a correct holder is judged dead. That was this test at staleMs 100, and it
+   * failed CI. No real staleMs closes the race; a longer one only makes the wait
+   * that much longer. Here time passes exactly as far as the test moves it and every
+   * beat fires in its turn, so 20ms against 100ms can stay as tight as it is: a
+   * holder that missed one beat in five would be reclaimed, and this would say so.
    */
   it("does not reclaim a live holder, however long it holds", async () => {
-    const holder = await acquireLock(dir, { waitMs: 2_000, heartbeatMs: 20, staleMs: 100 });
-    expect(holder).toBeDefined();
-    await new Promise((r) => setTimeout(r, 400)); // 4x staleMs
-    const thief = await acquireLock(dir, { waitMs: 150, heartbeatMs: 20, staleMs: 100 });
-    expect(thief).toBeUndefined();
-    holder!.release();
+    const timing = { heartbeatMs: 20, staleMs: 100 };
+    const holdMs = 100 * timing.staleMs; // 500 beats, with a rival looking every 100ms throughout
+    vi.useFakeTimers();
+    let holder: LockHandle | undefined;
+    try {
+      holder = await acquireLock(dir, { ...timing, waitMs: 0 });
+      expect(holder).toBeDefined();
+
+      // A rival that is already there, polling, for the whole of the hold.
+      let outcome: unknown = "waiting";
+      void acquireLock(dir, { ...timing, waitMs: holdMs }).then((lock) => { outcome = lock; });
+
+      await vi.advanceTimersByTimeAsync(holdMs - 100);
+      expect(outcome, "the rival took a live holder's lock").toBe("waiting"); // ninety-nine staleMs in
+      await vi.advanceTimersByTimeAsync(200);
+      expect(outcome, "the rival's wait ran out without it getting the lock").toBeUndefined();
+    } finally {
+      holder?.release();
+      vi.useRealTimers();
+    }
   });
 
   it("stops heartbeating once released, so nothing is left running", async () => {
@@ -701,8 +741,14 @@ describe("the lock", () => {
     expect(first.pid).toBe(process.pid);
     expect(Math.abs(Date.now() - first.heartbeat_at)).toBeLessThan(1_000); // epoch milliseconds
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    await new Promise((r) => setTimeout(r, 100)); // five heartbeat periods
-    expect(read().heartbeat_at).toBeGreaterThan(first.heartbeat_at);
+    // Waited for rather than slept past. After a stall Node drains one timer list at a time,
+    // oldest first, so a plain 100ms sleep can resolve ahead of the 20ms interval it was meant
+    // to outlast five times over, and the file is read before the beat has been written. Only
+    // the deadline is generous, so a passing run takes no longer than the beat does.
+    await vi.waitFor(
+      () => expect(read().heartbeat_at).toBeGreaterThan(first.heartbeat_at),
+      { timeout: 5_000, interval: 10 },
+    );
     lock!.release();
   });
 

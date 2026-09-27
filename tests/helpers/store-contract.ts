@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
 import { member, session } from "./fixtures.js";
 
 export function describeStoreContract(
@@ -457,6 +458,34 @@ export function describeStoreContract(
 
       const [event] = await store.eventsAfter(s.id, 0);
       expect(JSON.stringify(event)).not.toContain("send-0001");
+    });
+
+    /**
+     * A payload too deep to fingerprint must leave nothing behind.
+     *
+     * `fingerprint` throws, and `appendEventOnce` calls it before it mutates
+     * anything, so the throw has to reach the caller with no event appended and
+     * no key recorded. A store that wrote first and fingerprinted second would
+     * satisfy every other case in this block.
+     */
+    it("throws on a payload too deep to fingerprint, and writes nothing", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      let deep: unknown = { leaf: true };
+      for (let i = 0; i <= MAX_PAYLOAD_DEPTH; i++) deep = { a: deep };
+
+      await expect(
+        store.appendEventOnce(s.id, keyed({ payload: deep }), "send-0001"),
+      ).rejects.toThrow(PayloadTooDeepError);
+
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
+
+      // The key must also be free afterwards. If the failed call had recorded
+      // it, this would come back "replayed" or "conflict" rather than a fresh
+      // append — a key burned by a write that never happened.
+      const after = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      expect(after.outcome).toBe("appended");
     });
 
     // ------------------------------------------------------------- long-poll

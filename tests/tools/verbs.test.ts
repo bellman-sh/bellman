@@ -457,14 +457,37 @@ describe("platform role and room role are different things", () => {
     expect(res.text).toContain('does not hold the verb "invite"');
   });
 
-  // The invariant behind both: no room guard consults identity.role. This is a
-  // grep, because that is the property — not any one call's outcome.
+  it("refuses an org admin's revoke in a room whose seat lacks it", async () => {
+    // The seat holds `invite` but not `revoke`, so only the revoke guard can be
+    // what refuses. Revoke is its own verb; an org admin does not get it for free.
+    // Without this, a revoke-only exemption for admins would be caught by nothing
+    // but the ghost-seat test below, and only because that seat happens to belong
+    // to the admin.
+    const p = await pairUp(h, {
+      creatorKey: DEV_KEY.peer,
+      joinerKey: DEV_KEY.jesse,
+      manifest: seat(["send", "invite"], "admin-cannot-revoke"),
+    });
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, revoke: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "revoke"');
+  });
+
+  // The invariant behind all three: no room guard consults identity.role. This is
+  // a grep, because that is the property — not any one call's outcome. It reads
+  // both spellings, `identity.role` and `identity["role"]`, whitespace tolerated.
+  // It is a tripwire for the easy regression, not a proof: destructuring, optional
+  // chaining and a helper handed the identity all slip past it, so the behavioural
+  // tests above are the real guard.
   it("leaves identity.role used only by bellman_audit", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const readsRole = /identity\s*(?:\.\s*role\b|\[\s*(['"])role\1\s*\])/;
     const hits = src.split("\n")
       .map((line, i) => [i + 1, line] as const)
-      .filter(([, line]) => line.includes("identity.role"));
+      .filter(([, line]) => readsRole.test(line));
     expect(hits.length, `identity.role at lines ${hits.map(([n]) => n).join(", ")}`).toBe(1);
     expect(hits[0][1]).toContain("the audit log requires the admin role");
   });

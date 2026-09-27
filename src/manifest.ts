@@ -189,7 +189,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     roles: {
       author: role(
         ["send", "invite", "revoke", "request_actions", "respond_actions"],
-        "Brought the work. Can ask the reviewer to do things.",
+        "Brought the work. Can ask the reviewer to do things, when the reviewer allows it.",
       ),
       reviewer: role(
         ["send", "respond_actions"],

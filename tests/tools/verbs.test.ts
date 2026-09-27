@@ -26,11 +26,15 @@ afterEach(async () => { await h.close(); });
 
 const ALL_VERBS = ["send", "invite", "revoke", "request_actions", "respond_actions"];
 
-/** A pair manifest whose joiner seat holds exactly `can`. */
-function seat(can: string[], room = "verb-guards") {
+/**
+ * A manifest whose joiner seat holds exactly `can`. A pair unless `mode` says
+ * otherwise; the invite tests ask for a swarm, because a pair is full once the
+ * joiner arrives, with its join code consumed and no capacity left.
+ */
+function seat(can: string[], room = "verb-guards", mode: "pair" | "swarm" = "pair") {
   return {
     room,
-    mode: "pair",
+    mode,
     roles: { lead: { can: ALL_VERBS }, guest: { can } },
     default_role: "guest",
     creator_role: "lead",
@@ -179,10 +183,15 @@ describe("the review preset's asymmetry is enforced", () => {
 // ---------------------------------------------------------------------------
 // Review Focus. The verb guard sits ahead of every check about the message
 // (payload, occupancy, recipients, ref_id), so a seat with no authority always
-// hears about its own role. The checks about who is calling — session, closed,
-// frozen, member, left — still come first, and the last test here pins that.
-// Each of the rest passes for the wrong reason if the guard is moved further
-// down: the OTHER error appears instead, and the assertions here name it.
+// hears about its own role. Move the guard further down and each "prefers ..."
+// test fails: some OTHER error appears instead, and the assertions here name the
+// verb error. `does not compose verbs` is about composition, not ordering, and
+// stays green under a late guard.
+//
+// The checks about who is calling — session, closed, frozen, member, left — still
+// come first. Of those, only the left-member case is pinned here, by the last
+// test, which keeps that check ahead of the guard. Nothing in this file pins the
+// frozen ordering.
 describe("bellman_send — the verb guard comes first", () => {
   it("prefers the sender's missing verb over the recipients' capabilities", async () => {
     const p = await pairUp(h, {
@@ -352,7 +361,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     // green with the guard moved below the mint and prove nothing about it. Here
     // the joiner may speak but not invite, and only the verb guard stands between
     // it and a fresh code.
-    const p = await pairUp(h, { manifest: { ...seat(["send"]), mode: "swarm" } });
+    const p = await pairUp(h, { manifest: seat(["send"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
     // Keeps the setup honest: if the room is ever reshaped until it is full, this
     // fails loudly instead of going quietly vacuous.
@@ -377,7 +386,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     // guard sits relative to the revoke's work. A room that has filled has consumed
     // its code (a pair fills at two), so this is a swarm with room to spare. The
     // seat holds `invite` but not `revoke`, so the refusal can only be about revoke.
-    const p = await pairUp(h, { manifest: { ...seat(["send", "invite"]), mode: "swarm" } });
+    const p = await pairUp(h, { manifest: seat(["send", "invite"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
     // Keeps the setup honest: with no code, "unchanged" below holds of any outcome.
     expect(before.joinCode, "the room must have a live join code").not.toBeNull();
@@ -414,8 +423,9 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     });
     expect(res.isError).toBe(true);
     expect(res.text).toContain('does not hold the verb "invite"');
-    // And specifically NOT the old rule, which would have let the creator through.
-    expect(res.text).not.toContain("only the session creator");
+    // Before roles, `session.createdBy` was the only authority to reopen a room, so
+    // this creator would have been let through, and `isError` above is the
+    // assertion that fails if that rule ever comes back.
   });
 });
 

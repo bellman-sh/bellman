@@ -132,9 +132,19 @@ describe("tool surface", () => {
       // three descriptions with it.
       expect(doc, name).toContain("never gated");
     }
-    // No other tool lists a room's verbs. bellman_invite and bellman_send do name
-    // one verb each, in the singular, as what a call needs; this regex is
-    // deliberately plural, so it flags a tool that starts talking about verbs.
+  });
+
+  // Split from the test above on purpose: that one is about the three tools that
+  // DO show verbs, and its failure message says so. This one is about every OTHER
+  // tool, so pluralising the one verb bellman_invite or bellman_send names — a
+  // plausible editorial change — fails here, under a name that explains it,
+  // instead of failing the "enforces them" test above for an unrelated reason.
+  it("no other tool lists a room's verbs", async () => {
+    const { tools } = await jesse.listTools();
+    const showsVerbs = ["bellman_confirm", "bellman_connect", "bellman_start"];
+    // bellman_invite and bellman_send do name one verb each, in the singular, as
+    // what a call needs; this regex is deliberately plural, so it flags a tool
+    // that starts talking about verbs rather than naming the one it requires.
     for (const t of tools.filter((t) => !showsVerbs.includes(t.name))) {
       expect(t.description, t.name).not.toMatch(/verbs/i);
     }

@@ -864,10 +864,21 @@ describe("platform role and room role are different things", () => {
     expect(hits[0][1]).toContain("the audit log requires the admin role");
   });
 
-  it("never mentions Identity in src/roles.ts at all", async () => {
+  it("never names Identity in src/roles.ts's code", async () => {
     const { readFileSync } = await import("node:fs");
     const src = readFileSync(new URL("../../src/roles.ts", import.meta.url), "utf8");
-    expect(src).not.toContain("Identity");
+    // Comments are stripped first, and must be: the docblock deliberately says
+    // "takes a Session and a Member and NOT an Identity" and "DO NOT add an
+    // Identity parameter". That warning belongs where an editor sees it, so the
+    // assertion is about the code — no import of Identity, no annotation using
+    // it — not about the prose explaining why.
+    const code = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    expect(code).not.toContain("Identity");
+    // A positive control: stripping must not have eaten the whole file, or this
+    // assertion would pass against an empty string.
+    expect(code).toContain("export function denyVerb");
   });
 });
 

@@ -1301,7 +1301,8 @@ Closes #79 for bellman_send; the putGrant half is filed separately."
 ### Task 5: File the follow-up and close out
 
 **Files:**
-- Modify: `CONTEXT.md` — Next Steps
+- None in the repo. Every step here is an outward-facing action on GitHub, so
+  each needs the repo owner's approval before it runs.
 
 - [ ] **Step 1: Open the follow-up issue for the billing half**
 
@@ -1328,33 +1329,32 @@ BODY
 )"
 ```
 
-- [ ] **Step 2: Update `CONTEXT.md`**
+- [ ] **Step 2: Comment the atomicity warning onto issue #12**
 
-Replace the `#12` bullet under **Next Steps** with:
-
-```markdown
-- #12: run the store contract suite against `DurableObjectStore`. It is the only
-  store serving production and is verified solely by the smoke run plus
-  `tests/store-do-wiring.test.ts`. #79 added 12 contract cases that MemoryStore
-  alone proves.
-```
-
-Keep the file under 20 lines: drop the Claude Desktop connector bullet, which the OAuth work has since answered.
-
-- [ ] **Step 3: Commit**
+`CONTEXT.md` is gitignored (`.gitignore:24`) and does not exist in this
+worktree — it is local scratch in the main checkout, not a committable
+deliverable. This plan was wrong to route a durable note through it. The note
+belongs on the issue it warns about.
 
 ```bash
-npm run verify
-git add CONTEXT.md
-git commit -m "docs: note the contract cases #79 leaves unproven on the DO
+gh issue comment 12 --body "$(cat <<'BODY'
+Warning from #79, which added `appendEventOnce` and 13 conformance cases for it.
 
-13 of them. MemoryStore passes them; DurableObjectStore is covered only by
-the wiring test until #12 points the suite at it.
+One of those cases — two concurrent calls with the same key must produce one
+event — **cannot be satisfied by pointing this suite at `DurableObjectStore`
+with the existing `fakeStorage`** in `tests/store-do-wiring.test.ts`. Its
+`put`/`get` are plain async functions with no queuing, so they do not model the
+Durable Object input gate that makes the real thing atomic. The case would pass
+without the property it tests for: a false green on the single case that matters
+most.
 
-Refs #79"
+Whatever #12 does here needs either a fake that serialises access per object, or
+that case explicitly excluded with this reason recorded beside the exclusion.
+BODY
+)"
 ```
 
-- [ ] **Step 4: Open the pull request**
+- [ ] **Step 3: Open the pull request**
 
 ```bash
 git push -u origin mcfearsome/idempotency-keys-on-writes-so-a-retry-is-not-a-d

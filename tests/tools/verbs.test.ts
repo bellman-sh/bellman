@@ -183,10 +183,12 @@ describe("the review preset's asymmetry is enforced", () => {
 // ---------------------------------------------------------------------------
 // Review Focus. The verb guard sits ahead of every check about the message
 // (payload, occupancy, recipients, ref_id), so a seat with no authority always
-// hears about its own role. Move the guard further down and each "prefers ..."
-// test fails: some OTHER error appears instead, and the assertions here name the
-// verb error. `does not compose verbs` is about composition, not ordering, and
-// stays green under a late guard.
+// hears about its own role. Each "prefers ..." test is pinned by the one check
+// its name gives: move the guard below that check and the test fails, because the
+// OTHER error appears instead and the assertions here name the verb error. Below
+// only the payload check just the payload test fails; each further check the guard
+// passes fails one more, five in all. `does not compose verbs` is about
+// composition, not ordering, and stays green however far down the guard sits.
 //
 // The checks about who is calling — session, closed, frozen, member, left — still
 // come first. Of those, only the left-member case is pinned here, by the last
@@ -585,12 +587,14 @@ describe("a seat naming no role holds nothing", () => {
       ["bellman_invite", {}],
       ["bellman_invite", { revoke: true }],
     ] as const) {
+      // Two rows share a tool, so the tool alone cannot say which one broke.
+      const label = `${tool} ${JSON.stringify(args)}`;
       const res = await jesse.call(tool, {
         session_id: "qs_ghost_seat", member_id: "m_ghost", ...args,
       });
-      expect(res.isError, tool).toBe(true);
-      expect(res.text, tool).toContain('your role "no_such_role" does not hold the verb');
-      expect(res.text, tool).toContain("(it holds: none)");
+      expect(res.isError, label).toBe(true);
+      expect(res.text, label).toContain('your role "no_such_role" does not hold the verb');
+      expect(res.text, label).toContain("(it holds: none)");
     }
   });
 });

@@ -111,18 +111,30 @@ describe("tool surface", () => {
 
   // A joiner's human decides on the verbs a room declares, and since #2 the
   // server enforces them. Each tool that returns the room block says so. The
-  // guards are in src/roles.ts; the denial paths are tests/tools/verbs.test.ts.
-  it("says on every tool that shows a room's verbs that the server enforces them", async () => {
+  // decision is denyVerb in src/roles.ts, the call sites are bellman_send and
+  // bellman_invite, and the denial paths are tests/tools/verbs.test.ts.
+  it("says on every tool that shows a room's verbs that the server enforces them, and that reading and leaving are never gated", async () => {
     const { tools } = await jesse.listTools();
     const showsVerbs = ["bellman_confirm", "bellman_connect", "bellman_start"];
     for (const name of showsVerbs) {
       const doc = tools.find((t) => t.name === name)!.description!.replace(/\s+/g, " ");
-      expect(doc, name).toContain("enforced by the server");
-      // The old sentence must be gone, not merely joined by a new one.
-      expect(doc, name).not.toContain("not yet enforced");
-      expect(doc, name).not.toContain("stated intent");
+      expect(doc, name).toMatch(/verbs are enforced by the server/i);
+      // The old claim must be gone, not merely joined by a new one, and not back in
+      // another spelling: any case, and the plain "are not enforced", fail here. A
+      // phrase pin cannot stop a paraphrase ("nothing checks them at call time"
+      // passes); this closes the cheap ways back, not every one.
+      expect(doc, name).not.toMatch(/\bnot (yet )?enforced\b/i);
+      expect(doc, name).not.toMatch(/stated intent/i);
+      // Reading the room and leaving it are the two calls no verb gates. Without
+      // this clause "your_verbs is what a seat may do" reads as "and nothing else".
+      // Its truth is pinned by behaviour, not here: verbs.test.ts's "sync and
+      // leave are never gated". Gating either tool on purpose means changing all
+      // three descriptions with it.
+      expect(doc, name).toContain("never gated");
     }
-    // No other tool mentions verbs, so none can be showing them unqualified.
+    // No other tool lists a room's verbs. bellman_invite and bellman_send do name
+    // one verb each, in the singular, as what a call needs; this regex is
+    // deliberately plural, so it flags a tool that starts talking about verbs.
     for (const t of tools.filter((t) => !showsVerbs.includes(t.name))) {
       expect(t.description, t.name).not.toMatch(/verbs/i);
     }

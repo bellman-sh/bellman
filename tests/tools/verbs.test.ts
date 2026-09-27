@@ -145,6 +145,29 @@ describe("bellman_send — a seat that lacks the verb", () => {
     }
     expect(await eventCount(p.sessionId)).toBe(before);
   });
+
+  // README.md promises that a denial leaves "nothing... delivered or recorded".
+  // Every other test here checks "delivered"; nothing checked "recorded" until
+  // now. A denied call must not write an audit entry: hoisting bellman_send's
+  // audit() call above its verb guard passes the entire suite without this test.
+  it("a denied send records nothing in the audit log", async () => {
+    const p = await pairUp(h, { manifest: seat([]) });
+    const org = p.joiner.identity.orgId!;
+    // audit() skips entirely when both org ids are null, so without this the
+    // test would go vacuously green if the fixture identities ever lost their org.
+    expect(org, "the joiner must be in an org for auditing to run").toBeTruthy();
+    const before = (await h.store.auditForOrg(org, 500)).length;
+
+    const res = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "message", payload: { text: "x" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "send"');
+
+    expect((await h.store.auditForOrg(org, 500)).length,
+      "a denial must not record an action that never happened").toBe(before);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -428,6 +451,43 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     // Before roles, `session.createdBy` was the only authority to reopen a room, so
     // this creator would have been let through, and `isError` above is the
     // assertion that fails if that rule ever comes back.
+  });
+
+  // Same "or recorded" promise as bellman_send's audit test, for both of this
+  // handler's branches: a denied issue and a denied revoke must each leave the
+  // audit log alone. Both seats are swarms with spare capacity and (for revoke)
+  // a live code, for the same reason the mint/retire tests above need them: so
+  // a check other than the verb guard cannot be the one answering.
+  it("a denied issue records nothing in the audit log", async () => {
+    const p = await pairUp(h, { manifest: seat([], "verb-guards", "swarm") });
+    const org = p.joiner.identity.orgId!;
+    expect(org, "the joiner must be in an org for auditing to run").toBeTruthy();
+    const before = (await h.store.auditForOrg(org, 500)).length;
+
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "invite"');
+
+    expect((await h.store.auditForOrg(org, 500)).length,
+      "a denial must not record an action that never happened").toBe(before);
+  });
+
+  it("a denied revoke records nothing in the audit log", async () => {
+    const p = await pairUp(h, { manifest: seat(["invite"], "verb-guards", "swarm") });
+    const org = p.joiner.identity.orgId!;
+    expect(org, "the joiner must be in an org for auditing to run").toBeTruthy();
+    const before = (await h.store.auditForOrg(org, 500)).length;
+
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, revoke: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "revoke"');
+
+    expect((await h.store.auditForOrg(org, 500)).length,
+      "a denial must not record an action that never happened").toBe(before);
   });
 });
 

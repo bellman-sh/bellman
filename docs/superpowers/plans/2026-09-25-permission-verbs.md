@@ -580,9 +580,11 @@ Replace the deleted block with a pointer, so the next reader knows where it went
 npm run verify
 ```
 
-Expected: `tests/tools/surface.test.ts` now FAILS — it still pins that three tool descriptions say "not yet enforced at call time". That is correct and Task 5 fixes it. Everything else passes.
+Expected: **green.** 27 files, ~549 tests.
 
-Commit with the known-failing pin called out, so a bisect lands on the right explanation:
+`tests/tools/surface.test.ts` does **not** fail, and it is worth knowing why, because the first draft of this plan said it would. Its pin is `expect(doc).toContain("not yet enforced at call time")` — an assertion that the string is *present*. This task does not touch the three descriptions, so the string is still there and the pin passes. The sentence is now **false but still present**, and `toContain` cannot tell the difference.
+
+Nothing in the suite flags that staleness between here and Task 5. That is the real cost of splitting the work this way, and Task 5's Step 1 closes it by writing the inverted pin first and watching it fail.
 
 ```bash
 git add src/server.ts tests/tools/verbs.test.ts tests/tools/exchange.test.ts
@@ -599,8 +601,10 @@ probing. Every denial is asserted to append no event.
 
 Retires #1's trip-wire, which existed to fail on this commit.
 
-Known red until the next commit: surface.test.ts still pins the three
-'not yet enforced at call time' sentences."
+The three tool descriptions and the README still say verbs are not
+enforced. That is now false, and nothing in the suite flags it - the pin
+asserts the sentence is present, not that it is true. Task 5 rewrites
+them and inverts the pin."
 ```
 
 ---
@@ -776,7 +780,7 @@ Replace that test (`tests/tools/invite.test.ts:98-107`) with:
 npm run verify
 ```
 
-Expected: only `tests/tools/surface.test.ts`'s enforcement pin still fails. Task 5 fixes it.
+Expected: **green.** `tests/tools/surface.test.ts` does not fail here either — its pin asserts the stale sentence is *present*, and this task does not touch the descriptions. See Task 2 Step 7.
 
 ```bash
 git add src/server.ts tests/tools/verbs.test.ts tests/tools/invite.test.ts
@@ -787,9 +791,7 @@ a joiner invite, and a sealed room - one where no role holds invite - can
 be reopened by nobody, its creator included. manifest.test.ts already
 declares that manifest legal, so this is the declared behaviour arriving.
 
-createdBy stays as provenance; nothing reads it for authority now.
-
-Known red until the next commit: surface.test.ts's enforcement pin."
+createdBy stays as provenance; nothing reads it for authority now."
 ```
 
 ---
@@ -969,9 +971,7 @@ remaining call site is not the property; the absence everywhere else is.
 
 Also pins the fail-closed path (a seat naming no role holds nothing, built
 by writing the session straight into the store) and that sync and leave
-stay ungated for a seat with no verbs at all.
-
-Known red until the next commit: surface.test.ts's enforcement pin."
+stay ungated for a seat with no verbs at all."
 ```
 
 ---
@@ -1151,7 +1151,7 @@ Expected: no output.
 npm run verify
 ```
 
-Expected: **green — 26 files, ~555 tests, zero failures.** This is the first fully green commit since Task 2.
+Expected: **green — 27 files, ~560 tests, zero failures.** Every commit in this plan is green; what changes here is that the words finally match the behavior.
 
 ```bash
 git add src/server.ts tests/tools/surface.test.ts README.md

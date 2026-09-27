@@ -14,6 +14,13 @@ npm run smoke         # end-to-end; BELLMAN_URL points it at any deployment
 npm run dev:worker    # wrangler dev, real Durable Objects
 ```
 
+## Architecture
+
+`docs/ARCHITECTURE.md` is the whole-system view: the surfaces agents arrive
+on, why the server is remote-first, the four Durable Object types, how a plan
+resolves, the trust boundaries, and the cross-object atomicity gap that keeps
+producing bugs. Read it before changing how the pieces fit together.
+
 ## Layout
 
 - `src/server.ts` — the tools. One `McpServer` per request, bound to a caller identity.

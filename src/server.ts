@@ -276,7 +276,7 @@ Args:
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions.
-    Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused.
+    Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
@@ -387,7 +387,7 @@ Args:
   - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
-The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent. A call outside it is refused with an error naming the verb you lack.
+The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
       annotations: {

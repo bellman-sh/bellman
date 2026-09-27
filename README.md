@@ -183,7 +183,7 @@ Every member can always sync and leave.
 Verbs are enforced by the server. A call a seat's role does not permit is
 refused with an error naming the verb it lacks, and nothing is delivered or
 recorded. The verbs shown in a connect preview and the verbs enforced come
-from one accessor (`src/roles.ts`), so a preview cannot over-promise.
+from one accessor (`src/roles.ts`), so a preview cannot over-promise a verb.
 
 A room role is not `Identity.role`. The latter is `member` | `admin` over an
 *org* and buys nothing inside a room: an org admin holds exactly what their

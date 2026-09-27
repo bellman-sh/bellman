@@ -451,7 +451,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
 
 Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
-The room's verbs are enforced by the server: your_verbs is what this seat may do, and nothing else.
+The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       inputSchema: {

@@ -195,9 +195,12 @@ Expected: PASS.
 - [ ] **Step 5: Prove the fail-closed test is not a false green**
 
 Temporarily change `verbsOfRole`'s body to `return manifest.roles[role].can;` and run `npx vitest run tests/roles.test.ts` again.
-Expected: the `"fails closed for a role the manifest does not define"` case FAILS with a TypeError, and so does `"refuses every verb to a seat whose role the manifest does not define"`. The prototype-name cases still pass — that is why the test file labels them a regression guard rather than proof.
 
-Restore the real body before continuing.
+Expected: **7 failures.** Both unknown-role cases fail, and so do all five prototype-name cases — `roles["constructor"]` finds the inherited `Object` function, whose `.can` is `undefined`, so the assertion fails on `expected undefined to deeply equal []`; `roles["prototype"]` is `undefined` on a plain object, so that one throws a TypeError.
+
+So the prototype cases **do** discriminate against this mutation. What they cannot distinguish is a `?.can ?? []` variant, which returns `[]` for every name on `Object.prototype` — none of which has a `can`. That narrower claim is what the test file's comment makes, and it is the accurate one.
+
+Restore the real body and confirm the file is green before continuing.
 
 - [ ] **Step 6: Run the full suite and commit**
 
@@ -551,7 +554,10 @@ Expected: PASS.
 - [ ] **Step 5: Prove the guard is what made them pass**
 
 Temporarily change the guard to `const denial = null;` and run `npx vitest run tests/tools/verbs.test.ts`.
-Expected: red across both denial describes. Restore the real guard.
+
+Must fail: every case in both "lacks the verb" describes, every case in "the verb guard comes first", and the reviewer half of "the review preset's asymmetry is enforced". The "holds the verb" describe must stay **green** — it passed before the guard existed and must keep passing after, or the guard is refusing calls it should allow.
+
+Restore the real guard.
 
 - [ ] **Step 6: Retire the trip-wire**
 
@@ -929,13 +935,15 @@ Expected: PASS. These document decisions Tasks 2 and 3 already implemented rathe
 
 - [ ] **Step 3: Prove each new assertion can fail**
 
-Three deliberate breakages, one at a time, each reverted before the next:
+Three deliberate breakages, one at a time, each reverted before the next.
 
-1. In `src/roles.ts`, make `denyVerb` allow an unknown seat: insert `if (held.length === 0) return null;` before the `holds` line. Expected: `"a seat naming no role holds nothing"` FAILS.
-2. In `src/server.ts`'s `bellman_send` guard, change the last line to `if (denial && identity.role !== "admin") return fail(denial);`. Expected: `"refuses an org admin seated in a verbless role"` FAILS **and** `"leaves identity.role used only by bellman_audit"` FAILS.
-3. In `src/server.ts`'s `bellman_sync` handler, add a `denyVerb(session, me, "send")` guard after its member check. Expected: `"sync and leave are never gated"` FAILS.
+Each expectation below names the test that **must** fail — the one that proves the assertion discriminates. Expect collateral failures too: these mutations are coarse, and other tests in this file legitimately depend on the same behavior. Collateral red is fine; the named test staying **green** is the failure signal, because it would mean that assertion proves nothing.
 
-Revert all three. Confirm with `npx vitest run tests/tools/verbs.test.ts` back to green.
+1. In `src/roles.ts`, make `denyVerb` allow an unknown seat: insert `if (held.length === 0) return null;` before the `holds` line. Must fail: `"a seat naming no role holds nothing"`. Also expect every `seat([])` case in this file to fail, since a verbless seat now passes the guard.
+2. In `src/server.ts`'s `bellman_send` guard, change the last line to `if (denial && identity.role !== "admin") return fail(denial);`. Must fail: `"refuses an org admin seated in a verbless role"` **and** `"leaves identity.role used only by bellman_audit"` (the grep now finds two occurrences).
+3. In `src/server.ts`'s `bellman_sync` handler, add a `denyVerb(session, me, "send")` guard after its member check. Must fail: `"sync and leave are never gated"`. Also expect wide collateral breakage across other test files, since most of them sync from a seat that was never given `send`.
+
+Revert all three. Confirm `npx vitest run tests/tools/verbs.test.ts` is back to green.
 
 - [ ] **Step 4: Run the full suite and commit**
 

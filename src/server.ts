@@ -17,6 +17,30 @@ const SERVER_VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeouts
 const MAX_PAYLOAD_CHARS = 20_000;
 
+/** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
+const SEND_KINDS = ["message", "artifact", "action_request", "action_response", "brief_update"] as const;
+type SendKind = (typeof SEND_KINDS)[number];
+
+/**
+ * Which verb each send kind needs. A Record rather than a ternary with a default
+ * arm: a sixth kind must declare its verb here or this stops compiling. A default
+ * would hand it `send` silently, and a closed enum exists so that every guard is
+ * one somebody chose.
+ *
+ * Verbs do not compose: each kind maps to exactly one verb and no other, so a role
+ * holding `request_actions` but not `send` may ask a peer to act but not talk.
+ */
+const SEND_VERB = {
+  message: "send",
+  artifact: "send",
+  // A brief_update appends an event that puts this member's prose into every
+  // peer's context. A seat that may not speak may not restate itself either —
+  // which is exactly what `observer` promises its readers.
+  brief_update: "send",
+  action_request: "request_actions",
+  action_response: "respond_actions",
+} as const satisfies Record<SendKind, Verb>;
+
 // ---------------------------------------------------------------------------
 // Zod shapes (raw shapes — broadest client compatibility via the SDK)
 // ---------------------------------------------------------------------------
@@ -604,7 +628,7 @@ Errors: capability errors name the member lacking the grant.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
-        type: z.enum(["message", "artifact", "action_request", "action_response", "brief_update"]),
+        type: z.enum(SEND_KINDS),
         payload: z.record(z.string(), z.unknown()),
         ref_id: z.string().optional(),
       },
@@ -621,17 +645,9 @@ Errors: capability errors name the member lacking the grant.`,
 
       // Authority first: before the payload, before who is listening. A seat that
       // may not act hears why, rather than being sent off to shorten a message it
-      // was never allowed to send or learning who is present by probing.
-      //
-      // brief_update needs `send` because it appends an event that puts this
-      // member's prose into every peer's context. A seat that may not speak may
-      // not restate itself either — which is exactly what `observer` promises its
-      // readers. Verbs do not compose: each kind maps to one verb and no other.
-      const needed: Verb =
-        type === "action_request" ? "request_actions" :
-        type === "action_response" ? "respond_actions" :
-        "send";
-      const denial = denyVerb(session, me, needed);
+      // was never allowed to send or learning who is present by probing. Which verb
+      // each kind needs is SEND_VERB's business, at the top of the file.
+      const denial = denyVerb(session, me, SEND_VERB[type]);
       if (denial) return fail(denial);
 
       const serialized = JSON.stringify(payload);

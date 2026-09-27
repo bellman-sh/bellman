@@ -1,10 +1,14 @@
 /**
  * The verb guards. #1 declared a room's verbs and enforced none of them; this is
- * the file that turns bellman_connect's preview from stated intent into a fact.
+ * the file that turns bellman_connect's preview from stated intent into a fact —
+ * for all five verbs: send, request_actions and respond_actions in bellman_send,
+ * invite and revoke in bellman_invite.
  *
- * Every denial asserts two things: the caller is told which verb their seat
- * lacks, and the room did not move. An error that still appended an event would
- * be worse than no guard at all.
+ * Every KIND of send is denied with the missing verb named, and the room does not
+ * move: one row per kind in "a seat that lacks the verb", against the single
+ * guard site in bellman_send. An error that still appended an event would be
+ * worse than no guard at all. The other tests here pin what the caller hears;
+ * they do not each re-assert that the room stood still.
  *
  * Seats are authored rather than taken from a preset because a joiner always gets
  * `default_role` until #3, so a verbless or oddly-shaped joiner seat has to be
@@ -173,10 +177,12 @@ describe("the review preset's asymmetry is enforced", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Review Focus. The verb guard sits ahead of every other check in the handler,
-// so a seat with no authority always hears about its own role. Each of these
-// passes for the wrong reason if the guard is moved further down: the OTHER
-// error appears instead, and the assertions here name it.
+// Review Focus. The verb guard sits ahead of every check about the message
+// (payload, occupancy, recipients, ref_id), so a seat with no authority always
+// hears about its own role. The checks about who is calling — session, closed,
+// frozen, member, left — still come first, and the last test here pins that.
+// Each of the rest passes for the wrong reason if the guard is moved further
+// down: the OTHER error appears instead, and the assertions here name it.
 describe("bellman_send — the verb guard comes first", () => {
   it("prefers the sender's missing verb over the recipients' capabilities", async () => {
     const p = await pairUp(h, {
@@ -190,6 +196,25 @@ describe("bellman_send — the verb guard comes first", () => {
     expect(res.isError).toBe(true);
     expect(res.text).toContain('does not hold the verb "send"');
     expect(res.text).not.toContain("receive_messages");
+  });
+
+  it("prefers the missing request_actions verb over the recipient's request_actions capability", async () => {
+    // request_actions is the one name a verb and a capability share, so on this
+    // path only the error text tells the two layers apart. The sender's seat lacks
+    // the VERB; the recipient withheld the CAPABILITY. Both refuse, and the sender
+    // must hear about its own role rather than be sent to ask a peer to change a
+    // setting that was never the obstacle.
+    const p = await pairUp(h, {
+      manifest: seat(ALL_VERBS.filter((v) => v !== "request_actions")),
+      creatorCapabilities: ["read_context", "receive_messages"], // no request_actions
+    });
+    const res = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_request", payload: { action: "rerun CI" },
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "request_actions"');
+    expect(res.text).not.toContain("did not grant");
   });
 
   it("prefers the missing verb over validating ref_id", async () => {
@@ -322,13 +347,23 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
   });
 
   it("a denied invite neither mints a code nor appends an event", async () => {
-    const p = await pairUp(h, { manifest: seat([]) });
+    // A swarm room with spare capacity, deliberately not a full pair. In a full
+    // pair the capacity check refuses before the mint, so this test would stay
+    // green with the guard moved below the mint and prove nothing about it. Here
+    // the joiner may speak but not invite, and only the verb guard stands between
+    // it and a fresh code.
+    const p = await pairUp(h, { manifest: { ...seat(["send"]), mode: "swarm" } });
     const before = (await h.store.getSession(p.sessionId))!;
+    // Keeps the setup honest: if the room is ever reshaped until it is full, this
+    // fails loudly instead of going quietly vacuous.
+    expect(before.members.length, "the room must have spare capacity").toBeLessThan(before.maxMembers);
 
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
     });
     expect(res.isError).toBe(true);
+    // The verb guard refused it, not something else that also returns an error.
+    expect(res.text).toContain('does not hold the verb "invite"');
 
     const after = (await h.store.getSession(p.sessionId))!;
     expect(after.joinCode).toBe(before.joinCode);

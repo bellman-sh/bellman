@@ -1,6 +1,7 @@
 import type {
   AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
+import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
 const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -46,6 +47,19 @@ export interface GrantDelete {
   removed?: PlanGrant;
 }
 
+/**
+ * What an idempotent append did.
+ *
+ * A union rather than an optional `event` field, because the caller must tell
+ * four cases apart and two of them have no event: letting the compiler carry
+ * that removes a non-null assertion at the one call site that reads the cursor.
+ */
+export type EventWrite =
+  | { outcome: "appended"; event: SessionEvent }
+  | { outcome: "replayed"; event: SessionEvent }
+  | { outcome: "frozen" }
+  | { outcome: "conflict" };
+
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
   getSession(id: string): Promise<Session | undefined>;
@@ -83,6 +97,29 @@ export interface BellmanStore {
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">
   ): Promise<SessionEvent | null>;
+  /**
+   * Append an event unless this member has already used this key.
+   *
+   * A separate method rather than a parameter on appendEvent: `null` there
+   * already means frozen, and a caller now has four outcomes to tell apart.
+   * Same shape as the guarded grant writes — the guarantee is in the name, and
+   * a caller that does not want it calls the other method.
+   *
+   * The key check and the append are one operation, and cannot be two: a
+   * caller that read the key and then wrote would leave a window for its own
+   * retry to read the same empty slot and append a second event, which is the
+   * entire thing this prevents.
+   *
+   * The key check precedes the frozen check. A write that already succeeded
+   * keeps reporting its result even after the room freezes — the replay
+   * appends nothing, so nothing new enters a frozen room, and a retry across a
+   * freeze can otherwise never learn whether its first attempt landed.
+   */
+  appendEventOnce(
+    sessionId: string,
+    e: Omit<SessionEvent, "cursor" | "at">,
+    key: string
+  ): Promise<EventWrite>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
@@ -155,6 +192,13 @@ export class MemoryStore implements BellmanStore {
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
+  /**
+   * Idempotency keys, by session. Beside `waiters` rather than on the Session
+   * record: that type is the one SessionDO persists and hydrateStoredSession
+   * validates, and a field there would need a hydration rule it does not need.
+   * Same lifetime either way — a session is never deleted from this store.
+   */
+  private keys = new Map<string, Map<string, IdempotencyRecord>>();
 
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
@@ -245,10 +289,60 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     if (s.frozenAt !== null) return null;
-    const event: SessionEvent = { ...detach(e), cursor: s.events.length + 1, at: Date.now() };
+    return detach(this.appendNow(s, e));
+  }
+
+  async appendEventOnce(
+    sessionId: string,
+    e: Omit<SessionEvent, "cursor" | "at">,
+    key: string
+  ): Promise<EventWrite> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error(`Unknown session ${sessionId}`);
+
+    // Everything from here to appendNow is synchronous, deliberately. An await
+    // in this stretch yields, and this method's own retry can read the same
+    // empty slot in the gap and append a second event.
+    const storageKey = idempotencyKey(e.fromMemberId, key);
+    const seen = this.keys.get(sessionId);
+    const record = seen?.get(storageKey);
+    const print = fingerprint(e);
+
+    if (record) {
+      if (record.print !== print) return { outcome: "conflict" };
+      const original = s.events.find((ev) => ev.cursor === record.cursor);
+      // A record naming a cursor with no event is a store bug, not a replay.
+      // Returning "replayed" without one would crash the caller a frame later,
+      // where nothing says why.
+      if (!original) {
+        throw new Error(
+          `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
+        );
+      }
+      return { outcome: "replayed", event: detach(original) };
+    }
+
+    if (s.frozenAt !== null) return { outcome: "frozen" };
+
+    const event = this.appendNow(s, e);
+    const map = seen ?? new Map<string, IdempotencyRecord>();
+    map.set(storageKey, { cursor: event.cursor, print });
+    this.keys.set(sessionId, map);
+    return { outcome: "appended", event: detach(event) };
+  }
+
+  /**
+   * The append itself, with no awaits in it, so both public appenders can call
+   * it without yielding between their guard and their write. Same rule, and
+   * the same reason, as liveGrant and waitForEvents.
+   */
+  private appendNow(s: Session, e: Omit<SessionEvent, "cursor" | "at">): SessionEvent {
+    const event: SessionEvent = {
+      ...detach(e), cursor: s.events.length + 1, at: Date.now(),
+    };
     s.events.push(event);
     this.wake(s);
-    return detach(event);
+    return event;
   }
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {

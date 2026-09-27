@@ -917,7 +917,7 @@ Create `tests/tools/idempotency.test.ts`:
  * brief, and tells the caller it is not a fresh delivery.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { Harness, DEV_KEY } from "../helpers/harness.js";
+import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
 
@@ -948,7 +948,13 @@ describe("bellman_send with an idempotency_key", () => {
     const sync = await p.creator.call("bellman_sync", {
       session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
     });
-    const messages = (sync.data.events as { type: string }[])
+    // bellman_sync wraps every event as { trust, origin, data } — peer content
+    // is untrusted, so the type is inside `data`, not on the item. Reading
+    // `e.type` here yields undefined on every element and the filter always
+    // empties, which makes the assertion below fail no matter what the feature
+    // does. `envelopes()` is how tests/tools/exchange.test.ts unwraps them.
+    const messages = envelopes(sync.data.events)
+      .map((e) => e.data as { type: string })
       .filter((e) => e.type === "message");
     expect(messages).toHaveLength(1);
   });
@@ -1250,7 +1256,7 @@ Replace the append, audit and return with:
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `npx vitest run tests/tools/idempotency.test.ts`
-Expected: PASS, 11 tests.
+Expected: PASS, 12 tests — the 10 cases in this fence plus the two depth-guard cases.
 
 - [ ] **Step 6: Run the whole suite**
 

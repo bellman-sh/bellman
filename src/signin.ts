@@ -493,8 +493,8 @@ class BridgeAuth implements OAuthClientProvider {
     const spent = this.cred.tokens?.refresh_token;
     const stored = this.reread().tokens;
     /**
-     * `!== spent` is deliberately not load-bearing, and a mutation sweep will
-     * report removing it as survivable. Adopting the token we just spent costs
+     * `!== spent` is deliberately not the thing that makes this correct, and a
+     * mutation sweep will report removing it as survivable. Adopting the token we just spent costs
      * one more refresh that fails the same way, after which auth() is out of
      * retries and the backstop below opens a browser — the same end state, one
      * wasted round trip later. It stays because "adopt something NEWER" is the

@@ -267,7 +267,7 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
     "bellman_start",
     {
       title: "Start a Bellman session",
-      description: `Create a collaboration room and get a join code to share with the other session.
+      description: `Create a collaboration room and get a join code to share with the sessions you want in it.
 
 The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
 
@@ -369,7 +369,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // cannot see a preset or role that validated but is not what they meant.
         room: roomPreview(session, manifest.creatorRole),
         share_instructions:
-          `Give the join code to the other session's user. In that session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own brief.`,
+          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room takes more than one joiner; reissue a code with bellman_invite to add members later.`,
       });
     }
   );
@@ -613,14 +613,14 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, or brief update to the other member(s).
+      description: `Send a message, artifact, action request, action response, or brief update to every other member of the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm
   - type:
       "message"        — free-form text for the peer agent+human
       "artifact"       — code/doc/data payload ({ name, content })
-      "action_request" — ask the peer session to do something. Peer must have granted request_actions. THE PEER'S HUMAN approves, not the peer agent.
+      "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized

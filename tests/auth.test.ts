@@ -5,7 +5,7 @@ import type { Identity, Plan } from "../src/types.js";
 const ORIGINAL_KEYS = process.env.BELLMAN_KEYS;
 
 // Hermetic: dev-key cases assume BELLMAN_KEYS is unset, which is no longer
-// merely the default but load-bearing. A developer with it exported in their
+// merely the default but required. A developer with it exported in their
 // shell would otherwise see confusing failures.
 beforeEach(() => {
   delete process.env.BELLMAN_KEYS;

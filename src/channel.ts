@@ -9,7 +9,12 @@
  *                     result under ~/.config/bellman/.
  *   BELLMAN_URL       optional. Defaults to https://mcp.bellman.sh/mcp
  *   BELLMAN_NO_BROWSER  optional. Print the sign-in URL instead of opening a
- *                     browser. For SSH and headless machines.
+ *                     browser, for one you would rather open yourself on THIS
+ *                     machine. It does not make sign-in work from another
+ *                     machine: the listener binds 127.0.0.1 here, on the first
+ *                     free port in 51004-51008, so a browser elsewhere posts
+ *                     the code to its own loopback. Over SSH, forward that
+ *                     port. With no browser anywhere, set BELLMAN_KEY.
  *   XDG_CONFIG_HOME   optional. Where the credential is cached.
  *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
  *                     Launch with --dangerously-load-development-channels server:<name>.

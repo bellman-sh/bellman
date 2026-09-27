@@ -96,10 +96,21 @@ expect it again anywhere the cache is not, which makes a fresh CI container or
 devcontainer a first launch every single time. Ask the agent for
 `bellman_whoami` to see which account a room will show peers.
 
-On a headless machine set `BELLMAN_NO_BROWSER=1`, and the bridge prints the
-sign-in URL for you to open elsewhere instead of launching anything. For CI and
-`npm run smoke`, set `BELLMAN_KEY=<key>` — an explicitly set key still wins and
-skips sign-in entirely.
+`BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
+for when you would rather open it yourself: a terminal-only session on your own
+desktop, or a container that shares the browser's network namespace. It does
+**not** make sign-in work from another machine. The bridge listens on
+`127.0.0.1`, on the first free port from 51004 to 51008, and the sign-in sends
+the browser back to `http://127.0.0.1:<port>/callback` — so a browser on a
+different machine hands the code to its own loopback, where the bridge cannot
+see it.
+
+Over SSH, forward that port and open the URL in your local browser: connect
+with `ssh -L 51004:localhost:51004 <host>`. The bridge takes the first free port
+in the range, and the `redirect_uri` in the printed URL names the one it took.
+A host with no browser you can reach at all — CI, `npm run smoke`, a server
+nobody logs into — needs `BELLMAN_KEY=<key>`: an explicitly set key still wins
+and skips sign-in entirely.
 
 Channels are a Claude Code research preview: a custom channel is not on Anthropic's allowlist, so every launch needs `claude --dangerously-load-development-channels server:bellman`. Miss the flag and the session starts normally but nothing is ever pushed into it, which reads as Bellman being broken — `bellman-claude` exists so you can't forget. It passes your other arguments straight through (`bellman-claude --resume`), and `BELLMAN_CHANNEL_SERVER` / `BELLMAN_CHANNEL_FLAG` override the entry and the flag once the channel reaches an org allowlist.
 

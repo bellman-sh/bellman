@@ -108,9 +108,11 @@ which it did; its count and its comment both change.
 
 Only the room's creator may summarise.
 
-This does not contradict "nothing enforces verbs until #2". `bellman_invite`
-already gates on *"a session you created"*, so ownership checks live alongside
-the unenforced verbs as an existing pattern.
+This cited `bellman_invite`'s ownership check as precedent, but #2 deleted that
+check and replaced it with `denyVerb(session, me, "invite")` — there is no
+ownership check left to sit alongside, and no unenforced verb either. A scribe
+landing after #2 should skip the interim and write this guard as
+`denyVerb(session, me, "summarize")` from the start.
 
 It also matches the interim implementation exactly, and it closes a real hole:
 without it a joiner could rewrite the room's summary, and the summary feeds the

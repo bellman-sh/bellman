@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **`npm run verify` passes before every commit.** It runs `typecheck:worker`, `build`, then `test`. Baseline before this plan starts: **25 files, 517 tests, all passing.**
+- **`npm run verify` passes before every commit.** It runs `typecheck`, `typecheck:worker`, `build`, then `test`. Baseline before this plan starts: **25 files, 517 tests, all passing.**
 - **`Member.capabilities` and everything around it is untouched** — the `Capability` type, `CapabilitiesShape`, `MemberPatch.capabilities`, `src/store.ts:221`, `src/store-do.ts:138`, and both recipient-side filters in `bellman_send`. Verbs are a new check site, not a replacement (spec D1).
 - **`src/types.ts`, `src/store.ts`, `src/store-do.ts` are not modified by any task in this plan.** No new state, no new store method.
 - **`denyVerb` must never take an `Identity` parameter.** That signature is what makes spec D2 structural. After Task 4, `grep -n 'identity\.role' src/server.ts` must return exactly one line, inside `bellman_audit`.

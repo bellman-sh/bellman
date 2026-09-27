@@ -71,16 +71,15 @@ describe("verbsOfRole", () => {
     expect(verbsOfRole(swarm, "observer")).toEqual([]);
   });
 
-  // THE load-bearing assertion in this describe: an unguarded
-  // `manifest.roles[role].can` throws a TypeError here.
+  // An unguarded `manifest.roles[role].can` throws a TypeError here.
   it("fails closed for a role the manifest does not define", () => {
     expect(verbsOfRole(swarm, "ghost")).toEqual([]);
   });
 
-  // A regression guard, NOT proof that Object.hasOwn is load-bearing: for every
-  // name reachable on Object.prototype the value has no `can`, so `?.can ?? []`
-  // would return [] too. It is here so that a future rewrite reaching for a bare
-  // lookup still returns a list rather than an inherited function.
+  // This block kills the truthiness rewrite `roles[r] ? roles[r].can : []`, which
+  // returns [] for an undefined role but undefined for these names. It does NOT
+  // distinguish `Object.hasOwn` from `roles[r]?.can ?? []`, because none of these
+  // values has a `can` — a separate inherited-role test does that.
   it.each(["constructor", "prototype", "toString", "__proto__", "valueOf"])(
     "fails closed for %s rather than reaching an inherited property",
     (name) => {
@@ -601,7 +600,7 @@ npm run verify
 
 Expected: **green.** 27 files, ~549 tests.
 
-`tests/tools/surface.test.ts` does **not** fail, and it is worth knowing why, because the first draft of this plan said it would. Its pin is `expect(doc).toContain("not yet enforced at call time")` — an assertion that the string is *present*. This task does not touch the three descriptions, so the string is still there and the pin passes. The sentence is now **false but still present**, and `toContain` cannot tell the difference.
+`tests/tools/surface.test.ts` does **not** fail, though the first draft of this plan said it would. Its pin is `expect(doc).toContain("not yet enforced at call time")` — an assertion that the string is *present*. This task does not touch the three descriptions, so the string is still there and the pin passes. The sentence is now **false but still present**, and `toContain` cannot tell the difference.
 
 Nothing in the suite flags that staleness between here and Task 5. That is the real cost of splitting the work this way, and Task 5's Step 1 closes it by writing the inverted pin first and watching it fail.
 

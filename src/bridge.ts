@@ -523,7 +523,7 @@ export function createBridge(opts: BridgeOptions) {
     const giveUp = (): void => {
       log(
         `stopped watching ${w.memberId}: Bellman no longer accepts this connection. ` +
-          `Peer events will not arrive until the next Bellman tool call signs in again.`
+          `Peer events will not arrive until a later Bellman tool call successfully reconnects.`
       );
       disarm(w.memberId);
     };

@@ -772,7 +772,7 @@ describe("a connection Bellman stops accepting", () => {
       logs: [
         RETIRED,
         "stopped watching " + creatorMember + ": Bellman no longer accepts this connection. " +
-          "Peer events will not arrive until the next Bellman tool call signs in again.",
+          "Peer events will not arrive until a later Bellman tool call successfully reconnects.",
       ],
     });
   });
@@ -990,7 +990,7 @@ describe("a connection Bellman stops accepting", () => {
         logs: [
           RETIRED,
           `stopped watching ${creatorMember}: Bellman no longer accepts this connection. ` +
-            `Peer events will not arrive until the next Bellman tool call signs in again.`,
+            `Peer events will not arrive until a later Bellman tool call successfully reconnects.`,
         ],
       });
     } finally {

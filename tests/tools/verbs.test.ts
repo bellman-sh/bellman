@@ -268,3 +268,95 @@ describe("bellman_send — the verb guard comes first", () => {
     expect(res.text).toContain("has left the session");
   });
 });
+
+// ---------------------------------------------------------------------------
+// bellman_invite gated on two separate verbs. #1's enum made `invite` and
+// `revoke` distinct, so a seat may hold one without the other and the guard
+// respects that rather than treating revoke as a weaker invite.
+describe("bellman_invite — invite and revoke are separate verbs", () => {
+  it("lets a joiner who holds invite reopen the room", async () => {
+    // A swarm room, so there is capacity for a third member and the code is usable.
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: {
+        room: "guest-can-invite", mode: "swarm",
+        roles: { lead: { can: ALL_VERBS }, guest: { can: ["send", "invite"] } },
+        default_role: "guest", creator_role: "lead",
+      },
+      brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: started.data.join_code });
+    const confirmed = await joiner.call("bellman_confirm", {
+      connect_token: preview.data.connect_token, brief: brief(),
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+
+    const reissued = await joiner.call("bellman_invite", {
+      session_id: String(started.data.session_id),
+      member_id: String(confirmed.data.member_id),
+    });
+    expect(reissued.isError, reissued.text).toBe(false);
+    expect(String(reissued.data.join_code)).toMatch(/^BELL-/);
+  });
+
+  it("refuses invite to a seat that lacks it, naming the verb", async () => {
+    const p = await pairUp(h, { manifest: seat(["send", "revoke"]) });
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "invite"');
+    expect(res.text).toContain("(it holds: send, revoke)");
+  });
+
+  it("refuses revoke to a seat that holds invite but not revoke", async () => {
+    const p = await pairUp(h, { manifest: seat(["send", "invite"]) });
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, revoke: true,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "revoke"');
+  });
+
+  it("a denied invite neither mints a code nor appends an event", async () => {
+    const p = await pairUp(h, { manifest: seat([]) });
+    const before = (await h.store.getSession(p.sessionId))!;
+
+    const res = await p.joiner.call("bellman_invite", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(res.isError).toBe(true);
+
+    const after = (await h.store.getSession(p.sessionId))!;
+    expect(after.joinCode).toBe(before.joinCode);
+    expect(after.events.length).toBe(before.events.length);
+  });
+
+  it("refuses a creator whose own role holds neither verb — a sealed room stays sealed", async () => {
+    // tests/manifest.test.ts already declares this manifest legal. It means the
+    // room cannot be reopened by anyone, creator included. That is the declared
+    // behaviour arriving, not a regression.
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: {
+        room: "sealed", mode: "pair",
+        roles: { lead: { can: ["send"] }, guest: { can: ["send"] } },
+        default_role: "guest", creator_role: "lead",
+      },
+      brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const res = await creator.call("bellman_invite", {
+      session_id: String(started.data.session_id),
+      member_id: String(started.data.member_id),
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain('does not hold the verb "invite"');
+    // And specifically NOT the old rule, which would have let the creator through.
+    expect(res.text).not.toContain("only the session creator");
+  });
+});

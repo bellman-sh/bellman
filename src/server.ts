@@ -532,10 +532,12 @@ Errors: only the creator can issue; a full session refuses (the code could not b
       if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
-      // Roles land in M0; until then the creator is the only one who can reopen the door.
-      if (session.createdBy !== identity.userId) {
-        return fail("only the session creator can issue join codes.");
-      }
+      // Roles landed. `invite` and `revoke` are separate verbs, so a seat may hold
+      // one without the other. A room whose manifest gives nobody `invite` cannot
+      // be reopened by anyone, its creator included — tests/manifest.test.ts calls
+      // that a legal manifest, so it is the declared behaviour, not a hole.
+      const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
+      if (denial) return fail(denial);
 
       if (revoke) {
         if (!session.joinCode) return ok({ revoked: true, join_code: null });

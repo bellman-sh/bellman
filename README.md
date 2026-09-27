@@ -10,7 +10,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 
 - **Tools only** — no MCP resources, sampling, or elicitation (spotty support elsewhere)
 - **Text-first responses**, `structuredContent` as progressive enhancement
-- **Bearer-key auth** (OAuth 2.1 + DCR is the swap-in path, isolated in `src/auth.ts`)
+- **Bearer keys and OAuth 2.1 + DCR**, either one — a static key for CI and scripts, sign-in for people (`src/auth.ts`, `src/oauth/`)
 - **Long-poll capped at 25s** to stay under the strictest client tool-call timeouts
 
 ## Tool surface
@@ -81,9 +81,36 @@ That puts three commands on your PATH: `bellman-channel` (the bridge Claude Code
 **Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -- bellman-channel
+claude mcp add --scope user bellman -- bellman-channel
 bellman-claude                # start Claude Code with the channel loaded
 ```
+
+No key. On the **first launch after you install it**, the bridge registers
+itself with Bellman, opens a browser to sign you in, and caches the result under
+`~/.config/bellman/` at mode 600. Every launch after that is silent.
+
+That happens at *launch*, not at your first `bellman_*` call: Claude Code lists a
+server's tools as soon as it connects, and listing Bellman's tools is already a
+call to Bellman. So expect one tab, once, while Claude Code is starting — and
+expect it again anywhere the cache is not, which makes a fresh CI container or
+devcontainer a first launch every single time. Ask the agent for
+`bellman_whoami` to see which account a room will show peers.
+
+`BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
+for when you would rather open it yourself: a terminal-only session on your own
+desktop, or a container that shares the browser's network namespace. It does
+**not** make sign-in work from another machine. The bridge listens on
+`127.0.0.1`, on the first free port from 51004 to 51008, and the sign-in sends
+the browser back to `http://127.0.0.1:<port>/callback` — so a browser on a
+different machine hands the code to its own loopback, where the bridge cannot
+see it.
+
+Over SSH, forward that port and open the URL in your local browser: connect
+with `ssh -L 51004:localhost:51004 <host>`. The bridge takes the first free port
+in the range, and the `redirect_uri` in the printed URL names the one it took.
+A host with no browser you can reach at all — CI, `npm run smoke`, a server
+nobody logs into — needs `BELLMAN_KEY=<key>`: an explicitly set key still wins
+and skips sign-in entirely.
 
 Channels are a Claude Code research preview: a custom channel is not on Anthropic's allowlist, so every launch needs `claude --dangerously-load-development-channels server:bellman`. Miss the flag and the session starts normally but nothing is ever pushed into it, which reads as Bellman being broken — `bellman-claude` exists so you can't forget. It passes your other arguments straight through (`bellman-claude --resume`), and `BELLMAN_CHANNEL_SERVER` / `BELLMAN_CHANNEL_FLAG` override the entry and the flag once the channel reaches an org allowlist.
 
@@ -92,7 +119,7 @@ Team and Enterprise orgs must also turn on `channelsEnabled`.
 **Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
 
 ```bash
-claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVERY=hook -- bellman-channel
+claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel
 ```
 
 ```json
@@ -106,7 +133,7 @@ claude mcp add --scope user bellman -e BELLMAN_KEY=<your key> -e BELLMAN_DELIVER
 
 Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. The hook finds the bridge's queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
-**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors: point them at the same URL and sign in with GitHub or Google.
+**Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
 ## Plans
 

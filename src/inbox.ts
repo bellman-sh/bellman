@@ -178,7 +178,11 @@ export function drain(dir: string): PeerEvent[] {
     } catch {
       // A corrupt entry is dropped rather than left to wedge the queue.
     } finally {
-      rmSync(claimed, { force: true });
+      // `force` suppresses ENOENT, not EPERM. Throwing here would lose the whole
+      // batch this call has already read AND leave the files claimed, so the
+      // events would be neither delivered nor redeliverable — the tidy-up
+      // destroying the thing it was tidying up after.
+      try { rmSync(claimed, { force: true }); } catch { /* leave it; it is already claimed */ }
     }
   }
   return out;

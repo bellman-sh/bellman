@@ -145,7 +145,7 @@ The shape change, landing atomically because `npm run verify` typechecks both pr
   - `SessionDO.setJoinCode(role, code, expiresAt): Promise<string | null | false>` — returns the retired code
   - `SessionDO.consumeJoinCode(role): Promise<string | null>` — returns the retired code
   - `SessionDO.clearJoinCodes(): Promise<string[]>` — returns every retired code
-  - `joinCodes(code: string, role?: string)` test fixture helper
+  - `oneCode(code: string, role?: string)` test fixture helper
 
 - [ ] **Step 1: Change the types**
 
@@ -405,13 +405,9 @@ and replace both `Boolean(session.joinCode)` occurrences with `previous`.
 
 Remove it from `src/codes.ts` and from the import list in `tests/codes.test.ts`, deleting the three tests that call it (`matches the human-relayable BELL-XXXX-XX shape`, `never emits 0, O, 1, I or L`, `does not repeat itself across a large sample`) and rewriting them against `renderJoinCode("reviewer")`:
 
-```ts
-  it("matches the human-relayable shape", () => {
-    for (let i = 0; i < 200; i++) {
-      expect(renderJoinCode("reviewer")).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}-REVIEWER$/);
-    }
-  });
+Do NOT re-add a shape assertion here — Task 1's `renders the role as a third group` already asserts that exact regex, and repeating it is duplication for its own sake. Keep only the two that test different properties:
 
+```ts
   /** Codes get read aloud and retyped, so the ambiguous glyphs are excluded. */
   it("never emits 0, O, 1, I or L in the random groups", () => {
     const seen = new Set<string>();
@@ -438,7 +434,7 @@ In `tests/helpers/fixtures.ts`, import `JoinCodeRecord` from `../../src/types.js
 
 ```ts
 /** One live code for `role`, expiring in the standard 15 minutes. */
-export function joinCodes(code: string, role = "peer_b"): Record<string, JoinCodeRecord> {
+export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeRecord> {
   return { [role]: { code, expiresAt: Date.now() + 15 * 60 * 1000 } };
 }
 
@@ -463,15 +459,15 @@ export function session(over: Partial<Session> = {}): Session {
 }
 ```
 
-The default manifest is the pair preset, so `manifest.defaultRole` is `"peer_b"` — which is why `joinCodes()`' default role matches.
+The default manifest is the pair preset, so `manifest.defaultRole` is `"peer_b"` — which is why `oneCode()`'s default role matches.
 
 - [ ] **Step 8: Update the contract suite's existing join-code cases**
 
-In `tests/helpers/store-contract.ts`, import `joinCodes` from `./fixtures.js` and rewrite the five existing cases:
+In `tests/helpers/store-contract.ts`, import `oneCode` from `./fixtures.js` and rewrite the five existing cases:
 
 ```ts
     it("finds a session by join code", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-ABCD-12") });
+      const s = session({ joinCodes: oneCode("BELL-ABCD-12") });
       (await store.createSession(s));
       const hit = await store.getSessionByJoinCode("BELL-ABCD-12");
       expect(hit?.session.id).toBe(s.id);
@@ -481,7 +477,7 @@ In `tests/helpers/store-contract.ts`, import `joinCodes` from `./fixtures.js` an
 
     /** INVARIANT 2: unused join codes expire after 15 minutes. */
     it("stops resolving a join code once its TTL elapses", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-TTL0-01") });
+      const s = session({ joinCodes: oneCode("BELL-TTL0-01") });
       (await store.createSession(s));
       expect((await store.getSessionByJoinCode("BELL-TTL0-01"))).toBeDefined();
 
@@ -491,7 +487,7 @@ In `tests/helpers/store-contract.ts`, import `joinCodes` from `./fixtures.js` an
 
     /** INVARIANT 2: join codes are single-use. */
     it("consumeJoinCode makes the code unusable and idempotent", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-ONCE-01") });
+      const s = session({ joinCodes: oneCode("BELL-ONCE-01") });
       (await store.createSession(s));
 
       (await store.consumeJoinCode(s.id, "peer_b"));
@@ -509,7 +505,7 @@ In `tests/helpers/store-contract.ts`, import `joinCodes` from `./fixtures.js` an
     });
 
     it("issues a new join code and retires the old one", async () => {
-      const a = session({ joinCodes: joinCodes("BELL-AAAA-01") });
+      const a = session({ joinCodes: oneCode("BELL-AAAA-01") });
       (await store.createSession(a));
 
       (await store.setJoinCode(a.id, "peer_b", "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL));
@@ -528,7 +524,7 @@ Append after `issues a new join code and retires the old one`:
 
 ```ts
     it("holds a live code for two roles at once, each resolving to its own role", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-AAAA-01", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
       (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 
@@ -538,7 +534,7 @@ Append after `issues a new join code and retires the old one`:
 
     /** The invariant the whole issue turns on. */
     it("issuing for one role leaves another role's code resolving", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-AAAA-01", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
       (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 
@@ -550,7 +546,7 @@ Append after `issues a new join code and retires the old one`:
     });
 
     it("consuming one role's code leaves the other resolving", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-AAAA-01", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
       (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 
@@ -561,7 +557,7 @@ Append after `issues a new join code and retires the old one`:
     });
 
     it("clearJoinCodes retires every code, idempotently", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-AAAA-01", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
       (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 
@@ -575,7 +571,7 @@ Append after `issues a new join code and retires the old one`:
 
     /** The whole string is the key, so a doctored suffix was never issued. */
     it("does not resolve a code whose role group was edited or stripped", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-7F3K-92-PEER-B", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-7F3K-92-PEER-B", "peer_b") });
       (await store.createSession(s));
 
       expect((await store.getSessionByJoinCode("BELL-7F3K-92-PEER-B"))?.role).toBe("peer_b");
@@ -601,12 +597,12 @@ function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
 }
 ```
 
-In `keeps its manifest through createSession, on both read paths`, replace the `joinCode` field and the lookup, importing the `joinCodes` helper from `./helpers/fixtures.js`:
+In `keeps its manifest through createSession, on both read paths`, replace the `joinCode` field and the lookup, importing the `oneCode` helper from `./helpers/fixtures.js`:
 
 ```ts
     const s = session({
       id: "qs_current",
-      joinCodes: joinCodes("BELL-NEW-01"),
+      joinCodes: oneCode("BELL-NEW-01"),
       manifest: roomManifest({ room: "kept", purpose: "keep me" }),
     });
 ```
@@ -616,6 +612,24 @@ In `keeps its manifest through createSession, on both read paths`, replace the `
 ```
 
 In both `toMatchObject` assertions on an expired row — the `still expires when its alarm fires` case and the negative-control case — replace `joinCode: null` with `joinCodes: {}`.
+
+Finally, repair the negative-control test `hands the legacy row to every read path, and manifest.mode throws`. Its point is that the guard prevents a REAL crash, and after this task the crash from an unguarded lookup happens inside the call — the per-role resolver dereferences `joinCodes`, which a pre-manifest row does not have. Assert the rejection rather than a returned value, which keeps the control's intent intact:
+
+```ts
+    const leaked = [
+      await legacy.getSession(),
+      await store.getSession(LEGACY_ID),
+    ];
+
+    for (const s of leaked) {
+      expect(s).toBeDefined();
+      expect(() => s!.manifest.mode).toThrow(TypeError);
+    }
+
+    // The third read path now crashes inside the lookup itself: resolving a code
+    // per role dereferences joinCodes, which a pre-manifest row has never had.
+    await expect(store.getSessionByJoinCode(LEGACY_CODE)).rejects.toThrow(TypeError);
+```
 
 - [ ] **Step 11: Run the tests and watch the new ones fail against a broken store**
 
@@ -1118,7 +1132,7 @@ Add to the join-code section of `tests/helpers/store-contract.ts`:
 
 ```ts
     it("closing a session clears every code, not just the default role's", async () => {
-      const s = session({ joinCodes: joinCodes("BELL-AAAA-01", "peer_b") });
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
       (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 

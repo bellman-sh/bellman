@@ -28,6 +28,7 @@ export async function pairUp(
     joinerBrief?: Brief;
     orgOnly?: boolean;
     manifest?: Record<string, unknown>;
+    joinAs?: string;
   } = {},
 ): Promise<PairedSession> {
   const creator = await h.connect(opts.creatorKey ?? DEV_KEY.jesse);
@@ -41,7 +42,16 @@ export async function pairUp(
   });
   expect(started.isError, started.text).toBe(false);
 
-  const joinCode = String(started.data.join_code);
+  let joinCode = String(started.data.join_code);
+  if (opts.joinAs) {
+    const invited = await creator.call("bellman_invite", {
+      session_id: String(started.data.session_id),
+      member_id: String(started.data.member_id),
+      role: opts.joinAs,
+    });
+    expect(invited.isError, invited.text).toBe(false);
+    joinCode = String(invited.data.join_code);
+  }
   const preview = await joiner.call("bellman_connect", { join_code: joinCode });
   expect(preview.isError, preview.text).toBe(false);
 

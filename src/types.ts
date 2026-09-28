@@ -102,6 +102,14 @@ export interface PendingConnect {
   token: string;
   sessionId: string;
   userId: string;
+  /**
+   * The seat the code carried, captured here because bellman_confirm receives
+   * only the token. A revoke landing in between therefore does not cancel an
+   * in-flight confirm, bounded by the token's own 10-minute TTL. Re-resolving
+   * at confirm would be worse: issuing retires the previous code for a role, so
+   * a joiner who previewed legitimately would be bumped by an unrelated reissue.
+   */
+  roomRole: string;
   createdAt: number;
   expiresAt: number;
 }

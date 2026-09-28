@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
+import { pairUp } from "../helpers/flows.js";
 import { JOIN_CODE_TTL } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import type { Identity } from "../../src/types.js";
@@ -856,5 +857,54 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     expect(confirmed.isError, confirmed.text).toBe(false);
     expect(confirmed.data.room).toBeDefined();
     expect(confirmed.data.room).toEqual(preview.data.room);
+  });
+});
+
+describe("the joiner is seated in the code's role", () => {
+  it("seats the joiner in the role their code carried", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const invited = await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId, role: "lead",
+    });
+
+    const joiner = await h.connect(DEV_KEY.outsider);
+    const preview = await joiner.call("bellman_connect", { join_code: String(invited.data.join_code) });
+    // "lead", NOT the swarm preset's default role "helper". That difference is the
+    // whole point, and is what lets the negative control in Step 6 actually fail.
+    expect((preview.data.room as { your_role: string }).your_role).toBe("lead");
+
+    const confirmed = await joiner.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief(),
+      capabilities: ["read_context", "receive_messages"],
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+    expect((confirmed.data.room as { your_role: string }).your_role).toBe("lead");
+
+    const seated = (await h.store.getSession(sessionId))!
+      .members.find((m) => m.memberId === String(confirmed.data.member_id))!;
+    expect(seated.roomRole).toBe("lead");
+  });
+
+  /** The preview and the seat must agree, or the preview is a lie. */
+  it("revoking after the preview does not retroactively change the seat", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const invited = await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId, role: "lead",
+    });
+    const joiner = await h.connect(DEV_KEY.outsider);
+    const preview = await joiner.call("bellman_connect", { join_code: String(invited.data.join_code) });
+
+    await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId, role: "lead", revoke: true,
+    });
+
+    const confirmed = await joiner.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief(),
+      capabilities: ["read_context", "receive_messages"],
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+    expect((confirmed.data.room as { your_role: string }).your_role).toBe("lead");
   });
 });

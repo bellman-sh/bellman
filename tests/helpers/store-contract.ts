@@ -765,7 +765,7 @@ export function describeStoreContract(
 
     it("takePendingConnect is single-use", async () => {
       (await store.putPendingConnect({
-        token: "qct_1", sessionId: "qs_test", userId: "u_peer",
+        token: "qct_1", sessionId: "qs_test", userId: "u_peer", roomRole: "peer_b",
         createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       }));
       expect((await store.takePendingConnect("qct_1"))?.userId).toBe("u_peer");
@@ -774,7 +774,7 @@ export function describeStoreContract(
 
     it("takePendingConnect refuses an expired token", async () => {
       (await store.putPendingConnect({
-        token: "qct_2", sessionId: "qs_test", userId: "u_peer",
+        token: "qct_2", sessionId: "qs_test", userId: "u_peer", roomRole: "peer_b",
         createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       }));
       vi.advanceTimersByTime(CONNECT_TOKEN_TTL + 1);
@@ -862,7 +862,7 @@ export function describeStoreContract(
 
     it("sweep drops expired pending connects", async () => {
       (await store.putPendingConnect({
-        token: "qct_sweep", sessionId: "qs_test", userId: "u_peer",
+        token: "qct_sweep", sessionId: "qs_test", userId: "u_peer", roomRole: "peer_b",
         createdAt: Date.now(), expiresAt: Date.now() + 1_000,
       }));
       vi.advanceTimersByTime(1_001);
@@ -874,7 +874,7 @@ export function describeStoreContract(
       const s = session();
       (await store.createSession(s));
       (await store.putPendingConnect({
-        token: "qct_live", sessionId: s.id, userId: "u_peer",
+        token: "qct_live", sessionId: s.id, userId: "u_peer", roomRole: "peer_b",
         createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       }));
 

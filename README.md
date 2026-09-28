@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
+One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
 
 ## Why MCP as the rendezvous
 
@@ -23,7 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
-| `bellman_invite` | Issue a fresh join code at any time, or revoke the current one. Issuing needs the `invite` verb; revoking needs `revoke`. |
+| `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
 ## Trust model

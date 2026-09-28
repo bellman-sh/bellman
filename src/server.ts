@@ -269,7 +269,7 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
       title: "Start a Bellman session",
       description: `Create a collaboration room and get a join code to share with the other session.
 
-The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
+The join code (e.g. BELL-7F3K-92-PEER-B) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. The last group is the seat the code grants. Works across users, machines, surfaces, and model providers.
 
 Args:
   - manifest: the room's declaration. Either cite a preset —
@@ -387,9 +387,10 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
 Show the returned preview to your human. If they want to proceed, call bellman_confirm with the connect_token and your own brief. Nothing about your session crosses the wire until bellman_confirm.
 
 Args:
-  - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
+  - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
+The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
@@ -454,6 +455,8 @@ Args:
   - connect_token: from bellman_connect (single-use, 10 minute TTL)
   - brief: YOUR structured context summary — this is what crosses to the peer
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
+
+You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
 Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
@@ -541,14 +544,16 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
-Issuing RETIRES the previous code immediately — anyone still holding it can no longer join. That is also how you revoke: pass revoke=true to kill the current code without minting another.
+A room mints one live code per role. Issuing for a role RETIRES that role's previous code immediately and leaves every other role's code alone — so you can hand a reviewer code and a contributor code to different people.
+
+Omitting \`role\` issues for the room's default seat. Omitting it when revoking retires EVERY code: over-revoking is recoverable by minting again, while under-revoking leaves a door open behind someone who believes they shut it. Pass a role to revoke exactly one.
 
 So \`invite\` already invalidates an outstanding code, because issuing retires it. \`revoke\` is the narrower authority: close the door and leave it closed. A seat holding \`invite\` but not \`revoke\` can still cut off a code someone is holding, by minting a new one.
 
-Args: session_id, member_id (yours), revoke (default false)
-Returns: { join_code, join_code_expires_at, replaced_previous } or { revoked: true }
-Members see an invite_issued / invite_revoked event, so reopening the door is never silent.
-Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A full session refuses (the code could not be used).`,
+Args: session_id, member_id (yours), role (optional), revoke (default false)
+Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
+Members see an invite_issued / invite_revoked event, so reopening the door is never silent. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
+Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),

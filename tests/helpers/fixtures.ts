@@ -1,5 +1,6 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
 import { resolveManifest } from "../../src/manifest.js";
+import { JOIN_CODE_TTL } from "../../src/store.js";
 
 export const anthropicAgent = {
   provider: "anthropic",
@@ -51,7 +52,7 @@ export function member(over: Partial<Member> = {}): Member {
 
 /** One live code for `role`, expiring in the standard 15 minutes. */
 export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeRecord> {
-  return { [role]: { code, expiresAt: Date.now() + 15 * 60 * 1000 } };
+  return { [role]: { code, expiresAt: Date.now() + JOIN_CODE_TTL } };
 }
 
 export function session(over: Partial<Session> = {}): Session {

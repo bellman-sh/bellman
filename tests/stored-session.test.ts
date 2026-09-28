@@ -35,10 +35,14 @@ describe("hydrateStoredSession — legacy join codes", () => {
   });
 
   it("leaves a row that already has joinCodes alone", () => {
-    const current = { ...session(), events: undefined };
+    // One fixture call, not two: session() stamps expiresAt from Date.now(), so
+    // calling it twice lets expected and actual straddle a clock tick — measured
+    // at 0.026% per run, rare enough to be a real CI flake rather than theoretical.
+    const fixture = session();
+    const current = { ...fixture, events: undefined };
     delete (current as Record<string, unknown>).events;
     const row = hydrateStoredSession(current)!;
-    expect(row.joinCodes).toEqual(session().joinCodes);
+    expect(row.joinCodes).toEqual(fixture.joinCodes);
   });
 
   it("still refuses a row with no manifest", () => {

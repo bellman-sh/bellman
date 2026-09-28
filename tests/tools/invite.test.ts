@@ -219,13 +219,45 @@ describe("bellman_invite", () => {
     const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
     const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
     const lead = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+    const before = (await h.store.getSession(sessionId))!;
 
     const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
     expect(revoked.data.revoked).toBe(true);
+    // Pins the payload a genuine multi-role revoke reports: both live roles,
+    // named — not just the boolean flag the rest of this test checks.
+    expect(revoked.data.roles).toEqual(["helper", "lead"]);
+
+    const after = (await h.store.getSession(sessionId))!;
+    // One invite_revoked event for the whole revoke, not one per role retired.
+    expect(after.events.length).toBe(before.events.length + 1);
 
     const outsider = await h.connect(DEV_KEY.outsider);
     expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(true);
     expect((await outsider.call("bellman_connect", { join_code: String(lead.data.join_code) })).isError).toBe(true);
+  });
+
+  /**
+   * Review Minor 5 / known-issue #8: an expired-but-still-present code is not a
+   * live code, so it must not be reported as retired or fire invite_revoked —
+   * doing so announces the closing of a door that had already shut by itself.
+   * Sets expiresAt directly through the store rather than waiting out the real
+   * 15-minute TTL: the bug is in the revoke predicate's `Boolean(...)` check,
+   * which never consults expiresAt regardless of how the code got old.
+   */
+  it("does not report an already-expired code as retired, and stays silent when it is the only one", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
+    const sessionId = String(started.data.session_id);
+    const creatorMemberId = String(started.data.member_id);
+    await h.store.setJoinCode(sessionId, "helper", "BELL-EXPIRED-01-HELPER", Date.now() - 1);
+    const before = (await h.store.getSession(sessionId))!;
+
+    const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
+    expect(revoked.isError, revoked.text).toBe(false);
+    expect(revoked.data.roles).toEqual([]);
+
+    const after = (await h.store.getSession(sessionId))!;
+    expect(after.events.length).toBe(before.events.length);
   });
 
   /** Review Focus 4. */

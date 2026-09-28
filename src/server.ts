@@ -551,13 +551,14 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
+        role: z.string().min(1).max(31).optional(),
         revoke: z.boolean().default(false),
       },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, revoke }): Promise<ToolResult> => {
+    async ({ session_id, member_id, role, revoke }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
@@ -570,46 +571,58 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
       if (denial) return fail(denial);
 
+      // An absent role means the usual seat when issuing, and EVERY seat when
+      // revoking. Deliberately asymmetric: over-revoking is recoverable by
+      // minting again, while under-revoking leaves a door open behind someone
+      // who believes they shut it.
+      if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
+        return fail(
+          `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
+        );
+      }
+
       if (revoke) {
-        if (Object.keys(session.joinCodes).length === 0) return ok({ revoked: true, join_code: null });
-        await s.clearJoinCodes(session_id);
+        const retired = role ? [role] : Object.keys(session.joinCodes);
+        if (role) await s.consumeJoinCode(session_id, role);
+        else await s.clearJoinCodes(session_id);
         await s.appendEvent(session.id, {
           type: "invite_revoked",
           fromMemberId: member_id,
           fromUserId: identity.userId,
           fromLabel: identity.label,
-          payload: {},
+          payload: { roles: retired },
           refId: null,
         });
-        await audit(s, session, identity, "invite_revoked", {});
-        return ok({ revoked: true, join_code: null });
+        await audit(s, session, identity, "invite_revoked", { roles: retired });
+        return ok({ revoked: true, roles: retired, join_code: null });
       }
 
       if (activeMembers(session).length >= session.maxMembers) {
         return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
       }
 
-      const role = session.manifest.defaultRole;
-      const previous = Boolean(session.joinCodes[role]);
-      const code = renderJoinCode(role);
+      const issuedRole = role ?? session.manifest.defaultRole;
+      const previous = Boolean(session.joinCodes[issuedRole]);
+      const code = renderJoinCode(issuedRole);
       const expiresAt = Date.now() + JOIN_CODE_TTL;
-      if (!(await s.setJoinCode(session_id, role, code, expiresAt))) return fail(FROZEN);
+      if (!(await s.setJoinCode(session_id, issuedRole, code, expiresAt))) return fail(FROZEN);
       await s.appendEvent(session.id, {
         type: "invite_issued",
         fromMemberId: member_id,
         fromUserId: identity.userId,
         fromLabel: identity.label,
-        payload: { expires_at: new Date(expiresAt).toISOString() },
+        payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
         refId: null,
       });
-      await audit(s, session, identity, "invite_issued", { replaced_previous: previous });
+      await audit(s, session, identity, "invite_issued", { role: issuedRole, replaced_previous: previous });
 
       return ok({
         join_code: code,
         join_code_expires_at: new Date(expiresAt).toISOString(),
+        role: issuedRole,
         replaced_previous: previous,
         share_instructions:
-          "Give this code to the joining session. Any code issued earlier has stopped working.",
+          `Give this code to the joining session. It seats them as "${issuedRole}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });
     }
   );

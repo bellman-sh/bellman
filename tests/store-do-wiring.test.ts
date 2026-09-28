@@ -249,7 +249,10 @@ describe("a current row is untouched by the guard", () => {
 
     // Read the raw rows: getSession() would expire it lazily and hide the alarm's part.
     const rows = storage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCodes: {} });
+    expect(rows.session).toMatchObject({ closed: true });
+    // toMatchObject is a subset match: { joinCodes: {} } would match ANY joinCodes value,
+    // so the clear itself needs its own exact assertion or this line guards nothing.
+    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });
@@ -295,7 +298,9 @@ describe("negative control: the same calls with the guard removed", () => {
     const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCodes: {} });
+    expect(rows.session).toMatchObject({ closed: true });
+    // Same subset-match pitfall as the test above: assert the clear itself, exactly.
+    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });

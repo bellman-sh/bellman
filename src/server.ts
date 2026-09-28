@@ -488,7 +488,11 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         label: identity.label,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
-        roomRole: pending.roomRole,
+        // ?? handles a pending row written before roomRole existed (predates
+        // commit 62608a9): default to the room's default seat rather than
+        // leaving the member permanently stuck holding no role at all, the
+        // same legacy-lift rule commit 7d19453 applies to joinCode on read.
+        roomRole: pending.roomRole ?? session.manifest.defaultRole,
         brief: brief as Brief,
         joinedAt: Date.now(),
         leftAt: null,

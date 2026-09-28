@@ -10,11 +10,6 @@ function chunk(len: number): string {
   return out;
 }
 
-/** Human-relayable join code, e.g. BELL-7F3K-92 */
-export function generateJoinCode(): string {
-  return `BELL-${chunk(4)}-${chunk(2)}`;
-}
-
 /**
  * Human-relayable join code carrying its role, e.g. BELL-7F3K-92-REVIEWER.
  *

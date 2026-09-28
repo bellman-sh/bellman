@@ -61,6 +61,12 @@ export interface SessionEvent {
   at: number;
 }
 
+/** One live join code, and when it stops resolving. */
+export interface JoinCodeRecord {
+  code: string;
+  expiresAt: number;
+}
+
 export interface Session {
   id: string;
   // There is no `mode` here: read session.manifest.mode. Two fields for one fact
@@ -69,8 +75,15 @@ export interface Session {
   createdBy: string;
   orgId: string | null;
   orgOnly: boolean;
-  joinCode: string | null;      // null once consumed (pair) or session closed
-  joinCodeExpiresAt: number;    // unused-code TTL
+  /**
+   * Live join codes, one per role. The map key IS the one-per-role invariant:
+   * two live codes for the same seat are unrepresentable rather than prevented
+   * by a check. Bounded by the manifest, which is immutable after createSession.
+   *
+   * There is no `joinCode` beside this, for the reason the `mode` comment above
+   * gives: two fields for one fact could disagree.
+   */
+  joinCodes: Record<string, JoinCodeRecord>;
   expiresAt: number;            // whole-session TTL
   maxMembers: number;
   members: Member[];

@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
-import { member, session } from "./fixtures.js";
+import { member, oneCode, session } from "./fixtures.js";
 
 export function describeStoreContract(
   name: string,
@@ -84,39 +84,97 @@ export function describeStoreContract(
 
     // ------------------------------------------------------------ join codes
     it("finds a session by join code", async () => {
-      const s = session({ joinCode: "BELL-ABCD-12" });
+      const s = session({ joinCodes: oneCode("BELL-ABCD-12") });
       (await store.createSession(s));
-      expect((await store.getSessionByJoinCode("BELL-ABCD-12"))?.id).toBe(s.id);
+      const hit = await store.getSessionByJoinCode("BELL-ABCD-12");
+      expect(hit?.session.id).toBe(s.id);
+      expect(hit?.role).toBe("peer_b");
       expect((await store.getSessionByJoinCode("BELL-ZZZZ-99"))).toBeUndefined();
     });
 
     /** INVARIANT 2: unused join codes expire after 15 minutes. */
     it("stops resolving a join code once its TTL elapses", async () => {
-      const s = session({ joinCodeExpiresAt: Date.now() + JOIN_CODE_TTL });
+      const s = session({ joinCodes: oneCode("BELL-TTL0-01") });
       (await store.createSession(s));
-      expect((await store.getSessionByJoinCode(s.joinCode!))).toBeDefined();
+      expect((await store.getSessionByJoinCode("BELL-TTL0-01"))).toBeDefined();
 
       vi.advanceTimersByTime(JOIN_CODE_TTL + 1);
-      expect((await store.getSessionByJoinCode(s.joinCode!))).toBeUndefined();
+      expect((await store.getSessionByJoinCode("BELL-TTL0-01"))).toBeUndefined();
     });
 
     /** INVARIANT 2: join codes are single-use. */
     it("consumeJoinCode makes the code unusable and idempotent", async () => {
-      const s = session({ joinCode: "BELL-ONCE-01" });
+      const s = session({ joinCodes: oneCode("BELL-ONCE-01") });
       (await store.createSession(s));
 
-      (await store.consumeJoinCode(s.id));
+      (await store.consumeJoinCode(s.id, "peer_b"));
       expect((await store.getSessionByJoinCode("BELL-ONCE-01"))).toBeUndefined();
-      expect((await store.getSession(s.id))?.joinCode).toBeNull();
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
 
-      await expect(store.consumeJoinCode(s.id)).resolves.not.toThrow();
+      await expect(store.consumeJoinCode(s.id, "peer_b")).resolves.not.toThrow();
     });
 
     it("never resolves a join code for a closed session", async () => {
       const s = session();
       (await store.createSession(s));
       (await store.closeSession(s.id));
-      expect((await store.getSessionByJoinCode(s.joinCode!))).toBeUndefined();
+      expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
+    });
+
+    it("holds a live code for two roles at once, each resolving to its own role", async () => {
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      expect((await store.getSessionByJoinCode("BELL-AAAA-01"))?.role).toBe("peer_b");
+      expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
+    });
+
+    /** The invariant the whole issue turns on. */
+    it("issuing for one role leaves another role's code resolving", async () => {
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.setJoinCode(s.id, "peer_a", "BELL-DDDD-04", Date.now() + JOIN_CODE_TTL));
+
+      expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
+      expect((await store.getSessionByJoinCode("BELL-DDDD-04"))?.role).toBe("peer_a");
+      expect((await store.getSessionByJoinCode("BELL-AAAA-01"))?.role).toBe("peer_b");
+    });
+
+    it("consuming one role's code leaves the other resolving", async () => {
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.consumeJoinCode(s.id, "peer_b"));
+
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
+    });
+
+    it("clearJoinCodes retires every code, idempotently", async () => {
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.clearJoinCodes(s.id));
+
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+      await expect(store.clearJoinCodes(s.id)).resolves.not.toThrow();
+    });
+
+    /** The whole string is the key, so a doctored suffix was never issued. */
+    it("does not resolve a code whose role group was edited or stripped", async () => {
+      const s = session({ joinCodes: oneCode("BELL-7F3K-92-PEER-B", "peer_b") });
+      (await store.createSession(s));
+
+      expect((await store.getSessionByJoinCode("BELL-7F3K-92-PEER-B"))?.role).toBe("peer_b");
+      expect(await store.getSessionByJoinCode("BELL-7F3K-92-PEER-A")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-7F3K-92")).toBeUndefined();
     });
 
     // --------------------------------------------------------------- members
@@ -195,7 +253,7 @@ export function describeStoreContract(
       (await store.freezeSession(s.id, Date.now()));
 
       expect(await store.addMember(s.id, member({ memberId: "m_late" }))).toBe(false);
-      expect(await store.setJoinCode(s.id, "BELL-NEW-01", Date.now() + 60_000)).toBe(false);
+      expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEW-01", Date.now() + 60_000)).toBe(false);
       expect(await store.appendEvent(s.id, {
         type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
         fromLabel: "jesse", payload: { text: "nope" }, refId: null,
@@ -203,7 +261,7 @@ export function describeStoreContract(
 
       const after = (await store.getSession(s.id))!;
       expect(after.members).toHaveLength(1);
-      expect(after.joinCode).toBe(s.joinCode);
+      expect(after.joinCodes).toEqual(s.joinCodes);
       expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
     });
 
@@ -357,24 +415,24 @@ export function describeStoreContract(
     // ------------------------------------------------------- pending connects
     /** INVARIANT 2: connect tokens are single-use with their own TTL. */
     it("issues a new join code and retires the old one", async () => {
-      const a = session({ joinCode: "BELL-AAAA-01" });
+      const a = session({ joinCodes: oneCode("BELL-AAAA-01") });
       (await store.createSession(a));
 
-      (await store.setJoinCode(a.id, "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(a.id, "peer_b", "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL));
 
       expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
-      expect((await store.getSessionByJoinCode("BELL-BBBB-02"))?.id).toBe(a.id);
-      expect((await store.getSession(a.id))?.joinCode).toBe("BELL-BBBB-02");
+      expect((await store.getSessionByJoinCode("BELL-BBBB-02"))?.session.id).toBe(a.id);
+      expect((await store.getSession(a.id))?.joinCodes["peer_b"].code).toBe("BELL-BBBB-02");
     });
 
     it("issues a code after the previous one was consumed", async () => {
-      const a = session({ joinCode: "BELL-AAAA-01" });
+      const a = session({ joinCodes: oneCode("BELL-AAAA-01") });
       (await store.createSession(a));
-      (await store.consumeJoinCode(a.id));
+      (await store.consumeJoinCode(a.id, "peer_b"));
 
-      (await store.setJoinCode(a.id, "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(a.id, "peer_b", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
 
-      expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.id).toBe(a.id);
+      expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.session.id).toBe(a.id);
     });
 
     // ----------------------------------------------------------- plan grants
@@ -775,7 +833,7 @@ export function describeStoreContract(
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(true);
-      expect(fresh.joinCode).toBeNull();
+      expect(fresh.joinCodes).toEqual({});
       expect(fresh.events.at(-1)?.type).toBe("session_expired");
       expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
     });

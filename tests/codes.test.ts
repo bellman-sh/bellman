@@ -1,20 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
-  generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode, renderJoinCode,
+  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode,
 } from "../src/codes.js";
 
 describe("join codes", () => {
-  it("matches the human-relayable BELL-XXXX-XX shape", () => {
-    for (let i = 0; i < 200; i++) {
-      expect(generateJoinCode()).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}$/);
-    }
-  });
-
   /** Codes get read aloud and retyped, so the ambiguous glyphs are excluded. */
-  it("never emits 0, O, 1, I or L", () => {
+  it("never emits 0, O, 1, I or L in the random groups", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 500; i++) {
-      for (const ch of generateJoinCode().replace(/^BELL-/, "").replace("-", "")) {
+      for (const ch of renderJoinCode("reviewer").split("-").slice(1, 3).join("")) {
         seen.add(ch);
       }
     }
@@ -25,7 +19,7 @@ describe("join codes", () => {
   });
 
   it("does not repeat itself across a large sample", () => {
-    const codes = new Set(Array.from({ length: 2_000 }, generateJoinCode));
+    const codes = new Set(Array.from({ length: 2_000 }, () => renderJoinCode("reviewer")));
     expect(codes.size).toBe(2_000);
   });
 

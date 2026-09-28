@@ -34,7 +34,7 @@ describe("bellman_invite", () => {
       member_id: s.creatorMemberId,
     });
     expect(issued.isError, issued.text).toBe(false);
-    expect(String(issued.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}$/);
+    expect(String(issued.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}-PEER-B$/);
     expect(issued.data.replaced_previous).toBe(false);
 
     const preview = await stale.call("bellman_connect", { join_code: issued.data.join_code });

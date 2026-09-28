@@ -33,7 +33,7 @@ vi.mock("cloudflare:workers", () => ({
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Session } from "../src/types.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
 
@@ -108,9 +108,11 @@ function eventsIn(rows: Record<string, unknown>): unknown[] {
  * (those live under their own keys).
  */
 function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
-  const { manifest, events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE, ...over });
+  const { manifest, events, joinCodes, ...rest } = session({ id: LEGACY_ID, ...over });
   return {
     ...rest,
+    joinCode: LEGACY_CODE,
+    joinCodeExpiresAt: Date.now() + 15 * 60 * 1000,
     mode: manifest.mode,
     members: rest.members.map(({ roomRole, ...m }) => m),
   };
@@ -184,11 +186,11 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     const { legacy, legacyStorage } = await worldOn(storeDo);
     const before = legacyStorage.snapshot();
 
-    await legacy.consumeJoinCode();
+    await legacy.consumeJoinCode("peer_b");
     // false, not null: #71 gave this a third outcome, where null means "set, and
     // there was no previous code" and false means refused — here, because the row
     // reads as gone.
-    expect(await legacy.setJoinCode("BELL-NEW-02", Date.now() + 60_000)).toBe(false);
+    expect(await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000)).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
     await legacy.closeSession();
@@ -229,13 +231,13 @@ describe("a current row is untouched by the guard", () => {
     const { store } = await worldOn(storeDo);
     const s = session({
       id: "qs_current",
-      joinCode: "BELL-NEW-01",
+      joinCodes: oneCode("BELL-NEW-01"),
       manifest: roomManifest({ room: "kept", purpose: "keep me" }),
     });
     await store.createSession(s);
 
     expect((await store.getSession(s.id))?.manifest).toEqual(s.manifest);
-    expect((await store.getSessionByJoinCode("BELL-NEW-01"))?.manifest).toEqual(s.manifest);
+    expect((await store.getSessionByJoinCode("BELL-NEW-01"))?.session.manifest).toEqual(s.manifest);
   });
 
   it("still expires when its alarm fires", async () => {
@@ -247,7 +249,7 @@ describe("a current row is untouched by the guard", () => {
 
     // Read the raw rows: getSession() would expire it lazily and hide the alarm's part.
     const rows = storage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCode: null });
+    expect(rows.session).toMatchObject({ closed: true, joinCodes: {} });
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });
@@ -266,13 +268,16 @@ describe("negative control: the same calls with the guard removed", () => {
     const leaked = [
       await legacy.getSession(),
       await store.getSession(LEGACY_ID),
-      await store.getSessionByJoinCode(LEGACY_CODE),
     ];
 
     for (const s of leaked) {
       expect(s).toBeDefined();
       expect(() => s!.manifest.mode).toThrow(TypeError);
     }
+
+    // The third read path now crashes inside the lookup itself: resolving a code
+    // per role dereferences joinCodes, which a pre-manifest row has never had.
+    await expect(store.getSessionByJoinCode(LEGACY_CODE)).rejects.toThrow(TypeError);
   });
 
   /**
@@ -290,7 +295,7 @@ describe("negative control: the same calls with the guard removed", () => {
     const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCode: null });
+    expect(rows.session).toMatchObject({ closed: true, joinCodes: {} });
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });

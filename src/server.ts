@@ -6,7 +6,7 @@ import type {
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
-  generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
+  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode,
 } from "./codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
@@ -338,14 +338,17 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         joinedAt: now,
         leftAt: null,
       };
+      const defaultCode = {
+        code: renderJoinCode(manifest.defaultRole),
+        expiresAt: now + JOIN_CODE_TTL,
+      };
       const session: Session = {
         id: generateSessionId(),
         manifest,
         createdBy: identity.userId,
         orgId: identity.orgId,
         orgOnly: org_only,
-        joinCode: generateJoinCode(),
-        joinCodeExpiresAt: now + JOIN_CODE_TTL,
+        joinCodes: { [manifest.defaultRole]: defaultCode },
         expiresAt: now + ent.sessionTtlMs,
         maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
         members: [creator],
@@ -360,8 +363,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       return ok({
         session_id: session.id,
         member_id: memberId,
-        join_code: session.joinCode,
-        join_code_expires_at: new Date(session.joinCodeExpiresAt).toISOString(),
+        join_code: defaultCode.code,
+        join_code_expires_at: new Date(defaultCode.expiresAt).toISOString(),
         session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,
         // What the server recorded, seen from the creator's seat. Without it the
@@ -395,10 +398,11 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       },
     },
     async ({ join_code }): Promise<ToolResult> => {
-      const session = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
-      if (!session) {
+      const hit = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
+      if (!hit) {
         return fail("join code not found or expired. Codes expire 15 minutes after creation if unused, and are consumed when a pair session fills. Ask the creator to start a new session.");
       }
+      const { session, role } = hit;
       if (session.orgOnly && session.orgId !== identity.orgId) {
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
@@ -426,7 +430,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
             max_members: session.maxMembers,
             org_only: session.orgOnly,
           },
-          room: roomPreview(session, session.manifest.defaultRole),
+          room: roomPreview(session, role),
           creator_brief: untrusted(
             { memberId: creator.memberId, label: creator.label },
             creator.brief
@@ -493,9 +497,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
 
-      // Pair sessions consume the code when full; swarm codes live until expiry/capacity.
+      // A full pair session has no seat for ANY role, so every code goes.
       if (activeMembers(joined).length >= joined.maxMembers) {
-        await s.consumeJoinCode(joined.id);
+        await s.clearJoinCodes(joined.id);
       }
 
       const joinEvent = await appendOrFrozen(s, session.id, {
@@ -567,8 +571,8 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       if (denial) return fail(denial);
 
       if (revoke) {
-        if (!session.joinCode) return ok({ revoked: true, join_code: null });
-        await s.consumeJoinCode(session_id);
+        if (Object.keys(session.joinCodes).length === 0) return ok({ revoked: true, join_code: null });
+        await s.clearJoinCodes(session_id);
         await s.appendEvent(session.id, {
           type: "invite_revoked",
           fromMemberId: member_id,
@@ -585,9 +589,11 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
         return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
       }
 
-      const code = generateJoinCode();
+      const role = session.manifest.defaultRole;
+      const previous = Boolean(session.joinCodes[role]);
+      const code = renderJoinCode(role);
       const expiresAt = Date.now() + JOIN_CODE_TTL;
-      if (!(await s.setJoinCode(session_id, code, expiresAt))) return fail(FROZEN);
+      if (!(await s.setJoinCode(session_id, role, code, expiresAt))) return fail(FROZEN);
       await s.appendEvent(session.id, {
         type: "invite_issued",
         fromMemberId: member_id,
@@ -596,12 +602,12 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
         payload: { expires_at: new Date(expiresAt).toISOString() },
         refId: null,
       });
-      await audit(s, session, identity, "invite_issued", { replaced_previous: Boolean(session.joinCode) });
+      await audit(s, session, identity, "invite_issued", { replaced_previous: previous });
 
       return ok({
         join_code: code,
         join_code_expires_at: new Date(expiresAt).toISOString(),
-        replaced_previous: Boolean(session.joinCode),
+        replaced_previous: previous,
         share_instructions:
           "Give this code to the joining session. Any code issued earlier has stopped working.",
       });

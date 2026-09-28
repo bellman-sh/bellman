@@ -1,4 +1,4 @@
-import type { Brief, Member, RoomManifest, Session } from "../../src/types.js";
+import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
 import { resolveManifest } from "../../src/manifest.js";
 
 export const anthropicAgent = {
@@ -49,17 +49,22 @@ export function member(over: Partial<Member> = {}): Member {
   };
 }
 
+/** One live code for `role`, expiring in the standard 15 minutes. */
+export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeRecord> {
+  return { [role]: { code, expiresAt: Date.now() + 15 * 60 * 1000 } };
+}
+
 export function session(over: Partial<Session> = {}): Session {
   const now = Date.now();
+  const manifest = over.manifest ?? roomManifest();
   return {
     id: "qs_test",
-    manifest: roomManifest(),
+    manifest,
     frozenAt: null,
     createdBy: "u_jesse",
     orgId: "org_codenerd",
     orgOnly: false,
-    joinCode: "BELL-TEST-01",
-    joinCodeExpiresAt: now + 15 * 60 * 1000,
+    joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
     expiresAt: now + 4 * 60 * 60 * 1000,
     maxMembers: 2,
     members: [member()],

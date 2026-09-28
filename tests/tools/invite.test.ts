@@ -95,7 +95,9 @@ describe("bellman_invite", () => {
     expect(types).toContain("invite_revoked");
   });
 
-  it("is the creator's to give — a joined member cannot reopen the room", async () => {
+  it("is the lead's to give — a joiner seated without `invite` cannot reopen the room", async () => {
+    // The default `pair` preset seats the joiner as peer_b, which holds send,
+    // request_actions and respond_actions — and neither invite nor revoke.
     const s = await pairUp(h);
 
     const attempt = await s.joiner.call("bellman_invite", {
@@ -103,7 +105,7 @@ describe("bellman_invite", () => {
     });
 
     expect(attempt.isError).toBe(true);
-    expect(attempt.text).toContain("only the session creator");
+    expect(attempt.text).toContain('your role "peer_b" does not hold the verb "invite"');
   });
 
   it("refuses a code nobody could use, rather than handing out a dead one", async () => {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -103,6 +103,57 @@ describe("inbox queue", () => {
     expect(readMemberships(dir)).toEqual([{ session_id: "bs_test", member_id: "m_mine" }]);
     expect(drain(dir)).toEqual([]);
     expect(readMemberships(join(root, "missing"))).toEqual([]);
+  });
+});
+
+/**
+ * The tidy-up must not destroy the thing it is tidying up after.
+ *
+ * drain() claims each file with a rename, reads it, and removes it in a
+ * `finally`. rmSync's `force` suppresses ENOENT and not EPERM, so a removal the
+ * filesystem refuses used to throw out of drain — losing the whole batch this
+ * call had ALREADY read, and leaving the files claimed, so they were neither
+ * delivered nor redeliverable. The agent is told "No peer events arrived" and
+ * the events are gone.
+ */
+describe("a queue entry that cannot be removed", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "bellman-inbox-eperm-")); });
+  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+  it("still hands back the events it read", async () => {
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => {
+      const real = await importOriginal<typeof import("node:fs")>();
+      return {
+        ...real,
+        rmSync: (...args: Parameters<typeof real.rmSync>) => {
+          if (String(args[0]).includes(".claimed")) {
+            throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+          }
+          return real.rmSync(...args);
+        },
+      };
+    });
+    try {
+      const mocked = await import("../src/inbox.js");
+      mocked.enqueue(dir, event({ cursor: 1 }));
+      mocked.enqueue(dir, event({ cursor: 2, at: "2026-09-17T00:00:02.000Z" }));
+
+      let threw: unknown = "nothing";
+      let got: number[] = [];
+      try {
+        got = mocked.drain(dir).map((e) => e.cursor);
+        threw = undefined;
+      } catch (error) {
+        threw = error;
+      }
+
+      expect({ threw, got }).toEqual({ threw: undefined, got: [1, 2] });
+    } finally {
+      vi.doUnmock("node:fs");
+      vi.resetModules();
+    }
   });
 });
 

@@ -9,6 +9,7 @@ import {
   generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
 } from "./codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
+import { denyVerb, verbsOfRole } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
@@ -16,6 +17,30 @@ const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeouts
 const MAX_PAYLOAD_CHARS = 20_000;
+
+/** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
+const SEND_KINDS = ["message", "artifact", "action_request", "action_response", "brief_update"] as const;
+type SendKind = (typeof SEND_KINDS)[number];
+
+/**
+ * Which verb each send kind needs. A Record rather than a ternary with a default
+ * arm: a sixth kind must declare its verb here or this stops compiling. A default
+ * would hand it `send` silently, and a closed enum exists so that every guard is
+ * one somebody chose.
+ *
+ * Verbs do not compose: each kind maps to exactly one verb and no other, so a role
+ * holding `request_actions` but not `send` may ask a peer to act but not talk.
+ */
+const SEND_VERB = {
+  message: "send",
+  artifact: "send",
+  // A brief_update appends an event that puts this member's prose into every
+  // peer's context. A seat that may not speak may not restate itself either —
+  // which is exactly what `observer` promises its readers.
+  brief_update: "send",
+  action_request: "request_actions",
+  action_response: "respond_actions",
+} as const satisfies Record<SendKind, Verb>;
 
 // ---------------------------------------------------------------------------
 // Zod shapes (raw shapes — broadest client compatibility via the SDK)
@@ -128,10 +153,11 @@ function publicMember(m: Member) {
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
  *
- * The verbs are declared rules. Nothing enforces them at call time until #2, and
- * bellman_start, bellman_connect and bellman_confirm say so in their descriptions
- * (tests/tools/surface.test.ts pins that). When #2 enforces them, those three
- * sentences and the README's go with it.
+ * `your_verbs` goes through verbsOfRole, and so does denyVerb, which the guards
+ * in bellman_send and bellman_invite call — so what a joiner is SHOWN and what
+ * is ENFORCED are one computation and cannot drift apart. Do not inline the
+ * lookup back into this function: a preview that over-promised by a single verb
+ * is the failure this whole design exists to prevent.
  */
 function roomPreview(session: Session, viewerRole: string) {
   const m = session.manifest;
@@ -146,7 +172,7 @@ function roomPreview(session: Session, viewerRole: string) {
     preset: m.preset,
     mode: m.mode,
     your_role: viewerRole,
-    your_verbs: m.roles[viewerRole]?.can ?? [],
+    your_verbs: verbsOfRole(m, viewerRole),
     creator_role: m.creatorRole,
     roles,
     text: untrusted(
@@ -242,7 +268,7 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
     "bellman_start",
     {
       title: "Start a Bellman session",
-      description: `Create a collaboration room and get a join code to share with the other session.
+      description: `Create a collaboration room and get a join code to share with the sessions you want in it.
 
 The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
 
@@ -251,7 +277,7 @@ Args:
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions.
-    Verbs are declared, not yet enforced at call time: a role's list states your intent, not a guarantee.
+    Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
@@ -344,7 +370,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // cannot see a preset or role that validated but is not what they meant.
         room: roomPreview(session, manifest.creatorRole),
         share_instructions:
-          `Give the join code to the other session's user. In that session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own brief.`,
+          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room takes more than one joiner; reissue a code with bellman_invite to add members later.`,
       });
     }
   );
@@ -362,7 +388,7 @@ Args:
   - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
-The room's verbs are the creator's declared rules, not yet enforced at call time: read them as stated intent, not a guarantee.
+The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(30) },
       annotations: {
@@ -426,7 +452,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
 
 Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
-The room's verbs are declared rules, not yet enforced at call time: stated intent, not a guarantee.
+The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       inputSchema: {
@@ -507,16 +533,18 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
     "bellman_invite",
     {
       title: "Issue a new Bellman join code",
-      description: `Mint a fresh join code for a session you created — at any time, for as long as the session lives.
+      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives.
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
 Issuing RETIRES the previous code immediately — anyone still holding it can no longer join. That is also how you revoke: pass revoke=true to kill the current code without minting another.
 
+So \`invite\` already invalidates an outstanding code, because issuing retires it. \`revoke\` is the narrower authority: close the door and leave it closed. A seat holding \`invite\` but not \`revoke\` can still cut off a code someone is holding, by minting a new one.
+
 Args: session_id, member_id (yours), revoke (default false)
 Returns: { join_code, join_code_expires_at, replaced_previous } or { revoked: true }
 Members see an invite_issued / invite_revoked event, so reopening the door is never silent.
-Errors: only the creator can issue; a full session refuses (the code could not be used).`,
+Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
@@ -532,10 +560,12 @@ Errors: only the creator can issue; a full session refuses (the code could not b
       if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
-      // Roles land in M0; until then the creator is the only one who can reopen the door.
-      if (session.createdBy !== identity.userId) {
-        return fail("only the session creator can issue join codes.");
-      }
+      // Roles landed. `invite` and `revoke` are separate verbs, so a seat may hold
+      // one without the other. A room whose manifest gives nobody `invite` cannot
+      // be reopened by anyone, its creator included — tests/manifest.test.ts calls
+      // that a legal manifest, so it is the declared behaviour, not a hole.
+      const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
+      if (denial) return fail(denial);
 
       if (revoke) {
         if (!session.joinCode) return ok({ revoked: true, join_code: null });
@@ -584,14 +614,14 @@ Errors: only the creator can issue; a full session refuses (the code could not b
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, or brief update to the other member(s).
+      description: `Send a message, artifact, action request, action response, or brief update to every other member of the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm
   - type:
       "message"        — free-form text for the peer agent+human
       "artifact"       — code/doc/data payload ({ name, content })
-      "action_request" — ask the peer session to do something. Peer must have granted request_actions. THE PEER'S HUMAN approves, not the peer agent.
+      "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized
@@ -599,11 +629,11 @@ Args:
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
 Returns: { delivered_to, cursor, replayed? } — replayed: true means this key had already been used and nothing new was sent.
-Errors: capability errors name the member lacking the grant.`,
+Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
-        type: z.enum(["message", "artifact", "action_request", "action_response", "brief_update"]),
+        type: z.enum(SEND_KINDS),
         payload: z.record(z.string(), z.unknown()),
         ref_id: z.string().optional(),
         idempotency_key: z.string().min(8).max(80).optional(),
@@ -618,6 +648,13 @@ Errors: capability errors name the member lacking the grant.`,
       if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
+
+      // Authority first: before the payload, before who is listening. A seat that
+      // may not act hears why, rather than being sent off to shorten a message it
+      // was never allowed to send or learning who is present by probing. Which verb
+      // each kind needs is SEND_VERB's business, at the top of the file.
+      const denial = denyVerb(session, me, SEND_VERB[type]);
+      if (denial) return fail(denial);
 
       const serialized = JSON.stringify(payload);
       if (serialized.length > MAX_PAYLOAD_CHARS) {

@@ -35,7 +35,7 @@ export const grantKey = (key: string): string => `gr:${key}`;
  * percent-encoded here regardless, so even a grant written by some future path
  * that skipped validation lands in its own range rather than someone else's.
  *
- * The trailing colon is load-bearing for a second reason: without it the prefix
+ * The trailing colon matters for a second reason too: without it the prefix
  * for `org_a` would also match every grant in `org_ab`.
  */
 function segment(value: string): string {

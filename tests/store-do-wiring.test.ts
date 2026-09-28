@@ -128,7 +128,8 @@ async function worldOn(
   row: Record<string, unknown> = legacyRow(),
 ) {
   const legacyStorage = fakeStorage({ session: row, cursor: 0 });
-  const registry = new RegistryDO({ storage: fakeStorage() } as never, {} as never);
+  const registryStorage = fakeStorage();
+  const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
   const sessions = new Map<string, InstanceType<typeof SessionDO>>([
     [LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, {} as never)],
   ]);
@@ -150,6 +151,7 @@ async function worldOn(
     store: new DurableObjectStore(env),
     legacy: sessions.get(LEGACY_ID)!,
     legacyStorage,
+    registryStorage,
   };
 }
 
@@ -254,6 +256,42 @@ describe("a current row is untouched by the guard", () => {
     // so the clear itself needs its own exact assertion or this line guards nothing.
     expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+});
+
+describe("closing a session drops its registry rows", () => {
+  /**
+   * Pins the wiring D7 added (commit 007eec1): DurableObjectStore.closeSession
+   * calling clearJoinCodes at the boundary where it holds the registry handle.
+   * The store-contract suite's "closing a session clears every code" test looks
+   * like coverage of this but runs only against MemoryStore, a separate
+   * closeSession implementation that cannot exercise this path at all.
+   *
+   * The registry assertion is the one that carries the weight, not the map
+   * assertion above it: getSessionByJoinCode's closed guard already makes the
+   * codes stop resolving even if the registry rows are never dropped, so a
+   * behavioural assertion alone proves nothing about whether the rows
+   * themselves were cleared — only the raw registry snapshot can tell "the
+   * codes stopped working" apart from "the rows were dropped", which is the
+   * entire content of D7.
+   */
+  it("closeSession drops every role's registry row, not just the session's map", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({ id: "qs_closing", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+
+    await store.closeSession(s.id);
+
+    // The map cleared — this much MemoryStore already proves.
+    expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+    // The registry rows went too — this is the part only the DO store can fail.
+    // Checked by name rather than "no jc: rows at all": worldOn()'s own setup
+    // unconditionally registers LEGACY_CODE under the unrelated legacy session,
+    // so the registry is never empty of jc: rows even when this one closes clean.
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).not.toContain("jc:BELL-AAAA-01");
+    expect(keys).not.toContain("jc:BELL-CCCC-03");
   });
 });
 

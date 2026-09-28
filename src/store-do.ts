@@ -604,6 +604,8 @@ export class DurableObjectStore implements BellmanStore {
 
   async closeSession(sessionId: string): Promise<void> {
     await this.session(sessionId).closeSession();
+    // SessionDO holds no registry reference, so it cannot drop registry rows.
+    // We clear them here at the boundary where we have access to the registry.
     await this.clearJoinCodes(sessionId);
   }
 

@@ -121,6 +121,18 @@ export function describeStoreContract(
       expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
     });
 
+    /**
+     * The `closed` guard in its own right. The case above reaches `undefined` via
+     * the emptied index, so it would pass even with the guard deleted; this one
+     * gets past the index and can only be refused by the guard itself.
+     */
+    it("refuses a code that is still indexed for a session that is closed", async () => {
+      const s = session({ closed: true, joinCodes: oneCode("BELL-SHUT-01") });
+      (await store.createSession(s));
+
+      expect(await store.getSessionByJoinCode("BELL-SHUT-01")).toBeUndefined();
+    });
+
     it("holds a live code for two roles at once, each resolving to its own role", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));

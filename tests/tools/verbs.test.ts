@@ -168,6 +168,45 @@ describe("bellman_send — a seat that lacks the verb", () => {
     expect((await h.store.auditForOrg(org, 500)).length,
       "a denial must not record an action that never happened").toBe(before);
   });
+
+  // The same argument as the audit test above, for #79's idempotency keys: a
+  // refused send must not consume the caller's key. The guard sits above the
+  // store call, so a denied seat never reaches appendEventOnce and its key
+  // stays free.
+  //
+  // What this does NOT claim: moving the guard below the append turns 13 tests
+  // in this file red, the "appends nothing" rows among them, so this is not the
+  // sentinel for that drift. What nothing else covers is the KEY — every other
+  // denial test here measures events or audit rows. If key-recording were ever
+  // separated from appending, or a refusing guard added after the store call,
+  // this is the only test that would notice.
+  it("a denied send does not consume an idempotency key", async () => {
+    const KEY = "retry-0001";
+    // A seat that may ask but not talk: `message` needs `send`, `action_request`
+    // needs `request_actions`. That is what makes this provable at all — keys
+    // are namespaced per member, so a second member reusing the key would show
+    // nothing. The same member has to be refused once and allowed once.
+    const p = await pairUp(h, { manifest: seat(["request_actions"]) });
+
+    const denied = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "message", payload: { text: "refused" }, idempotency_key: KEY,
+    });
+    expect(denied.isError, denied.text).toBe(true);
+
+    // Same member, same key, and it must APPEND. "replayed" or a conflict would
+    // mean the refused call had recorded the key, so a caller denied once could
+    // never use that key again — its retries would answer for a send that never
+    // happened.
+    const allowed = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_request", payload: { action: "run the suite" },
+      idempotency_key: KEY,
+    });
+    expect(allowed.isError, allowed.text).toBe(false);
+    expect(allowed.data.replayed).toBeUndefined();
+    expect(typeof allowed.data.cursor).toBe("number");
+  });
 });
 
 // ---------------------------------------------------------------------------

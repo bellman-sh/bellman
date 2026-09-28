@@ -11,8 +11,8 @@ export type StoredSession = Omit<Session, "events">;
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Two fields were added after the sessions now in production were written, and
- * they want opposite treatment:
+ * Three fields were added after the sessions now in production were written, and
+ * they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
  *   would put words in the creator's mouth — while a read of
@@ -22,8 +22,15 @@ export type StoredSession = Omit<Session, "events">;
  *   and `undefined !== null`, so a row without it would report frozen and
  *   refuse every write in that room. Null is the honest default: a session
  *   nobody froze is not frozen.
+ * - **joinCode / joinCodeExpiresAt** are lifted into `joinCodes`, keyed by the
+ *   manifest's default role, and then stripped. Stripped rather than kept
+ *   because a `joinCode` beside `joinCodes` is the stale mirror the Session
+ *   type forbids. The legacy string has no role group and needs none: the whole
+ *   string is the index key, so it resolves as written and expires naturally.
+ *   Read-time rather than a bulk migration because there is no list of sessions
+ *   to iterate — the registry indexes by creator and by code, never by "all".
  *
- * Both live here, in one gate, rather than in two functions that could drift.
+ * All three live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -31,6 +38,16 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!m || typeof m !== "object") return undefined;
   const roles = (m as { roles?: unknown }).roles;
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
-  const row = raw as StoredSession;
-  return { ...row, frozenAt: row.frozenAt ?? null };
+
+  const {
+    joinCode, joinCodeExpiresAt, ...row
+  } = raw as StoredSession & { joinCode?: string | null; joinCodeExpiresAt?: number };
+
+  return {
+    ...row,
+    frozenAt: row.frozenAt ?? null,
+    joinCodes:
+      row.joinCodes ??
+      (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),
+  };
 }

@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
-  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode,
+  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
 } from "../src/codes.js";
+import { MAX_ROLE_KEY_LENGTH } from "../src/manifest.js";
 
 describe("join codes", () => {
   /** Codes get read aloud and retyped, so the ambiguous glyphs are excluded. */
@@ -42,6 +43,18 @@ describe("join codes", () => {
     const longest = "a" + "b".repeat(30);
     expect(longest).toMatch(/^[a-z][a-z0-9_]{0,30}$/);
     expect(renderJoinCode(longest).endsWith(`-${longest.toUpperCase()}`)).toBe(true);
+  });
+
+  /**
+   * Ties MAX_JOIN_CODE_LENGTH to MAX_ROLE_KEY_LENGTH directly, rather than to
+   * today's numbers on each side. A future edit that grows either constant
+   * without the other breaks THIS assertion, instead of shipping a code that
+   * renderJoinCode can produce and bellman_connect's own input schema refuses
+   * (see the Critical #1 regression test in tests/tools/handshake.test.ts).
+   */
+  it("caps the join code long enough for the longest legal role name", () => {
+    const longest = renderJoinCode("a".repeat(MAX_ROLE_KEY_LENGTH));
+    expect(MAX_JOIN_CODE_LENGTH).toBeGreaterThanOrEqual(longest.length);
   });
 
   it("keeps two roles distinct when only one has an underscore", () => {

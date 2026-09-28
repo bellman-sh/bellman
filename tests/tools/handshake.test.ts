@@ -908,3 +908,34 @@ describe("the joiner is seated in the code's role", () => {
     expect((confirmed.data.room as { your_role: string }).your_role).toBe("lead");
   });
 });
+
+describe("bellman_connect accepts every join code bellman_start can mint", () => {
+  // RoleKeyShape's longest legal role key. The rendered prefix "BELL-XXXX-XX-"
+  // is 13 chars, so a 31-char role name mints a 44-char code — the tool must
+  // accept back whatever it can hand out, not just what a preset role fits in.
+  it("round-trips a 31-character role name through bellman_connect", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const longRole = "a" + "b".repeat(30);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: {
+        room: "r",
+        mode: "pair",
+        roles: {
+          [longRole]: { can: ["send"] },
+          driver: { can: ["send", "invite", "revoke"] },
+        },
+        default_role: longRole,
+        creator_role: "driver",
+      },
+    });
+    expect(started.isError, started.text).toBe(false);
+
+    const peer = await h.connect(DEV_KEY.peer);
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+    expect((preview.data.room as { your_role: string }).your_role).toBe(longRole);
+  });
+});

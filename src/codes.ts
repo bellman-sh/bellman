@@ -1,7 +1,18 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { MAX_ROLE_KEY_LENGTH } from "./manifest.js";
 
 // No 0/O, 1/I/L — codes get relayed over voice and chat.
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+/**
+ * The longest string renderJoinCode can produce: the fixed "BELL-XXXX-XX-"
+ * prefix plus the longest legal role name (the `_` -> `-` swap is 1-for-1, so
+ * it does not change length). Anything that accepts a join code as input —
+ * bellman_connect's `join_code` argument — must be bounded at least this high,
+ * or a role name long enough to reach MAX_ROLE_KEY_LENGTH mints a code the
+ * server then refuses. tests/codes.test.ts pins the inequality directly.
+ */
+export const MAX_JOIN_CODE_LENGTH = "BELL-XXXX-XX-".length + MAX_ROLE_KEY_LENGTH;
 
 function chunk(len: number): string {
   const bytes = randomBytes(len);

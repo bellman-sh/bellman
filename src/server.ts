@@ -6,9 +6,9 @@ import type {
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
-  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode,
+  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
 } from "./codes.js";
-import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
+import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
@@ -393,7 +393,7 @@ Returns: { connect_token, connect_token_expires_at, session: {mode, active_membe
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
-      inputSchema: { join_code: z.string().min(4).max(30) },
+      inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
@@ -557,7 +557,7 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
-        role: z.string().min(1).max(31).optional(),
+        role: z.string().min(1).max(MAX_ROLE_KEY_LENGTH).optional(),
         revoke: z.boolean().default(false),
       },
       annotations: {

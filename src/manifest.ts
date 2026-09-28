@@ -18,7 +18,15 @@ export const VERBS = [
 export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
 
 const MAX_ROLES = 16;
-const MAX_ROLE_NAME = 31; // a leading letter plus RoleKeyShape's {0,30}: its longest string
+
+/**
+ * The longest legal role key: a leading letter plus up to 30 more characters
+ * (RoleKeyShape's regex, built from this below). Exported so codes.ts can size
+ * the join code that has to carry a role name whole, and so server.ts can bound
+ * `role` arguments against the same number it validates `join_code` against —
+ * one constant rather than two literals that can drift apart.
+ */
+export const MAX_ROLE_KEY_LENGTH = 31;
 
 /** A manifest that could not be resolved. The server turns this into a tool error. */
 export class ManifestError extends Error {
@@ -56,8 +64,8 @@ export const RoleKeyShape = z.string()
     `role keys must not be one of: ${[...RESERVED_ROLE_KEYS].join(", ")}`,
   )
   .regex(
-    /^[a-z][a-z0-9_]{0,30}$/,
-    "role keys must match [a-z][a-z0-9_]{0,30}",
+    new RegExp(`^[a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}$`),
+    `role keys must match [a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}`,
   );
 
 const RoleDefShape = z.strictObject({
@@ -110,8 +118,8 @@ const AuthorShape = z.strictObject({
   roles: RolesShape,
   // Both are echoed verbatim by the cross-field errors, which reach tool errors and
   // the audit log, so they are bounded like every other string in the shape.
-  default_role: z.string().max(MAX_ROLE_NAME),
-  creator_role: z.string().max(MAX_ROLE_NAME),
+  default_role: z.string().max(MAX_ROLE_KEY_LENGTH),
+  creator_role: z.string().max(MAX_ROLE_KEY_LENGTH),
 });
 
 /** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */

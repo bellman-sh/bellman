@@ -10,7 +10,8 @@ import {
 } from "./codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
-import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore } from "./store.js";
+import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
 const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
@@ -625,8 +626,9 @@ Args:
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized
   - ref_id: required for action_response
+  - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
-Returns: { delivered_to, cursor }
+Returns: { delivered_to, cursor, replayed? } — replayed: true means this key had already been used and nothing new was sent.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
       inputSchema: {
         session_id: z.string().min(4),
@@ -634,12 +636,13 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         type: z.enum(SEND_KINDS),
         payload: z.record(z.string(), z.unknown()),
         ref_id: z.string().optional(),
+        idempotency_key: z.string().min(8).max(80).optional(),
       },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, type, payload, ref_id }): Promise<ToolResult> => {
+    async ({ session_id, member_id, type, payload, ref_id, idempotency_key }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
@@ -679,28 +682,79 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (!req) return fail(`no action_request with cursor id ${ref_id}.`);
         if (req.fromMemberId === member_id) return fail("you cannot respond to your own action_request.");
       }
+      // Validated here so an invalid brief never appends an event; applied
+      // after the append, because a send the store refuses must not leave a
+      // brief written. The frozen guard above catches the common case, but a
+      // reused key does not reach the store until the append, and neither does
+      // a freeze that lands after that guard's read.
+      let updatedBrief: Brief | undefined;
       if (type === "brief_update") {
         const parsed = BriefShape.safeParse(payload);
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
-        await s.updateMember(session.id, member_id, { brief: parsed.data as Brief });
+        updatedBrief = parsed.data as Brief;
       }
 
-      const event = await appendOrFrozen(s, session.id, {
+      const draft = {
         type,
         fromMemberId: member_id,
         fromUserId: identity.userId,
         fromLabel: identity.label,
         payload,
         refId: ref_id ?? null,
-      });
-      await audit(s, session, identity, `sent_${type}`, {
-        chars: serialized.length,
-        ...(ref_id ? { ref_id } : {}),
-      });
+      };
+
+      let event: SessionEvent;
+      let replayed = false;
+      if (idempotency_key) {
+        let write: EventWrite;
+        try {
+          write = await s.appendEventOnce(session_id, draft, idempotency_key);
+        } catch (err) {
+          // An idempotency key means the payload has to be fingerprinted, and a
+          // payload this deeply nested cannot be. Said here rather than left to
+          // surface raw, because the caller can act on it: flatten the payload,
+          // or send without a key and lose only the retry protection.
+          if (err instanceof PayloadTooDeepError) {
+            return fail(
+              `payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels, so it cannot be fingerprinted for idempotency. ` +
+              `Flatten it, or send without idempotency_key.`
+            );
+          }
+          throw err;
+        }
+        if (write.outcome === "conflict") {
+          return fail(
+            `idempotency_key "${idempotency_key}" was already used for a different message. ` +
+            `Reuse a key only to retry the same send; pick a new one for new content.`
+          );
+        }
+        if (write.outcome === "frozen") return fail(FROZEN);
+        event = write.event;
+        replayed = write.outcome === "replayed";
+      } else {
+        event = await appendOrFrozen(s, session_id, draft);
+      }
+
+      // Nothing below happens twice. A replay's original call did all of it,
+      // and re-running it would grow the audit log on every retry — the bug
+      // #68 shipped, one layer down.
+      if (!replayed) {
+        if (updatedBrief) {
+          await s.updateMember(session_id, member_id, { brief: updatedBrief });
+        }
+        await audit(s, session, identity, `sent_${type}`, {
+          chars: serialized.length,
+          ...(ref_id ? { ref_id } : {}),
+        });
+      }
 
       return ok({
+        // The members active NOW, not the ones active when this was first
+        // appended. No history is kept to do better, and the field answers who
+        // can read it, which is the question either way.
         delivered_to: others.map((m) => m.label),
         cursor: event.cursor,
+        ...(replayed ? { replayed: true } : {}),
         note: type === "action_request"
           ? "The peer's HUMAN must approve this — expect an action_response event, possibly after a delay."
           : undefined,

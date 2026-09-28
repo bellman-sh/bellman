@@ -33,6 +33,7 @@ vi.mock("cloudflare:workers", () => ({
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Session } from "../src/types.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -50,9 +51,17 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     Object.entries(seed).map(([k, v]) => [k, structuredClone(v)]),
   );
   let writes = 0;
+  let puts = 0;
   const alarms: number[] = [];
   return {
     get writes() { return writes; },
+    /**
+     * put() INVOCATIONS, where `writes` counts keys. The difference is the
+     * whole point: three keys written in one call and the same three split
+     * across two calls both move `writes` by 3, so only this can tell a
+     * batched commit from separate ones.
+     */
+    get puts() { return puts; },
     alarms,
     snapshot: (): Record<string, unknown> => structuredClone(Object.fromEntries(rows)),
     get: async (key: string) => (rows.has(key) ? structuredClone(rows.get(key)) : undefined),
@@ -67,6 +76,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
      * failed far away with an undefined session instead of here.
      */
     put: async (keyOrEntries: unknown, value?: unknown) => {
+      puts++;
       if (typeof keyOrEntries === "string") {
         writes++;
         rows.set(keyOrEntries, structuredClone(value));
@@ -114,6 +124,17 @@ function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
     mode: manifest.mode,
     members: rest.members.map(({ roomRole, ...m }) => m),
   };
+}
+
+/**
+ * A session row as it is written today: a manifest, roomRole on members, and
+ * events under their own keys. legacyRow deliberately lacks the manifest, so
+ * hydrateStoredSession reads it as gone — which is right for the guard tests
+ * and useless for anything that needs the session to exist.
+ */
+function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
+  const { events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE, ...over });
+  return rest;
 }
 
 /**
@@ -292,5 +313,121 @@ describe("negative control: the same calls with the guard removed", () => {
     const rows = viaAlarm.legacyStorage.snapshot();
     expect(rows.session).toMatchObject({ closed: true, joinCode: null });
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+});
+
+/**
+ * appendEventOnce inside the real SessionDO. The contract suite proves these
+ * semantics for MemoryStore only (#12 is the work to point it here), so the
+ * parts that are this object's own — the key row, and its landing in the same
+ * put as the event — are pinned here.
+ */
+describe("SessionDO.appendEventOnce", () => {
+  const keyed = (over: Record<string, unknown> = {}) => ({
+    type: "message" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+    fromLabel: "jesse", payload: { text: "once" }, refId: null, ...over,
+  });
+
+  it("appends once and replays the same cursor", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+
+    const first = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    const again = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    expect(first.outcome).toBe("appended");
+    expect(again.outcome).toBe("replayed");
+    expect(again.outcome === "replayed" && again.event.cursor).toBe(1);
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(1);
+  });
+
+  it("refuses a key reused for different content", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    const clash = await store.appendEventOnce(
+      LEGACY_ID, keyed({ payload: { text: "different" } }), "send-0001",
+    );
+
+    expect(clash.outcome).toBe("conflict");
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(1);
+  });
+
+  it("returns frozen for a fresh key and replays a written one", async () => {
+    const { store } = await worldOn(storeDo, currentRow());
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    await store.freezeSession(LEGACY_ID, Date.now());
+
+    expect((await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001")).outcome)
+      .toBe("replayed");
+    expect((await store.appendEventOnce(LEGACY_ID, keyed({ payload: { text: "new" } }), "send-0002")).outcome)
+      .toBe("frozen");
+  });
+
+  /**
+   * The key row, the event and the cursor commit together. Committed
+   * separately, an interruption between them leaves the event stored with no
+   * key naming it, and the retry that follows appends a second one — the
+   * duplicate this method exists to prevent. writeEvent already makes this
+   * argument for the event and the cursor; the key joins them for the same
+   * reason, so one `put` is the assertion.
+   */
+  it("writes the key row in the same put as the event", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+
+    // Three keys, in ONE call. The key count alone cannot tell a batched
+    // commit from separate ones — 2 keys then 1 key also totals 3 — so the
+    // invocation count is what actually pins the atomicity here.
+    expect(legacyStorage.writes - before).toBe(3);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+    const rows = legacyStorage.snapshot();
+    const ik = Object.keys(rows).filter((k) => k.startsWith("ik:"));
+    expect(ik).toHaveLength(1);
+    expect(rows[ik[0]]).toMatchObject({ cursor: 1 });
+  });
+
+  it("namespaces the key row per member", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    await store.appendEventOnce(
+      LEGACY_ID, keyed({ fromMemberId: "m_joiner", payload: { text: "mine" } }), "send-0001",
+    );
+
+    expect(Object.keys(legacyStorage.snapshot()).filter((k) => k.startsWith("ik:")))
+      .toHaveLength(2);
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(2);
+  });
+
+  /**
+   * The contract suite pins this for MemoryStore; the suite does not run here
+   * yet (#12), so the production store's ordering needs its own witness.
+   *
+   * fingerprint() throws before anything is written, so the throw must leave
+   * the object untouched: no event row, no cursor bump, no key row — and the
+   * key still free, which is the part a row count cannot show.
+   */
+  it("throws on a payload too deep to fingerprint, writing nothing", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    let deep: unknown = { leaf: true };
+    for (let i = 0; i <= MAX_PAYLOAD_DEPTH; i++) deep = { a: deep };
+
+    const putsBefore = legacyStorage.puts;
+    await expect(
+      store.appendEventOnce(LEGACY_ID, keyed({ payload: deep }), "send-0001"),
+    ).rejects.toThrow(PayloadTooDeepError);
+
+    expect(legacyStorage.puts - putsBefore).toBe(0);
+    expect(Object.keys(legacyStorage.snapshot()).filter((k) => k.startsWith("ik:"))).toHaveLength(0);
+    expect(await store.eventsAfter(LEGACY_ID, 0)).toHaveLength(0);
+
+    // The key must still be free. A failed call that recorded it would make
+    // this "replayed" or "conflict" rather than a fresh append.
+    const after = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
+    expect(after.outcome).toBe("appended");
   });
 });

@@ -16,6 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
 import { member, session } from "./fixtures.js";
 
 export function describeStoreContract(
@@ -286,6 +287,205 @@ export function describeStoreContract(
           fromLabel: "l", payload: {}, refId: null,
         }),
       ).rejects.toThrow();
+    });
+
+    // ------------------------------------------------- idempotent appends
+    const keyed = (over: Record<string, unknown> = {}) => ({
+      type: "message" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+      fromLabel: "jesse", payload: { text: "once" }, refId: null, ...over,
+    });
+
+    it("appends the first time it sees a key", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      const write = await store.appendEventOnce(s.id, keyed(), "send-0001");
+
+      expect(write.outcome).toBe("appended");
+      expect(write.outcome === "appended" && write.event.cursor).toBe(1);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
+    /** The whole point: a retry is a no-op that returns the original. */
+    it("replays the original event for a repeated key, appending nothing", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      const first = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      const again = await store.appendEventOnce(s.id, keyed(), "send-0001");
+
+      if (first.outcome !== "appended") throw new Error(`first send said ${first.outcome}`);
+      if (again.outcome !== "replayed") throw new Error(`retry said ${again.outcome}`);
+      expect(again.event.cursor).toBe(first.event.cursor);
+      expect(again.event).toEqual(first.event);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
+    /**
+     * A key reused for different content is a client bug. Returning the stored
+     * event would tell the caller message B was delivered when A was.
+     */
+    it("refuses a key reused for different content, and appends nothing", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed(), "send-0001"));
+
+      const clash = await store.appendEventOnce(
+        s.id, keyed({ payload: { text: "different" } }), "send-0001",
+      );
+
+      expect(clash.outcome).toBe("conflict");
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
+    /** Object key order is not different content. */
+    it("treats a reordered payload as the same send", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed({ payload: { a: 1, b: 2 } }), "send-0001"));
+
+      const retry = await store.appendEventOnce(
+        s.id, keyed({ payload: { b: 2, a: 1 } }), "send-0001",
+      );
+
+      expect(retry.outcome).toBe("replayed");
+    });
+
+    /**
+     * Clients pick keys with no coordination between them. A shared namespace
+     * makes two peers that both count from 1 collide on their first message,
+     * and the failure presents as a lost message rather than as an error.
+     */
+    it("namespaces keys per member", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      const mine = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      const theirs = await store.appendEventOnce(
+        s.id, keyed({ fromMemberId: "m_joiner", payload: { text: "mine" } }), "send-0001",
+      );
+
+      expect(mine.outcome).toBe("appended");
+      expect(theirs.outcome).toBe("appended");
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(2);
+    });
+
+    /**
+     * A write that already succeeded keeps reporting its result even if the
+     * room froze afterwards. The replay appends nothing, so nothing new enters
+     * a frozen room — and a retry across a freeze can otherwise never learn
+     * that its first attempt landed, which is why it is retrying.
+     */
+    it("still replays a successful write after the session freezes", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed(), "send-0001"));
+      (await store.freezeSession(s.id, Date.now()));
+
+      const retry = await store.appendEventOnce(s.id, keyed(), "send-0001");
+
+      expect(retry.outcome).toBe("replayed");
+      expect(retry.outcome === "replayed" && retry.event.cursor).toBe(1);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
+    it("refuses a fresh key while frozen", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.freezeSession(s.id, Date.now()));
+
+      expect((await store.appendEventOnce(s.id, keyed(), "send-0001")).outcome).toBe("frozen");
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
+    });
+
+    /** Conflict outranks frozen: a client bug should say so, not be masked. */
+    it("reports a reused key as a conflict even while frozen", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed(), "send-0001"));
+      (await store.freezeSession(s.id, Date.now()));
+
+      const clash = await store.appendEventOnce(
+        s.id, keyed({ payload: { text: "different" } }), "send-0001",
+      );
+
+      expect(clash.outcome).toBe("conflict");
+    });
+
+    it("throws when appending to an unknown session, as appendEvent does", async () => {
+      await expect(
+        store.appendEventOnce("qs_nope", keyed(), "send-0001"),
+      ).rejects.toThrow();
+    });
+
+    /**
+     * REVIEW FOCUS 1: the race the private append primitive exists to prevent.
+     * Both calls are issued before either is awaited, so an implementation
+     * that yields between reading the key and writing the event appends twice.
+     * Every other test here awaits in between and would pass regardless.
+     */
+    it("appends once when two calls with the same key race", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      const [a, b] = await Promise.all([
+        store.appendEventOnce(s.id, keyed(), "send-0001"),
+        store.appendEventOnce(s.id, keyed(), "send-0001"),
+      ]);
+
+      const outcomes = [a.outcome, b.outcome].sort();
+      expect(outcomes).toEqual(["appended", "replayed"]);
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+    });
+
+    /** INVARIANT 5 again: the replayed event must not be stored state. */
+    it("hands back a detached event on replay", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed(), "send-0001"));
+
+      const retry = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      if (retry.outcome === "replayed") retry.event.cursor = 999;
+
+      expect((await store.eventsAfter(s.id, 0))[0].cursor).toBe(1);
+    });
+
+    /** D7: the key is an index, not content. It must not reach the peer. */
+    it("does not write the key onto the event", async () => {
+      const s = session();
+      (await store.createSession(s));
+      (await store.appendEventOnce(s.id, keyed(), "send-0001"));
+
+      const [event] = await store.eventsAfter(s.id, 0);
+      expect(JSON.stringify(event)).not.toContain("send-0001");
+    });
+
+    /**
+     * A payload too deep to fingerprint must leave nothing behind.
+     *
+     * `fingerprint` throws, and `appendEventOnce` calls it before it mutates
+     * anything, so the throw has to reach the caller with no event appended and
+     * no key recorded. A store that wrote first and fingerprinted second would
+     * satisfy every other case in this block.
+     */
+    it("throws on a payload too deep to fingerprint, and writes nothing", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      let deep: unknown = { leaf: true };
+      for (let i = 0; i <= MAX_PAYLOAD_DEPTH; i++) deep = { a: deep };
+
+      await expect(
+        store.appendEventOnce(s.id, keyed({ payload: deep }), "send-0001"),
+      ).rejects.toThrow(PayloadTooDeepError);
+
+      expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
+
+      // The key must also be free afterwards. If the failed call had recorded
+      // it, this would come back "replayed" or "conflict" rather than a fresh
+      // append — a key burned by a write that never happened.
+      const after = await store.appendEventOnce(s.id, keyed(), "send-0001");
+      expect(after.outcome).toBe("appended");
     });
 
     // ------------------------------------------------------------- long-poll

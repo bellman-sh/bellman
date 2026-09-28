@@ -250,6 +250,9 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.closed = true;
+    // Agree with expireIfDue: a closed room's codes stop resolving AND stop
+    // occupying the index, rather than relying on the `closed` guard alone.
+    await this.clearJoinCodes(sessionId);
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {

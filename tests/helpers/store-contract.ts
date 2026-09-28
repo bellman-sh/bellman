@@ -167,6 +167,16 @@ export function describeStoreContract(
       await expect(store.clearJoinCodes(s.id)).resolves.not.toThrow();
     });
 
+    it("closing a session clears every code, not just the default role's", async () => {
+      const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.closeSession(s.id));
+
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+    });
+
     /** The whole string is the key, so a doctored suffix was never issued. */
     it("does not resolve a code whose role group was edited or stripped", async () => {
       const s = session({ joinCodes: oneCode("BELL-7F3K-92-PEER-B", "peer_b") });

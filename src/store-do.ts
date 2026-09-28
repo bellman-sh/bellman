@@ -604,6 +604,7 @@ export class DurableObjectStore implements BellmanStore {
 
   async closeSession(sessionId: string): Promise<void> {
     await this.session(sessionId).closeSession();
+    await this.clearJoinCodes(sessionId);
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {

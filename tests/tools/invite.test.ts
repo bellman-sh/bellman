@@ -238,6 +238,25 @@ describe("bellman_invite", () => {
     expect(again.data.revoked).toBe(true);
   });
 
+  it("a real per-role revoke reports the retired role and appends one event; revoking it again is a silent no-op", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const before = (await h.store.getSession(sessionId))!;
+
+    const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
+    expect(revoked.isError, revoked.text).toBe(false);
+    expect(revoked.data.roles).toEqual(["helper"]);
+
+    const afterFirst = (await h.store.getSession(sessionId))!;
+    expect(afterFirst.events.length).toBe(before.events.length + 1);
+
+    const again = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
+    expect(again.isError, again.text).toBe(false);
+    expect(again.data.roles).toEqual([]);
+
+    const afterSecond = (await h.store.getSession(sessionId))!;
+    expect(afterSecond.events.length).toBe(afterFirst.events.length);
+  });
+
   it("refuses a role the manifest does not declare, naming the ones it does", async () => {
     const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
     const bad = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "admin" });

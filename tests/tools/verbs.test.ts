@@ -405,13 +405,12 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
   });
 
   it("a denied revoke neither retires the live code nor appends an event", async () => {
-    // The room must hold a LIVE join code. Without one the handler's
-    // `if (Object.keys(session.joinCodes).length === 0) return ok({ revoked: true, ... })`
-    // answers before a late guard could matter, and this test would prove nothing
-    // about where the guard sits relative to the revoke's work. A room that has
-    // filled has consumed its code (a pair fills at two), so this is a swarm with
-    // room to spare. The seat holds `invite` but not `revoke`, so the refusal can
-    // only be about revoke.
+    // The room must hold a LIVE join code. Without one, a denied revoke and a
+    // no-op revoke look identical (no event either way), and this test would
+    // prove nothing about where the guard sits relative to the revoke's work.
+    // A room that has filled has consumed its code (a pair fills at two), so
+    // this is a swarm with room to spare. The seat holds `invite` but not
+    // `revoke`, so the refusal can only be about revoke.
     const p = await pairUp(h, { manifest: seat(["send", "invite"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
     // Keeps the setup honest: with no code, "unchanged" below holds of any outcome.

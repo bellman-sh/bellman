@@ -582,18 +582,21 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       }
 
       if (revoke) {
-        const retired = role ? [role] : Object.keys(session.joinCodes);
+        const retired = (role ? [role] : Object.keys(session.joinCodes))
+          .filter((r) => Boolean(session.joinCodes[r]));
         if (role) await s.consumeJoinCode(session_id, role);
         else await s.clearJoinCodes(session_id);
-        await s.appendEvent(session.id, {
-          type: "invite_revoked",
-          fromMemberId: member_id,
-          fromUserId: identity.userId,
-          fromLabel: identity.label,
-          payload: { roles: retired },
-          refId: null,
-        });
-        await audit(s, session, identity, "invite_revoked", { roles: retired });
+        if (retired.length > 0) {
+          await s.appendEvent(session.id, {
+            type: "invite_revoked",
+            fromMemberId: member_id,
+            fromUserId: identity.userId,
+            fromLabel: identity.label,
+            payload: { roles: retired },
+            refId: null,
+          });
+          await audit(s, session, identity, "invite_revoked", { roles: retired });
+        }
         return ok({ revoked: true, roles: retired, join_code: null });
       }
 

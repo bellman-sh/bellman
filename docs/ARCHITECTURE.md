@@ -100,32 +100,39 @@ only to turn polling into push.
 
 ## 3. Why the server is remote-first
 
-This is the load-bearing decision, and cloud agents are why.
+Cloud agents are the reason, and the boundary is not the one it first looks
+like.
 
-A Claude Code cloud session runs in Anthropic's infrastructure. You did not
-launch it, you cannot pass it flags, and there is no machine of yours for it to
-open a socket back to. Any design that coordinates agents through local process
-management — a daemon, tmux session names, a Unix socket — **cannot reach it at
-all.**
+It is tempting to say a local orchestrator is limited to one machine. That is
+wrong — [OpenRig](https://github.com/mvschwarz/openrig) has a host registry and
+a cross-host executor, and reaches agents on any machine you control. The real
+line is **agents you did not launch**:
+
+- A **Claude Code cloud session** runs in Anthropic's infrastructure. You did
+  not start it, you cannot pass it flags, and there is no process of yours to
+  register it with. Nothing that works by launching and supervising a session
+  has a handle on it.
+- **Somebody else's agent** is not yours to launch either, and the problem is
+  not connectivity — it is that they must authenticate as themselves, their
+  content must arrive as untrusted, and the audit has to satisfy two
+  organisations rather than one.
 
 ```mermaid
 flowchart LR
-    subgraph yours["Your machine"]
-        A1["local agent"]
-        A2["local agent"]
+    subgraph launched["Agents you launched"]
+        A1["on this machine"]
+        A2["on another of<br/>your machines"]
     end
-    subgraph theirs["Anthropic cloud"]
-        C1["cloud session"]
-    end
-    subgraph third["A teammate's machine"]
-        T1["their agent"]
+    subgraph notyours["Agents you did not launch"]
+        C1["Claude Code<br/>cloud session"]
+        T1["someone else's<br/>agent"]
     end
 
-    ORCH["local orchestrator<br/>tmux, daemon"]
+    ORCH["local orchestrator<br/>daemon + host registry"]
     A1 <--> ORCH
     A2 <--> ORCH
-    ORCH -.->|"cannot reach"| C1
-    ORCH -.->|"cannot reach"| T1
+    ORCH -.->|"no handle on it"| C1
+    ORCH -.->|"not an identity<br/>it can speak for"| T1
 
     BELL["Bellman room"]
     A1 <--> BELL
@@ -134,11 +141,17 @@ flowchart LR
     T1 <--> BELL
 ```
 
-A cloud session can reach an HTTPS endpoint and sign in with OAuth. That is the
-only channel it has, so that is the channel Bellman is built on. Everything else
-follows from taking cloud agents seriously as first-class members: no daemon, no
-required local component, OAuth rather than a shared secret on disk, and org
-tenancy rather than "whoever is on this box".
+What both unreachable cases have in common is that they can open an HTTPS
+connection and sign in. That is the only channel available, so it is the one
+Bellman is built on, and the rest follows: no daemon, no required local
+component, OAuth rather than a secret on disk, org tenancy rather than
+"whoever is on this box", and peer content treated as untrusted because a
+member may belong to someone else entirely.
+
+This is a different job from orchestration rather than a better one. Booting
+and supervising a team wants local process control; putting agents from
+different people and providers in one room wants a hosted endpoint with an
+identity model. The two compose ([#85](../../../issues/85)).
 
 The cost is real. **MCP has no server push** — the protocol gives a server no
 way to wake a client. That single fact produces the whole delivery story below.

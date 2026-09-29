@@ -889,6 +889,74 @@ that cannot reach a local process.
 Run: `npx vitest run tests/store-do-wiring.test.ts -t "socket delivery"`
 Expected: FAIL — every socket's `sent` is empty; the waiter test passes already.
 
+- [ ] **Step 2b: Fix the alarm that never re-arms**
+
+Task 3's implementer found this and it belongs here, because this task owns
+the `alarm()` -> `wake()` -> socket path.
+
+`createSession` arms the TTL alarm exactly once (`setAlarm(s.expiresAt)`,
+`src/store-do.ts:99`). `alarm()` calls `expireIfDue(s, Date.now())`, whose
+guard is `if (s.closed || now <= s.expiresAt) return;`. An alarm that fires at
+*exactly* `expiresAt` therefore does nothing — and **nothing re-arms it**, so
+the room never expires at all.
+
+It has not bitten yet because `bellman_sync` calls `getSession` every 25
+seconds and `getSession` expires lazily. That is an accident, and **this
+branch removes it**: once a member watches over a socket instead of polling,
+nothing calls `getSession`, and a room whose alarm fired on the boundary lives
+forever. In a change whose whole purpose is that a quiet room costs nothing,
+a room that never dies is the wrong bug to ship.
+
+Write the failing test first:
+
+```ts
+  it("re-arms the TTL alarm when it fires before the room is due", async () => {
+    // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
+    // landing exactly on expiresAt expires nothing. Without a re-arm the room
+    // is then immortal, because after this branch nothing polls it.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+
+    vi.setSystemTime(at); // fire exactly on the boundary
+    await doi.alarm();
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+    expect(storage.alarms.at(-1)).toBeGreaterThan(at);
+  });
+```
+
+Wrap it in `vi.useFakeTimers()` / `vi.useRealTimers()` if the file does not
+already, following whatever the surrounding cases do.
+
+Run it, watch it fail on `storage.alarms.at(-1)` being undefined, then:
+
+```ts
+  async alarm(): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    await this.expireIfDue(s, Date.now());
+    /**
+     * Re-arm if the room is still live.
+     *
+     * expireIfDue's guard is `now <= expiresAt`, so an alarm firing exactly on
+     * the boundary expires nothing, and createSession arms this alarm only
+     * once. Without this line such a room never expires — which went unnoticed
+     * because bellman_sync's getSession expired it lazily every 25 seconds.
+     * A socket-watched room calls getSession never, so that safety net is
+     * gone and this one has to be real.
+     *
+     * Terminates: the re-arm is strictly after expiresAt, so the next firing
+     * has now > expiresAt and expireIfDue closes the room.
+     */
+    const fresh = await this.stored();
+    if (fresh && !fresh.closed) await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
+  }
+```
+
+Confirm green, then delete the re-arm line and confirm the test goes red again.
+
 - [ ] **Step 3: Implement the second arm**
 
 Replace `SessionDO.wake` in `src/store-do.ts`:

@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, confirms with its own, and the two sessions become members of each other's work.
+One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can issue a fresh code — one per role — to add members later.
 
 ## Why MCP as the rendezvous
 
@@ -253,3 +253,9 @@ Losing the room would be the wrong punishment for a failed card, and it is not r
 ## Production path
 
 State lives behind the `BellmanStore` interface (`src/store.ts`). The deployment this was shaped for is **Cloudflare Workers + Durable Objects** — each Bellman session maps 1:1 to a DO, which natively gives you the held long-poll connections, per-room serialization, and geographic placement. That's what serves `mcp.bellman.sh`: `src/worker.ts` with `DurableObjectStore` (`src/store-do.ts`), while `npm start` keeps the in-memory Node server for local development.
+
+## Architecture
+
+For the whole-system view — the surfaces agents arrive on, why the server is
+remote-first, the storage objects, the trust boundaries, and where this is
+going — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

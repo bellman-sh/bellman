@@ -661,7 +661,7 @@ Restore and re-run.
 
 - [ ] **Step 6: Act on the probe result, then run the full suite**
 
-PROBE RESULT: unrecorded
+PROBE RESULT: transactional
 
 If Task 1 recorded *not transactional*, a row can outlive the alarm that was meant to drain it. Add an opportunistic re-arm to the top of `getSession()`:
 

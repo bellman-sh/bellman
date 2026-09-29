@@ -596,9 +596,18 @@ excluded from `tsc`, so this is a runtime concern only.
 
 - [ ] **Step 1b: Convert EVERY bare `{ storage }` ctx in this file to `fakeCtx`**
 
-There are TEN as of Task 3 (the plan originally said four; Task 3 added six
-more). Find them all rather than trusting a line list:
-`grep -n 'new SessionDO({ storage\|new storeDo.SessionDO({ storage' tests/store-do-wiring.test.ts`
+THIRTEEN as of Task 3. Find them with a grep that matches the CONSTRUCTOR,
+not the argument:
+
+```bash
+grep -nE 'new (storeDo\.)?SessionDO\(' tests/store-do-wiring.test.ts   # expect 13
+```
+
+An earlier revision of this step grepped for `new storeDo.SessionDO({ storage`
+instead. That matches the ARGUMENT, so it misses every multi-line construction
+— where `(` ends the line and the ctx sits on the next — and it found 11 of 13.
+Both misses are in Task 3's TTL boundary test, and one of them drives
+`getSession` -> `expireIfDue` -> `wake()`, so it is exactly a site that breaks.
 
 ```ts
 new SessionDO({ storage: legacyStorage } as never, {} as never)
@@ -783,8 +792,10 @@ that cannot reach a local process.
   Step 1b, which converted every bare `{ storage }` ctx in the test file. If
   that did not happen, deleting the early return below makes ~20 existing
   tests throw `this.ctx.getWebSockets is not a function`. Check before you
-  start: `grep -n 'new SessionDO({ storage' tests/store-do-wiring.test.ts`
-  should find nothing.
+  start: `grep -cE 'new (storeDo\.)?SessionDO\(' tests/store-do-wiring.test.ts`
+  should equal the count of `fakeCtx(` sites in that file. Do NOT grep for
+  `SessionDO({ storage` — that matches the argument, and a multi-line
+  construction puts the ctx on the next line and slips straight through.
 - Produces: no new signature. `wake()` stays `private wake(event: SessionEvent): void`
   and stays synchronous.
 

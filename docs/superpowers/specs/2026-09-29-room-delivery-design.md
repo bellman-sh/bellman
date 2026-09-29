@@ -186,8 +186,8 @@ all sync, so the existing waiter arm above this is untouched and no caller of
 `SessionDO` gains its first `fetch` handler. Inside it, in this order:
 
 1. `await` the events the client missed (`eventsAfter(cursor)`)
-2. `ctx.acceptWebSocket(server)`
-3. `serializeAttachment({ memberIds, cursor })`
+2. `serializeAttachment({ memberIds, cursor })`
+3. `ctx.acceptWebSocket(server)`
 4. send the replay
 
 **The read comes first, and an earlier draft of this spec had it second.**
@@ -198,10 +198,34 @@ attachment, and `wake()`'s guard is `if (att && event.cursor <= att.cursor)`
 regardless of cursor, carrying no member ids. Reading first means a failed
 read accepts nothing.
 
-Steps 2 and 3 are synchronous and adjacent, so no await separates accepting a
-socket from attaching its cursor. That is the same shape `waitForEvents` already
+Steps 2 and 3 are synchronous and adjacent, so no await separates attaching a
+cursor from accepting the socket. That is the same shape `waitForEvents` already
 has — await the read, then register without yielding — so this order follows
 CLAUDE.md's rule rather than merely coexisting with it.
+
+**Attach before accept, and this was measured rather than assumed.** A draft of
+this section asserted that the Hibernation API requires accepting first for an
+attachment to persist. That is false. Against the pinned workerd
+(`1.20260926.1`), attaching first works, the attachment lands on the socket
+that is then accepted, and it survives a real eviction — the instance was torn
+down after 16 s idle and the attachment came back.
+
+It also closes the last orphan. `serializeAttachment` throws above the 16 KB
+cap, and with accept first that throw strands an accepted socket carrying no
+cursor; the probe reproduced it at 1,400 member ids, leaving `[null]` where
+attach-first leaves `[]`. `wake()` fails closed on a null attachment, so such a
+socket would silently receive nothing for as long as it stayed open.
+
+The reachability is remote but not zero, and not for the reason first given.
+A room's *active* membership is capped by its plan (2, 8 or 25), but nothing
+removes a member — `membersOf` deliberately returns members who have left, so
+that `/ws` and `bellman_sync` agree about who may watch (D6). A hub room
+accumulating a thousand seatings by one identity is churn, not a cap breach.
+
+The order therefore depends on a runtime behaviour this spec measured once.
+Task 8's workerd test and the smoke leg are what keep it honest: if a future
+workerd stopped persisting a pre-accept attachment, every socket would fail
+closed, and both checks would go red loudly rather than delivery going quiet.
 
 All four are inside one invocation, and the input gate holds every other
 request to the object for its duration. **This is CLAUDE.md's read-and-register

@@ -315,12 +315,26 @@ full read. #25 asks that the behaviour be pinned so `MemoryStore` and the DO
 store cannot drift; the type gives that at compile time and the tests give the
 rest.
 
-Exactly one caller outside the store reads `session.events`: `src/server.ts:729`,
+Exactly one **production** caller reads `session.events`: `src/server.ts`,
 `bellman_send` resolving an `action_response`'s `ref_id` by cursor. It becomes
 `eventAt(sessionId, cursor)` — one `storage.get(eventKey(cursor))`. A single
 key, which is better than the full list and better than `eventsAfter` too.
 `eventAt` joins `BellmanStore` and the contract suite, so both implementations
 are pinned together.
+
+The word *production* is doing real work there, and an earlier draft of this
+spec omitted it and was wrong. Eleven further lines read `session.events` —
+two in the contract suite and nine across `tests/tools` — and five helper
+signatures (`activeMembers`, `findMember`, `roomPreview`, `audit` in
+`server.ts`, `denyVerb` in `roles.ts`) take a `Session` only to read fields a
+`StoredSession` still has. The ripple is small in `src/`, not small overall.
+
+**One caveat on "the type does the enforcing".** It enforces against *callers*:
+a handler reaching for `.events` stops compiling. It does not enforce against
+an *implementation*, because a `Session` is assignable to `StoredSession` — a
+store that kept returning events would typecheck. That half needs a contract
+case asserting the returned object has no `events` property, or the claim is
+only half true.
 
 #25 says the contract pinning needs #12 first. For this it does not (D13).
 

@@ -149,6 +149,13 @@ export class SessionDO extends DurableObject {
    * CLAUDE.md's read-and-register rule, not an exemption from it: an event
    * appended between the replay and the accept would otherwise be delivered
    * to nobody and skipped by the cursor.
+   *
+   * The order is waitForEvents' own: await the read FIRST, then register with
+   * no await between. Accepting before the read would let a failed read leave
+   * an accepted socket with no attachment, and a socket with no cursor is one
+   * the fan-out cannot skip by: it would be sent every later event. So the
+   * read comes first, and the socket is attached before it is sent to; at no
+   * point is one accepted without its cursor.
    */
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade") !== "websocket") {
@@ -159,17 +166,18 @@ export class SessionDO extends DurableObject {
     const memberIds = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
+    // The only await. From here to the return nothing yields.
+    const missed = await this.events(cursor);
+
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
     this.ctx.acceptWebSocket(server);
-
-    const missed = await this.events(cursor);
-    for (const e of missed) server.send(JSON.stringify(e));
     const attachment: SocketAttachment = {
       memberIds,
       cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
     };
     server.serializeAttachment(attachment);
+    for (const e of missed) server.send(JSON.stringify(e));
 
     return new Response(null, { status: 101, webSocket: client });
   }

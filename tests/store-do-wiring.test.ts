@@ -37,11 +37,13 @@ vi.stubGlobal("WebSocketPair", class {
   1 = fakeSocket();
 });
 
-// workerd's Response takes { status: 101, webSocket } for an upgrade. Node's
-// rejects every status outside 200-599 with a RangeError, so without this
-// SessionDO.fetch throws on its last line. Only the 101 case is special-cased,
-// and only `status` and `webSocket` are modelled: this is what fetch's tests
-// read back, not a workerd Response.
+// workerd answers an upgrade with a Response of status 101 carrying a
+// `webSocket`. Node's Response throws a RangeError on any status outside
+// 200-599, so SessionDO.fetch, which is written for workerd, cannot return
+// here without this. The shim exists to test a workerd-only contract off
+// workerd; it hides no bug in fetch. Only the 101 case is special-cased, and
+// only `status` and `webSocket` are modelled: this is what fetch's tests read
+// back, not a workerd Response.
 const NodeResponse = Response;
 vi.stubGlobal("Response", class extends NodeResponse {
   webSocket?: unknown;
@@ -778,6 +780,17 @@ describe("fetch: websocket upgrade", () => {
     const { doi, ctx } = await world();
     const res = await doi.fetch(new Request("https://do/ws?cursor=0"));
     expect(res.status).toBe(426);
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("accepts no socket when reading the missed events fails", async () => {
+    // Read first, then accept (spec D5). Accepted before the read, a socket
+    // outlives a failed read with no attachment, and a socket with no cursor
+    // is one the fan-out cannot skip by: it would get every later event.
+    const { doi, ctx, storage } = await world(2);
+    storage.list = async () => { throw new Error("storage unavailable"); };
+
+    await expect(doi.fetch(upgrade(0))).rejects.toThrow("storage unavailable");
     expect(ctx.sockets).toHaveLength(0);
   });
 });

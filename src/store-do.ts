@@ -150,10 +150,14 @@ export class SessionDO extends DurableObject {
    * Read, attach, accept and send happen in this one invocation, and, its
    * only await being a storage read, the input gate holds every other request
    * to this object for its duration. That is CLAUDE.md's read-and-register
-   * rule, not an exemption from it: an event appended between the replay and
+   * rule, not an exemption from it: an event appended between the read and
    * the accept would otherwise be delivered to nobody and skipped by the
    * cursor. So the order is waitForEvents' own: await the read FIRST, then
    * register with no await between.
+   *
+   * The gate is D5's premise and is untested here: the fake has no input gate,
+   * and the sequence test pins only that nothing else awaits. Task 8's test,
+   * which races an append against an upgrade, is what exercises it.
    *
    * The cursor goes on before the accept. wake() has no good answer for a
    * socket whose cursor it does not know: send it everything, or silently

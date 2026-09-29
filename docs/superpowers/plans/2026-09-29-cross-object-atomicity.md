@@ -140,7 +140,8 @@ describe("named alarms", () => {
 
   /**
    * The boundary is the case that bites: an alarm fires AT its due time, not
-   * after it. `<` here would leave the handler scheduled and re-fire forever.
+   * after it. `<` here would skip the handler at that instant and re-arm the
+   * alarm to the same instant, so it spins until the clock moves on.
    */
   it("treats a handler due exactly now as due", () => {
     const due = new Map([["ttl", 1_000], ["outbox", 1_001]]);
@@ -201,7 +202,8 @@ export function earliestDue(times: Iterable<number>): number | null {
  * Which handlers are due at `now`, in name order so a drain is deterministic.
  *
  * Inclusive: an alarm fires AT its due time. An exclusive comparison would
- * leave the handler scheduled and re-fire it forever.
+ * skip the handler at that instant, and re-arming to `earliestDue` would set
+ * the alarm to the same instant again, so it spins until the clock moves on.
  */
 export function dueNames(due: Map<string, number>, now: number): string[] {
   return [...due]

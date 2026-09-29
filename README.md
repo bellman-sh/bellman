@@ -212,6 +212,11 @@ refused with an error naming the verb it lacks, and nothing is delivered or
 recorded. The `your_verbs` in a connect preview and the verbs enforced come
 from one accessor (`src/roles.ts`), so a preview cannot over-promise a verb.
 
+`invite` is not scoped to the inviter's own seat: a seat holding it can mint
+a join code for any role the manifest declares, including one more capable
+than its own, and can take that seat itself by leaving and rejoining. Give
+`invite` only to a seat you would trust with every seat's authority.
+
 A room role is not `Identity.role`. The latter is `member` | `admin` over an
 *org* and buys nothing inside a room: an org admin holds exactly what their
 seat holds.

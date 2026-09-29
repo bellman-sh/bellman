@@ -277,6 +277,7 @@ Args:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions.
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
+    invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. Give invite only to a seat you would trust with every seat's authority.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
@@ -544,7 +545,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
     "bellman_invite",
     {
       title: "Issue a new Bellman join code",
-      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives.
+      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives. This mints for any role the manifest declares, not only your own seat.
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 

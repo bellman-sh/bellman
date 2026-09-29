@@ -80,7 +80,9 @@ it("arms an alarm set inside a transaction, and keeps it across an abort", async
 
 - [ ] **Step 2: Run it**
 
-Run: `npm --prefix worker-tests install --legacy-peer-deps --no-audit --no-fund --silent && npm --prefix worker-tests exec vitest run probe-alarm`
+Run: `npm run test:worker -- probe-alarm`
+
+(`npm run test:worker` installs `worker-tests`' own dependency tree first, then runs vitest with `worker-tests/vitest.config.ts`. Do not reach for `npm --prefix worker-tests exec vitest` — `npm exec` keeps the caller's working directory, so vitest loads the ROOT config, whose `include` never matches a file under `worker-tests/`, and it reports "No test files found".)
 
 Two outcomes, both fine:
 - **PASS** — `setAlarm` commits with the transaction. Task 4 needs no fallback.

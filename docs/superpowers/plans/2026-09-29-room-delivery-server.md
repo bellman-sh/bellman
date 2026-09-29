@@ -794,6 +794,25 @@ that cannot reach a local process.
       expect(ws.sent.map((s) => JSON.parse(s).cursor)).toEqual([2]);
     });
 
+    it("sends nothing to a socket that claimed a cursor ahead of the room", async () => {
+      // The guard's ONLY real trigger, and the reason the test above cannot
+      // prove it. A socket's attachment starts at the cursor the client named
+      // and cursors only rise, so in ordinary flow event.cursor is always
+      // above att.cursor and the guard never fires — remove it and the test
+      // above still passes. It fires when a client names a cursor the room
+      // has not reached, and then it must: that client has claimed to have
+      // seen through 10, so 1 and 2 are not news to it.
+      const { doi, ctx, post } = await world();
+      await doi.fetch(open(ctx, 10));
+      await post(1);
+      await post(2);
+      expect(ctx.sockets[0].sent).toEqual([]);
+
+      // ...and it starts receiving once the room passes what it claimed.
+      for (let n = 3; n <= 11; n++) await post(n);
+      expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).cursor)).toEqual([11]);
+    });
+
     it("still resolves a long-poll waiter", async () => {
       const { doi, ctx, post } = await world();
       await doi.fetch(open(ctx, 0));
@@ -877,7 +896,14 @@ exact mistake the guard invites, and the one most likely to be reintroduced by
 someone tidying the method. Remove it again.
 
 Second, drop the `if (att && event.cursor <= att.cursor) continue;` line.
-Confirm "skips a socket already past the event" goes RED. Restore it.
+Confirm **"sends nothing to a socket that claimed a cursor ahead of the room"**
+goes RED — two frames arrive where none should. Restore it.
+
+Note which test that is. "skips a socket already past the event" passes with
+or without the guard: its socket connects at cursor 1 and then receives cursor
+2, and `2 > 1` means the guard never fires. Only a socket whose attachment is
+AHEAD of the incoming event exercises it. If you run the mutation against the
+wrong test you will conclude the guard is dead code and delete it.
 
 - [ ] **Step 7: Typecheck and commit**
 

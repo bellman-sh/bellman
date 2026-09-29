@@ -1,9 +1,44 @@
 # Pricing Re-tier — Design
 
-Status: approved design, pending implementation plan
+Status: **SUPERSEDED by #99, before implementation.** Do not build from this.
 Closes: #45 (the `max` plan), #75 (the creator index is never pruned)
 Related: #25, #12, #18 — the next branch, which this one clears the way for
 Defers: #53 (orgs and seats), #39 (self-serve checkout)
+
+> ## Superseded
+>
+> This spec rests on one claim: that watched-room concurrency is the entire
+> marginal cost of a room, at $0.005625 per watched room-hour. That is true of
+> the long-poll delivery path it was written against, and **#99 removes that
+> path** for every client that can reach a local process.
+>
+> A throwaway probe (scratchpad, not committed) confirmed a Durable Object is
+> evicted after ~10 s idle while its WebSocket stays open, and that delivery
+> works after revival. So for socket-watched rooms:
+>
+> - the $4.05/watched room-month duration term goes to approximately zero;
+> - the `103,680 × members × events` poll-read term disappears, because there
+>   are no polls;
+> - team's ~$53/month read exposure mostly goes with it;
+> - **`maxLiveRooms` loses its cost justification**, surviving only as an abuse
+>   control, which is a much weaker case for a new entitlement.
+>
+> What survives unchanged: remote MCP clients (ChatGPT connectors, Claude's web
+> connector) cannot reach a local process, so they keep long-polling and keep
+> costing duration. Whatever replaces this spec has to price that path alone
+> rather than all traffic.
+>
+> Two things here are worth keeping whatever comes next, and neither depends on
+> the cost argument:
+>
+> - **D2's index change** — storing `expiresAt` rather than `Date.now()` in
+>   `us:<userId>:<sessionId>` and pruning on read. That is #75, and it is a fix
+>   on its own terms.
+> - **D3's rank argument** — `max` must be declared between `pro` and `team`,
+>   because `src/billing/ledger.ts:80` derives plan rank from declaration
+>   order. #45 needs this regardless.
+>
+> Revisit once #99 is measured against a real bill.
 
 ## Problem
 

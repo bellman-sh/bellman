@@ -159,7 +159,8 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
  * serializeAttachment enforces workerd's 16 KB cap, because the order of attach
  * and accept in fetch exists to survive that throw. It counts as workerd does,
  * V8's serialization: for 1,400 ids it gives 16,833 bytes, the figure workerd
- * reported, and the boundary matches too (1,362 ids fit, 1,363 do not).
+ * reported, and the boundary matches too (1,362 ids fit, 1,363 do not). An
+ * attachment never set reads back as null, as it does in workerd.
  */
 const MAX_ATTACHMENT_BYTES = 16384;
 function fakeSocket() {
@@ -181,7 +182,7 @@ function fakeSocket() {
       }
       attachment = structuredClone(v);
     },
-    deserializeAttachment: () => structuredClone(attachment),
+    deserializeAttachment: () => (attachment === undefined ? null : structuredClone(attachment)),
   };
 }
 

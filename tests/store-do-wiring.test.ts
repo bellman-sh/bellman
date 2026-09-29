@@ -589,6 +589,38 @@ describe("membersOf", () => {
     expect(storage.writes - before).toBe(0);
   });
 
+  it("agrees with getSession about a room at its TTL boundary", async () => {
+    // The invariant is that membersOf and getSession agree about whether a
+    // room is closed, so this compares them instead of asserting a literal per
+    // timestamp. A literal would test today's rule and need editing whenever
+    // the guard moves; a comparison goes red when the guard moves on one side
+    // only. It cannot see both sides wrong together, which is what the TTL
+    // case above is for.
+    //
+    // The clock is pinned because > and >= differ only at now === expiresAt,
+    // a millisecond a real clock almost never lands on. Two objects per row,
+    // because getSession expires the room it reads.
+    const now = 1_000_000;
+    vi.setSystemTime(now);
+    try {
+      for (const [where, expiresAt] of [
+        ["a millisecond past", now - 1],
+        ["exactly at", now],
+        ["a millisecond short of", now + 1],
+      ] as const) {
+        const row = { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt };
+        const asked = new storeDo.SessionDO(
+          { storage: fakeStorage({ session: row, cursor: 0 }) } as never, {} as never);
+        const polled = new storeDo.SessionDO(
+          { storage: fakeStorage({ session: row, cursor: 0 }) } as never, {} as never);
+        expect((await asked.membersOf("u1")).closed, `${where} its TTL`).toBe(
+          (await polled.getSession())?.closed);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports an unknown room as closed with no members", async () => {
     const doi = new storeDo.SessionDO({ storage: fakeStorage() } as never, {} as never);
     expect(await doi.membersOf("u1")).toEqual({ memberIds: [], closed: true });

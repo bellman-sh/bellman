@@ -208,6 +208,28 @@ function fakeCtx(storage: ReturnType<typeof fakeStorage>) {
   };
 }
 
+/**
+ * Run `fn` with WebSocketPair wrapped, so a test can see each pair fetch
+ * builds. `seen` gets the pair as it is constructed, before fetch has touched
+ * it, which is the only moment a hook can see calls that come before the
+ * accept. The stub is put back afterwards, whether or not fn throws.
+ */
+type FakePair = { 0: ReturnType<typeof fakeSocket>; 1: ReturnType<typeof fakeSocket> };
+async function withPairs<T>(seen: (pair: FakePair) => void, fn: () => Promise<T>): Promise<T> {
+  const RealPair = globalThis.WebSocketPair;
+  globalThis.WebSocketPair = class extends RealPair {
+    constructor() {
+      super();
+      seen(this as unknown as FakePair);
+    }
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.WebSocketPair = RealPair;
+  }
+}
+
 /** The event rows in a storage snapshot. */
 function eventsIn(rows: Record<string, unknown>): unknown[] {
   return Object.entries(rows).filter(([k]) => k.startsWith("e:")).map(([, e]) => e);
@@ -770,19 +792,23 @@ describe("fetch: websocket upgrade", () => {
 
   it("answers 101 and accepts the socket", async () => {
     const { doi, ctx } = await world();
-    const res = await doi.fetch(upgrade(0));
+    const pairs: FakePair[] = [];
+    const res = await withPairs((pair) => pairs.push(pair), () => doi.fetch(upgrade(0)));
     expect(res.status).toBe(101);
     expect(ctx.sockets).toHaveLength(1);
-    // The client half goes out on the 101; the server half is the one accepted.
-    // Neither check is redundant: "not the accepted half" passes when there is
-    // no socket, and "there is a socket" passes when it is the accepted half.
-    // "Not the accepted half" is not belt-and-braces either. Handed the
-    // accepted half, workerd builds the 101 and fetch returns normally; the
-    // fault shows only when a connection is used (no frames, close 1006).
-    // Neither this fake nor the runtime's API reports it, so this is what does.
+    expect(pairs).toHaveLength(1);
+    // The client half goes out on the 101 and the server half is the one
+    // accepted: both are identities against the pair fetch built. Weaker
+    // checks admit real faults. "Truthy and not the accepted half" passes for
+    // the whole pair or for {}. "Is the client half" alone passes when fetch
+    // accepts the client half too, so the socket it returns is the accepted
+    // one. Neither this fake nor the runtime's API objects to that last fault:
+    // handed the accepted half, workerd builds the 101 and fetch returns
+    // normally, and it shows only when a connection is used (no frames, close
+    // 1006).
     const { webSocket } = res as unknown as { webSocket?: unknown };
-    expect(webSocket).toBeTruthy();
-    expect(webSocket).not.toBe(ctx.sockets[0]);
+    expect(webSocket).toBe(pairs[0][0]);
+    expect(ctx.sockets[0]).toBe(pairs[0][1]);
   });
 
   it("replays exactly what was missed, and nothing already seen", async () => {
@@ -851,7 +877,7 @@ describe("fetch: websocket upgrade", () => {
     // wrapper (the public eventsAfter, D5's name for the read) or chaining
     // `.then(x => x)` adds a hop, the marker overtakes fetch, and this goes
     // red on correct code. A `yield` right after `read` has two causes the
-    // log cannot tell apart, a hop or an await added before the accept, so
+    // log cannot tell apart, a hop or an await added before the attach, so
     // look at how fetch awaits the read first. Hook whatever fetch awaits
     // directly.
     //
@@ -873,21 +899,12 @@ describe("fetch: websocket upgrade", () => {
     const accept = ctx.acceptWebSocket;
     ctx.acceptWebSocket = (ws) => { calls.push("accept"); accept(ws); };
 
-    const RealPair = globalThis.WebSocketPair;
-    globalThis.WebSocketPair = class extends RealPair {
-      constructor() {
-        super();
-        const server = this[1];
-        const { serializeAttachment, send } = server;
-        server.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
-        server.send = (data) => { calls.push("send"); send(data); };
-      }
-    };
-    try {
-      await doi.fetch(upgrade(0));
-    } finally {
-      globalThis.WebSocketPair = RealPair;
-    }
+    await withPairs((pair) => {
+      const server = pair[1];
+      const { serializeAttachment, send } = server;
+      server.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
+      server.send = (data) => { calls.push("send"); send(data); };
+    }, () => doi.fetch(upgrade(0)));
 
     expect(calls).toEqual(["read", "attach", "accept", "send", "send", "yield"]);
   });

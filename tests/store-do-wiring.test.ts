@@ -720,8 +720,10 @@ describe("membersOf", () => {
 /**
  * SessionDO.fetch, the /ws upgrade. A SessionDO method and deliberately not a
  * BellmanStore one (MemoryStore cannot hold a hibernatable socket), so the
- * contract suite never reaches it. The fake ctx has no input gate, so these
- * pin what fetch sends and records, not that nothing can interleave with it.
+ * contract suite never reaches it. The fake ctx has no input gate, so nothing
+ * here can interleave with fetch. These pin what it sends and records and, in
+ * the sequence case, that it never yields once its read returns, which is what
+ * lets the real runtime's input gate make it atomic.
  */
 describe("fetch: websocket upgrade", () => {
   const upgrade = (cursor: number, members = "m1") =>
@@ -792,5 +794,40 @@ describe("fetch: websocket upgrade", () => {
 
     await expect(doi.fetch(upgrade(0))).rejects.toThrow("storage unavailable");
     expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("reads, then accepts, attaches and sends, without yielding in between", async () => {
+    // D5 as one assertion: the read, then accept, attach and send, with
+    // nothing yielding once the read returns. The whole sequence is compared,
+    // so any reordering shows. The fake has no input gate to interleave, so
+    // "yield" stands in for one: it is queued when the read settles, behind
+    // fetch's own continuation, so it lands last only if fetch never awaits
+    // again before it returns. The hooks sit where the things they watch
+    // appear: events() is the one thing fetch awaits, and the accepted socket
+    // does not exist until fetch makes it.
+    const { doi, ctx } = await world(2);
+    const calls: string[] = [];
+
+    const events = doi.events.bind(doi);
+    doi.events = (after?: number) => {
+      calls.push("read");
+      const read = events(after);
+      read.then(() => queueMicrotask(() => calls.push("yield")), () => {});
+      return read;
+    };
+
+    const accept = ctx.acceptWebSocket;
+    ctx.acceptWebSocket = (ws) => {
+      calls.push("accept");
+      const socket = ws as ReturnType<typeof fakeSocket>;
+      const { serializeAttachment, send } = socket;
+      socket.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
+      socket.send = (data) => { calls.push("send"); send(data); };
+      accept(ws);
+    };
+
+    await doi.fetch(upgrade(0));
+
+    expect(calls).toEqual(["read", "accept", "attach", "send", "send", "yield"]);
   });
 });

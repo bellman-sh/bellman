@@ -594,7 +594,7 @@ vi.stubGlobal("WebSocketPair", class {
 plain indexed object instead. Vitest does not typecheck and this file is
 excluded from `tsc`, so this is a runtime concern only.
 
-- [ ] **Step 1b: Convert EVERY bare `{ storage }` ctx in this file to `fakeCtx`**
+- [ ] **Step 1b: Give every `SessionDO` construction a ctx with `getWebSockets`**
 
 THIRTEEN as of Task 3. Find them with a grep that matches the CONSTRUCTOR,
 not the argument:
@@ -608,6 +608,18 @@ instead. That matches the ARGUMENT, so it misses every multi-line construction
 — where `(` ends the line and the ctx sits on the next — and it found 11 of 13.
 Both misses are in Task 3's TTL boundary test, and one of them drives
 `getSession` -> `expireIfDue` -> `wake()`, so it is exactly a site that breaks.
+
+Two clarifications the wording needs, both raised by Task 3:
+
+- **The target is `SessionDO`, not "bare `{ storage }`".** Task 3 already gave
+  its two sites a local `socketlessCtx(storage)` returning
+  `{ storage, getWebSockets: () => [] }`. Those are no longer "bare", but they
+  still need folding into `fakeCtx` so there is one ctx helper, not two. Fold
+  them and delete `socketlessCtx`.
+- **`RegistryDO` is out of scope.** There is one bare-ctx `RegistryDO`
+  construction in this file. It has no `wake()` and never reaches
+  `getWebSockets`, so leave it exactly as it is. "Every ctx" read literally
+  would sweep it in for no reason.
 
 ```ts
 new SessionDO({ storage: legacyStorage } as never, {} as never)
@@ -792,8 +804,9 @@ that cannot reach a local process.
   Step 1b, which converted every bare `{ storage }` ctx in the test file. If
   that did not happen, deleting the early return below makes ~20 existing
   tests throw `this.ctx.getWebSockets is not a function`. Check before you
-  start: `grep -cE 'new (storeDo\.)?SessionDO\(' tests/store-do-wiring.test.ts`
-  should equal the count of `fakeCtx(` sites in that file. Do NOT grep for
+  start: every site `grep -nE 'new (storeDo\.)?SessionDO\(' tests/store-do-wiring.test.ts`
+  finds must be passed a ctx that provides `getWebSockets` — via `fakeCtx`
+  after Task 4 folds in Task 3's interim `socketlessCtx`. Do NOT grep for
   `SessionDO({ storage` — that matches the argument, and a multi-line
   construction puts the ctx on the next line and slips straight through.
 - Produces: no new signature. `wake()` stays `private wake(event: SessionEvent): void`

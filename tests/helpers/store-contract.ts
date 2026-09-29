@@ -2,16 +2,17 @@
  * Conformance suite for the BellmanStore interface.
  *
  * The intent is that every implementation passes this identically: that is what
- * would make the interface a real seam rather than a comment. Today it runs
- * against ONE store, MemoryStore (tests/store.test.ts).
+ * makes the interface a real seam rather than a comment. Two stores run it now:
  *
- * DurableObjectStore, the store that serves production, does not run it yet;
- * issue #12 is the work to run it there. It is loadable under vitest, by
- * stubbing `cloudflare:workers` as tests/store-do-wiring.test.ts does. What
- * covers it until then is narrower: that file drives the real DurableObjectStore
- * over a fake storage and pins the manifest round trip, the legacy-row guard and
- * alarm(). So an assertion added below is proven for MemoryStore only. If a
- * Durable Object must honour it too, add it there as well.
+ *   - MemoryStore, under the root vitest program (tests/store.test.ts).
+ *   - DurableObjectStore, the store that serves production, inside workerd
+ *     (worker-tests/store-contract.test.ts). That is a SEPARATE vitest program
+ *     with its own dependency tree; see worker-tests/README.md for why.
+ *
+ * So an assertion added below is proven for both, and a divergence between them
+ * shows up here rather than in production. Where one genuinely cannot pass a
+ * case, say so through `divergences` below — the reason is required, and the
+ * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
@@ -19,12 +20,43 @@ import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
 import { member, oneCode, session } from "./fixtures.js";
 
+/**
+ * Cases an implementation cannot pass, each mapped to the reason it cannot.
+ *
+ * An entry here is a deliberate hole in "every implementation passes this
+ * identically", so the reason is the whole value of it and is required. The
+ * case is NOT skipped: it runs under `it.fails`, which is red unless the case
+ * fails. Fix the underlying cause and this suite tells you to delete the entry,
+ * rather than leaving a skip nobody revisits.
+ *
+ * The cost of `it.fails` over a skip, stated plainly: it is satisfied by the
+ * case failing for ANY reason, so it would stay green if the case broke afresh
+ * for an unrelated one. It buys "this still executes and still diverges", not
+ * "it diverges for the reason named here".
+ */
+export interface StoreContractDivergences {
+  /**
+   * `instanceof` across a Durable Object RPC boundary. workerd reconstructs a
+   * thrown error in the caller's realm: name, message and own properties
+   * survive, the prototype does not.
+   *
+   * Tracked as #101, and a production bug rather than a test artefact —
+   * src/server.ts:765 branches on exactly this `instanceof` and so never fires
+   * under Durable Objects. Delete this entry when #101 closes.
+   */
+  errorIdentityAcrossRpc?: string;
+}
+
 export function describeStoreContract(
   name: string,
   makeStore: () => BellmanStore,
+  divergences: StoreContractDivergences = {},
 ): void {
   describe(`BellmanStore contract: ${name}`, () => {
     let store: BellmanStore;
+
+    /** `it`, unless this store has an argued reason it cannot pass the case. */
+    const caseFor = (reason: string | undefined) => (reason ? it.fails : it);
 
     beforeEach(() => {
       vi.useFakeTimers();
@@ -548,25 +580,28 @@ export function describeStoreContract(
      * no key recorded. A store that wrote first and fingerprinted second would
      * satisfy every other case in this block.
      */
-    it("throws on a payload too deep to fingerprint, and writes nothing", async () => {
-      const s = session();
-      (await store.createSession(s));
+    caseFor(divergences.errorIdentityAcrossRpc)(
+      "throws on a payload too deep to fingerprint, and writes nothing",
+      async () => {
+        const s = session();
+        (await store.createSession(s));
 
-      let deep: unknown = { leaf: true };
-      for (let i = 0; i <= MAX_PAYLOAD_DEPTH; i++) deep = { a: deep };
+        let deep: unknown = { leaf: true };
+        for (let i = 0; i <= MAX_PAYLOAD_DEPTH; i++) deep = { a: deep };
 
-      await expect(
-        store.appendEventOnce(s.id, keyed({ payload: deep }), "send-0001"),
-      ).rejects.toThrow(PayloadTooDeepError);
+        await expect(
+          store.appendEventOnce(s.id, keyed({ payload: deep }), "send-0001"),
+        ).rejects.toThrow(PayloadTooDeepError);
 
-      expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
+        expect((await store.eventsAfter(s.id, 0))).toHaveLength(0);
 
-      // The key must also be free afterwards. If the failed call had recorded
-      // it, this would come back "replayed" or "conflict" rather than a fresh
-      // append — a key burned by a write that never happened.
-      const after = await store.appendEventOnce(s.id, keyed(), "send-0001");
-      expect(after.outcome).toBe("appended");
-    });
+        // The key must also be free afterwards. If the failed call had recorded
+        // it, this would come back "replayed" or "conflict" rather than a fresh
+        // append — a key burned by a write that never happened.
+        const after = await store.appendEventOnce(s.id, keyed(), "send-0001");
+        expect(after.outcome).toBe("appended");
+      },
+    );
 
     // ------------------------------------------------------------- long-poll
     it("waitForEvents returns immediately when events already exist", async () => {
@@ -599,13 +634,28 @@ export function describeStoreContract(
       await expect(pending).resolves.toHaveLength(1);
     });
 
+    /**
+     * The only case here that needs the store's OWN timer to fire rather than
+     * just the clock to move: nothing appends, so elapsing the wait is the only
+     * thing that can resolve it.
+     *
+     * That rules out a fake clock. vi's fake timers patch THIS realm's globals,
+     * and SessionDO.waitForEvents schedules its setTimeout inside the Durable
+     * Object, where they do not reach — a faked 5s advance leaves the long-poll
+     * running for real until the test times out. (Note the split: fake timers
+     * DO move `Date.now()` inside a Durable Object, which is why every TTL case
+     * above works. It is the callback queue that is not shared.)
+     *
+     * So this one waits for real, briefly. Real timers cost this case its ~50ms
+     * for both stores, which buys an assertion that holds for each of them
+     * without an exclusion.
+     */
     it("waitForEvents resolves empty after the wait elapses", async () => {
+      vi.useRealTimers();
       const s = session();
       (await store.createSession(s));
 
-      const pending = store.waitForEvents(s.id, 0, 5_000);
-      await vi.advanceTimersByTimeAsync(5_001);
-      await expect(pending).resolves.toEqual([]);
+      await expect(store.waitForEvents(s.id, 0, 50)).resolves.toEqual([]);
     });
 
     it("waitForEvents returns synchronously for a zero wait", async () => {

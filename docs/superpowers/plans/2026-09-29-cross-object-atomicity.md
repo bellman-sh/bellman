@@ -20,6 +20,8 @@
 - **A room holds many members, not two.** In comments, commit messages and PR bodies say *members*, *the room*, or *peers* — never "two sessions" or "the other session".
 - **Banned phrases** anywhere, including comments and commit messages: "load-bearing", "worth saying/stating/noting/knowing/recording", "structural"/"structurally". Name the consequence instead.
 - `npm run verify` runs typecheck + `typecheck:worker` + build + test + `test:worker`. Run it before every PR.
+- **A `// path/to/file.ts` first line in a code block labels the block, not the file.** No tracked `.ts` file in this repo opens with a path comment, so do not copy those lines into the files you write. Every other byte of a code block is verbatim.
+- **Expected failure text is a hint, not a contract.** Where a step predicts a specific error string, judge whether the red is for the stated reason; vitest's wording drifts between versions. Say so in your report if it differs, and carry on.
 
 ## Review Focus
 
@@ -237,7 +239,7 @@ An assertion you have not seen fail is not evidence. Change `at <= now` to `at <
 AssertionError: expected [] to deeply equal [ 'ttl' ]
 ```
 
-Put `<=` back and re-run. Do not skip this — the boundary test is the only one of the four that would pass against a subtly wrong implementation.
+Put `<=` back and re-run. Do not skip this: `<` for `<=` is the mistake most likely to survive a reading of the code, and the boundary test is the only one of the four that catches it.
 
 - [ ] **Step 6: Commit**
 
@@ -367,7 +369,7 @@ describe("outbox", () => {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/outbox.test.ts`
-Expected: FAIL — `No "drain" export is defined on the module`
+Expected: FAIL. Under vitest 5 a missing named export is `undefined` at the point of use rather than an import error, so the first assertion to touch one fails — `AssertionError: expected undefined to be 'ob:'` from the `OUTBOX_PREFIX` check. The red is for the right reason: the export does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 

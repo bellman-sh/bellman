@@ -482,6 +482,16 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       if (session.frozenAt !== null) return fail(FROZEN);
       if (activeMembers(session).length >= session.maxMembers) return fail("session filled while you were confirming.");
 
+      // ?? handles a pending row written before roomRole existed (predates
+      // commit 62608a9): default to the room's default seat rather than
+      // leaving the member permanently stuck holding no role at all, the
+      // same legacy-lift rule commit 7d19453 applies to joinCode on read.
+      // Hoisted rather than repeated at each use — the seat this member is
+      // given and the seat the confirm response shows them must be the same
+      // computation, or a legacy row can seat someone correctly and still
+      // preview them as "undefined" with no verbs.
+      const roomRole = pending.roomRole ?? session.manifest.defaultRole;
+
       const memberId = `m_${randomUUID().slice(0, 8)}`;
       const member: Member = {
         memberId,
@@ -489,11 +499,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         label: identity.label,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
-        // ?? handles a pending row written before roomRole existed (predates
-        // commit 62608a9): default to the room's default seat rather than
-        // leaving the member permanently stuck holding no role at all, the
-        // same legacy-lift rule commit 7d19453 applies to joinCode on read.
-        roomRole: pending.roomRole ?? session.manifest.defaultRole,
+        roomRole,
         brief: brief as Brief,
         joinedAt: Date.now(),
         leftAt: null,
@@ -530,7 +536,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           member_id: memberId,
           cursor: joinEvent.cursor,
           members: joined.members.map(publicMember),
-          room: roomPreview(joined, pending.roomRole),
+          room: roomPreview(joined, roomRole),
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)
             .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),

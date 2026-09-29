@@ -111,7 +111,7 @@ export class SessionDO extends DurableObject {
    * Which members this user owns here, and whether the room is closed.
    *
    * The authorization check for a /ws upgrade. Deliberately mirrors
-   * findMember (src/server.ts:109), leftAt and all: bellman_sync serves a
+   * findMember (src/server.ts), leftAt and all: bellman_sync serves a
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *

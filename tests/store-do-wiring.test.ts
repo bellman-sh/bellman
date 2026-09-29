@@ -550,7 +550,7 @@ describe("membersOf", () => {
   });
 
   it("still returns a member who has left", async () => {
-    // Review Focus #3. findMember (src/server.ts:109) does not exclude
+    // Review Focus #3. findMember (src/server.ts) does not exclude
     // leftAt, so bellman_sync still serves them. The two delivery paths
     // must not drift, so /ws must not exclude them either.
     const storage = fakeStorage({

@@ -752,17 +752,22 @@ type SocketAttachment = { memberIds: string[]; cursor: number };
     const memberIds = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
+    // Read FIRST. Accepting before reading leaves an accepted socket with no
+    // attachment if this throws, and wake()'s guard treats a null attachment
+    // as "send it everything". A failed read must accept nothing.
+    const missed = await this.events(cursor);
+
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
+    // Accept and attach are adjacent and synchronous: nothing can interleave
+    // between a socket existing and its cursor being recorded. Same shape as
+    // waitForEvents — await the read, then register without yielding.
     this.ctx.acceptWebSocket(server);
-
-    const missed = await this.events(cursor);
-    for (const e of missed) server.send(JSON.stringify(e));
-    const attachment: SocketAttachment = {
+    server.serializeAttachment({
       memberIds,
       cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
-    };
-    server.serializeAttachment(attachment);
+    } satisfies SocketAttachment);
+    for (const e of missed) server.send(JSON.stringify(e));
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -1007,9 +1012,13 @@ Replace `SessionDO.wake` in `src/store-do.ts`:
     const frame = JSON.stringify(event);
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as SocketAttachment | null;
-      if (att && event.cursor <= att.cursor) continue;
+      // Fail closed on a missing attachment. fetch() attaches before it sends,
+      // so every accepted socket has one; a null here means something is
+      // wrong, and over-delivering every event to a socket whose cursor we do
+      // not know is the worse of the two answers.
+      if (!att || event.cursor <= att.cursor) continue;
       ws.send(frame);
-      ws.serializeAttachment({ memberIds: att?.memberIds ?? [], cursor: event.cursor });
+      ws.serializeAttachment({ ...att, cursor: event.cursor });
     }
   }
 ```

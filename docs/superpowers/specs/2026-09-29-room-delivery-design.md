@@ -210,9 +210,29 @@ honour, and `tests/helpers/store-contract.ts` is what makes that interface a
 seam rather than a comment. Adding a method the contract cannot test identically
 in both implementations is how the seam stops meaning anything.
 
-Two calls, not one, and the split keeps the check cheap: `membersOf(identity)`
-reads `stored()` only — never events — and returns the member ids that identity
-owns in this room; empty means 403. Then `stub.fetch()` performs the upgrade.
+Two calls, not one: `membersOf(userId)` returns the member ids that identity
+owns in this room plus whether the room is closed; empty means 403. Then
+`stub.fetch()` performs the upgrade.
+
+An earlier draft justified `membersOf` as "reads the session row only, never an
+event key". That was true against the `getSession` this spec inherited, and
+D12 has since removed the distinction — `getSession` reads no events either
+now. Two real reasons survive, and they are the ones to keep:
+
+- **It returns two fields, not a session record.** Every hop here is RPC
+  between Durable Objects, so the payload is the cost.
+- **It does not expire the room as a side effect.** `getSession` calls
+  `expireIfDue`, which *writes*: it puts `closed: true`, clears the join codes
+  and appends a `session_expired` event. An authorization check on a watch
+  attempt must not do that.
+
+The second one has a trap attached. Because `membersOf` skips `expireIfDue`,
+a room past its TTL whose alarm has not yet fired would report `closed: false`
+while `bellman_sync` — which goes through `getSession` — reports it closed.
+That is the two-paths drift this spec names as its standing risk, arriving by
+the back door. `membersOf` therefore answers
+`closed: s.closed || now > s.expiresAt`: the same answer `getSession` would
+give, reached without writing. The alarm still performs the real expiry.
 
 An identity that owns a member in a room receives every event in that room and
 filters locally. That is the visibility `bellman_sync` already grants, so

@@ -524,8 +524,9 @@ a concurrent append.
 
 **Files:**
 - Modify: `tests/store-do-wiring.test.ts` (a `fakeCtx` with a WebSocket surface,
-  AND converting all four existing bare `{ storage }` constructions to use it —
-  see Step 1b, which Task 5 depends on)
+  AND converting every existing bare `{ storage }` construction to use it — ten
+  as of Task 3, found by grep, not by line number. See Step 1b, which Task 5
+  depends on)
 - Modify: `src/store-do.ts` (`SessionDO.fetch`)
 - Test: `tests/store-do-wiring.test.ts`
 
@@ -595,8 +596,9 @@ excluded from `tsc`, so this is a runtime concern only.
 
 - [ ] **Step 1b: Convert EVERY bare `{ storage }` ctx in this file to `fakeCtx`**
 
-There are four, at roughly `tests/store-do-wiring.test.ts:162`, `:169`, `:275`
-and `:498`:
+There are TEN as of Task 3 (the plan originally said four; Task 3 added six
+more). Find them all rather than trusting a line list:
+`grep -n 'new SessionDO({ storage\|new storeDo.SessionDO({ storage' tests/store-do-wiring.test.ts`
 
 ```ts
 new SessionDO({ storage: legacyStorage } as never, {} as never)

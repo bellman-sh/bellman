@@ -40,10 +40,17 @@ vi.stubGlobal("WebSocketPair", class {
 // workerd answers an upgrade with a Response of status 101 carrying a
 // `webSocket`. Node's Response throws a RangeError on any status outside
 // 200-599, so SessionDO.fetch, which is written for workerd, cannot return
-// here without this. The shim exists to test a workerd-only contract off
-// workerd; it hides no bug in fetch. Only the 101 case is special-cased, and
-// only `status` and `webSocket` are modelled: this is what fetch's tests read
-// back, not a workerd Response.
+// here without this. It makes a 101 buildable and reads `status` and
+// `webSocket` back as given. That is all it models; the rest is Node's own.
+//
+// It constrains nothing about the socket, and workerd constrains more. workerd
+// throws a RangeError for a 101 with no socket (or a null one) and for a
+// socket on a non-101 status; this builds the first and drops the socket in
+// the second. workerd does not tell the client half from the server half
+// either: sent the accepted one, it builds the 101 and the client's socket
+// closes 1006. So nothing here enforces what a 101 carries. That is asserted
+// where the response is read: "answers 101 and accepts the socket" requires a
+// socket, and requires that it is not the accepted one.
 const NodeResponse = Response;
 vi.stubGlobal("Response", class extends NodeResponse {
   webSocket?: unknown;
@@ -749,6 +756,12 @@ describe("fetch: websocket upgrade", () => {
     const res = await doi.fetch(upgrade(0));
     expect(res.status).toBe(101);
     expect(ctx.sockets).toHaveLength(1);
+    // The client half goes out on the 101; the server half is the one accepted.
+    // Neither check is redundant: "not the accepted half" passes when there is
+    // no socket, and "there is a socket" passes when it is the accepted half.
+    const { webSocket } = res as unknown as { webSocket?: unknown };
+    expect(webSocket).toBeTruthy();
+    expect(webSocket).not.toBe(ctx.sockets[0]);
   });
 
   it("replays exactly what was missed, and nothing already seen", async () => {

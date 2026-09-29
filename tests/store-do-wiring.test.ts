@@ -30,6 +30,31 @@ vi.mock("cloudflare:workers", () => ({
   },
 }));
 
+// workerd global. The DO returns client and accepts server; a test drives the
+// server side, which is the one acceptWebSocket is handed.
+vi.stubGlobal("WebSocketPair", class {
+  0 = fakeSocket();
+  1 = fakeSocket();
+});
+
+// workerd's Response takes { status: 101, webSocket } for an upgrade. Node's
+// rejects every status outside 200-599 with a RangeError, so without this
+// SessionDO.fetch throws on its last line. Only the 101 case is special-cased,
+// and only `status` and `webSocket` are modelled: this is what fetch's tests
+// read back, not a workerd Response.
+const NodeResponse = Response;
+vi.stubGlobal("Response", class extends NodeResponse {
+  webSocket?: unknown;
+  constructor(body?: BodyInit | null, init: ResponseInit & { webSocket?: unknown } = {}) {
+    const upgrade = init.status === 101;
+    super(body, upgrade ? { ...init, status: 200 } : init);
+    if (upgrade) {
+      Object.defineProperty(this, "status", { value: 101 });
+      this.webSocket = init.webSocket;
+    }
+  }
+});
+
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Member, Session } from "../src/types.js";
@@ -114,6 +139,49 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * A fake WebSocket pair plus the slice of DurableObjectState the Hibernation
+ * API needs. The real runtime persists accepted sockets across eviction and
+ * hands them back from getWebSockets(); here a plain array stands in, which is
+ * enough for fan-out, replay and attachment logic but NOT for eviction itself.
+ * Eviction is verified by npm run smoke against real Durable Objects — see D13.
+ */
+function fakeSocket() {
+  const sent: string[] = [];
+  let attachment: unknown = undefined;
+  let closed: { code: number; reason: string } | undefined;
+  return {
+    sent,
+    get closed() { return closed; },
+    send: (data: string) => { sent.push(data); },
+    close: (code: number, reason: string) => { closed = { code, reason }; },
+    serializeAttachment: (v: unknown) => { attachment = structuredClone(v); },
+    deserializeAttachment: () => structuredClone(attachment),
+  };
+}
+
+/**
+ * The ctx every SessionDO in this file is built over, in place of a bare
+ * `{ storage }`. SessionDO is handed the whole DurableObjectState, and a
+ * hand-rolled slice of it holds only until some path first reaches a member it
+ * left out; the failure then lands in whichever test gets there first. When
+ * the object starts using more of the runtime, grow this rather than making
+ * the object tolerate a missing member, which would hide a genuinely missing
+ * binding in workerd. RegistryDO touches only storage and keeps its own.
+ */
+function fakeCtx(storage: ReturnType<typeof fakeStorage>) {
+  const sockets: ReturnType<typeof fakeSocket>[] = [];
+  const autoResponses: unknown[] = [];
+  return {
+    storage,
+    sockets,
+    autoResponses,
+    acceptWebSocket: (ws: unknown) => { sockets.push(ws as ReturnType<typeof fakeSocket>); },
+    getWebSockets: () => [...sockets],
+    setWebSocketAutoResponse: (r: unknown) => { autoResponses.push(r); },
+  };
+}
+
 /** The event rows in a storage snapshot. */
 function eventsIn(rows: Record<string, unknown>): unknown[] {
   return Object.entries(rows).filter(([k]) => k.startsWith("e:")).map(([, e]) => e);
@@ -159,14 +227,14 @@ async function worldOn(
   const registryStorage = fakeStorage();
   const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
   const sessions = new Map<string, InstanceType<typeof SessionDO>>([
-    [LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, {} as never)],
+    [LEGACY_ID, new SessionDO(fakeCtx(legacyStorage) as never, {} as never)],
   ]);
   const env = {
     SESSION: {
       idFromName: (name: string) => name,
       get: (id: string) => {
         if (!sessions.has(id)) {
-          sessions.set(id, new SessionDO({ storage: fakeStorage() } as never, {} as never));
+          sessions.set(id, new SessionDO(fakeCtx(fakeStorage()) as never, {} as never));
         }
         return sessions.get(id)!;
       },
@@ -280,7 +348,7 @@ describe("a current row is untouched by the guard", () => {
 
   it("still expires when its alarm fires", async () => {
     const storage = fakeStorage();
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     await doi.createSession(session({ id: "qs_expired", expiresAt: Date.now() - 1 }));
 
     await doi.alarm();
@@ -503,7 +571,7 @@ describe("SessionDO.appendEventOnce", () => {
 describe("SessionDO read cost", () => {
   it("getSession does not list events", async () => {
     const storage = fakeStorage({ session: currentRow(), cursor: 0 });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     await doi.appendEvent({
       type: "message", fromMemberId: "m1", fromUserId: "u1",
       fromLabel: "jesse", payload: { n: 1 }, refId: null,
@@ -538,14 +606,14 @@ describe("membersOf", () => {
       ),
       cursor: 0,
     });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     // Review Focus #4: one identity, several members, one socket for all.
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1", "m3"], closed: false });
   });
 
   it("returns nothing for an identity that owns no member", async () => {
     const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     expect(await doi.membersOf("u9")).toEqual({ memberIds: [], closed: false });
   });
 
@@ -557,7 +625,7 @@ describe("membersOf", () => {
       session: withMembers({ memberId: "m1", userId: "u1", leftAt: Date.now() }),
       cursor: 0,
     });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     expect((await doi.membersOf("u1")).memberIds).toEqual(["m1"]);
   });
 
@@ -568,7 +636,7 @@ describe("membersOf", () => {
       session: { ...withMembers({ memberId: "m1", userId: "u1" }), closed: true },
       cursor: 0,
     });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
   });
 
@@ -583,7 +651,7 @@ describe("membersOf", () => {
       session: { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt: Date.now() - 1 },
       cursor: 0,
     });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     const before = storage.writes;
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
     expect(storage.writes - before).toBe(0);
@@ -604,14 +672,6 @@ describe("membersOf", () => {
     // a millisecond a real clock almost never lands on. Two objects per row,
     // because getSession can expire the room it reads.
     const now = 1_000_000;
-    // getSession can expire the row it reads, and expiry calls wake(). wake()
-    // is gaining a socket arm (ctx.getWebSockets(), on every event rather than
-    // only while a poll waits), so a ctx of storage alone will throw there.
-    // Give the object that method with no sockets attached, rather than making
-    // wake() tolerate its absence, which would hide a missing binding in
-    // workerd.
-    const socketlessCtx = (storage: ReturnType<typeof fakeStorage>) =>
-      ({ storage, getWebSockets: () => [] });
     vi.setSystemTime(now);
     try {
       for (const [where, expiresAt] of [
@@ -621,9 +681,9 @@ describe("membersOf", () => {
       ] as const) {
         const row = { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt };
         const asked = new storeDo.SessionDO(
-          socketlessCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
+          fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
         const polled = new storeDo.SessionDO(
-          socketlessCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
+          fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
         expect((await asked.membersOf("u1")).closed, `${where} its TTL`).toBe(
           (await polled.getSession())?.closed);
       }
@@ -633,13 +693,13 @@ describe("membersOf", () => {
   });
 
   it("reports an unknown room as closed with no members", async () => {
-    const doi = new storeDo.SessionDO({ storage: fakeStorage() } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(fakeStorage()) as never, {} as never);
     expect(await doi.membersOf("u1")).toEqual({ memberIds: [], closed: true });
   });
 
   it("reads no event keys", async () => {
     const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     // list() is how the log is scanned and get() is how one event is fetched
     // (eventAt). A list counter alone cannot see the second.
     const eventGets: string[] = [];
@@ -652,5 +712,72 @@ describe("membersOf", () => {
     await doi.membersOf("u1");
     expect(storage.lists - before).toBe(0);
     expect(eventGets).toEqual([]);
+  });
+});
+
+/**
+ * SessionDO.fetch, the /ws upgrade. A SessionDO method and deliberately not a
+ * BellmanStore one (MemoryStore cannot hold a hibernatable socket), so the
+ * contract suite never reaches it. The fake ctx has no input gate, so these
+ * pin what fetch sends and records, not that nothing can interleave with it.
+ */
+describe("fetch: websocket upgrade", () => {
+  const upgrade = (cursor: number, members = "m1") =>
+    new Request("https://do/ws?cursor=" + cursor, {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  const world = async (events = 0) => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    for (let n = 1; n <= events; n++) {
+      await doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: { n }, refId: null,
+      });
+    }
+    return { doi, ctx, storage };
+  };
+
+  it("answers 101 and accepts the socket", async () => {
+    const { doi, ctx } = await world();
+    const res = await doi.fetch(upgrade(0));
+    expect(res.status).toBe(101);
+    expect(ctx.sockets).toHaveLength(1);
+  });
+
+  it("replays exactly what was missed, and nothing already seen", async () => {
+    const { doi, ctx } = await world(5);
+    await doi.fetch(upgrade(3));
+    const got = ctx.sockets[0].sent.map((s) => JSON.parse(s).cursor);
+    expect(got).toEqual([4, 5]);
+  });
+
+  it("replays nothing when the cursor is current", async () => {
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(2));
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("stores the members and the replayed cursor on the attachment", async () => {
+    const { doi, ctx } = await world(3);
+    await doi.fetch(upgrade(1, "m1,m3"));
+    expect(ctx.sockets[0].deserializeAttachment())
+      .toEqual({ memberIds: ["m1", "m3"], cursor: 3 });
+  });
+
+  it("keeps the requested cursor on the attachment when nothing was replayed", async () => {
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(2));
+    expect(ctx.sockets[0].deserializeAttachment())
+      .toEqual({ memberIds: ["m1"], cursor: 2 });
+  });
+
+  it("refuses a request that is not an upgrade", async () => {
+    const { doi, ctx } = await world();
+    const res = await doi.fetch(new Request("https://do/ws?cursor=0"));
+    expect(res.status).toBe(426);
+    expect(ctx.sockets).toHaveLength(0);
   });
 });

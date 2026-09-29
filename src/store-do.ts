@@ -37,6 +37,9 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
+/** What a hibernating socket remembers. 16 KB cap; this is nowhere near it. */
+type SocketAttachment = { memberIds: string[]; cursor: number };
+
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -134,6 +137,41 @@ export class SessionDO extends DurableObject {
       memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
       closed: s.closed || Date.now() > s.expiresAt,
     };
+  }
+
+  /**
+   * Accept a watching socket. The Worker has already authenticated the caller
+   * and asked membersOf who they are; this request is one the Worker BUILT,
+   * so nothing on it came from the client (see the /ws route in worker.ts).
+   *
+   * Accept, replay and attach happen in this one invocation, and the input
+   * gate holds every other request to this object for its duration. That is
+   * CLAUDE.md's read-and-register rule, not an exemption from it: an event
+   * appended between the replay and the accept would otherwise be delivered
+   * to nobody and skipped by the cursor.
+   */
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade") !== "websocket") {
+      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    }
+    const url = new URL(request.url);
+    const cursor = Number(url.searchParams.get("cursor"));
+    const memberIds = (request.headers.get("x-bellman-members") ?? "")
+      .split(",").filter(Boolean);
+
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    this.ctx.acceptWebSocket(server);
+
+    const missed = await this.events(cursor);
+    for (const e of missed) server.send(JSON.stringify(e));
+    const attachment: SocketAttachment = {
+      memberIds,
+      cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
+    };
+    server.serializeAttachment(attachment);
+
+    return new Response(null, { status: 101, webSocket: client });
   }
 
   /** Returns the retired code, so the caller can drop it from the registry. */

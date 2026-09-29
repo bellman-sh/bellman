@@ -759,6 +759,10 @@ describe("fetch: websocket upgrade", () => {
     // The client half goes out on the 101; the server half is the one accepted.
     // Neither check is redundant: "not the accepted half" passes when there is
     // no socket, and "there is a socket" passes when it is the accepted half.
+    // "Not the accepted half" is not belt-and-braces either. Handed the
+    // accepted half, workerd builds the 101 and fetch returns normally; the
+    // fault shows only when a connection is used (no frames, close 1006).
+    // Neither this fake nor the runtime's API reports it, so this is what does.
     const { webSocket } = res as unknown as { webSocket?: unknown };
     expect(webSocket).toBeTruthy();
     expect(webSocket).not.toBe(ctx.sockets[0]);

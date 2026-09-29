@@ -133,6 +133,13 @@ export interface BellmanStore {
     key: string
   ): Promise<EventWrite>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
+  /**
+   * The event at exactly this cursor, or undefined.
+   *
+   * One key, not a scan. `bellman_send` resolves an action_response's ref_id
+   * this way; reading the whole history to find one event is what #25 was.
+   */
+  eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
@@ -376,6 +383,11 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return [];
     return detach(s.events.filter((e) => e.cursor > cursor));
+  }
+
+  async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
+    const e = this.sessions.get(sessionId)?.events.find((ev) => ev.cursor === cursor);
+    return e ? detach(e) : undefined;
   }
 
   /**

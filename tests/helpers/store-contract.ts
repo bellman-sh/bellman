@@ -360,6 +360,52 @@ export function describeStoreContract(
       expect((await store.eventsAfter("qs_nope", 0))).toEqual([]);
     });
 
+    it("eventAt returns exactly the event at that cursor", async () => {
+      const s = session();
+      await store.createSession(s);
+      const first = await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { n: 1 }, refId: null,
+      });
+      const second = await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { n: 2 }, refId: null,
+      });
+
+      expect(await store.eventAt(s.id, first!.cursor)).toEqual(first);
+      expect(await store.eventAt(s.id, second!.cursor)).toEqual(second);
+    });
+
+    it("eventAt returns undefined for a cursor with no event", async () => {
+      const s = session();
+      await store.createSession(s);
+      const only = await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { n: 1 }, refId: null,
+      });
+
+      expect(await store.eventAt(s.id, only!.cursor + 1)).toBeUndefined();
+      expect(await store.eventAt(s.id, 0)).toBeUndefined();
+      expect(await store.eventAt(s.id, -1)).toBeUndefined();
+    });
+
+    it("eventAt returns undefined for an unknown session", async () => {
+      expect(await store.eventAt("qs_nope", 1)).toBeUndefined();
+    });
+
+    it("eventAt hands back a detached copy", async () => {
+      const s = session();
+      await store.createSession(s);
+      const e = await store.appendEvent(s.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { n: 1 }, refId: null,
+      });
+
+      const got = await store.eventAt(s.id, e!.cursor);
+      (got!.payload as Record<string, unknown>).n = 99;
+      expect((await store.eventAt(s.id, e!.cursor))!.payload).toEqual({ n: 1 });
+    });
+
     it("throws when appending to an unknown session", async () => {
       await expect(
         store.appendEvent("qs_nope", {

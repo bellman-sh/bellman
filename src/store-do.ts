@@ -228,6 +228,10 @@ export class SessionDO extends DurableObject {
     return this.events(cursor);
   }
 
+  async eventAt(cursor: number): Promise<SessionEvent | undefined> {
+    return this.ctx.storage.get<SessionEvent>(eventKey(cursor));
+  }
+
   /**
    * The read and the registration must not be split by an await, or an event
    * appended in the gap wakes an empty waiter list and this poll hangs to its
@@ -679,6 +683,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
     return this.session(sessionId).eventsAfter(cursor);
+  }
+
+  async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
+    return this.session(sessionId).eventAt(cursor);
   }
 
   async waitForEvents(

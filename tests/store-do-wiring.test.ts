@@ -601,6 +601,14 @@ describe("membersOf", () => {
     // a millisecond a real clock almost never lands on. Two objects per row,
     // because getSession expires the room it reads.
     const now = 1_000_000;
+    // getSession expires the row it reads, and expiry calls wake(). wake() is
+    // gaining a socket arm (ctx.getWebSockets(), on every event rather than
+    // only while a poll waits), so a ctx of storage alone will throw there.
+    // Give the object that method with no sockets attached, rather than making
+    // wake() tolerate its absence, which would hide a missing binding in
+    // workerd.
+    const socketlessCtx = (storage: ReturnType<typeof fakeStorage>) =>
+      ({ storage, getWebSockets: () => [] });
     vi.setSystemTime(now);
     try {
       for (const [where, expiresAt] of [
@@ -610,9 +618,9 @@ describe("membersOf", () => {
       ] as const) {
         const row = { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt };
         const asked = new storeDo.SessionDO(
-          { storage: fakeStorage({ session: row, cursor: 0 }) } as never, {} as never);
+          socketlessCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
         const polled = new storeDo.SessionDO(
-          { storage: fakeStorage({ session: row, cursor: 0 }) } as never, {} as never);
+          socketlessCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
         expect((await asked.membersOf("u1")).closed, `${where} its TTL`).toBe(
           (await polled.getSession())?.closed);
       }

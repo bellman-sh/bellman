@@ -34,7 +34,7 @@ import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
 
@@ -118,9 +118,11 @@ function eventsIn(rows: Record<string, unknown>): unknown[] {
  * (those live under their own keys).
  */
 function legacyRow(over: Partial<Session> = {}): Record<string, unknown> {
-  const { manifest, events, ...rest } = session({ id: LEGACY_ID, joinCode: LEGACY_CODE, ...over });
+  const { manifest, events, joinCodes, ...rest } = session({ id: LEGACY_ID, ...over });
   return {
     ...rest,
+    joinCode: LEGACY_CODE,
+    joinCodeExpiresAt: Date.now() + 15 * 60 * 1000,
     mode: manifest.mode,
     members: rest.members.map(({ roomRole, ...m }) => m),
   };
@@ -147,7 +149,8 @@ async function worldOn(
   row: Record<string, unknown> = legacyRow(),
 ) {
   const legacyStorage = fakeStorage({ session: row, cursor: 0 });
-  const registry = new RegistryDO({ storage: fakeStorage() } as never, {} as never);
+  const registryStorage = fakeStorage();
+  const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
   const sessions = new Map<string, InstanceType<typeof SessionDO>>([
     [LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, {} as never)],
   ]);
@@ -169,6 +172,7 @@ async function worldOn(
     store: new DurableObjectStore(env),
     legacy: sessions.get(LEGACY_ID)!,
     legacyStorage,
+    registryStorage,
   };
 }
 
@@ -205,11 +209,11 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     const { legacy, legacyStorage } = await worldOn(storeDo);
     const before = legacyStorage.snapshot();
 
-    await legacy.consumeJoinCode();
+    await legacy.consumeJoinCode("peer_b");
     // false, not null: #71 gave this a third outcome, where null means "set, and
     // there was no previous code" and false means refused — here, because the row
     // reads as gone.
-    expect(await legacy.setJoinCode("BELL-NEW-02", Date.now() + 60_000)).toBe(false);
+    expect(await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000)).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
     await legacy.closeSession();
@@ -250,13 +254,13 @@ describe("a current row is untouched by the guard", () => {
     const { store } = await worldOn(storeDo);
     const s = session({
       id: "qs_current",
-      joinCode: "BELL-NEW-01",
+      joinCodes: oneCode("BELL-NEW-01"),
       manifest: roomManifest({ room: "kept", purpose: "keep me" }),
     });
     await store.createSession(s);
 
     expect((await store.getSession(s.id))?.manifest).toEqual(s.manifest);
-    expect((await store.getSessionByJoinCode("BELL-NEW-01"))?.manifest).toEqual(s.manifest);
+    expect((await store.getSessionByJoinCode("BELL-NEW-01"))?.session.manifest).toEqual(s.manifest);
   });
 
   it("still expires when its alarm fires", async () => {
@@ -268,8 +272,47 @@ describe("a current row is untouched by the guard", () => {
 
     // Read the raw rows: getSession() would expire it lazily and hide the alarm's part.
     const rows = storage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCode: null });
+    expect(rows.session).toMatchObject({ closed: true });
+    // toMatchObject is a subset match: { joinCodes: {} } would match ANY joinCodes value,
+    // so the clear itself needs its own exact assertion or this line guards nothing.
+    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+});
+
+describe("closing a session drops its registry rows", () => {
+  /**
+   * Pins the wiring D7 added (commit 007eec1): DurableObjectStore.closeSession
+   * calling clearJoinCodes at the boundary where it holds the registry handle.
+   * The store-contract suite's "closing a session clears every code" test looks
+   * like coverage of this but runs only against MemoryStore, a separate
+   * closeSession implementation that cannot exercise this path at all.
+   *
+   * The registry assertion is the one that carries the weight, not the map
+   * assertion above it: getSessionByJoinCode's closed guard already makes the
+   * codes stop resolving even if the registry rows are never dropped, so a
+   * behavioural assertion alone proves nothing about whether the rows
+   * themselves were cleared — only the raw registry snapshot can tell "the
+   * codes stopped working" apart from "the rows were dropped", which is the
+   * entire content of D7.
+   */
+  it("closeSession drops every role's registry row, not just the session's map", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({ id: "qs_closing", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+
+    await store.closeSession(s.id);
+
+    // The map cleared — this much MemoryStore already proves.
+    expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+    // The registry rows went too — this is the part only the DO store can fail.
+    // Checked by name rather than "no jc: rows at all": worldOn()'s own setup
+    // unconditionally registers LEGACY_CODE under the unrelated legacy session,
+    // so the registry is never empty of jc: rows even when this one closes clean.
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).not.toContain("jc:BELL-AAAA-01");
+    expect(keys).not.toContain("jc:BELL-CCCC-03");
   });
 });
 
@@ -287,13 +330,16 @@ describe("negative control: the same calls with the guard removed", () => {
     const leaked = [
       await legacy.getSession(),
       await store.getSession(LEGACY_ID),
-      await store.getSessionByJoinCode(LEGACY_CODE),
     ];
 
     for (const s of leaked) {
       expect(s).toBeDefined();
       expect(() => s!.manifest.mode).toThrow(TypeError);
     }
+
+    // The third read path now crashes inside the lookup itself: resolving a code
+    // per role dereferences joinCodes, which a pre-manifest row has never had.
+    await expect(store.getSessionByJoinCode(LEGACY_CODE)).rejects.toThrow(TypeError);
   });
 
   /**
@@ -311,7 +357,9 @@ describe("negative control: the same calls with the guard removed", () => {
     const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true, joinCode: null });
+    expect(rows.session).toMatchObject({ closed: true });
+    // Same subset-match pitfall as the test above: assert the clear itself, exactly.
+    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });

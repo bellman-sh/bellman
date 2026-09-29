@@ -103,7 +103,7 @@ describe("cross-provider pairing over the wire", () => {
       capabilities: ["read_context", "receive_messages", "request_actions"],
     });
     expect(started.isError, started.text).toBe(false);
-    expect(String(started.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}$/);
+    expect(String(started.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}-PEER-B$/);
 
     const sessionId = String(started.data.session_id);
     const jesseMember = String(started.data.member_id);

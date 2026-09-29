@@ -6,9 +6,9 @@ import type {
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
-  generateConnectToken, generateJoinCode, generateSessionId, normalizeJoinCode,
+  generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
 } from "./codes.js";
-import { ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
+import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
@@ -270,7 +270,7 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
       title: "Start a Bellman session",
       description: `Create a collaboration room and get a join code to share with the sessions you want in it.
 
-The join code (e.g. BELL-7F3K-92) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. Works across users, machines, surfaces, and model providers.
+The join code (e.g. BELL-7F3K-92-PEER-B) is human-relayable: paste it into another Claude/ChatGPT/Cursor/Gemini session that has Bellman connected, and that session runs bellman_connect with it. The last group is the seat the code grants. Works across users, machines, surfaces, and model providers.
 
 Args:
   - manifest: the room's declaration. Either cite a preset —
@@ -278,6 +278,7 @@ Args:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions.
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
+    invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. revoke is likewise not self-scoped: a seat holding it may retire any role's code, not only its own. Give invite only to a seat you would trust with every seat's authority.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
@@ -339,14 +340,17 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         joinedAt: now,
         leftAt: null,
       };
+      const defaultCode = {
+        code: renderJoinCode(manifest.defaultRole),
+        expiresAt: now + JOIN_CODE_TTL,
+      };
       const session: Session = {
         id: generateSessionId(),
         manifest,
         createdBy: identity.userId,
         orgId: identity.orgId,
         orgOnly: org_only,
-        joinCode: generateJoinCode(),
-        joinCodeExpiresAt: now + JOIN_CODE_TTL,
+        joinCodes: { [manifest.defaultRole]: defaultCode },
         expiresAt: now + ent.sessionTtlMs,
         maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
         members: [creator],
@@ -361,8 +365,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       return ok({
         session_id: session.id,
         member_id: memberId,
-        join_code: session.joinCode,
-        join_code_expires_at: new Date(session.joinCodeExpiresAt).toISOString(),
+        join_code: defaultCode.code,
+        join_code_expires_at: new Date(defaultCode.expiresAt).toISOString(),
         session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,
         // What the server recorded, seen from the creator's seat. Without it the
@@ -385,21 +389,23 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
 Show the returned preview to your human. If they want to proceed, call bellman_confirm with the connect_token and your own brief. Nothing about your session crosses the wire until bellman_confirm.
 
 Args:
-  - join_code (string): e.g. "BELL-7F3K-92" (case/whitespace insensitive)
+  - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
+The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
-      inputSchema: { join_code: z.string().min(4).max(30) },
+      inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
     async ({ join_code }): Promise<ToolResult> => {
-      const session = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
-      if (!session) {
+      const hit = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
+      if (!hit) {
         return fail("join code not found or expired. Codes expire 15 minutes after creation if unused, and are consumed when a pair session fills. Ask the creator to start a new session.");
       }
+      const { session, role } = hit;
       if (session.orgOnly && session.orgId !== identity.orgId) {
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
@@ -412,6 +418,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
         token,
         sessionId: session.id,
         userId: identity.userId,
+        roomRole: role,
         createdAt: Date.now(),
         expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       });
@@ -427,7 +434,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
             max_members: session.maxMembers,
             org_only: session.orgOnly,
           },
-          room: roomPreview(session, session.manifest.defaultRole),
+          room: roomPreview(session, role),
           creator_brief: untrusted(
             { memberId: creator.memberId, label: creator.label },
             creator.brief
@@ -450,6 +457,8 @@ Args:
   - connect_token: from bellman_connect (single-use, 10 minute TTL)
   - brief: YOUR structured context summary — this is what crosses to the peer
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages)
+
+You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
 Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
@@ -474,6 +483,16 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       if (session.frozenAt !== null) return fail(FROZEN);
       if (activeMembers(session).length >= session.maxMembers) return fail("session filled while you were confirming.");
 
+      // ?? handles a pending row written before roomRole existed (predates
+      // commit 62608a9): default to the room's default seat rather than
+      // leaving the member permanently stuck holding no role at all, the
+      // same legacy-lift rule commit 7d19453 applies to joinCode on read.
+      // Hoisted rather than repeated at each use — the seat this member is
+      // given and the seat the confirm response shows them must be the same
+      // computation, or a legacy row can seat someone correctly and still
+      // preview them as "undefined" with no verbs.
+      const roomRole = pending.roomRole ?? session.manifest.defaultRole;
+
       const memberId = `m_${randomUUID().slice(0, 8)}`;
       const member: Member = {
         memberId,
@@ -481,7 +500,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         label: identity.label,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
-        roomRole: session.manifest.defaultRole,
+        roomRole,
         brief: brief as Brief,
         joinedAt: Date.now(),
         leftAt: null,
@@ -494,9 +513,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
 
-      // Pair sessions consume the code when full; swarm codes live until expiry/capacity.
+      // A full pair session has no seat for ANY role, so every code goes.
       if (activeMembers(joined).length >= joined.maxMembers) {
-        await s.consumeJoinCode(joined.id);
+        await s.clearJoinCodes(joined.id);
       }
 
       const joinEvent = await appendOrFrozen(s, session.id, {
@@ -518,7 +537,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           member_id: memberId,
           cursor: joinEvent.cursor,
           members: joined.members.map(publicMember),
-          room: roomPreview(joined, joined.manifest.defaultRole),
+          room: roomPreview(joined, roomRole),
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)
             .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),
@@ -533,28 +552,31 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
     "bellman_invite",
     {
       title: "Issue a new Bellman join code",
-      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives.
+      description: `Mint a fresh join code for a room whose seat gives you the \`invite\` verb — at any time, for as long as the session lives. This mints for any role the manifest declares, not only your own seat.
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
-Issuing RETIRES the previous code immediately — anyone still holding it can no longer join. That is also how you revoke: pass revoke=true to kill the current code without minting another.
+A room mints one live code per role. Issuing for a role RETIRES that role's previous code immediately and leaves every other role's code alone — so you can hand a reviewer code and a contributor code to different people.
+
+Omitting \`role\` issues for the room's default seat. Omitting it when revoking retires EVERY code: over-revoking is recoverable by minting again, while under-revoking leaves a door open behind someone who believes they shut it. Pass a role to revoke exactly one.
 
 So \`invite\` already invalidates an outstanding code, because issuing retires it. \`revoke\` is the narrower authority: close the door and leave it closed. A seat holding \`invite\` but not \`revoke\` can still cut off a code someone is holding, by minting a new one.
 
-Args: session_id, member_id (yours), revoke (default false)
-Returns: { join_code, join_code_expires_at, replaced_previous } or { revoked: true }
-Members see an invite_issued / invite_revoked event, so reopening the door is never silent.
-Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A full session refuses (the code could not be used).`,
+Args: session_id, member_id (yours), role (optional), revoke (default false)
+Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
+Members see an invite_issued / invite_revoked event, so reopening the door is never silent. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
+Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
+        role: z.string().min(1).max(MAX_ROLE_KEY_LENGTH).optional(),
         revoke: z.boolean().default(false),
       },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, revoke }): Promise<ToolResult> => {
+    async ({ session_id, member_id, role, revoke }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
@@ -567,44 +589,70 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
       if (denial) return fail(denial);
 
+      // An absent role means the usual seat when issuing, and EVERY seat when
+      // revoking. Deliberately asymmetric: over-revoking is recoverable by
+      // minting again, while under-revoking leaves a door open behind someone
+      // who believes they shut it.
+      if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
+        return fail(
+          `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
+        );
+      }
+
       if (revoke) {
-        if (!session.joinCode) return ok({ revoked: true, join_code: null });
-        await s.consumeJoinCode(session_id);
-        await s.appendEvent(session.id, {
-          type: "invite_revoked",
-          fromMemberId: member_id,
-          fromUserId: identity.userId,
-          fromLabel: identity.label,
-          payload: {},
-          refId: null,
-        });
-        await audit(s, session, identity, "invite_revoked", {});
-        return ok({ revoked: true, join_code: null });
+        // An expired code is not a live code (:555 promises a silent no-op for
+        // "no live code to retire"), but nothing prunes joinCodes when a code
+        // merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
+        // the session-TTL sweep touch the map. So presence alone is not enough:
+        // check expiresAt too, or a bare revoke announces the closing of a door
+        // that had already shut by itself (event + audit row, over-reported roles).
+        const retired = (role ? [role] : Object.keys(session.joinCodes))
+          .filter((r) => {
+            const rec = session.joinCodes[r];
+            return rec !== undefined && Date.now() <= rec.expiresAt;
+          });
+        if (role) await s.consumeJoinCode(session_id, role);
+        else await s.clearJoinCodes(session_id);
+        if (retired.length > 0) {
+          await s.appendEvent(session.id, {
+            type: "invite_revoked",
+            fromMemberId: member_id,
+            fromUserId: identity.userId,
+            fromLabel: identity.label,
+            payload: { roles: retired },
+            refId: null,
+          });
+          await audit(s, session, identity, "invite_revoked", { roles: retired });
+        }
+        return ok({ revoked: true, roles: retired, join_code: null });
       }
 
       if (activeMembers(session).length >= session.maxMembers) {
         return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
       }
 
-      const code = generateJoinCode();
+      const issuedRole = role ?? session.manifest.defaultRole;
+      const previous = Boolean(session.joinCodes[issuedRole]);
+      const code = renderJoinCode(issuedRole);
       const expiresAt = Date.now() + JOIN_CODE_TTL;
-      if (!(await s.setJoinCode(session_id, code, expiresAt))) return fail(FROZEN);
+      if (!(await s.setJoinCode(session_id, issuedRole, code, expiresAt))) return fail(FROZEN);
       await s.appendEvent(session.id, {
         type: "invite_issued",
         fromMemberId: member_id,
         fromUserId: identity.userId,
         fromLabel: identity.label,
-        payload: { expires_at: new Date(expiresAt).toISOString() },
+        payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
         refId: null,
       });
-      await audit(s, session, identity, "invite_issued", { replaced_previous: Boolean(session.joinCode) });
+      await audit(s, session, identity, "invite_issued", { role: issuedRole, replaced_previous: previous });
 
       return ok({
         join_code: code,
         join_code_expires_at: new Date(expiresAt).toISOString(),
-        replaced_previous: Boolean(session.joinCode),
+        role: issuedRole,
+        replaced_previous: previous,
         share_instructions:
-          "Give this code to the joining session. Any code issued earlier has stopped working.",
+          `Give this code to the joining session. It seats them as "${issuedRole}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });
     }
   );

@@ -108,20 +108,35 @@ export class SessionDO extends DurableObject {
     return { ...fresh, events: await this.events(0) };
   }
 
-  async consumeJoinCode(): Promise<void> {
+  /** Returns the retired code, so the caller can drop it from the registry. */
+  async consumeJoinCode(role: string): Promise<string | null> {
     const s = await this.stored();
-    if (!s || !s.joinCode) return;
-    await this.ctx.storage.put("session", { ...s, joinCode: null });
+    const rec = s?.joinCodes[role];
+    if (!s || !rec) return null;
+    const { [role]: _retired, ...rest } = s.joinCodes;
+    await this.ctx.storage.put("session", { ...s, joinCodes: rest });
+    return rec.code;
   }
 
-  /** Returns the code being replaced, so the caller can drop it from the registry. */
-  /** `false` means frozen; a string (or null) means set, and names the old code. */
-  async setJoinCode(code: string, expiresAt: number): Promise<string | null | false> {
+  /** Returns every retired code, for the same reason. */
+  async clearJoinCodes(): Promise<string[]> {
+    const s = await this.stored();
+    if (!s) return [];
+    const codes = Object.values(s.joinCodes).map((rec) => rec.code);
+    if (codes.length > 0) await this.ctx.storage.put("session", { ...s, joinCodes: {} });
+    return codes;
+  }
+
+  /** `false` means frozen; a string (or null) means set, and names this role's old code. */
+  async setJoinCode(role: string, code: string, expiresAt: number): Promise<string | null | false> {
     const s = await this.stored();
     if (!s) return false;
     if (s.frozenAt !== null) return false;
-    const previous = s.joinCode;
-    await this.ctx.storage.put("session", { ...s, joinCode: code, joinCodeExpiresAt: expiresAt });
+    const previous = s.joinCodes[role]?.code ?? null;
+    await this.ctx.storage.put("session", {
+      ...s,
+      joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } },
+    });
     return previous;
   }
 
@@ -252,7 +267,7 @@ export class SessionDO extends DurableObject {
 
   private async expireIfDue(s: StoredSession, now: number): Promise<void> {
     if (s.closed || now <= s.expiresAt) return;
-    await this.ctx.storage.put("session", { ...s, closed: true, joinCode: null });
+    await this.ctx.storage.put("session", { ...s, closed: true, joinCodes: {} });
     const event: SessionEvent = {
       cursor: await this.nextCursor(),
       type: "session_expired" as EventType,
@@ -577,7 +592,9 @@ export class DurableObjectStore implements BellmanStore {
 
   async createSession(s: Session): Promise<void> {
     await this.session(s.id).createSession(s);
-    if (s.joinCode) await this.registry.putJoinCode(s.joinCode, s.id);
+    for (const rec of Object.values(s.joinCodes)) {
+      await this.registry.putJoinCode(rec.code, s.id);
+    }
     // A lapsed plan has to find this person's rooms, and bare create counts
     // cannot say which they are. Another write into a second object with no
     // transaction spanning it — the same gap as the join code above, tracked on
@@ -589,25 +606,33 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(id).getSession();
   }
 
-  async getSessionByJoinCode(code: string): Promise<Session | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
     const id = await this.registry.lookupJoinCode(code);
     if (!id) return undefined;
-    const s = await this.getSession(id);
-    if (!s || s.closed) return undefined;
-    if (s.joinCode !== code) return undefined; // consumed or rotated
-    if (Date.now() > s.joinCodeExpiresAt) return undefined;
-    return s;
+    const session = await this.getSession(id);
+    if (!session || session.closed) return undefined;
+    const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
+    if (!hit) return undefined; // consumed or rotated
+    const [role, rec] = hit;
+    if (Date.now() > rec.expiresAt) return undefined;
+    return { session, role };
   }
 
-  async consumeJoinCode(sessionId: string): Promise<void> {
-    const s = await this.getSession(sessionId);
-    const code = s?.joinCode;
-    await this.session(sessionId).consumeJoinCode();
-    if (code) await this.registry.dropJoinCode(code);
+  async consumeJoinCode(sessionId: string, role: string): Promise<void> {
+    const retired = await this.session(sessionId).consumeJoinCode(role);
+    if (retired) await this.registry.dropJoinCode(retired);
   }
 
-  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean> {
-    const previous = await this.session(sessionId).setJoinCode(code, expiresAt);
+  async clearJoinCodes(sessionId: string): Promise<void> {
+    for (const code of await this.session(sessionId).clearJoinCodes()) {
+      await this.registry.dropJoinCode(code);
+    }
+  }
+
+  async setJoinCode(
+    sessionId: string, role: string, code: string, expiresAt: number
+  ): Promise<boolean> {
+    const previous = await this.session(sessionId).setJoinCode(role, code, expiresAt);
     if (previous === false) return false;
     if (previous) await this.registry.dropJoinCode(previous);
     await this.registry.putJoinCode(code, sessionId);
@@ -624,6 +649,9 @@ export class DurableObjectStore implements BellmanStore {
 
   async closeSession(sessionId: string): Promise<void> {
     await this.session(sessionId).closeSession();
+    // SessionDO holds no registry reference, so it cannot drop registry rows.
+    // We clear them here at the boundary where we have access to the registry.
+    await this.clearJoinCodes(sessionId);
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {

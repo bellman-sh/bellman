@@ -439,21 +439,21 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     expect(res.text).toContain('does not hold the verb "invite"');
 
     const after = (await h.store.getSession(p.sessionId))!;
-    expect(after.joinCode).toBe(before.joinCode);
+    expect(after.joinCodes).toEqual(before.joinCodes);
     expect(after.events.length).toBe(before.events.length);
   });
 
   it("a denied revoke neither retires the live code nor appends an event", async () => {
-    // The room must hold a LIVE join code. Without one the handler's
-    // `if (!session.joinCode) return ok({ revoked: true, ... })` answers before a
-    // late guard could matter, and this test would prove nothing about where the
-    // guard sits relative to the revoke's work. A room that has filled has consumed
-    // its code (a pair fills at two), so this is a swarm with room to spare. The
-    // seat holds `invite` but not `revoke`, so the refusal can only be about revoke.
+    // The room must hold a LIVE join code. Without one, a denied revoke and a
+    // no-op revoke look identical (no event either way), and this test would
+    // prove nothing about where the guard sits relative to the revoke's work.
+    // A room that has filled has consumed its code (a pair fills at two), so
+    // this is a swarm with room to spare. The seat holds `invite` but not
+    // `revoke`, so the refusal can only be about revoke.
     const p = await pairUp(h, { manifest: seat(["send", "invite"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
     // Keeps the setup honest: with no code, "unchanged" below holds of any outcome.
-    expect(before.joinCode, "the room must have a live join code").not.toBeNull();
+    expect(Object.keys(before.joinCodes).length, "the room must have a live join code").toBeGreaterThan(0);
 
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId, revoke: true,
@@ -462,7 +462,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     expect(res.text).toContain('does not hold the verb "revoke"');
 
     const after = (await h.store.getSession(p.sessionId))!;
-    expect(after.joinCode, "a denied revoke must leave the code live").toBe(before.joinCode);
+    expect(after.joinCodes, "a denied revoke must leave the code live").toEqual(before.joinCodes);
     expect(after.events.length).toBe(before.events.length);
   });
 

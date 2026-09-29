@@ -63,12 +63,24 @@ export type EventWrite =
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
   getSession(id: string): Promise<Session | undefined>;
-  getSessionByJoinCode(code: string): Promise<Session | undefined>;
+  /**
+   * Resolve a code to its session and the role it carries.
+   *
+   * The whole rendered string is the key, role group included, so a code with a
+   * hand-edited suffix was never issued and does not resolve. The role comes
+   * from the record, never from reading the string — there is no code path that
+   * parses a suffix, which is what makes the tamper case fail closed.
+   */
+  getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined>;
 
-  /** Consume a session's single-use join code. Idempotent. */
-  consumeJoinCode(sessionId: string): Promise<void>;
-  /** Issue a join code, retiring whatever the session had. False means frozen. */
-  setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean>;
+  /** Retire one role's code. Idempotent. */
+  consumeJoinCode(sessionId: string, role: string): Promise<void>;
+
+  /** Retire every live code — a pair session filling, a session closing. Idempotent. */
+  clearJoinCodes(sessionId: string): Promise<void>;
+
+  /** Issue a code for one role, retiring only that role's previous code. False means frozen. */
+  setJoinCode(sessionId: string, role: string, code: string, expiresAt: number): Promise<boolean>;
   /**
    * Append a member to a session, unless it is frozen. False means frozen.
    *
@@ -203,7 +215,7 @@ export class MemoryStore implements BellmanStore {
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
     this.sessions.set(stored.id, stored);
-    if (stored.joinCode) this.byJoinCode.set(stored.joinCode, stored.id);
+    for (const rec of Object.values(stored.joinCodes)) this.byJoinCode.set(rec.code, stored.id);
     const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
     mine.add(stored.id);
     this.byCreator.set(stored.createdBy, mine);
@@ -216,30 +228,42 @@ export class MemoryStore implements BellmanStore {
     return detach(s);
   }
 
-  async getSessionByJoinCode(code: string): Promise<Session | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
     const id = this.byJoinCode.get(code);
     if (!id) return undefined;
-    const s = await this.getSession(id);
-    if (!s || s.closed) return undefined;
-    if (s.joinCode !== code) return undefined; // consumed or rotated
-    if (Date.now() > s.joinCodeExpiresAt) return undefined;
-    return s;
+    const session = await this.getSession(id);
+    if (!session || session.closed) return undefined;
+    const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
+    if (!hit) return undefined; // consumed or rotated
+    const [role, rec] = hit;
+    if (Date.now() > rec.expiresAt) return undefined;
+    return { session, role };
   }
 
-  async consumeJoinCode(sessionId: string): Promise<void> {
+  async consumeJoinCode(sessionId: string, role: string): Promise<void> {
     const s = this.sessions.get(sessionId);
-    if (!s || !s.joinCode) return;
-    this.byJoinCode.delete(s.joinCode);
-    s.joinCode = null;
+    const rec = s?.joinCodes[role];
+    if (!s || !rec) return;
+    this.byJoinCode.delete(rec.code);
+    delete s.joinCodes[role];
   }
 
-  async setJoinCode(sessionId: string, code: string, expiresAt: number): Promise<boolean> {
+  async clearJoinCodes(sessionId: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    s.joinCodes = {};
+  }
+
+  async setJoinCode(
+    sessionId: string, role: string, code: string, expiresAt: number
+  ): Promise<boolean> {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     if (s.frozenAt !== null) return false;
-    if (s.joinCode) this.byJoinCode.delete(s.joinCode); // the old code stops resolving
-    s.joinCode = code;
-    s.joinCodeExpiresAt = expiresAt;
+    const previous = s.joinCodes[role];
+    if (previous) this.byJoinCode.delete(previous.code); // only THIS role's old code
+    s.joinCodes[role] = { code, expiresAt };
     this.byJoinCode.set(code, sessionId);
     return true;
   }
@@ -270,6 +294,9 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.closed = true;
+    // Agree with expireIfDue: a closed room's codes stop resolving AND stop
+    // occupying the index, rather than relying on the `closed` guard alone.
+    await this.clearJoinCodes(sessionId);
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
@@ -539,8 +566,8 @@ export class MemoryStore implements BellmanStore {
   private expireIfDue(s: Session, now: number): void {
     if (s.closed || now <= s.expiresAt) return;
     s.closed = true;
-    if (s.joinCode) this.byJoinCode.delete(s.joinCode);
-    s.joinCode = null;
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    s.joinCodes = {};
     const event: SessionEvent = {
       cursor: s.events.length + 1,
       type: "session_expired" as EventType,

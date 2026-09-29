@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code (`BELL-7F3K-92`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can reissue a code to add members later.
+One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can issue a fresh code — one per role — to add members later.
 
 ## Why MCP as the rendezvous
 
@@ -23,7 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
-| `bellman_invite` | Issue a fresh join code at any time, or revoke the current one. Issuing needs the `invite` verb; revoking needs `revoke`. |
+| `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
 ## Trust model
@@ -211,6 +211,11 @@ Verbs are enforced by the server. A call a seat's role does not permit is
 refused with an error naming the verb it lacks, and nothing is delivered or
 recorded. The `your_verbs` in a connect preview and the verbs enforced come
 from one accessor (`src/roles.ts`), so a preview cannot over-promise a verb.
+
+`invite` is not scoped to the inviter's own seat: a seat holding it can mint
+a join code for any role the manifest declares, including one more capable
+than its own, and can take that seat itself by leaving and rejoining. Give
+`invite` only to a seat you would trust with every seat's authority.
 
 A room role is not `Identity.role`. The latter is `member` | `admin` over an
 *org* and buys nothing inside a room: an org admin holds exactly what their

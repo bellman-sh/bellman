@@ -34,7 +34,7 @@ describe("bellman_invite", () => {
       member_id: s.creatorMemberId,
     });
     expect(issued.isError, issued.text).toBe(false);
-    expect(String(issued.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}$/);
+    expect(String(issued.data.join_code)).toMatch(/^BELL-[A-Z2-9]{4}-[A-Z2-9]{2}-PEER-B$/);
     expect(issued.data.replaced_previous).toBe(false);
 
     const preview = await stale.call("bellman_connect", { join_code: issued.data.join_code });
@@ -172,5 +172,149 @@ describe("bellman_invite", () => {
 
     expect(joined.isError, joined.text).toBe(false);
     expect((joined.data.members as unknown[]).length).toBe(3);
+  });
+
+  it("mints a code per role, each resolving to its own seat", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+
+    const a = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
+    expect(a.isError, a.text).toBe(false);
+    expect(a.data.role).toBe("helper");
+    expect(String(a.data.join_code)).toMatch(/-HELPER$/);
+
+    const b = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+    expect(b.data.role).toBe("lead");
+
+    const outsider = await h.connect(DEV_KEY.outsider);
+    const preview = await outsider.call("bellman_connect", { join_code: String(a.data.join_code) });
+    expect((preview.data.room as { your_role: string }).your_role).toBe("helper");
+  });
+
+  it("issuing for one role leaves another role's code live", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
+    const lead1 = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+
+    const lead2 = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+    expect(lead2.data.replaced_previous).toBe(true);
+
+    const outsider = await h.connect(DEV_KEY.outsider);
+    expect((await outsider.call("bellman_connect", { join_code: String(lead1.data.join_code) })).isError).toBe(true);
+    expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(false);
+  });
+
+  it("revoking one role leaves the others live", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
+    const lead = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+
+    await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead", revoke: true });
+
+    const outsider = await h.connect(DEV_KEY.outsider);
+    expect((await outsider.call("bellman_connect", { join_code: String(lead.data.join_code) })).isError).toBe(true);
+    expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(false);
+  });
+
+  it("a bare revoke retires every code", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
+    const lead = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+    const before = (await h.store.getSession(sessionId))!;
+
+    const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
+    expect(revoked.data.revoked).toBe(true);
+    // Pins the payload a genuine multi-role revoke reports: both live roles,
+    // named — not just the boolean flag the rest of this test checks.
+    expect(revoked.data.roles).toEqual(["helper", "lead"]);
+
+    const after = (await h.store.getSession(sessionId))!;
+    // One invite_revoked event for the whole revoke, not one per role retired.
+    expect(after.events.length).toBe(before.events.length + 1);
+
+    const outsider = await h.connect(DEV_KEY.outsider);
+    expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(true);
+    expect((await outsider.call("bellman_connect", { join_code: String(lead.data.join_code) })).isError).toBe(true);
+  });
+
+  /**
+   * Review Minor 5 / known-issue #8: an expired-but-still-present code is not a
+   * live code, so it must not be reported as retired or fire invite_revoked —
+   * doing so announces the closing of a door that had already shut by itself.
+   * Sets expiresAt directly through the store rather than waiting out the real
+   * 15-minute TTL: the bug is in the revoke predicate's `Boolean(...)` check,
+   * which never consults expiresAt regardless of how the code got old.
+   */
+  it("does not report an already-expired code as retired, and stays silent when it is the only one", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
+    const sessionId = String(started.data.session_id);
+    const creatorMemberId = String(started.data.member_id);
+    await h.store.setJoinCode(sessionId, "helper", "BELL-EXPIRED-01-HELPER", Date.now() - 1);
+    const before = (await h.store.getSession(sessionId))!;
+
+    const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
+    expect(revoked.isError, revoked.text).toBe(false);
+    expect(revoked.data.roles).toEqual([]);
+
+    const after = (await h.store.getSession(sessionId))!;
+    expect(after.events.length).toBe(before.events.length);
+  });
+
+  /** Review Focus 4. */
+  it("a bare revoke against a room with no live codes succeeds", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
+
+    const again = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
+    expect(again.isError, again.text).toBe(false);
+    expect(again.data.revoked).toBe(true);
+  });
+
+  it("a real per-role revoke reports the retired role and appends one event; revoking it again is a silent no-op", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const before = (await h.store.getSession(sessionId))!;
+
+    const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
+    expect(revoked.isError, revoked.text).toBe(false);
+    expect(revoked.data.roles).toEqual(["helper"]);
+
+    const afterFirst = (await h.store.getSession(sessionId))!;
+    expect(afterFirst.events.length).toBe(before.events.length + 1);
+
+    const again = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
+    expect(again.isError, again.text).toBe(false);
+    expect(again.data.roles).toEqual([]);
+
+    const afterSecond = (await h.store.getSession(sessionId))!;
+    expect(afterSecond.events.length).toBe(afterFirst.events.length);
+  });
+
+  it("refuses a role the manifest does not declare, naming the ones it does", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const bad = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "admin" });
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toContain("lead");
+    expect(bad.text).toContain("helper");
+  });
+
+  /**
+   * Covers the handler's own frozen guard (src/server.ts, returns before
+   * setJoinCode is ever reached) — a different guard from the store-level one
+   * exercised by tests/store.test.ts's "refuses the writes themselves while
+   * frozen, not only the reads", which is the one that actually holds under a
+   * concurrent request. This test would still pass if that store-level guard
+   * were deleted; it is not meant to cover it.
+   */
+  it("a frozen room refuses a per-role issue and leaves other codes untouched", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
+    const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
+    await h.store.freezeSession(sessionId, Date.now());
+
+    const denied = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
+    expect(denied.isError).toBe(true);
+
+    await h.store.freezeSession(sessionId, null);
+    const outsider = await h.connect(DEV_KEY.outsider);
+    expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(false);
   });
 });

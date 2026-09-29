@@ -587,6 +587,9 @@ describe("membersOf", () => {
     const before = storage.writes;
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
     expect(storage.writes - before).toBe(0);
+    // setAlarm moves alarms and not writes, so scheduling work needs its own
+    // check. alarms starts empty because the row is seeded, not created.
+    expect(storage.alarms).toEqual([]);
   });
 
   it("agrees with getSession about a room at its TTL boundary", async () => {

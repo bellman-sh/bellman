@@ -330,7 +330,7 @@ instead of one key plus every event. `103,680 × members × events` becomes
 which is the term that made a 30-day team room expensive. #99 removes the cost
 for socket clients; this stops its growth for everyone else.
 
-### D13 — Hibernation is verified by smoke; a fake ctx cannot show it.
+### D13 — Eviction is proved in workerd, and again by smoke.
 
 `tests/store-do-wiring.test.ts` already loads the real `SessionDO` over a fake
 storage via `vi.mock("cloudflare:workers")`. That fake grows
@@ -344,11 +344,37 @@ assert delivery after revival. `BELLMAN_URL` already points smoke at any
 deployment including `wrangler dev`, so the throwaway probe becomes a standing
 check against real Durable Objects.
 
-`@cloudflare/vitest-pool-workers` was considered and rejected for now: it would
-make the eviction assertion a per-commit gate, at the cost of a third test
-program beside the Node and Worker ones that CLAUDE.md already names as
-standing friction. Revisit with #12, which wants Worker-side test
-infrastructure anyway.
+**Amended after #12 landed (PR #102).** This decision originally rejected
+`@cloudflare/vitest-pool-workers` — "it would make the eviction assertion a
+per-commit gate, at the cost of a third test program" — and said to revisit
+with #12. #12 built that program: `worker-tests/`, its own dependency tree so
+the pool keeps its vitest 4 peers while the root stays on vitest 5, and
+`npm run verify` already runs it. The rejection's only stated cost is now
+sunk, so the revisit resolves the other way.
+
+The eviction assertion becomes a per-commit gate. `worker-tests/wrangler.toml`
+sets `main = "../src/worker.ts"`, so the pool serves the real `/ws` route and
+a test can drive the whole path rather than a stubbed object.
+
+The mechanism comes from #12's own contract test, which documents it while
+making a different point:
+
+> `abortAllDurableObjects()` "tears the instances down, and that is what clears
+> `SessionDO.waiters` — in-memory state no storage rollback would touch."
+
+That is this design's central claim stated by someone who was not making it.
+Waiters are in-memory and die with the instance; sockets are held by the
+runtime and do not. One test asserts both halves — a socket delivers across a
+teardown, and a waiter registered before the same teardown does not — which
+pins the difference between the two arms rather than only the presence of one.
+
+**If the pool cannot express it,** because `abortAllDurableObjects()` closes
+accepted sockets rather than leaving them hibernating, then eviction stays
+smoke-only and this decision records that the pool cannot express eviction.
+The fallback is the original D13, unchanged.
+
+The smoke leg stays either way. It is the only check that runs against a real
+deployment, and a pool is a simulation of workerd's lifecycle, not a bill.
 
 For #25 specifically, two checks can go red today without #12: the contract
 suite gains `eventAt` cases run against `MemoryStore` as every other case is,

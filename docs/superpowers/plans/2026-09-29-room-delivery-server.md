@@ -24,9 +24,21 @@ API), vitest, wrangler.
 - **Two TypeScript programs.** `npm run typecheck` (Node) excludes `src/worker.ts`,
   `src/store-do.ts`, `src/oauth/store.ts`; `npm run typecheck:worker` includes them.
   Both must pass. `npm run verify` runs typecheck + typecheck:worker + build + test.
-- **Two test programs.** Anything importing `cloudflare:workers` cannot be imported
-  by a vitest test without `vi.mock("cloudflare:workers")`. Runtime-free shapes go in
-  a module beside it — see `src/stored-session.ts`.
+- **Three test programs now, not two.** (1) The root vitest suite: anything importing
+  `cloudflare:workers` needs `vi.mock("cloudflare:workers")`; runtime-free shapes go in
+  a module beside it — see `src/stored-session.ts`. (2) `worker-tests/`, added by #12
+  (PR #102): a SEPARATE npm package with its own `node_modules`, running
+  `@cloudflare/vitest-pool-workers` against real workerd. It is not an npm workspace of
+  the root; `npm install` there is separate. Its `wrangler.toml` sets
+  `main = "../src/worker.ts"`, so the real Worker and real Durable Objects are loaded.
+  (3) `npm run smoke`, against a real deployment.
+- **`npm run verify` now runs five things**, not four: `typecheck && typecheck:worker &&
+  build && test && test:worker`. The last one installs `worker-tests/` with
+  `--legacy-peer-deps` first, so it is slower than the plan's earlier tasks assume.
+- **The shared contract suite binds both stores now.** `tests/helpers/store-contract.ts`
+  runs against `MemoryStore` (root suite) AND `DurableObjectStore` (worker-tests). A case
+  added there must pass in real workerd too. `describeStoreContract` takes a third
+  argument, a `StoreContractDivergences` map, for documented per-store deviations.
 - **A room holds many members, not two.** Never write "two sessions" or "the other
   session" in code comments, commit messages or docs. Say *members*, *the room*, or
   *peers*.
@@ -1266,19 +1278,136 @@ process does."
 
 ---
 
-### Task 8: The smoke run proves hibernation
+### Task 8: Prove eviction in workerd, then again in smoke
 
-A fake ctx cannot show eviction and revival, which is the claim this whole
-change rests on. This makes the throwaway probe a standing check.
+The claim this whole change rests on is that delivery survives the object being
+evicted and revived. A fake ctx cannot show it. Two checks now can, and they
+prove different things: the workerd test is a per-commit gate on the mechanism,
+the smoke run is the only check against a real deployment.
 
 **Files:**
+- Create: `worker-tests/ws-delivery.test.ts`
 - Modify: `scripts/smoke.ts`
 
 **Interfaces:**
-- Consumes: the `/ws` route (Task 7).
+- Consumes: the `/ws` route (Task 7), `SessionDO`'s socket arm (Tasks 4-6).
 - Produces: nothing other code imports.
 
-- [ ] **Step 1: Add the `/ws` leg**
+**Read first:** `worker-tests/README.md`. It names three things that will bite
+you — the `--legacy-peer-deps` install, the deliberate `workerd` override, and
+the fact that the pool's config API changed at 0.22.0 (no `defineWorkersConfig`;
+`cloudflareTest()` is a plain Vite plugin; `isolatedStorage` is gone, replaced
+by `reset()` and `abortAllDurableObjects()` from `cloudflare:test`).
+
+- [ ] **Step 1: Write the failing workerd test**
+
+Create `worker-tests/ws-delivery.test.ts`. Follow the shape of
+`worker-tests/store-contract.test.ts` for imports and cleanup.
+
+```ts
+/**
+ * Delivery survives the object being evicted and revived — in real workerd,
+ * against the real /ws route (worker-tests/wrangler.toml sets
+ * main = "../src/worker.ts").
+ *
+ * The mechanism is abortAllDurableObjects(), which store-contract.test.ts
+ * already documents while making a different point: it "tears the instances
+ * down, and that is what clears SessionDO.waiters — in-memory state no storage
+ * rollback would touch." That is exactly the claim under test here. A waiter is
+ * in-memory and dies with the instance; a socket is held by the runtime and
+ * does not. The second case pins that difference rather than assuming it.
+ */
+import { describe, it, expect, afterEach } from "vitest";
+import { env, SELF, reset, abortAllDurableObjects } from "cloudflare:test";
+
+afterEach(async () => {
+  await reset();
+  await abortAllDurableObjects();
+});
+
+describe("delivery across eviction", () => {
+  it("a socket still receives after the object is torn down and revived", async () => {
+    // Build a room whose member this identity owns, then upgrade.
+    // Use the same fixtures/keys path the /ws route tests use.
+    const res = await SELF.fetch("https://bellman.test/ws?session=<id>&cursor=0", {
+      headers: { upgrade: "websocket", authorization: "Bearer <key>" },
+    });
+    expect(res.status).toBe(101);
+    const ws = res.webSocket!;
+    ws.accept();
+
+    const frames: string[] = [];
+    ws.addEventListener("message", (e) => frames.push(String(e.data)));
+
+    // THE TEARDOWN. Every instance goes; only runtime-held state survives.
+    await abortAllDurableObjects();
+
+    // Appending revives the object. wake() must find the socket on the
+    // rebuilt instance, via ctx.getWebSockets(), not via instance state.
+    await appendOneEvent();
+
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(JSON.parse(frames[0]).payload).toEqual({ text: "after teardown" });
+  });
+
+  it("a long-poll waiter does NOT survive the same teardown", async () => {
+    // The companion half. If this also survived, the first test would be
+    // proving nothing about hibernation — both arms would just be durable.
+    const polling = /* start a bellman_sync long poll with a long wait */;
+    await abortAllDurableObjects();
+    await appendOneEvent();
+    // The waiter is gone with its instance, so this poll cannot be woken by
+    // the append; it resolves empty at its own timeout instead.
+    expect(await polling).toEqual([]);
+  });
+});
+```
+
+Fill in the room setup, the key, and `appendOneEvent()` from whatever
+`worker-tests/store-contract.test.ts` and `tests/helpers/fixtures.ts` already
+provide — do not invent a new fixture layer. Import `vi` from vitest if you use
+`vi.waitFor`.
+
+- [ ] **Step 2: Run it and verify it fails**
+
+Run: `npm run test:worker`
+Expected: FAIL. Before Tasks 4-7 exist this cannot pass at all; if you are
+running Task 8 after them, break it deliberately instead — see Step 3.
+
+**If `abortAllDurableObjects()` closes the accepted socket** rather than
+leaving it hibernating, this test cannot be written this way. That is a real
+possible outcome, not a failure on your part. Report it as
+DONE_WITH_CONCERNS, say exactly what you observed, delete the file, and do the
+smoke steps only. The spec's D13 anticipates this and calls for recording that
+the pool cannot express eviction.
+
+- [ ] **Step 3: Make it pass, then see it fail on purpose**
+
+The implementation already exists (Tasks 4-6). Once green, change `wake()`'s
+socket loop to iterate an empty array (`for (const ws of [] as WebSocket[])`),
+re-run `npm run test:worker`, and confirm the first case goes RED. Restore it.
+
+Then, separately, confirm the second case is not vacuous: make it assert
+`toHaveLength(1)` instead of `toEqual([])` and confirm THAT goes red too. A
+test that passes whatever the code does is not a test. Restore it.
+
+- [ ] **Step 4: Commit the workerd test**
+
+```bash
+git add worker-tests/ws-delivery.test.ts
+git commit -m "test(worker): prove delivery survives eviction, in real workerd (#99)
+
+#12 built worker-tests and npm run verify already pays for it, so the
+eviction assertion the design rests on becomes a per-commit gate rather
+than something only a manual smoke run covers.
+
+Two cases, because one would not be evidence. A socket delivers across
+abortAllDurableObjects(); a long-poll waiter registered before the same
+teardown does not. That is the difference between the two arms of wake(),
+asserted rather than assumed."
+```
+
+- [ ] **Step 5: Add the smoke `/ws` leg**
 
 In `scripts/smoke.ts`, after the existing send/sync checks, with the room and
 its member handles already in scope:
@@ -1314,9 +1443,9 @@ its member handles already in scope:
   await new Promise<void>((r) => ws.addEventListener("open", () => r(), { once: true }));
   console.log("  ok  /ws upgrades a member");
 
-  // THE CHECK. Past the ~10s idle eviction, so the object that delivers below
-  // is a different instance from the one that accepted this socket. Nothing in
-  // the fake-ctx tests can show this.
+  // Past the ~10s idle eviction, so the object that delivers below is a
+  // different instance from the one that accepted this socket. The workerd
+  // test proves the mechanism; this proves it against a real deployment.
   await new Promise((r) => setTimeout(r, 15_000));
 
   const arriving = nextFrame(ws, 10_000);
@@ -1336,7 +1465,12 @@ Use whatever names the surrounding script already has for the session id, the
 member handles, the keys and the `call` helper; the identifiers above are
 placeholders for those.
 
-- [ ] **Step 2: Run it against real Durable Objects**
+**Note:** `scripts/smoke.ts` IS in the Node tsc program (`tsconfig.test.json`
+includes `scripts`). If the global `WebSocket`/`MessageEvent` types or the
+non-standard `headers` option do not typecheck, cast at the call site rather
+than widening any shared type.
+
+- [ ] **Step 6: Run it against real Durable Objects**
 
 ```bash
 npx wrangler dev &
@@ -1346,26 +1480,16 @@ BELLMAN_URL=http://localhost:8787/mcp npm run smoke
 Expected: every existing check passes, then the three new lines. The run is
 ~15 seconds longer, which is the eviction wait and is the point.
 
-- [ ] **Step 3: See the hibernation check fail on purpose**
-
-In `src/store-do.ts`, change `wake()`'s socket loop to iterate an empty array
-(`for (const ws of [] as WebSocket[])`). Re-run the smoke against `wrangler dev`
-and confirm it fails at "no frame within 10000ms". Restore the loop and confirm
-it passes. A green smoke nobody has seen fail proves nothing about delivery.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 7: Commit the smoke leg**
 
 ```bash
 git add scripts/smoke.ts
-git commit -m "test(smoke): prove delivery survives eviction and revival (#99)
+git commit -m "test(smoke): prove /ws delivers after eviction, against a deployment (#99)
 
-The probe that justified the design was a throwaway. This makes it a
-standing check: connect, idle past the ~10s eviction, then assert an event
-posted over ordinary HTTP still reaches the socket.
-
-A fake ctx cannot show this. It is the one claim in the design that only
-real Durable Objects can verify, and the smoke run already points wherever
-BELLMAN_URL says."
+The workerd test in worker-tests gates the mechanism on every commit. This
+is the other half: the same claim against whatever BELLMAN_URL points at,
+which is the only place the real eviction timer and the real network are
+involved."
 ```
 
 ---
@@ -1439,10 +1563,14 @@ git commit -m "docs: describe the two delivery paths and why both exist (#99)"
 ## Done when
 
 - [ ] `npm run verify` is green.
+- [ ] `npm run verify` includes `npm run test:worker`, and `worker-tests/ws-delivery.test.ts`
+      passes in real workerd — or, if the pool cannot express eviction, that is
+      recorded in the spec's D13 and the file is gone.
 - [ ] `BELLMAN_URL=http://localhost:8787/mcp npm run smoke` is green against
       `wrangler dev`, including the eviction check.
 - [ ] Every "see it fail on purpose" step has actually been run. There are
-      eight, in Tasks 1, 2, 3, 4, 5 (two), 6, 7 and 8.
+      nine, in Tasks 1, 2, 3, 4, 5 (two), 6, 7 and 8 (two: the socket loop, and
+      the waiter case's own non-vacuity).
 - [ ] `git log` shows one commit per task, each signed.
 - [ ] No client behaviour has changed: `src/bridge.ts`, `src/channel.ts` and
       `src/stop-hook.ts` are untouched by this plan, and every existing bridge

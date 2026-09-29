@@ -1555,6 +1555,51 @@ Fill in the room setup, the key, and `appendOneEvent()` from whatever
 provide — do not invent a new fixture layer. Import `vi` from vitest if you use
 `vi.waitFor`.
 
+- [ ] **Step 1b: Test the premise the whole design rests on**
+
+Nothing on this branch tests Durable Object input-gate atomicity, and every
+read-and-register argument in the spec depends on it. Task 4's implementer
+flagged this after grepping for it and finding nothing. It is testable here and
+nowhere else, because it needs a real object serving two real requests.
+
+Do not test the gate directly — test the property it buys:
+
+```ts
+  it("an event appended while a socket is connecting is delivered exactly once", async () => {
+    /**
+     * D5's premise, and the only place it can be checked. fetch reads the
+     * missed events, attaches and accepts inside ONE invocation, and the input
+     * gate holds every other request to the object for that duration. So an
+     * append racing the upgrade either lands before the read — and is replayed
+     * — or after the registration, and is sent as a frame. What it cannot do
+     * is fall between them, which would drop it silently.
+     *
+     * This is the socket form of CLAUDE.md's read-and-register rule. The long
+     * poll has a test for the same property; this is that test for sockets.
+     */
+    const frames: string[] = [];
+    const [res] = await Promise.all([
+      SELF.fetch(`https://bellman.test/ws?session=${id}&cursor=0`, {
+        headers: { upgrade: "websocket", authorization: `Bearer ${key}` },
+      }),
+      appendOneEvent({ text: "racing the upgrade" }),
+    ]);
+    const ws = res.webSocket!;
+    ws.accept();
+    ws.addEventListener("message", (e) => frames.push(String(e.data)));
+
+    // Whether it was replayed or pushed, it must arrive, and once.
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+    expect(JSON.parse(frames[0]).payload).toEqual({ text: "racing the upgrade" });
+  });
+```
+
+Run it repeatedly — `--repeat 20` or a loop — because a race that passes once
+proves less than a race that passes twenty times. If it is flaky, that is a
+finding and the most valuable one on this task: it would mean the gate does not
+give what D5 claims, and the design needs revisiting rather than the test
+relaxing. Report it as DONE_WITH_CONCERNS and stop rather than adding a retry.
+
 - [ ] **Step 2: Run it and verify it fails**
 
 Run: `npm run test:worker`

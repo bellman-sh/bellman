@@ -147,25 +147,35 @@ export class SessionDO extends DurableObject {
    * and asked membersOf who they are; this request is one the Worker BUILT,
    * so nothing on it came from the client (see the /ws route in worker.ts).
    *
-   * Accept, replay and attach happen in this one invocation, and, its only
-   * await being a storage read, the input gate holds every other request to
-   * this object for its duration. That is CLAUDE.md's read-and-register rule,
-   * not an exemption from it: an event appended between the replay and the
-   * accept would otherwise be delivered to nobody and skipped by the cursor.
+   * Read, attach, accept and send happen in this one invocation, and, its
+   * only await being a storage read, the input gate holds every other request
+   * to this object for its duration. That is CLAUDE.md's read-and-register
+   * rule, not an exemption from it: an event appended between the replay and
+   * the accept would otherwise be delivered to nobody and skipped by the
+   * cursor. So the order is waitForEvents' own: await the read FIRST, then
+   * register with no await between.
    *
-   * The order is waitForEvents' own: await the read FIRST, then register with
-   * no await between. Accepting before the read would let a failed read leave
-   * an accepted socket with no attachment, and wake() has no good answer for
-   * a socket whose cursor it does not know: send it everything, or silently
-   * send it nothing. Reading first closes that.
+   * The cursor goes on before the accept. wake() has no good answer for a
+   * socket whose cursor it does not know: send it everything, or silently
+   * send it nothing. The read can throw, and so can serializeAttachment, above
+   * 16 KB. Both come before the accept, so a failure of either accepts nothing.
    *
-   * It does not close the window between accept and attach, which is narrow
-   * and bounded, not absent. serializeAttachment throws above 16 KB, and that
-   * would strand the same unattached socket. What goes in is the ids one
-   * identity owns in this room, departed members included (leaving sets
-   * leftAt; nothing removes a member), so reaching it takes over a thousand
-   * seatings by one identity in one room's life. The plan caps active members
-   * far below that (ENTITLEMENTS in auth.ts): this is churn, not size.
+   * DEPENDENCY. Attaching before accepting works, and survives eviction, in
+   * the workerd that worker-tests pins (D5 records which, and how it was
+   * measured). That is observed behaviour, not a guarantee this repo controls.
+   * Do not "tidy" this back to accept-then-attach: it reopens the stranded
+   * socket. And if a future workerd stopped persisting a pre-accept
+   * attachment, every socket would arrive with no cursor and wake() fails
+   * closed (D5), so delivery would go quiet instead of erroring. Task 8's
+   * workerd test and the smoke leg are what would catch that.
+   *
+   * The 16 KB is reachable only by churn. What goes in is the ids one identity
+   * owns in this room, departed members included: membersOf returns them on
+   * purpose, so /ws and bellman_sync agree about who may watch, and nothing
+   * removes a member. The list grows with seatings, not with the plan's cap on
+   * active members (ENTITLEMENTS in auth.ts), so it takes over a thousand
+   * seatings by one identity in one room's life. That is churn, not a breach
+   * of the cap.
    */
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade") !== "websocket") {
@@ -181,12 +191,12 @@ export class SessionDO extends DurableObject {
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
-    this.ctx.acceptWebSocket(server);
     const attachment: SocketAttachment = {
       memberIds,
       cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
     };
     server.serializeAttachment(attachment);
+    this.ctx.acceptWebSocket(server);
     for (const e of missed) server.send(JSON.stringify(e));
 
     return new Response(null, { status: 101, webSocket: client });

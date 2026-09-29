@@ -21,6 +21,7 @@
  * exclusion.
  */
 import { describe, it, expect, vi } from "vitest";
+import { serialize } from "node:v8";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
 // a DurableObject is just something that holds its ctx and env.
@@ -154,7 +155,13 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
  * hands them back from getWebSockets(); here a plain array stands in, which is
  * enough for fan-out, replay and attachment logic but NOT for eviction itself.
  * Eviction is verified by npm run smoke against real Durable Objects — see D13.
+ *
+ * serializeAttachment enforces workerd's 16 KB cap, because the order of attach
+ * and accept in fetch exists to survive that throw. It counts as workerd does,
+ * V8's serialization: for 1,400 ids it gives 16,833 bytes, the figure workerd
+ * reported, and the boundary matches too (1,362 ids fit, 1,363 do not).
  */
+const MAX_ATTACHMENT_BYTES = 16384;
 function fakeSocket() {
   const sent: string[] = [];
   let attachment: unknown = undefined;
@@ -164,7 +171,16 @@ function fakeSocket() {
     get closed() { return closed; },
     send: (data: string) => { sent.push(data); },
     close: (code: number, reason: string) => { closed = { code, reason }; },
-    serializeAttachment: (v: unknown) => { attachment = structuredClone(v); },
+    serializeAttachment: (v: unknown) => {
+      const bytes = serialize(v).byteLength;
+      if (bytes > MAX_ATTACHMENT_BYTES) {
+        throw new Error(
+          `A WebSocket 'attachment' cannot be larger than ${MAX_ATTACHMENT_BYTES} bytes.` +
+          `'attachment' was ${bytes} bytes.`,
+        );
+      }
+      attachment = structuredClone(v);
+    },
     deserializeAttachment: () => structuredClone(attachment),
   };
 }
@@ -729,7 +745,7 @@ describe("membersOf", () => {
  * BellmanStore one (MemoryStore cannot hold a hibernatable socket), so the
  * contract suite never reaches it. The fake ctx has no input gate, so nothing
  * here can interleave with fetch. These pin what it sends and records and, in
- * the sequence case, that accept, attach and the sends all happen before it
+ * the sequence case, that attach, accept and the sends all happen before it
  * next yields, which is what lets the real runtime's input gate make it atomic.
  */
 describe("fetch: websocket upgrade", () => {
@@ -803,10 +819,10 @@ describe("fetch: websocket upgrade", () => {
   });
 
   it("accepts no socket when reading the missed events fails", async () => {
-    // Read first, then accept (spec D5). Accepted before the read, a socket
-    // outlives a failed read with no attachment, and wake() has no good
-    // answer for a socket whose cursor it does not know: send it everything,
-    // or silently send it nothing.
+    // Read first, then attach and accept (spec D5). Accepted before the read,
+    // a socket outlives a failed read with no attachment, and wake() has no
+    // good answer for a socket whose cursor it does not know: send it
+    // everything, or silently send it nothing.
     const { doi, ctx, storage } = await world(2);
     storage.list = async () => { throw new Error("storage unavailable"); };
 
@@ -814,8 +830,8 @@ describe("fetch: websocket upgrade", () => {
     expect(ctx.sockets).toHaveLength(0);
   });
 
-  it("reads, then accepts, attaches and sends, without yielding in between", async () => {
-    // D5 as one assertion: the read, then accept, attach and send, with
+  it("reads, then attaches, accepts and sends, without yielding in between", async () => {
+    // D5 as one assertion: the read, then attach, accept and send, with
     // nothing yielding between them. The whole sequence is compared, so any
     // reordering shows. The fake has no input gate to interleave, so "yield"
     // stands in for one. It marks the first await fetch reaches after the
@@ -824,9 +840,10 @@ describe("fetch: websocket upgrade", () => {
     // after the last send is allowed: nothing is left to register by then.
     //
     // "yield" is queued when the read SETTLES, not at accept. Queued at
-    // accept it cannot see an await between the read and the accept, or
-    // between building the pair and accepting it, so "simplifying" it to
-    // accept time silently drops two of the four windows.
+    // accept it cannot see an await anywhere before the accept: between the
+    // read and the pair, the pair and the attach, or the attach and the
+    // accept. "Simplifying" it to accept time silently drops three of the
+    // four windows.
     //
     // It also needs fetch to await the hooked promise itself, with no hop:
     // the marker sits behind fetch's continuation only then. Awaiting a
@@ -837,8 +854,10 @@ describe("fetch: websocket upgrade", () => {
     // look at how fetch awaits the read first. Hook whatever fetch awaits
     // directly.
     //
-    // events() is the one thing fetch awaits, and the accepted socket does not
-    // exist until fetch makes it, so that is where the hooks go.
+    // events() is the one thing fetch awaits, and the server socket does not
+    // exist until fetch builds the pair, so the hooks go on events() and on the
+    // WebSocketPair constructor (restored after). The attach comes before the
+    // accept, so a hook installed at accept would never see it.
     const { doi, ctx } = await world(2);
     const calls: string[] = [];
 
@@ -851,17 +870,38 @@ describe("fetch: websocket upgrade", () => {
     };
 
     const accept = ctx.acceptWebSocket;
-    ctx.acceptWebSocket = (ws) => {
-      calls.push("accept");
-      const socket = ws as ReturnType<typeof fakeSocket>;
-      const { serializeAttachment, send } = socket;
-      socket.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
-      socket.send = (data) => { calls.push("send"); send(data); };
-      accept(ws);
+    ctx.acceptWebSocket = (ws) => { calls.push("accept"); accept(ws); };
+
+    const RealPair = globalThis.WebSocketPair;
+    globalThis.WebSocketPair = class extends RealPair {
+      constructor() {
+        super();
+        const server = this[1];
+        const { serializeAttachment, send } = server;
+        server.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
+        server.send = (data) => { calls.push("send"); send(data); };
+      }
     };
+    try {
+      await doi.fetch(upgrade(0));
+    } finally {
+      globalThis.WebSocketPair = RealPair;
+    }
 
-    await doi.fetch(upgrade(0));
+    expect(calls).toEqual(["read", "attach", "accept", "send", "send", "yield"]);
+  });
 
-    expect(calls).toEqual(["read", "accept", "attach", "send", "send", "yield"]);
+  it("accepts no socket when the attachment is over the runtime's cap", async () => {
+    // Attach before accept (spec D5). Attached after, an over-cap attachment
+    // throws with the socket already accepted and carrying no cursor. The fake
+    // enforces workerd's 16 KB cap, so 1,400 ids reproduces it: workerd threw
+    // at exactly this size, and left an accepted socket with no attachment.
+    // What the fake cannot show is that an attachment set before the accept
+    // persists in workerd. That is the dependency named in fetch, and Task 8's.
+    const { doi, ctx } = await world(2);
+    const ids = Array.from({ length: 1400 }, (_, i) => "m_" + i.toString(16).padStart(8, "0"));
+
+    await expect(doi.fetch(upgrade(0, ids.join(",")))).rejects.toThrow("cannot be larger than 16384 bytes");
+    expect(ctx.sockets).toHaveLength(0);
   });
 });

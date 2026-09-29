@@ -1,0 +1,26 @@
+# Test-only Worker config. Mirrors the real wrangler.toml's Durable Object
+# topology and nothing else: no routes, no observability, no custom domain.
+name = "bellman-worker-tests"
+main = "../src/worker.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "SessionDO"
+
+[[durable_objects.bindings]]
+name = "REGISTRY"
+class_name = "RegistryDO"
+
+[[durable_objects.bindings]]
+name = "AUDIT"
+class_name = "AuditDO"
+
+[[durable_objects.bindings]]
+name = "AUTH"
+class_name = "AuthDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO", "AuthDO"]

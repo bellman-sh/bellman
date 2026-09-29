@@ -572,6 +572,23 @@ describe("membersOf", () => {
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
   });
 
+  it("reports a room past its TTL as closed, and writes nothing", async () => {
+    // getSession closes a room past its TTL on read (expireIfDue), so
+    // bellman_sync sees it as closed while its alarm is still pending. /ws
+    // must say the same, or the two delivery paths disagree about whether the
+    // room is live. membersOf gets there by computing it: authorizing a watch
+    // must not mutate the room, and expireIfDue would write the closed flag,
+    // clear the join codes and append session_expired.
+    const storage = fakeStorage({
+      session: { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt: Date.now() - 1 },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const before = storage.writes;
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
+    expect(storage.writes - before).toBe(0);
+  });
+
   it("reports an unknown room as closed with no members", async () => {
     const doi = new storeDo.SessionDO({ storage: fakeStorage() } as never, {} as never);
     expect(await doi.membersOf("u1")).toEqual({ memberIds: [], closed: true });
@@ -580,8 +597,17 @@ describe("membersOf", () => {
   it("reads no event keys", async () => {
     const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
     const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    // list() is how the log is scanned and get() is how one event is fetched
+    // (eventAt). A list counter alone cannot see the second.
+    const eventGets: string[] = [];
+    const get = storage.get;
+    storage.get = async (key: string) => {
+      if (key.startsWith("e:")) eventGets.push(key);
+      return get(key);
+    };
     const before = storage.lists;
     await doi.membersOf("u1");
     expect(storage.lists - before).toBe(0);
+    expect(eventGets).toEqual([]);
   });
 });

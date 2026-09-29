@@ -115,15 +115,24 @@ export class SessionDO extends DurableObject {
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *
-   * Reads the session row only. Never an event key — that is the whole
-   * reason the route asks here rather than calling getSession.
+   * Two reasons the route asks here rather than calling getSession. This
+   * returns two fields, not the whole record (live join codes and every
+   * member's brief) across an RPC hop. And it does not expire the room as a
+   * side effect: getSession runs expireIfDue, which writes, and authorizing a
+   * watch must not.
+   *
+   * The second reason carries an obligation. The two paths must still agree
+   * on "closed", or a room past its TTL whose alarm has not fired yet reads
+   * as open here while bellman_sync, through getSession, reads it as closed.
+   * So `closed` is computed by expireIfDue's own rule (now past expiresAt)
+   * and not written. Change that rule in one place and it must change in both.
    */
   async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
     const s = await this.stored();
     if (!s) return { memberIds: [], closed: true };
     return {
       memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
-      closed: s.closed,
+      closed: s.closed || Date.now() > s.expiresAt,
     };
   }
 

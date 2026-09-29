@@ -183,9 +183,25 @@ all sync, so the existing waiter arm above this is untouched and no caller of
 
 ### D5 — Accept, replay and attach happen in one invocation.
 
-`SessionDO` gains its first `fetch` handler. Inside it, in order: accept the
-socket with `ctx.acceptWebSocket`, read `eventsAfter(cursor)`, send those
-events, write `serializeAttachment({ memberIds, cursor })`.
+`SessionDO` gains its first `fetch` handler. Inside it, in this order:
+
+1. `await` the events the client missed (`eventsAfter(cursor)`)
+2. `ctx.acceptWebSocket(server)`
+3. `serializeAttachment({ memberIds, cursor })`
+4. send the replay
+
+**The read comes first, and an earlier draft of this spec had it second.**
+That draft accepted the socket before reading, which leaves a real failure
+open: if the storage read throws, an accepted socket survives with no
+attachment, and `wake()`'s guard is `if (att && event.cursor <= att.cursor)`
+— null `att` fails the guard, so that socket receives *every* later event
+regardless of cursor, carrying no member ids. Reading first means a failed
+read accepts nothing.
+
+Steps 2 and 3 are synchronous and adjacent, so no await separates accepting a
+socket from attaching its cursor. That is the same shape `waitForEvents` already
+has — await the read, then register without yielding — so this order follows
+CLAUDE.md's rule rather than merely coexisting with it.
 
 All four are inside one invocation, and the input gate holds every other
 request to the object for its duration. **This is CLAUDE.md's read-and-register

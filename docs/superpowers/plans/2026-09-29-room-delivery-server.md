@@ -727,7 +727,14 @@ In `src/store-do.ts`, in `SessionDO`, after `membersOf`. Add the attachment
 type above the class, beside `type Waiter`:
 
 ```ts
-/** What a hibernating socket remembers. 16 KB cap; this is nowhere near it. */
+/**
+ * What a hibernating socket remembers, across eviction.
+ *
+ * The 16 KB cap is reachable, though only by churn: membersOf deliberately
+ * returns members who have left (D6), so this list grows with seatings rather
+ * than with the room's active cap. serializeAttachment throws above it, which
+ * is why fetch attaches before it accepts.
+ */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 ```
 
@@ -753,8 +760,10 @@ type SocketAttachment = { memberIds: string[]; cursor: number };
       .split(",").filter(Boolean);
 
     // Read FIRST. Accepting before reading leaves an accepted socket with no
-    // attachment if this throws, and wake()'s guard treats a null attachment
-    // as "send it everything". A failed read must accept nothing.
+    // attachment if this throws, and wake() has no right answer for a socket
+    // whose cursor it does not know — it fails closed, so that socket then
+    // receives nothing, silently, for as long as it stays open. A failed read
+    // must accept nothing.
     const missed = await this.events(cursor);
 
     const pair = new WebSocketPair();

@@ -523,7 +523,9 @@ attachment — all in one invocation, so the input gate makes them atomic agains
 a concurrent append.
 
 **Files:**
-- Modify: `tests/store-do-wiring.test.ts` (a `fakeCtx` with a WebSocket surface)
+- Modify: `tests/store-do-wiring.test.ts` (a `fakeCtx` with a WebSocket surface,
+  AND converting all four existing bare `{ storage }` constructions to use it —
+  see Step 1b, which Task 5 depends on)
 - Modify: `src/store-do.ts` (`SessionDO.fetch`)
 - Test: `tests/store-do-wiring.test.ts`
 
@@ -586,6 +588,45 @@ vi.stubGlobal("WebSocketPair", class {
   1 = fakeSocket();
 });
 ```
+
+**If that class-field form does not compile**, use a constructor returning a
+plain indexed object instead. Vitest does not typecheck and this file is
+excluded from `tsc`, so this is a runtime concern only.
+
+- [ ] **Step 1b: Convert EVERY bare `{ storage }` ctx in this file to `fakeCtx`**
+
+There are four, at roughly `tests/store-do-wiring.test.ts:162`, `:169`, `:275`
+and `:498`:
+
+```ts
+new SessionDO({ storage: legacyStorage } as never, {} as never)
+// becomes
+new SessionDO(fakeCtx(legacyStorage) as never, {} as never)
+```
+
+**This is not tidying, and skipping it breaks Task 5.** Around twenty call
+sites in this file reach `wake()` through `appendEvent`, `appendEventOnce` or
+`alarm()`. Today `wake()` opens with `if (this.waiters.length === 0) return;`,
+so with no waiters registered it returns before touching `this.ctx` — that
+early return is the only reason a ctx with no `getWebSockets` works at all.
+Task 5 deletes that line, because it would otherwise skip socket delivery
+whenever nobody is long-polling, which becomes the common case. The moment it
+goes, every one of those paths calls `this.ctx.getWebSockets()` and throws
+`TypeError: this.ctx.getWebSockets is not a function`.
+
+Do NOT instead make `wake()` tolerant (`this.ctx.getWebSockets?.() ?? []`).
+That weakens production code to accommodate a test fake, and it would hide a
+real missing-binding failure in workerd. Fix the fake, not the object.
+
+Note that `worker-tests/` will stay green either way — it runs against real
+Durable Objects, where `getWebSockets()` exists. Only the root suite breaks,
+which is exactly the kind of split that gets misdiagnosed.
+
+- [ ] **Step 1c: Confirm the conversion changed nothing**
+
+Run: `npm test`
+Expected: PASS, same count as before your change. `fakeCtx` passes `storage`
+straight through, so no existing assertion should move.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -736,7 +777,12 @@ that cannot reach a local process.
 - Test: `tests/store-do-wiring.test.ts`
 
 **Interfaces:**
-- Consumes: `SocketAttachment` and the fake ctx (Task 4).
+- Consumes: `SocketAttachment` and the fake ctx (Task 4) — including Task 4's
+  Step 1b, which converted every bare `{ storage }` ctx in the test file. If
+  that did not happen, deleting the early return below makes ~20 existing
+  tests throw `this.ctx.getWebSockets is not a function`. Check before you
+  start: `grep -n 'new SessionDO({ storage' tests/store-do-wiring.test.ts`
+  should find nothing.
 - Produces: no new signature. `wake()` stays `private wake(event: SessionEvent): void`
   and stays synchronous.
 

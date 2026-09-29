@@ -30,6 +30,12 @@ jobs:
       - run: npm run build
       - run: npm test
 
+      # A third program: the BellmanStore contract suite against
+      # DurableObjectStore, inside real workerd. Its own dependency tree, because
+      # the Workers vitest pool still peers on vitest 4 and this repo runs 5 —
+      # see worker-tests/README.md. The script installs it before running.
+      - run: npm run test:worker
+
   deploy:
     # Only a push to main that already passed the checks above.
     needs: verify

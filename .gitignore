@@ -22,3 +22,6 @@ data/
 # Personal, per-project instructions and session handoff (not committed)
 CLAUDE.local.md
 CONTEXT.md
+
+# The second test program keeps its own dependency tree; see worker-tests/README.md.
+worker-tests/node_modules

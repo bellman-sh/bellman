@@ -185,7 +185,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
     });
     expect(sync.data.events).toEqual([]);
     expect((await h.store.getSession(sessionId))!.members).toHaveLength(1);
-    expect((await h.store.getSession(sessionId))!.events).toHaveLength(0);
+    expect(await h.store.eventsAfter(sessionId, 0)).toHaveLength(0);
   });
 
   it("ships the joiner's brief only on confirm", async () => {

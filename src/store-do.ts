@@ -99,13 +99,12 @@ export class SessionDO extends DurableObject {
     await this.ctx.storage.setAlarm(s.expiresAt);
   }
 
-  async getSession(): Promise<Session | undefined> {
+  async getSession(): Promise<StoredSession | undefined> {
     const s = await this.stored();
     if (!s) return undefined;
     await this.expireIfDue(s, Date.now());
-    const fresh = await this.stored();
-    if (!fresh) return undefined;
-    return { ...fresh, events: await this.events(0) };
+    // Re-read: expireIfDue may have written closed=true and cleared the codes.
+    return this.stored();
   }
 
   /** Returns the retired code, so the caller can drop it from the registry. */
@@ -606,11 +605,11 @@ export class DurableObjectStore implements BellmanStore {
     await this.registry.indexSession(s.createdBy, s.id);
   }
 
-  async getSession(id: string): Promise<Session | undefined> {
+  async getSession(id: string): Promise<StoredSession | undefined> {
     return this.session(id).getSession();
   }
 
-  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
     const id = await this.registry.lookupJoinCode(code);
     if (!id) return undefined;
     const session = await this.getSession(id);

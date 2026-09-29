@@ -52,6 +52,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   );
   let writes = 0;
   let puts = 0;
+  let lists = 0;
   const alarms: number[] = [];
   return {
     get writes() { return writes; },
@@ -62,6 +63,11 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
      * batched commit from separate ones.
      */
     get puts() { return puts; },
+    /**
+     * list() INVOCATIONS. A list is a range scan, so a read that makes one costs
+     * O(keys in the range) where a get costs O(1) — which is what #25 was.
+     */
+    get lists() { return lists; },
     alarms,
     snapshot: (): Record<string, unknown> => structuredClone(Object.fromEntries(rows)),
     get: async (key: string) => (rows.has(key) ? structuredClone(rows.get(key)) : undefined),
@@ -97,6 +103,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     delete: async (key: string) => { writes++; return rows.delete(key); },
     setAlarm: async (at: number) => { alarms.push(at); },
     list: async (opts: { prefix?: string; start?: string; reverse?: boolean; limit?: number } = {}) => {
+      lists++;
       let keys = [...rows.keys()]
         .filter((k) => k.startsWith(opts.prefix ?? "") && k >= (opts.start ?? ""))
         .sort();
@@ -477,5 +484,29 @@ describe("SessionDO.appendEventOnce", () => {
     // this "replayed" or "conflict" rather than a fresh append.
     const after = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
     expect(after.outcome).toBe("appended");
+  });
+});
+
+/**
+ * What a session read COSTS, inside the real SessionDO. The contract suite
+ * proves what getSession returns; it cannot see how many storage operations the
+ * read made, and the count is this object's own.
+ */
+describe("SessionDO read cost", () => {
+  it("getSession does not list events", async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    await doi.appendEvent({
+      type: "message", fromMemberId: "m1", fromUserId: "u1",
+      fromLabel: "jesse", payload: { n: 1 }, refId: null,
+    });
+
+    const before = storage.lists;
+    const got = await doi.getSession();
+
+    expect(got?.id).toBe(LEGACY_ID);
+    expect(got).not.toHaveProperty("events");
+    // The whole point of #25: a session read is O(1) keys, not O(events).
+    expect(storage.lists - before).toBe(0);
   });
 });

@@ -20,6 +20,10 @@ afterEach(async () => {
   await h.close();
 });
 
+async function eventCount(sessionId: string): Promise<number> {
+  return (await h.store.eventsAfter(sessionId, 0)).length;
+}
+
 describe("bellman_invite", () => {
   it("issues a working code long after the original was consumed", async () => {
     const s = await pairUp(h);
@@ -219,7 +223,7 @@ describe("bellman_invite", () => {
     const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
     const helper = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper" });
     const lead = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "lead" });
-    const before = (await h.store.getSession(sessionId))!;
+    const before = await eventCount(sessionId);
 
     const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
     expect(revoked.data.revoked).toBe(true);
@@ -227,9 +231,8 @@ describe("bellman_invite", () => {
     // named — not just the boolean flag the rest of this test checks.
     expect(revoked.data.roles).toEqual(["helper", "lead"]);
 
-    const after = (await h.store.getSession(sessionId))!;
     // One invite_revoked event for the whole revoke, not one per role retired.
-    expect(after.events.length).toBe(before.events.length + 1);
+    expect(await eventCount(sessionId)).toBe(before + 1);
 
     const outsider = await h.connect(DEV_KEY.outsider);
     expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(true);
@@ -250,14 +253,13 @@ describe("bellman_invite", () => {
     const sessionId = String(started.data.session_id);
     const creatorMemberId = String(started.data.member_id);
     await h.store.setJoinCode(sessionId, "helper", "BELL-EXPIRED-01-HELPER", Date.now() - 1);
-    const before = (await h.store.getSession(sessionId))!;
+    const before = await eventCount(sessionId);
 
     const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });
     expect(revoked.isError, revoked.text).toBe(false);
     expect(revoked.data.roles).toEqual([]);
 
-    const after = (await h.store.getSession(sessionId))!;
-    expect(after.events.length).toBe(before.events.length);
+    expect(await eventCount(sessionId)).toBe(before);
   });
 
   /** Review Focus 4. */
@@ -272,21 +274,20 @@ describe("bellman_invite", () => {
 
   it("a real per-role revoke reports the retired role and appends one event; revoking it again is a silent no-op", async () => {
     const { creator, sessionId, creatorMemberId } = await pairUp(h, { manifest: manifestFixture({ preset: "swarm" }) });
-    const before = (await h.store.getSession(sessionId))!;
+    const before = await eventCount(sessionId);
 
     const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
     expect(revoked.isError, revoked.text).toBe(false);
     expect(revoked.data.roles).toEqual(["helper"]);
 
-    const afterFirst = (await h.store.getSession(sessionId))!;
-    expect(afterFirst.events.length).toBe(before.events.length + 1);
+    const afterFirst = await eventCount(sessionId);
+    expect(afterFirst).toBe(before + 1);
 
     const again = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, role: "helper", revoke: true });
     expect(again.isError, again.text).toBe(false);
     expect(again.data.roles).toEqual([]);
 
-    const afterSecond = (await h.store.getSession(sessionId))!;
-    expect(afterSecond.events.length).toBe(afterFirst.events.length);
+    expect(await eventCount(sessionId)).toBe(afterFirst);
   });
 
   it("refuses a role the manifest does not declare, naming the ones it does", async () => {

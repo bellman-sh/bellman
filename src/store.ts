@@ -2,6 +2,7 @@ import type {
   AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
+import type { StoredSession } from "./stored-session.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
 const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -62,7 +63,14 @@ export type EventWrite =
 
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
-  getSession(id: string): Promise<Session | undefined>;
+  /**
+   * The session record and its members. NOT its events.
+   *
+   * Returning StoredSession rather than Session is what stops #25 coming
+   * back: a handler that reaches for history no longer compiles, so it has
+   * to call eventsAfter or eventAt and say which events it wants.
+   */
+  getSession(id: string): Promise<StoredSession | undefined>;
   /**
    * Resolve a code to its session and the role it carries.
    *
@@ -71,7 +79,7 @@ export interface BellmanStore {
    * from the record, never from reading the string — there is no code path that
    * parses a suffix, which is what makes the tamper case fail closed.
    */
-  getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined>;
+  getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined>;
 
   /** Retire one role's code. Idempotent. */
   consumeJoinCode(sessionId: string, role: string): Promise<void>;
@@ -228,14 +236,15 @@ export class MemoryStore implements BellmanStore {
     this.byCreator.set(stored.createdBy, mine);
   }
 
-  async getSession(id: string): Promise<Session | undefined> {
+  async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
     if (!s) return undefined;
     this.expireIfDue(s, Date.now());
-    return detach(s);
+    const { events: _events, ...rest } = detach(s);
+    return rest;
   }
 
-  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
     const id = this.byJoinCode.get(code);
     if (!id) return undefined;
     const session = await this.getSession(id);

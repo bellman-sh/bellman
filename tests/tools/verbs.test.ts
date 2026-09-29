@@ -42,7 +42,7 @@ function seat(can: string[], room = "verb-guards", mode: "pair" | "swarm" = "pai
 }
 
 async function eventCount(sessionId: string): Promise<number> {
-  return (await h.store.getSession(sessionId))!.events.length;
+  return (await h.store.eventsAfter(sessionId, 0)).length;
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +427,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     // it and a fresh code.
     const p = await pairUp(h, { manifest: seat(["send"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
+    const eventsBefore = await eventCount(p.sessionId);
     // Keeps the setup honest: if the room is ever reshaped until it is full, this
     // fails loudly instead of going quietly vacuous.
     expect(before.members.length, "the room must have spare capacity").toBeLessThan(before.maxMembers);
@@ -440,7 +441,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
 
     const after = (await h.store.getSession(p.sessionId))!;
     expect(after.joinCodes).toEqual(before.joinCodes);
-    expect(after.events.length).toBe(before.events.length);
+    expect(await eventCount(p.sessionId)).toBe(eventsBefore);
   });
 
   it("a denied revoke neither retires the live code nor appends an event", async () => {
@@ -452,6 +453,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     // `revoke`, so the refusal can only be about revoke.
     const p = await pairUp(h, { manifest: seat(["send", "invite"], "verb-guards", "swarm") });
     const before = (await h.store.getSession(p.sessionId))!;
+    const eventsBefore = await eventCount(p.sessionId);
     // Keeps the setup honest: with no code, "unchanged" below holds of any outcome.
     expect(Object.keys(before.joinCodes).length, "the room must have a live join code").toBeGreaterThan(0);
 
@@ -463,7 +465,7 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
 
     const after = (await h.store.getSession(p.sessionId))!;
     expect(after.joinCodes, "a denied revoke must leave the code live").toEqual(before.joinCodes);
-    expect(after.events.length).toBe(before.events.length);
+    expect(await eventCount(p.sessionId)).toBe(eventsBefore);
   });
 
   it("refuses a creator whose own role holds neither verb — a sealed room stays sealed", async () => {

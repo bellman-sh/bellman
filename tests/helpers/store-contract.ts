@@ -438,6 +438,31 @@ export function describeStoreContract(
       expect((await store.eventAt(s.id, e!.cursor))!.payload).toEqual({ n: 1 });
     });
 
+    /**
+     * bellman_send resolves an action_response's ref_id with eventAt, so this is
+     * a room boundary: a lookup that searched every session would let a member
+     * answer an action_request from a room they were never in.
+     */
+    it("eventAt never reaches into another room", async () => {
+      const a = session({ id: "qs_a" });
+      const b = session({ id: "qs_b" });
+      await store.createSession(a);
+      await store.createSession(b);
+      const inA = await store.appendEvent(a.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { room: "a" }, refId: null,
+      });
+      const inB = await store.appendEvent(b.id, {
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { room: "b" }, refId: null,
+      });
+      // Same cursor in both rooms — a lookup that ignored the session id
+      // would still find something, and would find the wrong thing.
+      expect(inA!.cursor).toBe(inB!.cursor);
+      expect((await store.eventAt(a.id, inA!.cursor))?.payload).toEqual({ room: "a" });
+      expect((await store.eventAt(b.id, inB!.cursor))?.payload).toEqual({ room: "b" });
+    });
+
     it("throws when appending to an unknown session", async () => {
       await expect(
         store.appendEvent("qs_nope", {
@@ -1152,7 +1177,10 @@ export function describeStoreContract(
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(true);
       expect(fresh.joinCodes).toEqual({});
-      expect(fresh.events.at(-1)?.type).toBe("session_expired");
+      // Read after getSession, not before it: DurableObjectStore.sweep is a
+      // no-op, so there it is the read above that expires the session and
+      // writes this event. getSession no longer carries history (#25).
+      expect((await store.eventsAfter(s.id, 0)).at(-1)?.type).toBe("session_expired");
       expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
     });
 
@@ -1165,7 +1193,11 @@ export function describeStoreContract(
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
 
-      const expired = (await store.getSession(s.id))!.events.filter(
+      // The read comes first and is not incidental: DurableObjectStore.sweep is a
+      // no-op, so there this read is what expires the session, and the events
+      // below would be empty without it.
+      await store.getSession(s.id);
+      const expired = (await store.eventsAfter(s.id, 0)).filter(
         (e) => e.type === "session_expired",
       );
       expect(expired).toHaveLength(1);

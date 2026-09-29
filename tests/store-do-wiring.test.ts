@@ -729,8 +729,8 @@ describe("membersOf", () => {
  * BellmanStore one (MemoryStore cannot hold a hibernatable socket), so the
  * contract suite never reaches it. The fake ctx has no input gate, so nothing
  * here can interleave with fetch. These pin what it sends and records and, in
- * the sequence case, that it never yields once its read returns, which is what
- * lets the real runtime's input gate make it atomic.
+ * the sequence case, that accept, attach and the sends all happen before it
+ * next yields, which is what lets the real runtime's input gate make it atomic.
  */
 describe("fetch: websocket upgrade", () => {
   const upgrade = (cursor: number, members = "m1") =>
@@ -800,8 +800,9 @@ describe("fetch: websocket upgrade", () => {
 
   it("accepts no socket when reading the missed events fails", async () => {
     // Read first, then accept (spec D5). Accepted before the read, a socket
-    // outlives a failed read with no attachment, and a socket with no cursor
-    // is one the fan-out cannot skip by: it would get every later event.
+    // outlives a failed read with no attachment, and wake() has no good
+    // answer for a socket whose cursor it does not know: send it everything,
+    // or silently send it nothing.
     const { doi, ctx, storage } = await world(2);
     storage.list = async () => { throw new Error("storage unavailable"); };
 
@@ -811,13 +812,29 @@ describe("fetch: websocket upgrade", () => {
 
   it("reads, then accepts, attaches and sends, without yielding in between", async () => {
     // D5 as one assertion: the read, then accept, attach and send, with
-    // nothing yielding once the read returns. The whole sequence is compared,
-    // so any reordering shows. The fake has no input gate to interleave, so
-    // "yield" stands in for one: it is queued when the read settles, behind
-    // fetch's own continuation, so it lands last only if fetch never awaits
-    // again before it returns. The hooks sit where the things they watch
-    // appear: events() is the one thing fetch awaits, and the accepted socket
-    // does not exist until fetch makes it.
+    // nothing yielding between them. The whole sequence is compared, so any
+    // reordering shows. The fake has no input gate to interleave, so "yield"
+    // stands in for one. It marks the first await fetch reaches after the
+    // read returns (or its return, if it reaches none), so what is logged
+    // before it ran without yielding, and the sequence ends with it. An await
+    // after the last send is allowed: nothing is left to register by then.
+    //
+    // "yield" is queued when the read SETTLES, not at accept. Queued at
+    // accept it cannot see an await between the read and the accept, or
+    // between building the pair and accepting it, so "simplifying" it to
+    // accept time silently drops two of the four windows.
+    //
+    // It also needs fetch to await the hooked promise itself, with no hop:
+    // the marker sits behind fetch's continuation only then. Awaiting a
+    // wrapper (the public eventsAfter, D5's name for the read) or chaining
+    // `.then(x => x)` adds a hop, the marker overtakes fetch, and this goes
+    // red on correct code. A `yield` right after `read` has two causes the
+    // log cannot tell apart, a hop or an await added before the accept, so
+    // look at how fetch awaits the read first. Hook whatever fetch awaits
+    // directly.
+    //
+    // events() is the one thing fetch awaits, and the accepted socket does not
+    // exist until fetch makes it, so that is where the hooks go.
     const { doi, ctx } = await world(2);
     const calls: string[] = [];
 

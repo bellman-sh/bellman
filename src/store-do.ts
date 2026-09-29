@@ -37,7 +37,10 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
-/** What a hibernating socket remembers. 16 KB cap; this is nowhere near it. */
+/**
+ * What a hibernating socket remembers. The runtime rejects more than 16 KB;
+ * fetch says how close this can get.
+ */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 
 // ---------------------------------------------------------------------------
@@ -144,18 +147,25 @@ export class SessionDO extends DurableObject {
    * and asked membersOf who they are; this request is one the Worker BUILT,
    * so nothing on it came from the client (see the /ws route in worker.ts).
    *
-   * Accept, replay and attach happen in this one invocation, and the input
-   * gate holds every other request to this object for its duration. That is
-   * CLAUDE.md's read-and-register rule, not an exemption from it: an event
-   * appended between the replay and the accept would otherwise be delivered
-   * to nobody and skipped by the cursor.
+   * Accept, replay and attach happen in this one invocation, and, its only
+   * await being a storage read, the input gate holds every other request to
+   * this object for its duration. That is CLAUDE.md's read-and-register rule,
+   * not an exemption from it: an event appended between the replay and the
+   * accept would otherwise be delivered to nobody and skipped by the cursor.
    *
    * The order is waitForEvents' own: await the read FIRST, then register with
    * no await between. Accepting before the read would let a failed read leave
-   * an accepted socket with no attachment, and a socket with no cursor is one
-   * the fan-out cannot skip by: it would be sent every later event. So the
-   * read comes first, and the socket is attached before it is sent to; at no
-   * point is one accepted without its cursor.
+   * an accepted socket with no attachment, and wake() has no good answer for
+   * a socket whose cursor it does not know: send it everything, or silently
+   * send it nothing. Reading first closes that.
+   *
+   * It does not close the window between accept and attach, which is narrow
+   * and bounded, not absent. serializeAttachment throws above 16 KB, and that
+   * would strand the same unattached socket. What goes in is the ids one
+   * identity owns in this room, departed members included (leaving sets
+   * leftAt; nothing removes a member), so reaching it takes over a thousand
+   * seatings by one identity in one room's life. The plan caps active members
+   * far below that (ENTITLEMENTS in auth.ts): this is churn, not size.
    */
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade") !== "websocket") {

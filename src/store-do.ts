@@ -118,8 +118,8 @@ export class SessionDO extends DurableObject {
    * Two reasons the route asks here rather than calling getSession. This
    * returns two fields, not the whole record (live join codes and every
    * member's brief) across an RPC hop. And it does not expire the room as a
-   * side effect: getSession runs expireIfDue, which writes, and authorizing a
-   * watch must not.
+   * side effect: getSession runs expireIfDue, which can write, and authorizing
+   * a watch must not.
    *
    * The second reason carries an obligation. The two paths must still agree
    * on "closed", or a room past its TTL whose alarm has not fired yet reads
@@ -298,6 +298,7 @@ export class SessionDO extends DurableObject {
   }
 
   private async expireIfDue(s: StoredSession, now: number): Promise<void> {
+    // membersOf is the other half of this rule: it answers "closed" the same way, without writing.
     if (s.closed || now <= s.expiresAt) return;
     await this.ctx.storage.put("session", { ...s, closed: true, joinCodes: {} });
     const event: SessionEvent = {

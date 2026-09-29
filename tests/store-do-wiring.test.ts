@@ -32,7 +32,7 @@ vi.mock("cloudflare:workers", () => ({
 
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
-import type { Session } from "../src/types.js";
+import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
@@ -203,6 +203,14 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
   it("SessionDO.getSession() reads it as gone", async () => {
     const { legacy } = await worldOn(storeDo);
     expect(await legacy.getSession()).toBeUndefined();
+  });
+
+  it("SessionDO.membersOf() reads it as an unknown room", async () => {
+    // u_jesse owns m_creator in this row. A membersOf that read the raw row
+    // would answer { memberIds: ["m_creator"], closed: false }, and /ws would
+    // open a socket onto a room every other read path already treats as gone.
+    const { legacy } = await worldOn(storeDo);
+    expect(await legacy.membersOf("u_jesse")).toEqual({ memberIds: [], closed: true });
   });
 
   it("the store facade's getSession and getSessionByJoinCode read it as gone too", async () => {
@@ -507,6 +515,73 @@ describe("SessionDO read cost", () => {
     expect(got?.id).toBe(LEGACY_ID);
     expect(got).not.toHaveProperty("events");
     // The whole point of #25: a session read is O(1) keys, not O(events).
+    expect(storage.lists - before).toBe(0);
+  });
+});
+
+/**
+ * SessionDO.membersOf, the /ws upgrade's authorization read. It is a SessionDO
+ * method and deliberately not a BellmanStore one (MemoryStore cannot hold a
+ * hibernatable socket), so the contract suite never reaches it and the real
+ * object over fake storage is where it is pinned.
+ */
+describe("membersOf", () => {
+  const withMembers = (...ms: Partial<Member>[]) =>
+    currentRow({ members: ms.map((m) => member(m)) });
+
+  it("returns every member that identity owns", async () => {
+    const storage = fakeStorage({
+      session: withMembers(
+        { memberId: "m1", userId: "u1" },
+        { memberId: "m2", userId: "u2" },
+        { memberId: "m3", userId: "u1" },
+      ),
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    // Review Focus #4: one identity, several members, one socket for all.
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1", "m3"], closed: false });
+  });
+
+  it("returns nothing for an identity that owns no member", async () => {
+    const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    expect(await doi.membersOf("u9")).toEqual({ memberIds: [], closed: false });
+  });
+
+  it("still returns a member who has left", async () => {
+    // Review Focus #3. findMember (src/server.ts:109) does not exclude
+    // leftAt, so bellman_sync still serves them. The two delivery paths
+    // must not drift, so /ws must not exclude them either.
+    const storage = fakeStorage({
+      session: withMembers({ memberId: "m1", userId: "u1", leftAt: Date.now() }),
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    expect((await doi.membersOf("u1")).memberIds).toEqual(["m1"]);
+  });
+
+  it("reports a closed room as closed, with the membership intact", async () => {
+    // Review Focus #2. A poll onto a closed room lasts 25s; a socket would
+    // last forever. The route refuses, but the distinction is made here.
+    const storage = fakeStorage({
+      session: { ...withMembers({ memberId: "m1", userId: "u1" }), closed: true },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
+  });
+
+  it("reports an unknown room as closed with no members", async () => {
+    const doi = new storeDo.SessionDO({ storage: fakeStorage() } as never, {} as never);
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: [], closed: true });
+  });
+
+  it("reads no event keys", async () => {
+    const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
+    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    const before = storage.lists;
+    await doi.membersOf("u1");
     expect(storage.lists - before).toBe(0);
   });
 });

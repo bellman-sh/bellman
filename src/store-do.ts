@@ -107,6 +107,26 @@ export class SessionDO extends DurableObject {
     return this.stored();
   }
 
+  /**
+   * Which members this user owns here, and whether the room is closed.
+   *
+   * The authorization check for a /ws upgrade. Deliberately mirrors
+   * findMember (src/server.ts:109), leftAt and all: bellman_sync serves a
+   * member who has left, and two delivery paths that disagree about who may
+   * watch is exactly the drift the spec names as its standing risk.
+   *
+   * Reads the session row only. Never an event key — that is the whole
+   * reason the route asks here rather than calling getSession.
+   */
+  async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
+    const s = await this.stored();
+    if (!s) return { memberIds: [], closed: true };
+    return {
+      memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
+      closed: s.closed,
+    };
+  }
+
   /** Returns the retired code, so the caller can drop it from the registry. */
   async consumeJoinCode(role: string): Promise<string | null> {
     const s = await this.stored();

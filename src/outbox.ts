@@ -28,7 +28,8 @@ export function earliestDue(times: Iterable<number>): number | null {
  * Which handlers are due at `now`, in name order so a drain is deterministic.
  *
  * Inclusive: an alarm fires AT its due time. An exclusive comparison would
- * leave the handler scheduled and re-fire it forever.
+ * skip the handler at that instant, and re-arming to `earliestDue` would set
+ * the alarm to the same instant again, so it spins until the clock moves on.
  */
 export function dueNames(due: Map<string, number>, now: number): string[] {
   return [...due]

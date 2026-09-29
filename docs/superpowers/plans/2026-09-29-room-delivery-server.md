@@ -759,14 +759,17 @@ type SocketAttachment = { memberIds: string[]; cursor: number };
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
-    // Accept and attach are adjacent and synchronous: nothing can interleave
-    // between a socket existing and its cursor being recorded. Same shape as
-    // waitForEvents — await the read, then register without yielding.
-    this.ctx.acceptWebSocket(server);
+    // Attach BEFORE accept. serializeAttachment throws above the 16 KB cap,
+    // and accepting first would strand an accepted socket with no cursor —
+    // wake() fails closed on that, so it would receive nothing, silently, for
+    // as long as it stayed open. Measured against workerd 1.20260926.1: a
+    // pre-accept attachment persists and survives eviction. Both calls are
+    // synchronous and adjacent, so nothing interleaves either.
     server.serializeAttachment({
       memberIds,
       cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
     } satisfies SocketAttachment);
+    this.ctx.acceptWebSocket(server);
     for (const e of missed) server.send(JSON.stringify(e));
 
     return new Response(null, { status: 101, webSocket: client });

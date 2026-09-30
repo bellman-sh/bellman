@@ -870,6 +870,22 @@ describe("fetch: websocket upgrade", () => {
     expect(ctx.sockets).toHaveLength(0);
   });
 
+  it("accepts no socket when a frame cannot be built", async () => {
+    // fetch builds the frames straight after the read, before the attach and
+    // the accept, so a failure there accepts nothing, as the read's and the
+    // attach's do. An event whose time cannot be formatted is such a failure:
+    // publicEvent throws on it. Build the frames after the accept and the
+    // request still fails, but with a socket left accepted.
+    const { doi, ctx } = await world();
+    doi.events = async () => [{
+      cursor: 1, at: Number.NaN, type: "message", fromMemberId: "m9",
+      fromUserId: "u9", fromLabel: "peer", payload: {}, refId: null,
+    }];
+
+    await expect(doi.fetch(upgrade(0))).rejects.toThrow(/Invalid time value/);
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
   it("reads, then attaches, accepts and sends, without yielding in between", async () => {
     // D5 as one assertion: the read, then attach, accept and send, with
     // nothing yielding between them. The whole sequence is compared, so any

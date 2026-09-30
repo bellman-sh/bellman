@@ -95,9 +95,9 @@ export interface OutboxStorage {
  * The storage rows one enqueue adds, for the caller to fold into its OWN
  * transaction alongside the mutation.
  *
- * Returning rows rather than writing them is the whole design: the mutation and
- * the intent to follow it up commit together or neither does. A separate write
- * here would reopen the window this module exists to close.
+ * The mutation and the intent to follow it up commit together or neither does.
+ * A separate write here would reopen the window this module exists to close, so
+ * the rows are returned rather than written.
  */
 export function enqueueRows(
   nextSeq: number,
@@ -120,6 +120,21 @@ export function backoffMs(attempts: number): number {
 
 /** From this attempt on, every failure is logged. */
 export const NOISY_AFTER = 5;
+
+/**
+ * How long the alarm waits behind the inline delivery.
+ *
+ * Arming for `now` put the alarm 1-3 ms behind the commit, so it raced the
+ * inline drain on every write. `deliverNow`'s single-flight guard absorbs that
+ * overlap, but a grace period makes the alarm a backstop: it finds an empty
+ * queue and does nothing, unless the inline attempt never ran or is still stuck
+ * on a downstream that has stopped answering.
+ *
+ * The cost of a longer grace is how long a row waits when the isolate dies
+ * between the commit and the inline attempt. Five seconds against a row that
+ * currently waits forever.
+ */
+export const OUTBOX_GRACE_MS = 5_000;
 
 /**
  * Deliver queued rows in key order, head first.
@@ -182,11 +197,11 @@ export class OutboxDriver {
    * Rows for the caller to fold into ITS OWN transaction, alongside whatever
    * mutation owes them.
    *
-   * Returned rather than written, and that is the point of this module: the
-   * mutation and the intent to follow it up commit together or neither does. A
-   * separate write here would reopen the window the outbox exists to close.
-   * `txn` is the caller's transaction, so the sequence number is read inside it
-   * too and two concurrent enqueues cannot pick the same one.
+   * The mutation and the intent to follow it up commit together or neither does.
+   * A separate write here would reopen the window the outbox exists to close, so
+   * the rows are returned rather than written. `txn` is the caller's transaction,
+   * so the sequence number is read inside it too and two concurrent enqueues
+   * cannot pick the same one.
    *
    * An empty `intents` returns {}, so a refused mutation queues nothing.
    */
@@ -203,31 +218,65 @@ export class OutboxDriver {
     // has to be: a row that commits with nothing scheduled to read it is the
     // window this module exists to close. RegistryDO has no other alarm, so
     // nothing would ever come back for it. setAlarm called inside a
-    // transaction closure commits with that transaction — probed against
-    // workerd, and recorded in Task 1 of
-    // docs/superpowers/plans/2026-09-29-cross-object-atomicity.md.
+    // transaction closure commits with that transaction, and rolls back with
+    // it — probed against workerd.
     //
-    // The earliest due time wins, so arming for the queue cannot push back a
+    // Behind the inline delivery, not with it: see OUTBOX_GRACE_MS. The
+    // earliest due time still wins, so arming for the queue cannot push back a
     // session TTL that was already closer.
-    await this.storage.setAlarm(Math.min(at, ...(await this.allDue()).values()));
+    await this.storage.setAlarm(Math.min(at + OUTBOX_GRACE_MS, ...(await this.allDue()).values()));
     return { ...enqueueRows(nextSeq, intents), [dueKey(OUTBOX_HANDLER)]: at };
   }
+
+  /** The drain in progress, so a second caller joins it instead of starting another. */
+  private draining: Promise<void> | null = null;
+  /** Set by a caller that arrived mid-drain: rows may have been queued behind its listing. */
+  private again = false;
 
   /**
    * Try to clear the queue now.
    *
    * Called straight after the transaction commits. Without it a join code would
    * not resolve until the alarm fired, so handing someone a code right after
-   * creating a room would fail. The alarm is the backstop, not the path.
+   * creating a room would fail.
+   *
+   * One drain at a time. `deliver` awaits another object, which opens this one's
+   * input gate, so an alarm or a second request can reach here mid-delivery. Two
+   * drains would each hold their own listing of the queue: both deliver the head,
+   * a failing one rewrites a row the other has already delivered and deleted, and
+   * one that listed an empty queue deletes the marker of a row queued after it
+   * listed, leaving that row with nothing scheduled to deliver it.
    */
   async deliverNow(): Promise<void> {
-    const next = await drain(this.storage, this.deliver, Date.now());
-    if (next === null) {
-      await this.storage.delete(dueKey(OUTBOX_HANDLER));
-      return;
+    if (this.draining) {
+      this.again = true;
+      return this.draining;
     }
-    await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: next });
-    await this.reArm();
+    this.draining = this.drainLoop();
+    return this.draining;
+  }
+
+  private async drainLoop(): Promise<void> {
+    try {
+      for (;;) {
+        this.again = false;
+        const next = await drain(this.storage, this.deliver, Date.now());
+        if (next === null) {
+          await this.storage.delete(dueKey(OUTBOX_HANDLER));
+        } else {
+          await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: next });
+          await this.reArm();
+        }
+        // Another pass only when this one emptied the queue it listed, because rows
+        // may have been queued behind that listing. After a failure the head is still
+        // failing, and the backoff owns the retry.
+        if (next !== null || !this.again) break;
+      }
+    } finally {
+      // Runs synchronously after `break`, so no caller can join a drain that has
+      // already decided it is done.
+      this.draining = null;
+    }
   }
 
   /** Every due time this object knows: stored rows over derived ones. */

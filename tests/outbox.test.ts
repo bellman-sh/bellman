@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
-  DUE_PREFIX, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver, backoffMs, drain, dueKey, dueNames,
-  earliestDue, enqueueRows, mergeDue, outboxKey,
+  DUE_PREFIX, OUTBOX_GRACE_MS, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver, backoffMs, drain,
+  dueKey, dueNames, earliestDue, enqueueRows, mergeDue, outboxKey,
   type OutboxRow, type OutboxStorage,
 } from "../src/outbox.js";
 
@@ -430,10 +430,10 @@ describe("OutboxDriver", () => {
   });
 
   /**
-   * The arm is the point of enqueue's one write. A row that commits with nothing
-   * scheduled to read it is the window this module exists to close, and
-   * RegistryDO has no other alarm to come back for it. Both facts are asserted,
-   * so the test fails if either the arm or the marker goes missing.
+   * A row that commits with nothing scheduled to read it is the window this module
+   * exists to close, and RegistryDO has no other alarm to come back for it, so
+   * enqueue arms one itself, a grace period behind the inline delivery. Both facts
+   * are asserted, so the test fails if either the arm or the marker goes missing.
    */
   it("enqueue arms the alarm, alongside the marker it returns", async () => {
     const storage = fakeStorage();
@@ -442,7 +442,7 @@ describe("OutboxDriver", () => {
     const rows = await driver.enqueue(fakeTxn(), [intent]);
 
     expect(rows[dueKey("outbox")]).toBe(NOW);
-    expect(storage.alarm).toBe(NOW);
+    expect(storage.alarm).toBe(NOW + OUTBOX_GRACE_MS);
   });
 
   /**
@@ -459,6 +459,30 @@ describe("OutboxDriver", () => {
     await driver.enqueue(fakeTxn(), [intent]);
 
     expect(storage.alarm).toBe(1);
+  });
+
+  /**
+   * The alarm is a backstop, so it waits behind the inline delivery instead of
+   * racing it. Armed for `now`, it fired 1-3 ms after the commit and ran a second
+   * drain against the first. The marker stays at `now`, so the handler is due the
+   * moment the alarm does fire, whatever fired it.
+   */
+  it("enqueue arms the alarm a grace period behind the marker, and a nearer due time still wins", async () => {
+    const storage = fakeStorage();
+    const rows = await new OutboxDriver(storage, async () => {}).enqueue(fakeTxn(), [intent]);
+    const marker = rows[dueKey("outbox")] as number;
+
+    expect(storage.alarm).toBeGreaterThanOrEqual(marker + OUTBOX_GRACE_MS);
+    // A grace too short to matter would put the race back.
+    expect(OUTBOX_GRACE_MS).toBeGreaterThanOrEqual(1_000);
+
+    // A due time nearer than the grace still wins, so a session cannot expire late
+    // because a row was queued.
+    const nearer = fakeStorage();
+    await new OutboxDriver(
+      nearer, async () => {}, async () => new Map([["ttl", NOW + 1_000]])
+    ).enqueue(fakeTxn(), [intent]);
+    expect(nearer.alarm).toBe(NOW + 1_000);
   });
 
   it("enqueue leaves an earlier stored due time in place, even one at the epoch", async () => {
@@ -533,7 +557,7 @@ describe("OutboxDriver", () => {
     // A macrotask turn runs every ready promise first, so by now enqueue has
     // reached the alarm write and has nothing left to do but wait on it.
     await new Promise((resolve) => setImmediate(resolve));
-    expect(started).toEqual([NOW]);
+    expect(started).toEqual([NOW + OUTBOX_GRACE_MS]);
     expect(resolved).toBe(false);
 
     release();
@@ -582,5 +606,185 @@ describe("OutboxDriver", () => {
     await driver.reArm();
 
     expect(storage.alarms).toEqual([0]);
+  });
+});
+
+describe("OutboxDriver, overlapping deliverNow calls", () => {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const deferred = () => {
+    let resolve!: () => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<void>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+  /** A deliver() whose every call the test settles by hand, in the order it chooses. */
+  function manualDeliver() {
+    const calls: Array<{ id: string; def: ReturnType<typeof deferred> }> = [];
+    const landed: string[] = [];
+    const deliver = (row: OutboxRow) => {
+      const def = deferred();
+      calls.push({ id: row.id, def });
+      return def.promise.then(() => { landed.push(row.id); });
+    };
+    return { calls, landed, deliver };
+  }
+  const queuedIds = (storage: ReturnType<typeof fakeStorage>) =>
+    [...storage.map].filter(([k]) => k.startsWith(OUTBOX_PREFIX)).map(([, v]) => (v as OutboxRow).id);
+
+  it("delivers a row once when the alarm arrives during the inline delivery", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "r0", kind: "audit", payload: 0 }]));
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const inline = driver.deliverNow();
+    await tick();
+    const alarm = driver.deliverNow();
+    await tick();
+    expect(m.calls.map((c) => c.id)).toEqual(["r0"]);
+
+    m.calls[0].def.resolve();
+    await Promise.all([inline, alarm]);
+    expect(queuedIds(storage)).toEqual([]);
+  });
+
+  it("never puts back a row that another drain has already delivered and deleted", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [
+      { id: "r0", kind: "put", payload: 0 }, { id: "r1", kind: "drop", payload: 1 },
+    ]));
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const inline = driver.deliverNow();
+    await tick();
+    const alarm = driver.deliverNow();
+    await tick();
+    // The order that hurts: the first call lands, so does everything after it,
+    // and then whichever call is still open fails.
+    m.calls[0].def.resolve();
+    await tick();
+    for (const c of m.calls.slice(1)) c.def.resolve();
+    await tick();
+    for (const c of m.calls) c.def.reject(new Error("late failure"));
+    await Promise.all([inline, alarm]);
+
+    for (const id of queuedIds(storage)) expect(m.landed).not.toContain(id);
+  });
+
+  it("never leaves rows queued with no due marker", async () => {
+    const storage = fakeStorage();
+    await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const first = driver.deliverNow(); // lists [r0]; its ack is slow
+    await tick();
+    // A second write commits while that delivery is in flight, and asks to be drained.
+    const seq = (await storage.get<number>(OUTBOX_SEQ))!;
+    await storage.put({
+      ...enqueueRows(seq + 1, [{ id: "r1", kind: "put", payload: 1 }]),
+      [dueKey("outbox")]: 2,
+    });
+    const second = driver.deliverNow();
+    await tick();
+    for (const c of m.calls.slice(1)) c.def.reject(new Error("sink error"));
+    await tick();
+    m.calls[0].def.resolve(); // the slow one lands last
+    await tick();
+    for (const c of m.calls.slice(1)) c.def.reject(new Error("sink error"));
+    await tick();
+    await Promise.allSettled([first, second]);
+
+    expect(queuedIds(storage).length).toBeGreaterThan(0);      // r1 cannot have landed
+    expect(storage.map.has(dueKey("outbox"))).toBe(true);      // so something must still come back for it
+  });
+
+  /**
+   * A caller that joins a drain is told the queue has been tried, so it has to wait
+   * for the drain it joined. Handing someone a join code right after creating the
+   * room only works if the caller that made the room waits for the delivery that
+   * makes the code resolve, even when another caller started that delivery.
+   */
+  it("resolves a caller that joined a drain only once that drain has finished", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]));
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const inline = driver.deliverNow();
+    await tick();
+    let joinerDone = false;
+    const joiner = driver.deliverNow().then(() => { joinerDone = true; });
+    await tick();
+    expect(joinerDone).toBe(false);
+
+    m.calls[0].def.resolve();
+    await Promise.all([inline, joiner]);
+    expect(joinerDone).toBe(true);
+    expect(queuedIds(storage)).toEqual([]);
+  });
+
+  /**
+   * After a failure the head is still failing, and the backoff owns the retry. A
+   * caller that arrived mid-drain must not turn that into an immediate second
+   * attempt, or every write to a downed downstream retries the head at once and
+   * the attempt count climbs faster than the backoff allows.
+   */
+  it("does not retry a failing head for a caller that arrived mid-drain", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]));
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const first = driver.deliverNow();
+    await tick();
+    const second = driver.deliverNow();
+    await tick();
+    m.calls[0].def.reject(new Error("AuditDO is down"));
+    await tick();
+
+    expect(m.calls.length).toBe(1);
+    await Promise.all([first, second]);
+    expect(queuedIds(storage)).toEqual(["r0"]);
+  });
+
+  /** A drain that has finished must not leave the driver believing one is still running. */
+  it("starts a fresh drain for a call made after the previous one finished", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]));
+    const landed: string[] = [];
+    const driver = new OutboxDriver(storage, async (row) => { landed.push(row.id); });
+
+    await driver.deliverNow();
+    await storage.put(enqueueRows(1, [{ id: "r1", kind: "put", payload: 1 }]));
+    await driver.deliverNow();
+
+    expect(landed).toEqual(["r0", "r1"]);
+  });
+
+  /**
+   * A drain that throws, because the storage under it failed, must not wedge the
+   * driver: the next call drains, instead of joining a drain that is over.
+   */
+  it("drains again after a drain that threw", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]));
+    const landed: string[] = [];
+    const driver = new OutboxDriver(storage, async (row) => { landed.push(row.id); });
+    const list = storage.list.bind(storage);
+    let failNext = true;
+    storage.list = async <T>(options: { prefix: string }) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("storage is down");
+      }
+      return list<T>(options);
+    };
+
+    await expect(driver.deliverNow()).rejects.toThrow("storage is down");
+    await driver.deliverNow();
+
+    expect(landed).toEqual(["r0"]);
   });
 });

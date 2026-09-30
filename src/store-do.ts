@@ -8,6 +8,7 @@ import type {
 import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
+import { publicEvent } from "./public-event.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -159,6 +160,11 @@ export class SessionDO extends DurableObject {
    * and the sequence test pins only that nothing else awaits. Task 8's test,
    * which races an append against an upgrade, is what exercises it.
    *
+   * What goes out is publicEvent(e), the shape wake() and the poll use, and not
+   * the stored event, which carries the sender's user id (spec D1a). The frames
+   * are built straight after the read, so that a failure there, like the read's
+   * and the attach's, accepts nothing.
+   *
    * The cursor goes on before the accept. wake() has no good answer for a
    * socket whose cursor it does not know: send it everything, or silently
    * send it nothing. The read can throw, and so can serializeAttachment, above
@@ -192,6 +198,7 @@ export class SessionDO extends DurableObject {
 
     // The only await. From here to the return nothing yields.
     const missed = await this.events(cursor);
+    const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -201,7 +208,7 @@ export class SessionDO extends DurableObject {
     };
     server.serializeAttachment(attachment);
     this.ctx.acceptWebSocket(server);
-    for (const e of missed) server.send(JSON.stringify(e));
+    for (const frame of frames) server.send(frame);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -361,6 +368,11 @@ export class SessionDO extends DurableObject {
    * identically however a member is watching it, which is the property the
    * whole two-path design rests on.
    *
+   * The frame is publicEvent(event), the projection the poll returns, and not
+   * the stored event: that carries fromUserId, and every member of a room
+   * receives every other member's events (spec D1a). The waiter arm resolves
+   * with the stored event because the poll projects it at the tool boundary.
+   *
    * Synchronous on purpose. getWebSockets, deserializeAttachment, send and
    * serializeAttachment are all sync, so nothing here yields — an await
    * between reading a socket's cursor and sending would reopen the gap that
@@ -371,7 +383,7 @@ export class SessionDO extends DurableObject {
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
 
-    const frame = JSON.stringify(event);
+    const frame = JSON.stringify(publicEvent(event));
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as SocketAttachment | null;
       // Fail closed on a missing attachment. fetch() attaches before it sends,

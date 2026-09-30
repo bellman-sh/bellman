@@ -69,6 +69,7 @@ import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
+import { publicEvent } from "../src/public-event.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -818,6 +819,18 @@ describe("fetch: websocket upgrade", () => {
     expect(got).toEqual([4, 5]);
   });
 
+  it("replays the public event, not the stored one", async () => {
+    // Spec D1a, on the replay path: the same projection wake() sends. A member
+    // who reconnects must not be told by the replay what a live member is not.
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(0));
+
+    const stored = await doi.eventsAfter(0);
+    expect(stored).toHaveLength(2);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s))).toEqual(stored.map(publicEvent));
+    for (const frame of ctx.sockets[0].sent) expect(frame).not.toContain("fromUserId");
+  });
+
   it("replays nothing when the cursor is current", async () => {
     const { doi, ctx } = await world(2);
     await doi.fetch(upgrade(2));
@@ -1022,8 +1035,7 @@ describe("wake: socket delivery", () => {
     expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
   });
 
-  // The three cases below pin what the seven above leave open: the second
-  // caller, the fail-closed read, and the synchrony.
+  // The cases below pin what the seven above leave open.
 
   it("sends an event appended with a key, and does not resend it on a replay", async () => {
     // appendEventOnce is the second of wake()'s three callers: it is what
@@ -1068,6 +1080,25 @@ describe("wake: socket delivery", () => {
       fromLabel: "peer", payload: { n: 1 }, refId: null,
     });
     expect(ctx.sockets[0].sent).toHaveLength(1);
+  });
+
+  it("sends the public event, not the stored one", async () => {
+    // Spec D1a. The stored event carries fromUserId, the sender's upstream
+    // identity (u_github_4242 and the like), and every member of a room
+    // receives every other member's events. So the frame is publicEvent(event):
+    // the projection the poll returns, one shape for both transports.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const event = await doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u_github_4242",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    });
+
+    const frame = ctx.sockets[0].sent[0];
+    expect(frame).not.toContain("4242");
+    expect(Object.keys(JSON.parse(frame)).sort())
+      .toEqual(["at", "cursor", "from", "payload", "ref_id", "type"]);
+    expect(JSON.parse(frame)).toEqual(publicEvent(event!));
   });
 });
 

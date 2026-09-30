@@ -13,6 +13,7 @@ import { denyVerb, verbsOfRole } from "./roles.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
+import { publicEvent } from "./public-event.js";
 
 const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
@@ -180,17 +181,6 @@ function roomPreview(session: StoredSession, viewerRole: string) {
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },
     ),
-  };
-}
-
-function publicEvent(e: SessionEvent) {
-  return {
-    cursor: e.cursor,
-    type: e.type,
-    from: { member_id: e.fromMemberId, label: e.fromLabel },
-    payload: e.payload,
-    ref_id: e.refId,
-    at: new Date(e.at).toISOString(),
   };
 }
 

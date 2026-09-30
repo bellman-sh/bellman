@@ -385,14 +385,25 @@ export class SessionDO extends DurableObject {
 
     const frame = JSON.stringify(publicEvent(event));
     for (const ws of this.ctx.getWebSockets()) {
-      const att = ws.deserializeAttachment() as SocketAttachment | null;
-      // Fail closed on a missing attachment. fetch() attaches before it sends,
-      // so every accepted socket has one; a null here means something is
-      // wrong, and over-delivering every event to a socket whose cursor we do
-      // not know is the worse of the two answers.
-      if (!att || event.cursor <= att.cursor) continue;
-      ws.send(frame);
-      ws.serializeAttachment({ ...att, cursor: event.cursor });
+      // One socket must not starve the rest. getWebSockets() returns a list, and
+      // a send that threw would end this loop with every later socket missing
+      // the event, after the waiter arm had run and the event was stored. So
+      // each socket is its own try: log, skip, carry on. Unproven but cheap: no
+      // send has been observed to throw in workerd, so this is a guard and not
+      // a known failure. The cursor moves only after a send that returned, and
+      // a reconnect replays from the cursor its client names (fetch).
+      try {
+        const att = ws.deserializeAttachment() as SocketAttachment | null;
+        // Fail closed on a missing attachment. fetch() attaches before it sends,
+        // so every accepted socket has one; a null here means something is
+        // wrong, and over-delivering every event to a socket whose cursor we do
+        // not know is the worse of the two answers.
+        if (!att || event.cursor <= att.cursor) continue;
+        ws.send(frame);
+        ws.serializeAttachment({ ...att, cursor: event.cursor });
+      } catch (err) {
+        console.error("socket delivery failed:", err);
+      }
     }
   }
 

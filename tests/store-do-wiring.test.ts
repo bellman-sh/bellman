@@ -1100,6 +1100,37 @@ describe("wake: socket delivery", () => {
       .toEqual(["at", "cursor", "from", "payload", "ref_id", "type"]);
     expect(JSON.parse(frame)).toEqual(publicEvent(event!));
   });
+
+  it("does not let a socket that throws starve the others, or fail the append", async () => {
+    // Unproven but cheap: no send has been observed to throw in workerd. If one
+    // did, getWebSockets() returns a list and the loop would end at it: every
+    // later socket would miss the event, after the waiter arm had run and the
+    // event was stored, and the append would fail for a sender whose message is
+    // safe. The throw here comes from a fake, to prove the guard, not to
+    // describe a failure that has happened.
+    const { doi, ctx, post } = await world();
+    for (const member of ["m1", "m2", "m3"]) await doi.fetch(open(ctx, 0, member));
+    const boom = new Error("send failed");
+    ctx.sockets[1].send = () => { throw boom; };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(post(1)).resolves.toMatchObject({ cursor: 1 });
+
+      // Both neighbours got it. The one that threw did not, and keeps its old
+      // cursor: the cursor moves only after a send that returned.
+      expect(ctx.sockets[0].sent).toHaveLength(1);
+      expect(ctx.sockets[2].sent).toHaveLength(1);
+      const cursorOf = (i: number) =>
+        (ctx.sockets[i].deserializeAttachment() as { cursor: number }).cursor;
+      expect([cursorOf(0), cursorOf(1), cursorOf(2)]).toEqual([1, 0, 1]);
+
+      // Logged once, with the error itself.
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]).toContain(boom);
+    } finally {
+      log.mockRestore();
+    }
+  });
 });
 
 /**

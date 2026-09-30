@@ -925,6 +925,153 @@ describe("fetch: websocket upgrade", () => {
 });
 
 /**
+ * wake()'s socket arm. wake() is private and reached through its three callers,
+ * appendEvent, appendEventOnce and the TTL alarm (by way of expireIfDue), so
+ * these drive those. The waiter arm is the long poll that remote MCP clients
+ * keep using, and it stays: "still resolves a long-poll waiter" pins that both
+ * arms serve one event.
+ */
+describe("wake: socket delivery", () => {
+  const world = async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    const post = (n: number) => doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n }, refId: null,
+    });
+    return { doi, ctx, post };
+  };
+  const open = (ctx: ReturnType<typeof fakeCtx>, cursor: number, members = "m1") =>
+    new Request("https://do/ws?cursor=" + cursor, {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  it("sends an appended event to a watching socket", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    await post(1);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).payload)).toEqual([{ n: 1 }]);
+  });
+
+  it("fans out to every socket", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0, "m1"));
+    await doi.fetch(open(ctx, 0, "m2"));
+    await post(1);
+    expect(ctx.sockets).toHaveLength(2);
+    for (const ws of ctx.sockets) expect(ws.sent).toHaveLength(1);
+  });
+
+  it("advances each socket's attachment as it sends", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    await post(1);
+    await post(2);
+    expect((ctx.sockets[0].deserializeAttachment() as { cursor: number }).cursor).toBe(2);
+  });
+
+  it("skips a socket already past the event", async () => {
+    const { doi, ctx, post } = await world();
+    await post(1);
+    // Connects at cursor 1: it has already seen event 1 and must not get it.
+    await doi.fetch(open(ctx, 1));
+    const ws = ctx.sockets[0];
+    expect(ws.sent).toEqual([]);
+    await post(2);
+    expect(ws.sent.map((s) => JSON.parse(s).cursor)).toEqual([2]);
+  });
+
+  it("sends nothing to a socket that claimed a cursor ahead of the room", async () => {
+    // The guard's ONLY real trigger, and the reason the test above cannot
+    // prove it. A socket's attachment starts at the cursor the client named
+    // and cursors only rise, so in ordinary flow event.cursor is always
+    // above att.cursor and the guard never fires — remove it and the test
+    // above still passes. It fires when a client names a cursor the room
+    // has not reached, and then it must: that client has claimed to have
+    // seen through 10, so 1 and 2 are not news to it.
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 10));
+    await post(1);
+    await post(2);
+    expect(ctx.sockets[0].sent).toEqual([]);
+
+    // ...and it starts receiving once the room passes what it claimed.
+    for (let n = 3; n <= 11; n++) await post(n);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).cursor)).toEqual([11]);
+  });
+
+  it("still resolves a long-poll waiter", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    const polling = doi.waitForEvents(0, 5_000);
+    await post(1);
+    expect((await polling).map((e) => e.cursor)).toEqual([1]);
+    // Both arms, one event. The long poll is permanent for remote clients.
+    expect(ctx.sockets[0].sent).toHaveLength(1);
+  });
+
+  it("delivers session_expired over the socket too", async () => {
+    const storage = fakeStorage({
+      session: { ...currentRow(), expiresAt: Date.now() - 1 }, cursor: 0,
+    });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.fetch(open(ctx, 0));
+    await doi.alarm();
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
+  });
+
+  // The three cases below pin what the seven above leave open: the second
+  // caller, the fail-closed read, and the synchrony.
+
+  it("sends an event appended with a key, and does not resend it on a replay", async () => {
+    // appendEventOnce is the second of wake()'s three callers: it is what
+    // bellman_send calls when it carries an idempotency_key. A retry finds the
+    // stored event and returns it without appending, so nothing wakes and the
+    // socket must not see it a second time.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const send = () => doi.appendEventOnce({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    }, "send-0001");
+
+    expect((await send()).outcome).toBe("appended");
+    expect((await send()).outcome).toBe("replayed");
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).payload)).toEqual([{ n: 1 }]);
+  });
+
+  it("sends nothing to a socket that has no attachment", async () => {
+    // Fail closed. fetch attaches before it accepts, so a socket it accepts
+    // always carries one; a socket without one is a symptom that something is
+    // wrong, and the DEPENDENCY paragraph on fetch names one way. Its cursor is
+    // unknown, so it gets nothing rather than every event. fakeSocket reads an
+    // attachment that was never set back as null, as workerd does.
+    const { doi, ctx, post } = await world();
+    ctx.acceptWebSocket(fakeSocket());
+    await post(1);
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("has delivered by the time wake() returns", async () => {
+    // wake() is synchronous: getWebSockets, deserializeAttachment, send and
+    // serializeAttachment all are, and an await between reading a socket's
+    // cursor and sending would reopen the gap that read-and-register exists to
+    // close. So nothing here awaits, and the frame is on the socket when the
+    // call returns. wake() is private, so this reaches it by name; the cases
+    // above reach it through its callers.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    (doi as unknown as { wake(e: unknown): void }).wake({
+      cursor: 1, at: 0, type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    });
+    expect(ctx.sockets[0].sent).toHaveLength(1);
+  });
+});
+
+/**
  * The TTL alarm's re-arm. createSession arms the alarm once, and expireIfDue's
  * guard is `now <= expiresAt`, so a firing that lands exactly on the boundary
  * expires nothing. That went unnoticed while bellman_sync called getSession on

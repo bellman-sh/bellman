@@ -353,12 +353,35 @@ export class SessionDO extends DurableObject {
     });
   }
 
-  /** Resolve every waiter this event is past, each from its own cursor. */
+  /**
+   * Two arms, one event.
+   *
+   * Waiters are in-memory long polls and do not survive eviction; sockets are
+   * held by the runtime and do. Both are served here so that a room behaves
+   * identically however a member is watching it, which is the property the
+   * whole two-path design rests on.
+   *
+   * Synchronous on purpose. getWebSockets, deserializeAttachment, send and
+   * serializeAttachment are all sync, so nothing here yields — an await
+   * between reading a socket's cursor and sending would reopen the gap that
+   * read-and-register exists to close.
+   */
   private wake(event: SessionEvent): void {
-    if (this.waiters.length === 0) return;
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
+
+    const frame = JSON.stringify(event);
+    for (const ws of this.ctx.getWebSockets()) {
+      const att = ws.deserializeAttachment() as SocketAttachment | null;
+      // Fail closed on a missing attachment. fetch() attaches before it sends,
+      // so every accepted socket has one; a null here means something is
+      // wrong, and over-delivering every event to a socket whose cursor we do
+      // not know is the worse of the two answers.
+      if (!att || event.cursor <= att.cursor) continue;
+      ws.send(frame);
+      ws.serializeAttachment({ ...att, cursor: event.cursor });
+    }
   }
 
   /** Session TTL fires here rather than in a global sweep. */

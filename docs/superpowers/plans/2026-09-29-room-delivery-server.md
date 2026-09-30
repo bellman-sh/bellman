@@ -1023,7 +1023,9 @@ Replace `SessionDO.wake` in `src/store-do.ts`:
 
     // D1a: the public projection, never the stored event — a raw SessionEvent
     // carries fromUserId, and every member of the room receives this frame.
-    const frame = JSON.stringify(publicEvent(event));
+    // Built lazily: a poll-only room pays nothing, and a projection failure
+    // cannot fail an append whose event is already stored.
+    let frame: string | undefined;
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as SocketAttachment | null;
       // Fail closed on a missing attachment. fetch() attaches before it sends,
@@ -1031,6 +1033,7 @@ Replace `SessionDO.wake` in `src/store-do.ts`:
       // wrong, and over-delivering every event to a socket whose cursor we do
       // not know is the worse of the two answers.
       if (!att || event.cursor <= att.cursor) continue;
+      frame ??= JSON.stringify(publicEvent(event));
       ws.send(frame);
       ws.serializeAttachment({ ...att, cursor: event.cursor });
     }

@@ -198,10 +198,18 @@ calling `bellman_sync`, `bellman_sync` calls `waitForEvents`, and
 
 ```
 for (const ws of this.ctx.getWebSockets()) {
-  const att = ws.deserializeAttachment();
-  if (event.cursor <= att.cursor) continue;
-  ws.send(JSON.stringify(publicEvent(event)));   // D1a: never the stored event
-  ws.serializeAttachment({ ...att, cursor: event.cursor });
+  try {
+    const att = ws.deserializeAttachment();
+    // Fail closed: a socket whose cursor we do not know gets nothing, since
+    // over-delivering is the worse of the two wrong answers.
+    if (!att || event.cursor <= att.cursor) continue;
+    ws.send(JSON.stringify(publicEvent(event)));   // D1a: never the stored event
+    ws.serializeAttachment({ ...att, cursor: event.cursor });
+  } catch (err) {
+    // Per socket, so one failing member cannot starve the rest of the
+    // fan-out. Unobserved, not a known failure.
+    console.error("socket delivery failed", err);
+  }
 }
 ```
 
@@ -628,6 +636,20 @@ bus), new `tests/bus.test.ts`, `tests/helpers/fake-bellman.ts`,
   permanent, for clients that cannot reach a local process. Any change to what
   a watcher sees has to land in both arms of `wake()`, and D1 is what keeps
   that from also meaning two send paths.
+- **The TTL alarm's timing is measured on one platform only.** `expireIfDue`
+  expires a room strictly past `expiresAt`, so an alarm firing *on* the
+  boundary expires nothing, and `alarm()` re-arms for that case. 450 natural
+  firings across two independent harnesses landed 1-14 ms late, none early and
+  none on the boundary — but all 450 were local workerd reading one process
+  clock. **That is "not observed locally", not "cannot happen".** If production
+  dispatches within the same millisecond, `now === expiresAt` is common there
+  and the re-arm does real work. The other branch, an alarm firing *early*, needs
+  clock disagreement larger than dispatch latency, which a Durable Object
+  migrating between machines could in principle supply; local data cannot see it
+  at all. Either way the cost is mild and bounded: the room stays open until the
+  next `getSession` expires it lazily, `membersOf` already reports it closed to
+  new watchers, and only a quiet socket-only room misses `session_expired`
+  entirely. Logging the two branches would settle it from production data.
 - **Node's `headers` option is non-standard.** D2 records the measurement and
   the subprotocol fallback so a future break is a lookup rather than a
   rediscovery.

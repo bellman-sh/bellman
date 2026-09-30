@@ -364,7 +364,27 @@ export class SessionDO extends DurableObject {
   /** Session TTL fires here rather than in a global sweep. */
   async alarm(): Promise<void> {
     const s = await this.stored();
-    if (s) await this.expireIfDue(s, Date.now());
+    if (!s) return;
+    await this.expireIfDue(s, Date.now());
+    /**
+     * Re-arm if the room is still live.
+     *
+     * expireIfDue's guard is `now <= expiresAt`, so an alarm firing exactly on
+     * the boundary expires nothing, and createSession arms this alarm only
+     * once. Without this line such a room never expires — which went unnoticed
+     * because bellman_sync's getSession expired it lazily every 25 seconds.
+     * A socket-watched room is not polled, so getSession runs only when a
+     * member calls some other tool and a quiet room is never checked: that
+     * safety net is gone and this one has to be real.
+     *
+     * Terminates: the re-arm is strictly after expiresAt, so the next firing
+     * has now > expiresAt and expireIfDue closes the room. That holds while
+     * Date.now() advances with the clock that schedules the alarm, as it does
+     * in workerd. A frozen fake clock breaks it: see the "failed to invoke
+     * drain()" lines in `npm run test:worker`.
+     */
+    const fresh = await this.stored();
+    if (fresh && !fresh.closed) await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
   }
 
   private async expireIfDue(s: StoredSession, now: number): Promise<void> {

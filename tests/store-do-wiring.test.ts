@@ -923,3 +923,79 @@ describe("fetch: websocket upgrade", () => {
     expect(ctx.sockets).toHaveLength(0);
   });
 });
+
+/**
+ * The TTL alarm's re-arm. createSession arms the alarm once, and expireIfDue's
+ * guard is `now <= expiresAt`, so a firing that lands exactly on the boundary
+ * expires nothing. That went unnoticed while bellman_sync called getSession on
+ * every poll, which expired the room lazily. A member watching over a socket
+ * does not poll, so on a quiet room nothing calls it, and the alarm has to
+ * finish the job itself.
+ *
+ * The clock is pinned with vi.setSystemTime and put back in a finally, as in
+ * membersOf's boundary case: a test cannot make a real clock read exactly
+ * expiresAt.
+ */
+describe("SessionDO.alarm: the TTL re-arm", () => {
+  it("re-arms the TTL alarm when it fires before the room is due", async () => {
+    // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
+    // landing exactly on expiresAt expires nothing. Without a re-arm the room
+    // is then immortal until something calls getSession, and a room watched
+    // over sockets is not polled.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+
+    try {
+      vi.setSystemTime(at); // fire exactly on the boundary
+      await doi.alarm();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+    expect(storage.alarms.at(-1)).toBeGreaterThan(at);
+  });
+
+  it("closes the room on the re-armed firing, and arms nothing after it", async () => {
+    // Why the re-arm terminates, run rather than argued. It is set for
+    // expiresAt + 1, strictly after the boundary, so the firing it buys has
+    // now > expiresAt and expireIfDue closes the room. Once the room is
+    // closed the re-arm must stop: expiresAt + 1 is at or behind the clock by
+    // then, so an alarm set there would be due the moment it was set, and
+    // would set the next one the same way.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    try {
+      vi.setSystemTime(at);
+      await doi.alarm(); // the boundary firing: nothing due, re-armed
+      const rearmed = storage.alarms.at(-1)!;
+      expect(rearmed).toBeGreaterThan(at);
+
+      vi.setSystemTime(rearmed); // the runtime fires it when it comes due
+      await doi.alarm();
+
+      expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: true });
+      expect(storage.alarms).toEqual([rearmed]); // the one re-arm, and no second
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-arm a room that is already closed", async () => {
+    // closeSession leaves the TTL alarm pending, so it still fires on a room
+    // that is already closed, and expireIfDue returns early on it without
+    // writing. Nothing is left to expire, so nothing is re-armed.
+    const storage = fakeStorage({
+      session: { ...currentRow(), closed: true, expiresAt: Date.now() - 1 }, cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    await doi.alarm();
+
+    expect(storage.alarms).toEqual([]);
+  });
+});

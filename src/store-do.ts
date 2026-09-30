@@ -35,6 +35,12 @@ import { OutboxDriver } from "./outbox.js";
 const CURSOR_PAD = 12;
 const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0")}`;
 const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
+/**
+ * Delivered intent ids, so a redelivered audit entry is applied once.
+ * One row per entry that arrives with an id, and nothing prunes them, as
+ * nothing prunes the entries.
+ */
+const deliveredKey = (intentId: string) => `d:${intentId}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -601,13 +607,28 @@ export class RegistryDO extends DurableObject {
 // ---------------------------------------------------------------------------
 
 export class AuditDO extends DurableObject {
-  async append(entry: AuditEntry): Promise<void> {
+  /**
+   * Append an audit entry, at most once per intent.
+   *
+   * The outbox that feeds this delivers at least once — a row is deleted only
+   * after this call returns, so an acknowledgement lost in flight redelivers.
+   * The `d:` row is what makes that safe. Callers with no intent to redeliver
+   * pass no id and always append.
+   */
+  async append(entry: AuditEntry, intentId?: string): Promise<void> {
+    if (intentId !== undefined && (await this.ctx.storage.get(deliveredKey(intentId)))) return;
     const seq = ((await this.ctx.storage.get<number>("seq")) ?? 0) + 1;
-    // Entry and sequence in one write: committed separately, an interruption
-    // between them means the next entry reuses this sequence number and
-    // overwrites it. An audit log that can quietly drop the record of a
+    // Entry, sequence and delivery marker in one write. Split, an interruption
+    // leaves one without the others: an entry with no sequence is overwritten by
+    // the next entry; a marker with no entry makes the redelivery skip an entry
+    // that never landed; an entry with no marker is appended again by the
+    // redelivery. An audit log that can quietly drop or double the record of a
     // privilege change is not an audit log.
-    await this.ctx.storage.put<unknown>({ [auditKey(seq)]: entry, seq });
+    await this.ctx.storage.put<unknown>({
+      [auditKey(seq)]: entry,
+      seq,
+      ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
+    });
   }
 
   async recent(limit: number): Promise<AuditEntry[]> {

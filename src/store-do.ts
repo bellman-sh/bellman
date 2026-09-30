@@ -8,6 +8,7 @@ import type {
 import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
+import { OutboxDriver } from "./outbox.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -44,6 +45,28 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 export class SessionDO extends DurableObject {
   /** Live long-polls. In-memory is correct: one instance serves this session. */
   private waiters: Waiter[] = [];
+
+  /**
+   * This object's one alarm, shared by name: the driver works out which handlers
+   * are due and points the alarm at the soonest.
+   *
+   * The session TTL is the only handler so far, and it is DERIVED from the session
+   * record rather than stored as a `due:` row, because sessions written before named
+   * alarms have no row and an alarm re-armed from stored rows alone would leave every
+   * one of them with no expiry. See derivedDue().
+   *
+   * The delivery throws because this object has no queue yet, so nothing can be due
+   * under a name that would call it. Task 10 of
+   * docs/superpowers/plans/2026-09-29-cross-object-atomicity.md supplies the real
+   * one. A row that somehow reached this would stay queued and be retried, not dropped.
+   */
+  private driver = new OutboxDriver(
+    this.ctx.storage,
+    async () => {
+      throw new Error("SessionDO has no outbox delivery yet");
+    },
+    () => this.derivedDue()
+  );
 
   /**
    * The one raw read of the "session" record. Everything in this class reads it
@@ -95,8 +118,11 @@ export class SessionDO extends DurableObject {
     for (const e of events) seeded[eventKey(e.cursor)] = e;
     if (events.length > 0) seeded.cursor = events[events.length - 1].cursor;
     await this.ctx.storage.put<unknown>(seeded);
-    // TTL is enforced by this alarm rather than by a global sweep.
-    await this.ctx.storage.setAlarm(s.expiresAt);
+    // TTL is enforced by an alarm rather than a global sweep. It is DERIVED
+    // from the session record rather than stored as a due row: sessions written
+    // before named alarms have no due row, and re-arming from stored rows alone
+    // would leave every one of them with no alarm and no expiry.
+    await this.driver.reArm();
   }
 
   async getSession(): Promise<Session | undefined> {
@@ -259,10 +285,40 @@ export class SessionDO extends DurableObject {
     for (const w of woken) w.resolve([event]);
   }
 
-  /** Session TTL fires here rather than in a global sweep. */
+  /**
+   * The object's single alarm, shared by name: the driver reports which handlers
+   * are due and this dispatches on them. Only the session TTL exists so far, and
+   * it fires here rather than in a global sweep.
+   *
+   * Nothing here clears a handler's due time. Each decides its next one from state
+   * it has already changed, so a handler that throws keeps its due time and the
+   * alarm is retried instead of forgotten. That makes every handler idempotent by
+   * necessity, and the TTL's is: expireIfDue does nothing to a session that is
+   * closed or not yet past its expiry.
+   *
+   * The closing reArm() is what keeps the TTL alive when this ran for another
+   * reason. A fired alarm is consumed, so without it a live session would be left
+   * with none.
+   */
   async alarm(): Promise<void> {
+    const now = Date.now();
+    for (const name of await this.driver.dueNow(now)) {
+      if (name === "ttl") {
+        const s = await this.stored();
+        if (s) await this.expireIfDue(s, now);
+      }
+    }
+    await this.driver.reArm();
+  }
+
+  /**
+   * Due times this object computes rather than stores. A closed session has no TTL
+   * left to enforce: deriving one for it would re-arm the alarm to a time already
+   * past, and it would fire again for as long as the session existed.
+   */
+  private async derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
-    if (s) await this.expireIfDue(s, Date.now());
+    return s && !s.closed ? new Map([["ttl", s.expiresAt]]) : new Map();
   }
 
   private async expireIfDue(s: StoredSession, now: number): Promise<void> {

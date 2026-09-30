@@ -397,7 +397,7 @@ describe("outbox", () => {
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/outbox.test.ts`
-Expected: FAIL. Under vitest 5 a missing named export is `undefined` at the point of use rather than an import error, so the first assertion to touch one fails — `AssertionError: expected undefined to be 'ob:'` from the `OUTBOX_PREFIX` check. The red is for the right reason: the export does not exist yet.
+Expected: FAIL. Under vitest 5 a missing named export is `undefined` at the point of use rather than an import error, so the first assertion to touch one fails — whichever assertion touches one first decides the message: a constant check gives `AssertionError: expected undefined to be 'ob:'`, and a call gives `TypeError: drain is not a function`. Either is the right reason — the export does not exist yet.
 
 - [ ] **Step 3: Write the implementation**
 
@@ -407,9 +407,9 @@ Append to `src/outbox.ts`:
 export const OUTBOX_PREFIX = "ob:";
 /**
  * Deliberately outside OUTBOX_PREFIX. A counter inside the prefix it tracks is
- * listed by its own drain, which then hands a bare number to deliver() and can
- * set the counter to itself — the same trap already commented for the client
- * sweep cursor in store-do.ts.
+ * listed by its own drain, which hands a bare number to deliver() as though it
+ * were a row. The same trap is commented for the OAuth purge cursor in
+ * src/oauth/store.ts.
  */
 export const OUTBOX_SEQ = "ob_seq";
 
@@ -2435,7 +2435,7 @@ If it passes without the lock, the test is not reproducing the race — interlea
 - [ ] **Step 8: Commit and open PR 3**
 
 ```bash
-git add src/billing/ledger.ts src/billing/stripe.ts src/oauth/store.ts src/worker.ts src/app.ts tests/billing.test.ts worker-tests/reconcile-race.test.ts
+git add src/billing/ledger.ts src/billing/stripe.ts src/oauth/store.ts src/worker.ts tests/billing.test.ts worker-tests/reconcile-race.test.ts
 git -c commit.gpgsign=true commit -S -m "fix: reconcile a purchase inside the user's queue (#69)
 
 Reading the ledger and writing the grant are one decision, and the Worker

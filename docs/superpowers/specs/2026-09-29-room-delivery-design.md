@@ -200,7 +200,7 @@ calling `bellman_sync`, `bellman_sync` calls `waitForEvents`, and
 for (const ws of this.ctx.getWebSockets()) {
   const att = ws.deserializeAttachment();
   if (event.cursor <= att.cursor) continue;
-  ws.send(JSON.stringify(event));
+  ws.send(JSON.stringify(publicEvent(event)));   // D1a: never the stored event
   ws.serializeAttachment({ ...att, cursor: event.cursor });
 }
 ```

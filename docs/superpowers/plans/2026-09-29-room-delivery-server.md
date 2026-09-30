@@ -1021,7 +1021,9 @@ Replace `SessionDO.wake` in `src/store-do.ts`:
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
 
-    const frame = JSON.stringify(event);
+    // D1a: the public projection, never the stored event — a raw SessionEvent
+    // carries fromUserId, and every member of the room receives this frame.
+    const frame = JSON.stringify(publicEvent(event));
     for (const ws of this.ctx.getWebSockets()) {
       const att = ws.deserializeAttachment() as SocketAttachment | null;
       // Fail closed on a missing attachment. fetch() attaches before it sends,

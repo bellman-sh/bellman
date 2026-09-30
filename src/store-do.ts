@@ -427,12 +427,13 @@ export class SessionDO extends DurableObject {
      * The condition is `now >= expiresAt`, and it is as tight as it looks. A
      * room still open here already has now <= expiresAt (expireIfDue closes it
      * otherwise), so this leaves only now === expiresAt, the boundary. An alarm
-     * runs at or after the time it was set for (150 natural firings in workerd
-     * all ran 1 to 14 ms after), so a firing before expiresAt does not come
-     * from setAlarm(expiresAt). Where one appears, as under the contract
-     * suite's frozen fake clock, the handler's clock disagrees with the one
-     * that scheduled the alarm, and a re-arm would set expiresAt + 1, already
-     * in the past: due at once, re-armed again, until the object is torn down.
+     * is expected to run at or after the time it was set for (measured in
+     * workerd: 150 natural firings all ran 1 to 14 ms after), so a firing
+     * before expiresAt is not expected from setAlarm(expiresAt). Where one
+     * appears, as under the contract suite's frozen fake clock, the handler's
+     * clock disagrees with the one that scheduled the alarm, and a re-arm would
+     * set expiresAt + 1, already in the past: due at once, re-armed again, until
+     * the object is torn down.
      *
      * Terminates: the re-arm is strictly after expiresAt, so the next firing
      * has now > expiresAt and expireIfDue closes the room.

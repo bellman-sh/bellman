@@ -1210,12 +1210,13 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
 
   it("does not re-arm a firing that lands before the room is due", async () => {
     // The re-arm is for the boundary, now === expiresAt, and only for it. An
-    // alarm set for expiresAt runs at or after it, so a firing before it means
-    // the clock the handler reads disagrees with the one that scheduled the
-    // alarm, and a re-arm would set an alarm for expiresAt + 1 that is already
-    // in the past: due at once, and re-armed again, until the object is torn
-    // down. The contract suite's frozen fake clock is such a disagreement, and
-    // it is what printed "failed to invoke drain()" under npm run test:worker.
+    // alarm set for expiresAt is expected to run at or after it, so a firing
+    // before it points to a handler clock that disagrees with the one that
+    // scheduled the alarm, and a re-arm would set an alarm for expiresAt + 1
+    // that is already in the past: due at once, and re-armed again, until the
+    // object is torn down. The contract suite's frozen fake clock is such a
+    // disagreement, and before this gate it printed "failed to invoke drain()"
+    // lines in npm run test:worker.
     const at = Date.now() + 10_000;
     const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);

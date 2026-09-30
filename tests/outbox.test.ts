@@ -897,7 +897,16 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
   });
 
   describe("the pass cap", () => {
-    afterEach(() => { vi.restoreAllMocks(); });
+    const NOW = 1_800_000_000_000;
+    // The marker's date is what one test here pins, so the clock stands still.
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(NOW);
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
 
     /**
      * A deliver() that queues another row each time, up to `chain` deliveries, so no
@@ -945,6 +954,27 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
       // The row the last pass queued is still there, and the marker is set.
       expect(queuedIds(storage)).toEqual([`r${MAX_DRAIN_PASSES}`]);
       expect(await driver.dueNow(Number.MAX_SAFE_INTEGER)).toEqual(["outbox"]);
+    });
+
+    /**
+     * A cleared marker is the stranding bug, and a marker left at "due now" sends
+     * reArm() straight back to an alarm that fires at once, so an object that keeps
+     * hitting the cap runs back to back. So the marker is present and dated one backoff
+     * step ahead, as after a failed delivery, and the alarm is armed for it. One
+     * assertion holds both facts about the marker: a missing one is not the date it
+     * should have.
+     */
+    it("dates the marker one backoff step ahead when it hits the cap, and arms the alarm for it", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const storage = fakeStorage();
+      await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+      const { deliver } = refilling(storage, Number.POSITIVE_INFINITY);
+      const driver = new OutboxDriver(storage, deliver);
+
+      await driver.deliverNow();
+
+      expect(storage.map.get(dueKey("outbox"))).toBe(NOW + backoffMs(1));
+      expect(storage.alarm).toBe(NOW + backoffMs(1));
     });
 
     /**

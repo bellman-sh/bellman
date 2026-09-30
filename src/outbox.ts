@@ -151,8 +151,9 @@ export const OUTBOX_GRACE_MS = 5_000;
  * pace. A pass costs a listing, a delivery per row and a few writes, so a hundred
  * keeps one invocation's worst case to seconds.
  *
- * Stopping early is safe: the rows stay queued and the marker stays set, so the
- * alarm comes back for them. It delays work and never drops it.
+ * Stopping early is safe: the rows stay queued and the marker stays set, dated one
+ * backoff step ahead, so the alarm comes back for them shortly instead of at once.
+ * It delays work and never drops it.
  */
 export const MAX_DRAIN_PASSES = 100;
 
@@ -306,15 +307,19 @@ export class OutboxDriver {
         if (next !== null || !this.again) break;
         // The cap. Every pass here follows one that emptied the queue it listed, so
         // reaching it means rows keep arriving behind the drain, or a drain that no
-        // longer deletes what it delivers keeps finding the same ones. Stop, and leave
-        // the queue and the marker as they are: a row still queued has its marker,
-        // because the look above put it back, so the alarm comes back for it. Stopping
-        // early delays work and never drops it, so the marker is not cleared here.
+        // longer deletes what it delivers keeps finding the same ones. Stop, and date
+        // the marker ahead by the step a failed delivery takes, then arm the alarm for
+        // it. The marker stays present, because a cleared one is the stranding bug. It
+        // is not left at the look's "due now", because reArm() would then schedule the
+        // next alarm for immediately and the object would run back to back. Stopping
+        // early delays work and never drops it.
         if (pass >= MAX_DRAIN_PASSES) {
           const depth = (await this.storage.list({ prefix: OUTBOX_PREFIX })).size;
           console.error(
             `outbox: stopped after ${MAX_DRAIN_PASSES} drain passes, queue depth ${depth}; the alarm retries`
           );
+          await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: Date.now() + backoffMs(1) });
+          await this.reArm();
           break;
         }
       }

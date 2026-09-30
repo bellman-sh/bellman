@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { DUE_PREFIX, dueKey, dueNames, earliestDue, mergeDue } from "../src/outbox.js";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
+import {
+  DUE_PREFIX, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver, backoffMs, drain, dueKey, dueNames,
+  earliestDue, enqueueRows, mergeDue, outboxKey,
+  type OutboxRow, type OutboxStorage,
+} from "../src/outbox.js";
 
 describe("named alarms", () => {
   /**
@@ -14,9 +18,14 @@ describe("named alarms", () => {
 
   it("picks the earliest due time, and null when nothing is scheduled", () => {
     expect(earliestDue([500, 100, 900])).toBe(100);
+    // The minimum first. A loop that starts one element in passes every other
+    // case here, because none of them has the minimum in first position.
+    expect(earliestDue([1, 5, 9])).toBe(1);
     // A fake clock starts at 0. That is a due time, not "nothing scheduled".
     expect(earliestDue([5, 0, 9])).toBe(0);
     // Any iterable works, including `Map.values()`, which can only be read once.
+    // This is also the only case with the minimum in LAST position: a loop that
+    // drops the final element passes every other case here and fails this one.
     expect(earliestDue(new Map([["a", 500], ["b", 100]]).values())).toBe(100);
     expect(earliestDue([])).toBeNull();
   });
@@ -31,7 +40,9 @@ describe("named alarms", () => {
     expect(dueNames(due, 1_000)).toEqual(["ttl"]);
     expect(dueNames(due, 1_001)).toEqual(["outbox", "ttl"]);
     expect(dueNames(due, 999)).toEqual([]);
-    // Name order, whatever order the map was built in.
+    // Name order, whatever order the map was built in. These are also the only
+    // due times of 0 in this test: a guard such as `if (!at)` that drops a
+    // handler due at the epoch passes every other case here and fails this one.
     expect(dueNames(new Map([["b", 0], ["c", 0], ["a", 0]]), 0)).toEqual(["a", "b", "c"]);
   });
 
@@ -58,5 +69,518 @@ describe("named alarms", () => {
     );
     expect([...rows]).toEqual(rowsBefore);
     expect([...derived]).toEqual(derivedBefore);
+
+    // A stored due time of 0 is a due time, not an absent one, so it still
+    // shadows the derived 999. `||` where `??` is meant lets the derived time win.
+    expect(
+      mergeDue(new Map([[`${DUE_PREFIX}ttl`, 0]]), new Map([["ttl", 999]]))
+    ).toEqual(new Map([["ttl", 0]]));
+  });
+});
+
+/** The storage a Durable Object would supply, as a plain Map. */
+function fakeStorage(): OutboxStorage & {
+  map: Map<string, unknown>;
+  alarm: number | null;
+  alarms: number[];
+} {
+  const map = new Map<string, unknown>();
+  const self = {
+    map,
+    alarm: null as number | null,
+    // Every setAlarm call, oldest first. `alarm` alone cannot tell "never set"
+    // from "set to nothing".
+    alarms: [] as number[],
+    async get<T>(key: string) { return map.get(key) as T | undefined; },
+    async put<T>(entries: Record<string, T>) {
+      for (const [k, v] of Object.entries(entries)) map.set(k, v);
+    },
+    async delete(key: string) { return map.delete(key); },
+    async list<T>({ prefix }: { prefix: string }) {
+      return new Map(
+        [...map].filter(([k]) => k.startsWith(prefix)).sort(([a], [b]) => (a < b ? -1 : 1))
+      ) as Map<string, T>;
+    },
+    async setAlarm(at: number) { self.alarm = at; self.alarms.push(at); },
+  };
+  return self;
+}
+
+describe("outbox", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("numbers rows from the counter and parks the counter outside the prefix", () => {
+    const rows = enqueueRows(0, [
+      { id: "i1", kind: "audit", payload: { a: 1 } },
+      { id: "i2", kind: "audit", payload: { a: 2 } },
+    ]);
+    expect(Object.keys(rows).sort()).toEqual([OUTBOX_SEQ, outboxKey(0), outboxKey(1)].sort());
+    expect(rows[OUTBOX_SEQ]).toBe(1);
+    expect(rows[outboxKey(0)]).toEqual({ id: "i1", kind: "audit", payload: { a: 1 }, attempts: 0 });
+    // The counter must not be listed by the drain that reads `ob:`, or the
+    // drain hands a bare number to deliver() as though it were a row.
+    expect(OUTBOX_SEQ.startsWith(OUTBOX_PREFIX)).toBe(false);
+  });
+
+  it("enqueues nothing for an empty intent list", () => {
+    expect(enqueueRows(7, [])).toEqual({});
+  });
+
+  it("delivers in key order and deletes each row once it lands", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [
+      { id: "i1", kind: "audit", payload: 1 },
+      { id: "i2", kind: "audit", payload: 2 },
+    ]));
+
+    const seen: unknown[] = [];
+    const next = await drain(storage, async (row) => { seen.push(row.payload); }, 1_000);
+
+    expect(seen).toEqual([1, 2]);
+    expect(next).toBeNull();
+    expect([...storage.map.keys()]).toEqual([OUTBOX_SEQ]);
+  });
+
+  /**
+   * Review Focus 3. An org move emits two rows. If the head fails, the one
+   * behind it must still be there AND must not have been delivered ahead of it.
+   * An audit stream that reorders around a stuck entry is worse than one that
+   * stalls, so a failing head blocks everything behind it.
+   */
+  it("stops at a failing row, keeps it, and leaves the ones behind it untouched", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [
+      { id: "revoked", kind: "audit", payload: "old-org" },
+      { id: "granted", kind: "audit", payload: "new-org" },
+    ]));
+
+    const seen: unknown[] = [];
+    const next = await drain(storage, async (row) => {
+      if (row.id === "revoked") throw new Error("AuditDO is down");
+      seen.push(row.payload);
+    }, 1_000);
+
+    // Nothing delivered, because the head never landed.
+    expect(seen).toEqual([]);
+    // Both rows still queued, in order, with the head's attempt counted.
+    expect(await storage.get<OutboxRow>(outboxKey(0)))
+      .toEqual({ id: "revoked", kind: "audit", payload: "old-org", attempts: 1 });
+    expect(await storage.get<OutboxRow>(outboxKey(1)))
+      .toEqual({ id: "granted", kind: "audit", payload: "new-org", attempts: 0 });
+    // And it asked to be woken again.
+    expect(next).toBe(1_000 + backoffMs(1));
+  });
+
+  it("backs off by doubling to a five-minute cap", () => {
+    expect(backoffMs(1)).toBe(1_000);
+    expect(backoffMs(2)).toBe(2_000);
+    expect(backoffMs(3)).toBe(4_000);
+    expect(backoffMs(99)).toBe(300_000);
+  });
+
+  /**
+   * Storage keys outlive a deploy, so each is pinned by its literal as well as by
+   * the constant. A narrower pad sorts `ob:10` before `ob:9`, which breaks FIFO
+   * past nine rows. A wider one mixes widths with rows already stored, which
+   * reorders the queue across the deploy. A renamed counter is not found, so
+   * numbering starts again at 0 over rows that are still waiting.
+   */
+  it("keeps its storage keys byte for byte", () => {
+    expect(OUTBOX_PREFIX).toBe("ob:");
+    expect(OUTBOX_SEQ).toBe("ob_seq");
+    expect(outboxKey(0)).toBe("ob:000000000000");
+    expect(outboxKey(42)).toBe("ob:000000000042");
+  });
+
+  it("leaves the intents it is given alone", () => {
+    const intents = [{ id: "i1", kind: "audit", payload: { a: 1 } }];
+    const before = structuredClone(intents);
+
+    enqueueRows(0, intents);
+
+    // The stored row gets its own attempts count. The caller's intent does not.
+    expect(intents).toEqual(before);
+  });
+
+  it("never waits less than the first delay, even for a count of zero", () => {
+    expect(backoffMs(0)).toBe(1_000);
+  });
+
+  /**
+   * A crash between delivering a row and deleting it has to find the row still
+   * queued, so it is delivered again rather than lost. Deleting first would turn
+   * at-least-once into at-most-once, and a dropped audit entry cannot be
+   * recovered.
+   */
+  it("keeps a row in storage until its delivery has landed", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "i1", kind: "audit", payload: 1 }]));
+
+    let whileDelivering: unknown = "deliver never ran";
+    await drain(storage, async () => {
+      whileDelivering = await storage.get(outboxKey(0));
+    }, 1_000);
+
+    expect(whileDelivering)
+      .toEqual({ id: "i1", kind: "audit", payload: 1, attempts: 0 });
+  });
+
+  /**
+   * The first failure cannot tell the two counts apart, because a count of 0
+   * and a count of 1 both wait one second. It takes a second failure to see
+   * whether the wait follows the attempts including this one.
+   */
+  it("counts each failure, doubles the wait, and lands the row once the downstream recovers", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [{ id: "i1", kind: "audit", payload: 1 }]));
+    let down = true;
+    const attemptsSeen: number[] = [];
+    const landed: unknown[] = [];
+    const deliver = async (row: OutboxRow) => {
+      attemptsSeen.push(row.attempts);
+      if (down) throw new Error("AuditDO is down");
+      landed.push(row.payload);
+    };
+
+    // The wake time is counted from the time drain was given.
+    expect(await drain(storage, deliver, 10_000)).toBe(11_000);
+    expect(await drain(storage, deliver, 20_000)).toBe(22_000);
+    expect(await drain(storage, deliver, 30_000)).toBe(34_000);
+
+    down = false;
+    expect(await drain(storage, deliver, 40_000)).toBeNull();
+
+    // deliver() sees how often the row has already failed, and it lands once.
+    expect(attemptsSeen).toEqual([0, 1, 2, 3]);
+    expect(landed).toEqual([1]);
+    expect([...storage.map.keys()]).toEqual([OUTBOX_SEQ]);
+  });
+
+  /**
+   * A row that fails behind a delivered one must not drag the delivered one back
+   * into the queue. Deleting only after a clean pass would deliver it again on
+   * the next drain.
+   */
+  it("does not deliver a row again because one behind it failed", async () => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, [
+      { id: "a", kind: "audit", payload: "a" },
+      { id: "b", kind: "audit", payload: "b" },
+    ]));
+    let bDown = true;
+    const landed: unknown[] = [];
+    const deliver = async (row: OutboxRow) => {
+      if (row.id === "b" && bDown) throw new Error("AuditDO is down");
+      landed.push(row.payload);
+    };
+
+    await drain(storage, deliver, 0);
+    bDown = false;
+    await drain(storage, deliver, 0);
+
+    expect(landed).toEqual(["a", "b"]);
+  });
+
+  /**
+   * A stuck queue has to become loud, but not from the first blip: a downstream
+   * object that is down for a moment should not read as an outage. From the
+   * fifth failure on, every failure is logged with the row and the error.
+   */
+  it("logs a failing row from its fifth failure on, and not before", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const storage = fakeStorage();
+    await storage.put({ [outboxKey(0)]: { id: "i1", kind: "audit", payload: 1, attempts: 3 } });
+    const boom = new Error("AuditDO is down");
+    const deliver = async () => { throw boom; };
+
+    await drain(storage, deliver, 0); // the fourth failure
+    expect(errors).not.toHaveBeenCalled();
+
+    await drain(storage, deliver, 0); // the fifth
+    expect(errors).toHaveBeenCalledTimes(1);
+    const [message, err] = errors.mock.calls[0];
+    expect(message).toContain("audit");
+    expect(message).toContain("i1");
+    expect(message).toContain("5");
+    expect(err).toBe(boom);
+
+    await drain(storage, deliver, 0); // and the sixth
+    expect(errors).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** A caller's transaction, reduced to the one read the driver makes from it. */
+function fakeTxn(values: Record<string, unknown> = {}) {
+  const asked: string[] = [];
+  return {
+    asked,
+    async get<T>(key: string) {
+      asked.push(key);
+      return values[key] as T | undefined;
+    },
+  };
+}
+
+describe("OutboxDriver", () => {
+  const NOW = 1_800_000_000_000;
+  const intent = { id: "i1", kind: "audit", payload: { a: 1 } };
+
+  // The driver stamps rows and arms the alarm from Date.now(). Frozen, the marker
+  // and the alarm are exact values rather than "some time around now".
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("enqueue returns the rows and a due marker, numbered from the transaction's counter", async () => {
+    const driver = new OutboxDriver(fakeStorage(), async () => {});
+    const txn = fakeTxn({ [OUTBOX_SEQ]: 4 });
+
+    const rows = await driver.enqueue(txn, [intent]);
+
+    expect(Object.keys(rows).sort())
+      .toEqual([outboxKey(5), OUTBOX_SEQ, dueKey("outbox")].sort());
+    expect(rows[OUTBOX_SEQ]).toBe(5);
+    expect(rows[dueKey("outbox")]).toBe(NOW);
+    // The counter is read from the caller's transaction, and from no other key.
+    expect(txn.asked).toEqual([OUTBOX_SEQ]);
+  });
+
+  it("enqueue returns {} for no intents, without reading the transaction", async () => {
+    const txn = fakeTxn({ [OUTBOX_SEQ]: 4 });
+    const driver = new OutboxDriver(fakeStorage(), async () => {});
+
+    expect(await driver.enqueue(txn, [])).toEqual({});
+    // The positive fact behind the empty object: it stopped before reading.
+    expect(txn.asked).toEqual([]);
+  });
+
+  it("deliverNow clears the due marker when the queue empties", async () => {
+    const storage = fakeStorage();
+    const seen: unknown[] = [];
+    const driver = new OutboxDriver(storage, async (row) => { seen.push(row.payload); });
+    await storage.put({
+      ...enqueueRows(0, [
+        { id: "i1", kind: "audit", payload: 1 },
+        { id: "i2", kind: "audit", payload: 2 },
+      ]),
+      [dueKey("outbox")]: NOW,
+    });
+    // The marker has to exist before it can be seen to go.
+    expect(storage.map.has(dueKey("outbox"))).toBe(true);
+
+    await driver.deliverNow();
+
+    expect(seen).toEqual([1, 2]);
+    // Only the counter is left. A marker nobody clears re-fires the alarm forever
+    // against an empty queue.
+    expect([...storage.map.keys()]).toEqual([OUTBOX_SEQ]);
+  });
+
+  it("deliverNow keeps the due marker and arms the alarm when a row fails", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async (row) => {
+      if (row.id === "revoked") throw new Error("AuditDO is down");
+    });
+    await storage.put({
+      ...enqueueRows(0, [
+        { id: "revoked", kind: "audit", payload: "old-org" },
+        { id: "granted", kind: "audit", payload: "new-org" },
+      ]),
+      [dueKey("outbox")]: NOW,
+    });
+
+    await driver.deliverNow();
+
+    // One failure is a one-second wait, so the marker moves into the future...
+    expect(storage.map.get(dueKey("outbox"))).toBe(NOW + 1_000);
+    // ...and the alarm follows it, or nothing would come back for the rows.
+    expect(storage.alarm).toBe(NOW + 1_000);
+  });
+
+  it("allDue merges derived under stored, and dueNow returns only what is due", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(
+      storage, async () => {}, async () => new Map([["ttl", 50]])
+    );
+    await storage.put({ [dueKey("outbox")]: 700 });
+
+    expect(await driver.allDue()).toEqual(new Map([["outbox", 700], ["ttl", 50]]));
+    expect(await driver.dueNow(100)).toEqual(["ttl"]);
+    expect(await driver.dueNow(700)).toEqual(["outbox", "ttl"]);
+  });
+
+  it("reArm points the alarm at the earliest of stored and derived", async () => {
+    const storedFirst = fakeStorage();
+    await storedFirst.put({ [dueKey("outbox")]: 200 });
+    await new OutboxDriver(
+      storedFirst, async () => {}, async () => new Map([["ttl", 900]])
+    ).reArm();
+    expect(storedFirst.alarm).toBe(200);
+
+    // And with the derived time the earlier one. Ignoring either side passes
+    // exactly one of the two cases.
+    const derivedFirst = fakeStorage();
+    await derivedFirst.put({ [dueKey("outbox")]: 800 });
+    await new OutboxDriver(
+      derivedFirst, async () => {}, async () => new Map([["ttl", 100]])
+    ).reArm();
+    expect(derivedFirst.alarm).toBe(100);
+  });
+
+  /**
+   * The arm is the point of enqueue's one write. A row that commits with nothing
+   * scheduled to read it is the window this module exists to close, and
+   * RegistryDO has no other alarm to come back for it. Both facts are asserted,
+   * so the test fails if either the arm or the marker goes missing.
+   */
+  it("enqueue arms the alarm, alongside the marker it returns", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+
+    const rows = await driver.enqueue(fakeTxn(), [intent]);
+
+    expect(rows[dueKey("outbox")]).toBe(NOW);
+    expect(storage.alarm).toBe(NOW);
+  });
+
+  /**
+   * Arming for the queue must not push back a due time that was already closer.
+   * SessionDO's session expiry is one: a queue that moved the alarm later would
+   * stop rooms expiring.
+   */
+  it("enqueue leaves an earlier derived due time in place", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(
+      storage, async () => {}, async () => new Map([["ttl", 1]])
+    );
+
+    await driver.enqueue(fakeTxn(), [intent]);
+
+    expect(storage.alarm).toBe(1);
+  });
+
+  it("enqueue leaves an earlier stored due time in place, even one at the epoch", async () => {
+    // A fake clock starts at 0. A handler due then is due, and is not "nothing
+    // scheduled", so it must not lose the alarm to a row queued later.
+    for (const earlier of [NOW - 5, 0]) {
+      const storage = fakeStorage();
+      await storage.put({ [dueKey("retry")]: earlier });
+      const driver = new OutboxDriver(storage, async () => {});
+
+      await driver.enqueue(fakeTxn(), [intent]);
+
+      expect(storage.alarm).toBe(earlier);
+    }
+  });
+
+  /**
+   * The counter holds the last number used, so a counter of 0 means row 0
+   * exists. Read as unset, it would hand out 0 again and overwrite a row that
+   * has not been delivered.
+   */
+  it("enqueue numbers rows consecutively, from 0 on a fresh queue, never reusing one", async () => {
+    const driver = new OutboxDriver(fakeStorage(), async () => {});
+
+    const fresh = await driver.enqueue(fakeTxn(), [intent, { ...intent, id: "i2" }]);
+    expect(Object.keys(fresh).sort())
+      .toEqual([outboxKey(0), outboxKey(1), OUTBOX_SEQ, dueKey("outbox")].sort());
+    expect(fresh[OUTBOX_SEQ]).toBe(1);
+
+    const after = await driver.enqueue(fakeTxn({ [OUTBOX_SEQ]: 0 }), [intent]);
+    expect(Object.keys(after).sort())
+      .toEqual([outboxKey(1), OUTBOX_SEQ, dueKey("outbox")].sort());
+    expect(after[OUTBOX_SEQ]).toBe(1);
+  });
+
+  it("enqueue writes no rows of its own", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+
+    await driver.enqueue(fakeTxn(), [intent]);
+
+    // The rows are the caller's to commit with its mutation. The alarm is the
+    // one thing enqueue writes itself.
+    expect([...storage.map.keys()]).toEqual([]);
+  });
+
+  it("enqueue arms nothing when it has nothing to queue", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+
+    await driver.enqueue(fakeTxn(), []);
+
+    // A refused mutation queues nothing, so there is nothing to wake for.
+    expect(storage.alarms).toEqual([]);
+  });
+
+  /**
+   * The arm only commits with the caller's transaction if it finishes inside the
+   * closure, so enqueue must not resolve before the alarm write has. The write is
+   * held open here, and enqueue has to still be waiting on it.
+   */
+  it("enqueue does not resolve until the alarm write has", async () => {
+    const storage = fakeStorage();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const started: number[] = [];
+    storage.setAlarm = async (at) => { started.push(at); await held; };
+    const driver = new OutboxDriver(storage, async () => {});
+
+    let resolved = false;
+    const pending = driver.enqueue(fakeTxn(), [intent]).then(() => { resolved = true; });
+    // A macrotask turn runs every ready promise first, so by now enqueue has
+    // reached the alarm write and has nothing left to do but wait on it.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(started).toEqual([NOW]);
+    expect(resolved).toBe(false);
+
+    release();
+    await pending;
+    expect(resolved).toBe(true);
+  });
+
+  it("deliverNow leaves a nearer derived due time in place when a row fails", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(
+      storage,
+      async () => { throw new Error("AuditDO is down"); },
+      async () => new Map([["ttl", NOW + 500]])
+    );
+    await storage.put({ ...enqueueRows(0, [intent]), [dueKey("outbox")]: NOW });
+
+    await driver.deliverNow();
+
+    // The retry is a second away and a session expires in half of that.
+    expect(storage.map.get(dueKey("outbox"))).toBe(NOW + 1_000);
+    expect(storage.alarm).toBe(NOW + 500);
+  });
+
+  it("dueNow defaults to the current time", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+    await storage.put({ [dueKey("outbox")]: NOW, [dueKey("retry")]: NOW + 1 });
+
+    expect(await driver.dueNow()).toEqual(["outbox"]);
+  });
+
+  it("reArm sets no alarm when nothing is scheduled", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+
+    await driver.reArm();
+
+    expect(storage.alarms).toEqual([]);
+  });
+
+  it("reArm arms a due time of 0, which is a due time and not nothing scheduled", async () => {
+    const storage = fakeStorage();
+    const driver = new OutboxDriver(storage, async () => {});
+    await storage.put({ [dueKey("outbox")]: 0 });
+
+    await driver.reArm();
+
+    expect(storage.alarms).toEqual([0]);
   });
 });

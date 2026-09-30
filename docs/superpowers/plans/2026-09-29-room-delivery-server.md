@@ -1228,6 +1228,8 @@ it a request the Worker built.
 
 **Files:**
 - Modify: `src/worker.ts`
+- Modify: `tsconfig.test.json` (add the new test to `exclude` — see Step 0, which
+  is not optional)
 - Test: `tests/worker-ws.test.ts` (create)
 
 **Interfaces:**
@@ -1237,6 +1239,29 @@ it a request the Worker built.
   101 upgraded, 400 bad cursor or missing session, 401 no identity, 403 owns no
   member here, 404 unknown room, 409 room closed, 426 not an upgrade,
   503 unconfigured.
+
+- [ ] **Step 0: Exclude the new test from the Node tsc program, first**
+
+Do this before writing the test, or Step 7's `npm run verify` fails and you
+will spend the round diagnosing it.
+
+`tests/worker-ws.test.ts` imports `src/worker.ts`, which `tsconfig.test.json`
+excludes. That file already carries the precedent and the reason:
+`tests/store-do-wiring.test.ts` is excluded because importing a Workers file
+pulls `@cloudflare/workers-types` into a `types: ["node"]` program and breaks an
+unrelated file (`scripts/rotate-key.ts`, TS2554 on `randomBytes`). Vitest is
+unaffected — it does not typecheck, and the `vi.mock` lets it load a module that
+imports `cloudflare:workers`.
+
+Add `"tests/worker-ws.test.ts"` to that `exclude` array, and extend the existing
+comment there to name both files and the one reason, rather than adding a second
+comment. The comment says to delete those entries when Worker-side tests get
+their own tsconfig project; #12 has since created `worker-tests/` with its own
+program, so note that the entries could likely go — but do not attempt that
+migration here.
+
+Confirm before continuing: `npm run typecheck` exits 0 with the new file
+present but empty.
 
 - [ ] **Step 1: Write the failing tests**
 

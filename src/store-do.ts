@@ -364,9 +364,13 @@ export class SessionDO extends DurableObject {
    * Two arms, one event.
    *
    * Waiters are in-memory long polls and do not survive eviction; sockets are
-   * held by the runtime and do. Both are served here so that a room behaves
-   * identically however a member is watching it, which is the property the
-   * whole two-path design rests on.
+   * held by the runtime and do. Both are served here so that the room serves
+   * the same events in the same shape however a member is watching it, which
+   * is the property the whole two-path design rests on. It stops there. The
+   * poll then drops the caller's own events and wraps the rest in the
+   * untrusted envelope, at the tool boundary; a room socket is per room, not
+   * per member, so it carries a member's own events and leaves both to the
+   * client (spec D1a and D6).
    *
    * The frame is publicEvent(event), the projection the poll returns, and not
    * the stored event: that carries fromUserId, and every member of a room
@@ -423,8 +427,9 @@ export class SessionDO extends DurableObject {
      *
      * expireIfDue's guard is `now <= expiresAt`, so an alarm firing exactly on
      * the boundary expires nothing, and createSession arms this alarm only
-     * once. Without this line such a room never expires — which went unnoticed
-     * because bellman_sync's getSession expired it lazily every 25 seconds.
+     * once. Without this line such a room never expires — which would have
+     * gone unnoticed because bellman_sync's getSession expires it lazily every
+     * 25 seconds.
      * A socket-watched room is not polled, so getSession runs only when a
      * member calls some other tool and a quiet room is never checked: that
      * safety net is gone and this one has to be real.
@@ -432,13 +437,16 @@ export class SessionDO extends DurableObject {
      * The condition is `now >= expiresAt`, and it is as tight as it looks. A
      * room still open here already has now <= expiresAt (expireIfDue closes it
      * otherwise), so this leaves only now === expiresAt, the boundary. An alarm
-     * is expected to run at or after the time it was set for (measured in
-     * workerd: 150 natural firings all ran 1 to 14 ms after), so a firing
-     * before expiresAt is not expected from setAlarm(expiresAt). Where one
-     * appears, as under the contract suite's frozen fake clock, the handler's
-     * clock disagrees with the one that scheduled the alarm, and a re-arm would
-     * set expiresAt + 1, already in the past: due at once, re-armed again, until
-     * the object is torn down.
+     * is expected to run at or after the time it was set for (observed in local
+     * workerd, on one process clock: 150 natural firings all ran 1 to 14 ms
+     * after; production is unmeasured), so a firing before expiresAt is not
+     * expected from setAlarm(expiresAt). Where one appears, as under the
+     * contract suite's frozen fake clock, the handler's clock disagrees with the
+     * one that scheduled the alarm, and a re-arm would set expiresAt + 1,
+     * already in the past: due at once, re-armed again, until the object is torn
+     * down. Not re-arming costs something too, and it is bounded: an early
+     * firing in production would leave the room open until the next getSession
+     * expires it lazily.
      *
      * Terminates: the re-arm is strictly after expiresAt, so the next firing
      * has now > expiresAt and expireIfDue closes the room.

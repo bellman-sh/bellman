@@ -1205,10 +1205,10 @@ describe("wake: socket delivery", () => {
 /**
  * The TTL alarm's re-arm. createSession arms the alarm once, and expireIfDue's
  * guard is `now <= expiresAt`, so a firing that lands exactly on the boundary
- * expires nothing. That went unnoticed while bellman_sync called getSession on
- * every poll, which expired the room lazily. A member watching over a socket
- * does not poll, so on a quiet room nothing calls it, and the alarm has to
- * finish the job itself.
+ * expires nothing. That would have gone unnoticed while bellman_sync called
+ * getSession on every poll, which expires the room lazily. A member watching
+ * over a socket does not poll, so on a quiet room nothing calls it, and the
+ * alarm has to finish the job itself.
  *
  * The clock is pinned with vi.setSystemTime and put back in a finally, as in
  * membersOf's boundary case: a test cannot make a real clock read exactly

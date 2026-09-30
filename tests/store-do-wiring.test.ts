@@ -1147,6 +1147,59 @@ describe("wake: socket delivery", () => {
       log.mockRestore();
     }
   });
+
+  // An event whose time publicEvent cannot format. It is the detector for the
+  // two cases below: wherever a frame is built for it, publicEvent throws.
+  const unformattable = {
+    cursor: 1, at: Number.NaN, type: "message", fromMemberId: "m9",
+    fromUserId: "u9", fromLabel: "peer", payload: {}, refId: null,
+  };
+  // wake() is private, so these reach it by name.
+  const wakeOf = (doi: unknown) =>
+    (doi as { wake(e: unknown): void }).wake.bind(doi);
+
+  it("builds no frame for a socket that is not due the event", async () => {
+    // The frame is built on the first socket that is due the event, not on
+    // every append: a poll-only room has no sockets and pays nothing per
+    // append, and a room whose sockets are all past the event pays nothing
+    // either. Built eagerly, the unformattable event throws out of wake() with
+    // no socket to blame. Built for a socket that is not due it, the failure is
+    // caught by the per-socket try and logged. Built lazily, nothing is built,
+    // so nothing throws and nothing is logged.
+    const { doi, ctx } = await world();
+    const wake = wakeOf(doi);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(() => wake(unformattable)).not.toThrow(); // no sockets at all
+
+      await doi.fetch(open(ctx, 5)); // a socket already past cursor 1
+      expect(() => wake(unformattable)).not.toThrow();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("contains a frame that cannot be built, so it cannot fail the append", async () => {
+    // The frame is built inside the per-socket try, after the guard, so a
+    // projection failure is one more thing that try contains: it does not fail
+    // an append whose event is already stored. Nothing is sent, and the socket
+    // keeps its cursor.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const wake = wakeOf(doi);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(() => wake(unformattable)).not.toThrow();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0][1])).toMatch(/Invalid time value/);
+    } finally {
+      log.mockRestore();
+    }
+    expect(ctx.sockets[0].sent).toEqual([]);
+    expect((ctx.sockets[0].deserializeAttachment() as { cursor: number }).cursor).toBe(0);
+  });
 });
 
 /**

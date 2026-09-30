@@ -383,7 +383,11 @@ export class SessionDO extends DurableObject {
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
 
-    const frame = JSON.stringify(publicEvent(event));
+    // Built on the first socket that is due the event and shared by the rest: a
+    // poll-only room pays nothing per append, and a projection failure lands in
+    // the per-socket try below instead of failing an append whose event is
+    // already stored.
+    let frame: string | undefined;
     for (const ws of this.ctx.getWebSockets()) {
       // One socket must not starve the rest. getWebSockets() returns a list, and
       // a send that threw would end this loop with every later socket missing
@@ -399,6 +403,7 @@ export class SessionDO extends DurableObject {
         // wrong, and over-delivering every event to a socket whose cursor we do
         // not know is the worse of the two answers.
         if (!att || event.cursor <= att.cursor) continue;
+        frame ??= JSON.stringify(publicEvent(event));
         ws.send(frame);
         ws.serializeAttachment({ ...att, cursor: event.cursor });
       } catch (err) {

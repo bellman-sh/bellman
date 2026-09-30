@@ -321,6 +321,20 @@ function fakeTxn(values: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * Storage that calls `before` with a short tag ahead of every operation, so a test can
+ * record the sequence of operations a driver makes, or make it die before one of them.
+ */
+function instrumented(raw: ReturnType<typeof fakeStorage>, before: (tag: string) => void): OutboxStorage {
+  return {
+    async get<T>(key: string) { before(`get ${key}`); return raw.get<T>(key); },
+    async put<T>(entries: Record<string, T>) { before(`put ${Object.keys(entries).join(",")}`); return raw.put(entries); },
+    async delete(key: string) { before(`delete ${key}`); return raw.delete(key); },
+    async list<T>(options: { prefix: string }) { before(`list ${options.prefix}`); return raw.list<T>(options); },
+    async setAlarm(at: number) { before("setAlarm"); return raw.setAlarm(at); },
+  };
+}
+
 describe("OutboxDriver", () => {
   const NOW = 1_800_000_000_000;
   const intent = { id: "i1", kind: "audit", payload: { a: 1 } };
@@ -789,14 +803,14 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
   });
 
   /**
-   * A row committed while a drain is in flight sets the marker, and the drain's own
-   * delete then takes it. If the committer never reaches deliverNow(), because its
-   * isolate died in that gap or because it queues without delivering, nothing wakes
-   * for the row: alarm() dispatches on the marker. So a drain that finds a row after
-   * clearing the marker puts the marker back and takes another pass, and the marker
-   * is there while that pass is still in flight.
+   * A row committed while a drain is in flight sets the marker. If the committer
+   * never reaches deliverNow(), because its isolate died in that gap or because it
+   * queues without delivering, nothing wakes for the row unless the marker survives:
+   * alarm() dispatches on the marker. So a drain that finds a row behind its pass
+   * leaves the marker alone and takes another pass, and the marker is there, as the
+   * second write set it, while that pass is still in flight.
    */
-  it("puts the marker back and takes another pass for a row committed while it was in flight", async () => {
+  it("keeps the marker set and takes another pass for a row committed while it was in flight", async () => {
     const storage = fakeStorage();
     await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
     const m = manualDeliver();
@@ -815,11 +829,11 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
     m.calls[0].def.resolve(); // r0 lands, so that pass's listing is empty
     await tick();
 
-    // The drain looked again, found r1 and started another pass. That pass is still
-    // waiting on r1, and the marker is back for the alarm to find.
+    // The drain looked, found r1 and started another pass. That pass is still waiting
+    // on r1, and the marker is still set, untouched, for the alarm to find.
     expect(m.calls.map((c) => c.id)).toEqual(["r0", "r1"]);
     expect(await driver.dueNow(Number.MAX_SAFE_INTEGER)).toEqual(["outbox"]);
-    expect(storage.map.get(dueKey("outbox"))).toBeLessThanOrEqual(Date.now());
+    expect(storage.map.get(dueKey("outbox"))).toBe(2);
 
     m.calls[1].def.resolve();
     await first;
@@ -828,35 +842,87 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
   });
 
   /**
-   * The look has to come after the delete. Looking first and deleting second leaves
-   * a gap between them, and a row committed in that gap loses its marker to the
-   * delete without the look ever seeing it.
+   * The look comes first, and the marker is cleared only when it found nothing. The
+   * other order deletes the marker, looks, and puts the marker back if a row is
+   * there, which leaves a gap between the delete and the put: a crash in it strands
+   * a row with no marker. Both orders behave the same until something dies, so the
+   * order is pinned as the sequence of storage operations, not only by what ends up
+   * stored.
    */
-  it("looks at the queue after it clears the marker, not before", async () => {
-    const storage = fakeStorage();
-    await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
-    const landed: string[] = [];
-    const driver = new OutboxDriver(storage, async (row) => { landed.push(row.id); });
+  it("looks at the queue before it clears the marker, and clears it only when nothing is queued", async () => {
+    const marker = dueKey("outbox");
 
-    // A second write commits at the moment the marker is deleted: its row and its
-    // marker land first, then the delete takes the marker.
-    const remove = storage.delete.bind(storage);
-    let committed = false;
-    storage.delete = async (key: string) => {
-      if (key === dueKey("outbox") && !committed) {
-        committed = true;
-        const seq = (await storage.get<number>(OUTBOX_SEQ))!;
-        await storage.put({
-          ...enqueueRows(seq + 1, [{ id: "r1", kind: "put", payload: 1 }]),
-          [dueKey("outbox")]: 2,
-        });
+    // Nothing queued behind the delivery: the look is the operation just before the delete.
+    const quiet = fakeStorage();
+    await quiet.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [marker]: 1 });
+    const quietOps: string[] = [];
+    await new OutboxDriver(instrumented(quiet, (tag) => quietOps.push(tag)), async () => {}).deliverNow();
+    const at = quietOps.indexOf(`delete ${marker}`);
+    expect(at).toBeGreaterThan(0);
+    expect(quietOps[at - 1]).toBe(`list ${OUTBOX_PREFIX}`);
+
+    // A row committed during the delivery: the look finds it, so the marker is not
+    // deleted until that row has landed, and it is never put back because it was
+    // never taken.
+    const busy = fakeStorage();
+    await busy.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [marker]: 1 });
+    const busyOps: string[] = [];
+    const commitDuringDelivery = async (row: OutboxRow) => {
+      if (row.id === "r0") {
+        await busy.put({ ...enqueueRows(1, [{ id: "r1", kind: "put", payload: 1 }]), [marker]: 2 });
       }
-      return remove(key);
     };
+    await new OutboxDriver(instrumented(busy, (tag) => busyOps.push(tag)), commitDuringDelivery).deliverNow();
+    expect(busyOps.filter((tag) => tag === `delete ${marker}`)).toHaveLength(1);
+    expect(busyOps.indexOf(`delete ${marker}`)).toBeGreaterThan(busyOps.indexOf(`delete ${outboxKey(1)}`));
+    expect(busyOps).not.toContain(`put ${marker}`);
+  });
 
-    await driver.deliverNow();
+  /**
+   * A crash can land between any two storage operations of a drain, and what it
+   * leaves behind decides whether a queued row is ever delivered: alarm() dispatches
+   * on the marker, so a row queued with no marker has nothing coming back for it. So
+   * the drain is killed before each of its storage operations in turn: that operation
+   * and every one after it throws, so nothing the dying drain would have written next
+   * reaches storage, as with a real crash. After each, a restarted object, a new driver
+   * on the same storage, runs alarm() the way the registry does. The alarm the row's
+   * own enqueue armed is assumed to fire. A queued row must never be left without its
+   * marker.
+   */
+  it("leaves every queued row recoverable by the alarm, whichever storage operation a crash lands before", async () => {
+    const marker = dueKey("outbox");
+    const stranded: string[] = [];
+    let finished = false;
+    for (let crashAt = 1; crashAt <= 1_000 && !finished; crashAt++) {
+      const raw = fakeStorage();
+      await raw.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [marker]: 1 });
+      // A second write commits while r0 is being delivered, as another request can
+      // once a delivery awaits another object.
+      const deliver = async (row: OutboxRow) => {
+        if (row.id === "r0") {
+          await raw.put({ ...enqueueRows(1, [{ id: "r1", kind: "put", payload: 1 }]), [marker]: 2 });
+        }
+      };
+      let seen = 0;
+      let diedBefore: string | undefined;
+      const storage = instrumented(raw, (tag) => {
+        if (++seen >= crashAt) {
+          diedBefore ??= tag;
+          throw new Error("the object died here");
+        }
+      });
 
-    expect(landed).toEqual(["r0", "r1"]);
+      await new OutboxDriver(storage, deliver).deliverNow().catch(() => {});
+      finished = diedBefore === undefined;
+
+      // The restarted object: alarm() drains only when the marker says the outbox is due.
+      const revived = new OutboxDriver(raw, async () => {});
+      if ((await revived.dueNow(Number.MAX_SAFE_INTEGER)).includes("outbox")) await revived.deliverNow();
+      if (queuedIds(raw).length > 0) stranded.push(`before "${diedBefore ?? "no crash"}" (operation ${crashAt})`);
+    }
+
+    expect(finished).toBe(true);
+    expect(stranded).toEqual([]);
   });
 
   /**

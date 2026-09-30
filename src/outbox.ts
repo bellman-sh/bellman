@@ -122,13 +122,21 @@ export function backoffMs(attempts: number): number {
 export const NOISY_AFTER = 5;
 
 /**
- * How long the alarm waits behind the inline delivery.
+ * How long the alarm waits behind the inline delivery, for a write into an empty
+ * queue.
  *
- * Arming for `now` put the alarm 1-3 ms behind the commit, so it raced the
- * inline drain on every write. `deliverNow`'s single-flight guard absorbs that
- * overlap, but a grace period makes the alarm a backstop: it finds an empty
- * queue and does nothing, unless the inline attempt never ran or is still stuck
- * on a downstream that has stopped answering.
+ * Arming for `now` put the alarm 1-3 ms behind the commit, so it raced the inline
+ * drain on every write. With a grace period, the alarm a write into an empty queue
+ * arms is a backstop: by the time it fires the inline attempt has emptied the
+ * queue and it does nothing, unless that attempt never ran or is still stuck on a
+ * downstream that has stopped answering.
+ *
+ * When an earlier marker is already stored, the earliest due time wins and the
+ * alarm is armed for that marker instead, which can be as soon as the commit
+ * itself. That alarm can reach `deliverNow` while the inline attempt is running,
+ * and single flight absorbs it: it joins the drain instead of starting another.
+ * The grace shortens the overlap in the common case, and the guard is what makes
+ * the rest of it safe.
  *
  * The cost of a longer grace is how long a row waits when the isolate dies
  * between the commit and the inline attempt. Five seconds against a row that
@@ -140,7 +148,7 @@ export const OUTBOX_GRACE_MS = 5_000;
  * The most passes one drain makes before it stops and leaves the rest to the alarm.
  *
  * Without a bound, a drain that stops deleting the rows it delivers spins forever:
- * every pass finds the same rows, puts the marker back and asks for another, and
+ * every pass finds the same rows, leaves the marker set and asks for another, and
  * nothing can interrupt a loop that never yields to the event loop. In an object
  * that is wall-clock and billing spent with no way to stop it.
  *
@@ -283,18 +291,22 @@ export class OutboxDriver {
         this.again = false;
         const next = await drain(this.storage, this.deliver, Date.now());
         if (next === null) {
-          await this.storage.delete(dueKey(OUTBOX_HANDLER));
-          // Verify before clearing. An enqueue can commit a row, and set this marker,
-          // while the drain is in flight, and the delete above takes that marker with
-          // the rest: the row would sit queued with nothing to wake for it, and a
-          // committer that never reaches deliverNow() (an isolate death in that gap)
-          // cannot repair it. Looking after the delete, not before, is what makes the
-          // look safe: any row committed before the delete is visible to it. A row
-          // committed after the look carries its own marker and its own alarm, both
-          // written in its own transaction, so it does not need this branch.
+          // Look first, and clear the marker only if nothing is queued. An enqueue can
+          // commit a row, and set this marker, while the drain is in flight, so a delete
+          // that did not look would take the marker with the rest and leave the row with
+          // nothing to wake for it. Deleting first and putting the marker back after a
+          // look would be just as correct in normal operation: consecutive storage
+          // awaits do not open the input gate, so no other request runs between them.
+          // The two differ in what a crash leaves behind. Delete first, and it leaves no
+          // marker and a queued row, which nothing recovers. Look first, and it leaves
+          // the marker and a queued row, which the alarm recovers. When two shapes are
+          // equally correct, take the one whose failure is recoverable. A row committed
+          // after the delete carries its own marker and its own alarm, both written in
+          // its own transaction, so it does not need this branch.
           if ((await this.storage.list({ prefix: OUTBOX_PREFIX })).size > 0) {
-            await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: Date.now() });
             this.again = true;
+          } else {
+            await this.storage.delete(dueKey(OUTBOX_HANDLER));
           }
         } else {
           await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: next });
@@ -310,9 +322,9 @@ export class OutboxDriver {
         // longer deletes what it delivers keeps finding the same ones. Stop, and date
         // the marker ahead by the step a failed delivery takes, then arm the alarm for
         // it. The marker stays present, because a cleared one is the stranding bug. It
-        // is not left at the look's "due now", because reArm() would then schedule the
-        // next alarm for immediately and the object would run back to back. Stopping
-        // early delays work and never drops it.
+        // is not left as it is, because that is usually "due now", the time an enqueue
+        // set, and reArm() would then schedule the next alarm for immediately and the
+        // object would run back to back. Stopping early delays work and never drops it.
         if (pass >= MAX_DRAIN_PASSES) {
           const depth = (await this.storage.list({ prefix: OUTBOX_PREFIX })).size;
           console.error(

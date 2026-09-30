@@ -197,13 +197,15 @@ calling `bellman_sync`, `bellman_sync` calls `waitForEvents`, and
 `wake()` stays synchronous, because every socket call it needs is:
 
 ```
+let frame: string | undefined;   // built once, and only if a socket is due
 for (const ws of this.ctx.getWebSockets()) {
   try {
     const att = ws.deserializeAttachment();
     // Fail closed: a socket whose cursor we do not know gets nothing, since
     // over-delivering is the worse of the two wrong answers.
     if (!att || event.cursor <= att.cursor) continue;
-    ws.send(JSON.stringify(publicEvent(event)));   // D1a: never the stored event
+    frame ??= JSON.stringify(publicEvent(event));   // D1a: never the stored event
+    ws.send(frame);
     ws.serializeAttachment({ ...att, cursor: event.cursor });
   } catch (err) {
     // Per socket, so one failing member cannot starve the rest of the
@@ -632,9 +634,25 @@ bus), new `tests/bus.test.ts`, `tests/helpers/fake-bellman.ts`,
 - **Inbound frames may bill as requests.** D1 makes the socket receive-only, so
   the exposure is a keepalive at most, and `setWebSocketAutoResponse` keeps
   even that from waking the object. Confirm against a bill.
-- **Two delivery paths must stay behaviourally identical.** The long poll is
-  permanent, for clients that cannot reach a local process. Any change to what
-  a watcher sees has to land in both arms of `wake()`, and D1 is what keeps
+- **A stored event that cannot be projected poisons its room's replay.**
+  `fetch` maps `publicEvent` over every missed event with no per-event guard —
+  deliberately, so a failure accepts no socket rather than half a replay. But
+  the failure is durable: that event stays stored, so every reconnect from
+  before its cursor fails again, forever. `at` cannot cause it (server-set at
+  all three creation sites), yet `JSON.stringify` of a very deep payload can:
+  the tool boundary's own stringify and the frame's differ by about one level
+  of nesting, and `MAX_PAYLOAD_DEPTH` (64) guards only *keyed* sends — an
+  unkeyed send is capped at 20,000 characters and not at depth. Measured in
+  Node 22 and unmeasured in workerd. A depth cap beside the char cap in
+  `bellman_send` would close it at the door, which is the right place.
+- **The two delivery paths carry the same content, not the same packaging.**
+  The long poll is permanent, for clients that cannot reach a local process,
+  and any change to what a watcher sees has to land in both arms of `wake()`.
+  They are not identical and must not be described as such: the poll drops a
+  member's own events and adds the untrusted wrapper, while a room socket is
+  per-room by construction (D7), carries every event including the member's
+  own, and leaves the wrapper to the client (D1a, D9). What must match is the
+  event's content and shape. D1 is what keeps
   that from also meaning two send paths.
 - **The TTL alarm's timing is measured on one platform only.** `expireIfDue`
   expires a room strictly past `expiresAt`, so an alarm firing *on* the

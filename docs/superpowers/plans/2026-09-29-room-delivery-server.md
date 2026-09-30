@@ -983,16 +983,22 @@ Run it, watch it fail on `storage.alarms.at(-1)` being undefined, then:
      *
      * expireIfDue's guard is `now <= expiresAt`, so an alarm firing exactly on
      * the boundary expires nothing, and createSession arms this alarm only
-     * once. Without this line such a room never expires — which went unnoticed
-     * because bellman_sync's getSession expired it lazily every 25 seconds.
-     * A socket-watched room calls getSession never, so that safety net is
-     * gone and this one has to be real.
+     * once. Without this line such a room would never expire — which would
+     * have gone unnoticed, because bellman_sync's getSession expired it lazily
+     * every 25 seconds. A socket-watched room calls getSession never, so that
+     * safety net is gone and this one has to be real.
+     *
+     * Gated on now >= expiresAt, not merely "still open". Reaching here with
+     * an open room already implies now <= expiresAt, so the only real case is
+     * the boundary itself. The looser form spins under a frozen test clock.
      *
      * Terminates: the re-arm is strictly after expiresAt, so the next firing
      * has now > expiresAt and expireIfDue closes the room.
      */
     const fresh = await this.stored();
-    if (fresh && !fresh.closed) await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
+    if (fresh && !fresh.closed && now >= fresh.expiresAt) {
+      await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
+    }
   }
 ```
 

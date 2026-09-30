@@ -115,6 +115,34 @@ connect and that is authoritative, so a client that dies mid-batch simply asks
 for the same events again — an ack would only let the DO record *attempted*
 delivery more precisely, which nothing reads.
 
+### D1a — A socket frame carries exactly what a poll response carries.
+
+The spec left the frame's shape unstated, and the first implementation sent the
+stored `SessionEvent` verbatim. That is wrong twice over.
+
+**It leaks a field.** `publicEvent` (`src/server.ts`) deliberately omits
+`fromUserId`, exposing only `cursor`, `type`, `from: { member_id, label }`,
+`payload`, `ref_id` and an ISO `at`. A raw `SessionEvent` carries `fromUserId`
+— `u_github_4242` and the like. Every member of a room receives every other
+member's events, so a raw frame hands one user another user's upstream identity
+across the network. The poll path has never done that.
+
+**It forks the envelope.** The poll gives `from: { member_id, label }` and an
+ISO timestamp; the raw event gives `fromMemberId`/`fromUserId`/`fromLabel` and
+an epoch number. A bridge consuming both would need two parsers for one kind of
+thing, and the two would drift — which is this design's named standing risk
+arriving as a data format.
+
+So the socket sends `publicEvent(event)`, and `publicEvent` moves out of
+`src/server.ts` into a runtime-free module both programs can import, the way
+`src/stored-session.ts` already holds the shape `store-do.ts` and the tests
+share. One function, one shape, both transports.
+
+The untrusted wrapper is NOT added here. The poll wraps at the tool boundary
+and the bridge renders with `<` escaped at delivery; the socket keeps that
+division, carrying the public event and leaving the wrapper to the client
+(D9). What must be identical is the *content*, not the packaging.
+
 ### D2 — The upgrade authenticates by `Authorization` header, exactly as `/mcp` does.
 
 Same order, same functions: `identityFromAccessToken` for an OAuth access

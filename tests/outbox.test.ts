@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
-  DUE_PREFIX, OUTBOX_GRACE_MS, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver, backoffMs, drain,
-  dueKey, dueNames, earliestDue, enqueueRows, mergeDue, outboxKey,
+  DUE_PREFIX, MAX_DRAIN_PASSES, OUTBOX_GRACE_MS, OUTBOX_PREFIX, OUTBOX_SEQ, OutboxDriver,
+  backoffMs, drain, dueKey, dueNames, earliestDue, enqueueRows, mergeDue, outboxKey,
   type OutboxRow, type OutboxStorage,
 } from "../src/outbox.js";
 
@@ -894,5 +894,87 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
     await joiner;
 
     expect(landed).toEqual(["r0", "r1"]);
+  });
+
+  describe("the pass cap", () => {
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    /**
+     * A deliver() that queues another row each time, up to `chain` deliveries, so no
+     * pass leaves the queue empty until then. Past the cap it throws instead: a driver
+     * with no working cap then fails these tests, where it would otherwise spin.
+     */
+    function refilling(storage: ReturnType<typeof fakeStorage>, chain: number) {
+      const state = { delivered: 0 };
+      const deliver = async () => {
+        state.delivered++;
+        if (state.delivered > MAX_DRAIN_PASSES + 50) throw new Error("the drain ran past its cap");
+        if (state.delivered < chain) {
+          const seq = (await storage.get<number>(OUTBOX_SEQ))!;
+          await storage.put(enqueueRows(seq + 1, [
+            { id: `r${state.delivered}`, kind: "put", payload: state.delivered },
+          ]));
+        }
+      };
+      return { state, deliver };
+    }
+
+    /**
+     * Without a bound, a deliver() that keeps the queue from emptying spins the drain
+     * forever, and nothing can interrupt a loop that never yields to the event loop.
+     * So the drain stops at the cap, says so, and leaves the rows queued with the
+     * marker set: the alarm comes back for them, so stopping early delays work and
+     * never drops it. This is the one test in the file that has to complete rather
+     * than hang.
+     */
+    it("stops at the pass cap when the queue never empties, and leaves the rows queued with the marker set", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const storage = fakeStorage();
+      await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+      const { state, deliver } = refilling(storage, Number.POSITIVE_INFINITY);
+      const driver = new OutboxDriver(storage, deliver);
+
+      await driver.deliverNow();
+
+      // Each pass delivers one row, so this counts the passes.
+      expect(state.delivered).toBe(MAX_DRAIN_PASSES);
+      expect(errors).toHaveBeenCalledTimes(1);
+      const [message] = errors.mock.calls[0];
+      expect(message).toContain(String(MAX_DRAIN_PASSES));
+      expect(message).toContain("queue depth 1");
+      // The row the last pass queued is still there, and the marker is set.
+      expect(queuedIds(storage)).toEqual([`r${MAX_DRAIN_PASSES}`]);
+      expect(await driver.dueNow(Number.MAX_SAFE_INTEGER)).toEqual(["outbox"]);
+    });
+
+    /**
+     * The cap has to sit above what a busy queue needs, or it stops legitimate work: a
+     * queue that keeps refilling for twenty passes is busy, not broken. And a queue that
+     * is empty after the last pass the cap allows ended normally, so reporting it as a
+     * runaway would raise an alarm for nothing.
+     */
+    it("does not stop a queue that refills for a while, or one that empties on the last pass the cap allows", async () => {
+      for (const chain of [20, MAX_DRAIN_PASSES]) {
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const storage = fakeStorage();
+        await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+        const { state, deliver } = refilling(storage, chain);
+        const driver = new OutboxDriver(storage, deliver);
+
+        await driver.deliverNow();
+
+        expect(state.delivered).toBe(chain);
+        expect(errors).not.toHaveBeenCalled();
+        expect(queuedIds(storage)).toEqual([]);
+        expect(storage.map.has(dueKey("outbox"))).toBe(false);
+        errors.mockRestore();
+      }
+    });
+
+    // The cap is a safety net measured in seconds of work, so a change to it should be
+    // deliberate.
+    it("caps a drain at a hundred passes", () => {
+      expect(MAX_DRAIN_PASSES).toBe(100);
+    });
   });
 });

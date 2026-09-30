@@ -137,6 +137,26 @@ export const NOISY_AFTER = 5;
 export const OUTBOX_GRACE_MS = 5_000;
 
 /**
+ * The most passes one drain makes before it stops and leaves the rest to the alarm.
+ *
+ * Without a bound, a drain that stops deleting the rows it delivers spins forever:
+ * every pass finds the same rows, puts the marker back and asks for another, and
+ * nothing can interrupt a loop that never yields to the event loop. In an object
+ * that is wall-clock and billing spent with no way to stop it.
+ *
+ * A pass is only repeated after one that emptied the queue it listed, so reaching
+ * this many means rows keep arriving behind every pass, or something is wrong. A
+ * hundred in a row needs writes landing faster than the drain clears them for the
+ * length of a hundred passes, and audit intents and join codes are written at human
+ * pace. A pass costs a listing, a delivery per row and a few writes, so a hundred
+ * keeps one invocation's worst case to seconds.
+ *
+ * Stopping early is safe: the rows stay queued and the marker stays set, so the
+ * alarm comes back for them. It delays work and never drops it.
+ */
+export const MAX_DRAIN_PASSES = 100;
+
+/**
  * Deliver queued rows in key order, head first.
  *
  * Returns when to wake again, or null when the queue is empty. A failing head
@@ -258,7 +278,7 @@ export class OutboxDriver {
 
   private async drainLoop(): Promise<void> {
     try {
-      for (;;) {
+      for (let pass = 1; ; pass++) {
         this.again = false;
         const next = await drain(this.storage, this.deliver, Date.now());
         if (next === null) {
@@ -284,6 +304,19 @@ export class OutboxDriver {
         // so does the look above. After a failure the head is still failing, and the
         // backoff owns the retry.
         if (next !== null || !this.again) break;
+        // The cap. Every pass here follows one that emptied the queue it listed, so
+        // reaching it means rows keep arriving behind the drain, or a drain that no
+        // longer deletes what it delivers keeps finding the same ones. Stop, and leave
+        // the queue and the marker as they are: a row still queued has its marker,
+        // because the look above put it back, so the alarm comes back for it. Stopping
+        // early delays work and never drops it, so the marker is not cleared here.
+        if (pass >= MAX_DRAIN_PASSES) {
+          const depth = (await this.storage.list({ prefix: OUTBOX_PREFIX })).size;
+          console.error(
+            `outbox: stopped after ${MAX_DRAIN_PASSES} drain passes, queue depth ${depth}; the alarm retries`
+          );
+          break;
+        }
       }
     } finally {
       // Runs synchronously after `break`, so no caller can join a drain that has

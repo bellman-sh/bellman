@@ -400,9 +400,10 @@ export class SessionDO extends DurableObject {
   async alarm(): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    await this.expireIfDue(s, Date.now());
+    const now = Date.now();
+    await this.expireIfDue(s, now);
     /**
-     * Re-arm if the room is still live.
+     * Re-arm on the boundary, and only there.
      *
      * expireIfDue's guard is `now <= expiresAt`, so an alarm firing exactly on
      * the boundary expires nothing, and createSession arms this alarm only
@@ -412,14 +413,23 @@ export class SessionDO extends DurableObject {
      * member calls some other tool and a quiet room is never checked: that
      * safety net is gone and this one has to be real.
      *
+     * The condition is `now >= expiresAt`, and it is as tight as it looks. A
+     * room still open here already has now <= expiresAt (expireIfDue closes it
+     * otherwise), so this leaves only now === expiresAt, the boundary. An alarm
+     * runs at or after the time it was set for (150 natural firings in workerd
+     * all ran 1 to 14 ms after), so a firing before expiresAt does not come
+     * from setAlarm(expiresAt). Where one appears, as under the contract
+     * suite's frozen fake clock, the handler's clock disagrees with the one
+     * that scheduled the alarm, and a re-arm would set expiresAt + 1, already
+     * in the past: due at once, re-armed again, until the object is torn down.
+     *
      * Terminates: the re-arm is strictly after expiresAt, so the next firing
-     * has now > expiresAt and expireIfDue closes the room. That holds while
-     * Date.now() advances with the clock that schedules the alarm, as it does
-     * in workerd. A frozen fake clock breaks it: see the "failed to invoke
-     * drain()" lines in `npm run test:worker`.
+     * has now > expiresAt and expireIfDue closes the room.
      */
     const fresh = await this.stored();
-    if (fresh && !fresh.closed) await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
+    if (fresh && !fresh.closed && now >= fresh.expiresAt) {
+      await this.ctx.storage.setAlarm(fresh.expiresAt + 1);
+    }
   }
 
   private async expireIfDue(s: StoredSession, now: number): Promise<void> {

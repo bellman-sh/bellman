@@ -1115,7 +1115,7 @@ describe("wake: socket delivery", () => {
  * expiresAt.
  */
 describe("SessionDO.alarm: the TTL re-arm", () => {
-  it("re-arms the TTL alarm when it fires before the room is due", async () => {
+  it("re-arms the TTL alarm when it fires exactly on the boundary", async () => {
     // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
     // landing exactly on expiresAt expires nothing. Without a re-arm the room
     // is then immortal until something calls getSession, and a room watched
@@ -1174,6 +1174,29 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
 
     await doi.alarm();
 
+    expect(storage.alarms).toEqual([]);
+  });
+
+  it("does not re-arm a firing that lands before the room is due", async () => {
+    // The re-arm is for the boundary, now === expiresAt, and only for it. An
+    // alarm set for expiresAt runs at or after it, so a firing before it means
+    // the clock the handler reads disagrees with the one that scheduled the
+    // alarm, and a re-arm would set an alarm for expiresAt + 1 that is already
+    // in the past: due at once, and re-armed again, until the object is torn
+    // down. The contract suite's frozen fake clock is such a disagreement, and
+    // it is what printed "failed to invoke drain()" under npm run test:worker.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    try {
+      vi.setSystemTime(at - 5_000); // early: not due, and not on the boundary
+      await doi.alarm();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
     expect(storage.alarms).toEqual([]);
   });
 });

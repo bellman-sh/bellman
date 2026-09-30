@@ -787,4 +787,112 @@ describe("OutboxDriver, overlapping deliverNow calls", () => {
 
     expect(landed).toEqual(["r0"]);
   });
+
+  /**
+   * A row committed while a drain is in flight sets the marker, and the drain's own
+   * delete then takes it. If the committer never reaches deliverNow(), because its
+   * isolate died in that gap or because it queues without delivering, nothing wakes
+   * for the row: alarm() dispatches on the marker. So a drain that finds a row after
+   * clearing the marker puts the marker back and takes another pass, and the marker
+   * is there while that pass is still in flight.
+   */
+  it("puts the marker back and takes another pass for a row committed while it was in flight", async () => {
+    const storage = fakeStorage();
+    await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+    const m = manualDeliver();
+    const driver = new OutboxDriver(storage, m.deliver);
+
+    const first = driver.deliverNow();
+    await tick();
+    // A second write commits: its row, and the marker enqueue returns. Its caller
+    // never gets as far as deliverNow().
+    const seq = (await storage.get<number>(OUTBOX_SEQ))!;
+    await storage.put({
+      ...enqueueRows(seq + 1, [{ id: "r1", kind: "put", payload: 1 }]),
+      [dueKey("outbox")]: 2,
+    });
+
+    m.calls[0].def.resolve(); // r0 lands, so that pass's listing is empty
+    await tick();
+
+    // The drain looked again, found r1 and started another pass. That pass is still
+    // waiting on r1, and the marker is back for the alarm to find.
+    expect(m.calls.map((c) => c.id)).toEqual(["r0", "r1"]);
+    expect(await driver.dueNow(Number.MAX_SAFE_INTEGER)).toEqual(["outbox"]);
+    expect(storage.map.get(dueKey("outbox"))).toBeLessThanOrEqual(Date.now());
+
+    m.calls[1].def.resolve();
+    await first;
+    expect(queuedIds(storage)).toEqual([]);
+    expect(storage.map.has(dueKey("outbox"))).toBe(false);
+  });
+
+  /**
+   * The look has to come after the delete. Looking first and deleting second leaves
+   * a gap between them, and a row committed in that gap loses its marker to the
+   * delete without the look ever seeing it.
+   */
+  it("looks at the queue after it clears the marker, not before", async () => {
+    const storage = fakeStorage();
+    await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+    const landed: string[] = [];
+    const driver = new OutboxDriver(storage, async (row) => { landed.push(row.id); });
+
+    // A second write commits at the moment the marker is deleted: its row and its
+    // marker land first, then the delete takes the marker.
+    const remove = storage.delete.bind(storage);
+    let committed = false;
+    storage.delete = async (key: string) => {
+      if (key === dueKey("outbox") && !committed) {
+        committed = true;
+        const seq = (await storage.get<number>(OUTBOX_SEQ))!;
+        await storage.put({
+          ...enqueueRows(seq + 1, [{ id: "r1", kind: "put", payload: 1 }]),
+          [dueKey("outbox")]: 2,
+        });
+      }
+      return remove(key);
+    };
+
+    await driver.deliverNow();
+
+    expect(landed).toEqual(["r0", "r1"]);
+  });
+
+  /**
+   * The look at the end of a drain cannot see a row committed after it. That row's
+   * committer calls deliverNow() and, with the drain still running, joins it. The
+   * join has to ask for another pass, or the drain ends without ever trying the row
+   * and the committer's own delivery is silently skipped: a join code handed out
+   * right after its room was created would not resolve until the alarm.
+   */
+  it("gives a caller that joins after the drain's last look another pass", async () => {
+    const storage = fakeStorage();
+    await storage.put({ ...enqueueRows(0, [{ id: "r0", kind: "put", payload: 0 }]), [dueKey("outbox")]: 1 });
+    const landed: string[] = [];
+    const driver = new OutboxDriver(storage, async (row) => { landed.push(row.id); });
+
+    // The look is the drain's second listing of the queue, after its own. A second
+    // write commits just after the look has read, and its caller joins the drain.
+    const readQueue = storage.list.bind(storage);
+    let listings = 0;
+    let joiner: Promise<void> | undefined;
+    storage.list = async <T>(options: { prefix: string }) => {
+      const seen = await readQueue<T>(options);
+      if (options.prefix === OUTBOX_PREFIX && ++listings === 2) {
+        const seq = (await storage.get<number>(OUTBOX_SEQ))!;
+        await storage.put({
+          ...enqueueRows(seq + 1, [{ id: "r1", kind: "put", payload: 1 }]),
+          [dueKey("outbox")]: 2,
+        });
+        joiner = driver.deliverNow();
+      }
+      return seen;
+    };
+
+    await driver.deliverNow();
+    await joiner;
+
+    expect(landed).toEqual(["r0", "r1"]);
+  });
 });

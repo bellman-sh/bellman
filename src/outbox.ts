@@ -263,13 +263,26 @@ export class OutboxDriver {
         const next = await drain(this.storage, this.deliver, Date.now());
         if (next === null) {
           await this.storage.delete(dueKey(OUTBOX_HANDLER));
+          // Verify before clearing. An enqueue can commit a row, and set this marker,
+          // while the drain is in flight, and the delete above takes that marker with
+          // the rest: the row would sit queued with nothing to wake for it, and a
+          // committer that never reaches deliverNow() (an isolate death in that gap)
+          // cannot repair it. Looking after the delete, not before, is what makes the
+          // look safe: any row committed before the delete is visible to it. A row
+          // committed after the look carries its own marker and its own alarm, both
+          // written in its own transaction, so it does not need this branch.
+          if ((await this.storage.list({ prefix: OUTBOX_PREFIX })).size > 0) {
+            await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: Date.now() });
+            this.again = true;
+          }
         } else {
           await this.storage.put({ [dueKey(OUTBOX_HANDLER)]: next });
           await this.reArm();
         }
         // Another pass only when this one emptied the queue it listed, because rows
-        // may have been queued behind that listing. After a failure the head is still
-        // failing, and the backoff owns the retry.
+        // may have been queued behind that listing: a caller that joined says so, and
+        // so does the look above. After a failure the head is still failing, and the
+        // backoff owns the retry.
         if (next !== null || !this.again) break;
       }
     } finally {

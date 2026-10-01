@@ -1142,6 +1142,79 @@ export function describeStoreContract(
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
     });
 
+    /**
+     * Who acted and why are part of the record, whichever guard the write went
+     * through. Billing's reason for a change and the admin's identity are what an
+     * auditor reads first, and a store that dropped either on one path would
+     * still pass every case above.
+     */
+    it("records the actor and detail it was given, through either guard", async () => {
+      const grant = {
+        plan: "team" as const, role: "admin" as const,
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(
+        { ...grant, key: "github:owned", orgId: "org_a", source: "operator" }, "org_a",
+        { actorUserId: "u_admin", detail: { via: "admin route" } }
+      );
+      await store.putGrantIfSource(
+        { ...grant, key: "github:billed", orgId: "org_b", source: "purchase" }, "purchase",
+        { actorUserId: "stripe", detail: { customer: "cus_1" } }
+      );
+
+      expect((await store.auditForOrg("org_a", 10))[0]).toMatchObject({
+        actorUserId: "u_admin", detail: { key: "github:owned", via: "admin route" },
+      });
+      expect((await store.auditForOrg("org_b", 10))[0]).toMatchObject({
+        actorUserId: "stripe", detail: { key: "github:billed", customer: "cus_1" },
+      });
+    });
+
+    /**
+     * The log is read in time order, so an entry carries the moment of the write
+     * that made it. The clock moves between the four writes: with it frozen, an
+     * entry stamped by a different call, or by none, would read the same.
+     */
+    it("stamps each entry with the time of the write that made it", async () => {
+      const base = {
+        plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      const asAdmin = { actorUserId: "u_admin" };
+      const times: number[] = [];
+      const tick = () => {
+        vi.advanceTimersByTime(1_000);
+        times.push(Date.now());
+      };
+
+      tick();
+      await store.putGrantIfOwned({ ...base, key: "github:1", source: "operator" }, "org_mine", asAdmin);
+      tick();
+      await store.putGrantIfSource({ ...base, key: "github:2", source: "purchase" }, "purchase", asAdmin);
+      tick();
+      await store.deleteGrantIfOwned("github:1", "org_mine", asAdmin);
+      tick();
+      await store.deleteGrantIfSource("github:2", "purchase", asAdmin);
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.at)).toEqual(times);
+    });
+
+    /** What the caller passed is theirs afterwards: changing it must not rewrite the record. */
+    it("keeps the detail it was given as it was when the write happened", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+      const detail = { reason: { why: "left the team" } };
+      await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_admin", detail });
+
+      detail.reason.why = "changed afterwards";
+
+      expect((await store.auditForOrg("org_mine", 10))[0]).toMatchObject({
+        detail: { reason: { why: "left the team" } },
+      });
+    });
+
     /** null is a bucket, not "unscoped": org-less grants list as their own set. */
     it("lists org-less grants separately from an org's", async () => {
       (await store.putGrant({

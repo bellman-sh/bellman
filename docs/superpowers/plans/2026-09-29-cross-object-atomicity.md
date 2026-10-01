@@ -2085,7 +2085,9 @@ Then update the existing guarded-write calls in this file (around lines 869, 880
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: FAIL, but **not for the reason an earlier draft gave.** That draft said `putGrantIfOwned` takes two arguments in `MemoryStore`; it takes three, because Task 7 absorbed this task's Step 3 so that no task boundary ended with `npm run typecheck` red for a missing implementor. The new cases fail on their assertions instead — they assert audit entries that the cases themselves are the first to look for. If the suite is GREEN here, the cases are asserting nothing: say so rather than moving on.
+Expected: **PASS.** Two earlier drafts of this step were wrong about that, in opposite directions. The first predicted `putGrantIfOwned` takes two arguments in `MemoryStore`; it takes three, because Task 7 absorbed this task's Step 3 so no task boundary ended with `typecheck` red for a missing implementor. The second then kept "Expected: FAIL" and only changed the reason; that was also wrong. Task 7 made BOTH stores audit, so cases written against that behaviour pass the moment they are added.
+
+A green run here is therefore correct and is NOT evidence the cases are vacuous. What distinguishes the two is Step 5: a case earns its place by failing against a broken implementation, not by failing before the implementation exists. Go to Step 5 and let the mutants answer it.
 
 - [ ] **Step 3: Implement in `MemoryStore`**
 

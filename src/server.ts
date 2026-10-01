@@ -10,7 +10,9 @@ import {
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
-import { FROZEN, activeMembers, audit, findMember, leaveRoom, sessionStatus } from "./rooms.js";
+import {
+  FROZEN, activeMembers, audit, findMember, issueInvite, leaveRoom, revokeInvite, sessionStatus,
+} from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
@@ -526,82 +528,19 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       },
     },
     async ({ session_id, member_id, role, revoke }): Promise<ToolResult> => {
-      const session = await s.getSession(session_id);
-      if (!session || session.closed) return fail("session not found or closed.");
-      if (session.frozenAt !== null) return fail(FROZEN);
-      const me = findMember(session, member_id, identity);
-      if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
-      // Roles landed. `invite` and `revoke` are separate verbs, so a seat may hold
-      // one without the other. A room whose manifest gives nobody `invite` cannot
-      // be reopened by anyone, its creator included — tests/manifest.test.ts calls
-      // that a legal manifest, so it is the declared behaviour, not a hole.
-      const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
-      if (denial) return fail(denial);
-
-      // An absent role means the usual seat when issuing, and EVERY seat when
-      // revoking. Deliberately asymmetric: over-revoking is recoverable by
-      // minting again, while under-revoking leaves a door open behind someone
-      // who believes they shut it.
-      if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
-        return fail(
-          `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
-        );
-      }
-
       if (revoke) {
-        // An expired code is not a live code (:555 promises a silent no-op for
-        // "no live code to retire"), but nothing prunes joinCodes when a code
-        // merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
-        // the session-TTL sweep touch the map. So presence alone is not enough:
-        // check expiresAt too, or a bare revoke announces the closing of a door
-        // that had already shut by itself (event + audit row, over-reported roles).
-        const retired = (role ? [role] : Object.keys(session.joinCodes))
-          .filter((r) => {
-            const rec = session.joinCodes[r];
-            return rec !== undefined && Date.now() <= rec.expiresAt;
-          });
-        if (role) await s.consumeJoinCode(session_id, role);
-        else await s.clearJoinCodes(session_id);
-        if (retired.length > 0) {
-          await s.appendEvent(session.id, {
-            type: "invite_revoked",
-            fromMemberId: member_id,
-            fromUserId: identity.userId,
-            fromLabel: identity.label,
-            payload: { roles: retired },
-            refId: null,
-          });
-          await audit(s, session, identity, "invite_revoked", { roles: retired });
-        }
-        return ok({ revoked: true, roles: retired, join_code: null });
+        const r = await revokeInvite(s, identity, session_id, member_id, role);
+        return r.ok ? ok({ revoked: true, roles: r.value.roles, join_code: null }) : fail(r.reason);
       }
-
-      if (activeMembers(session).length >= session.maxMembers) {
-        return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
-      }
-
-      const issuedRole = role ?? session.manifest.defaultRole;
-      const previous = Boolean(session.joinCodes[issuedRole]);
-      const code = renderJoinCode(issuedRole);
-      const expiresAt = Date.now() + JOIN_CODE_TTL;
-      if (!(await s.setJoinCode(session_id, issuedRole, code, expiresAt))) return fail(FROZEN);
-      await s.appendEvent(session.id, {
-        type: "invite_issued",
-        fromMemberId: member_id,
-        fromUserId: identity.userId,
-        fromLabel: identity.label,
-        payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
-        refId: null,
-      });
-      await audit(s, session, identity, "invite_issued", { role: issuedRole, replaced_previous: previous });
-
+      const r = await issueInvite(s, identity, session_id, member_id, role);
+      if (!r.ok) return fail(r.reason);
       return ok({
-        join_code: code,
-        join_code_expires_at: new Date(expiresAt).toISOString(),
-        role: issuedRole,
-        replaced_previous: previous,
+        join_code: r.value.code,
+        join_code_expires_at: new Date(r.value.expiresAt).toISOString(),
+        role: r.value.role,
+        replaced_previous: r.value.replacedPrevious,
         share_instructions:
-          `Give this code to the joining session. It seats them as "${issuedRole}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
+          `Give this code to the joining session. It seats them as "${r.value.role}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });
     }
   );

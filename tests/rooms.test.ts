@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { member, session } from "./helpers/fixtures.js";
 import { MemoryStore } from "../src/store.js";
-import { activeMembers, audit, leaveRoom } from "../src/rooms.js";
+import { activeMembers, audit, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
 import type { Identity } from "../src/types.js";
 
 /**
@@ -166,5 +166,82 @@ describe("leaveRoom", () => {
     if (!r.ok) return;
     expect(r.value.sessionStatus).toBe("active");
     expect((await store.getSession("qs_test"))?.closed).toBe(false);
+  });
+});
+
+describe("issueInvite", () => {
+  it("mints a code for the room's default seat", async () => {
+    // The default fixture already holds a live code for this seat, and issuing
+    // would retire it. A room with none is what makes `replacedPrevious` false.
+    await store.createSession(session({ maxMembers: 4, joinCodes: {} }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.role).toBe("peer_b");
+    expect(r.value.replacedPrevious).toBe(false);
+    expect((await store.getSessionByJoinCode(r.value.code))?.role).toBe("peer_b");
+  });
+
+  it("refuses a role the manifest does not declare", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator", "scribe");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("not_found");
+    expect(r.reason).toContain("declares no role");
+  });
+
+  it("refuses a full room, because the code could not be used", async () => {
+    await store.createSession(session({
+      maxMembers: 2,
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
+    }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+  });
+
+  it("refuses a frozen room", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+    await store.freezeSession("qs_test", Date.now());
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("frozen");
+  });
+});
+
+describe("revokeInvite", () => {
+  it("retires every live code when no role is named", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual(["peer_b"]);
+    expect(await store.getSessionByJoinCode("BELL-TEST-01")).toBeUndefined();
+  });
+
+  it("reports nothing retired when the only code had already expired", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      joinCodes: { peer_b: { code: "BELL-OLD-01", expiresAt: Date.now() - 1000 } },
+    }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual([]);
   });
 });

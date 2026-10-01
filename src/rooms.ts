@@ -14,8 +14,10 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, Session } from "./types.js";
-import type { BellmanStore } from "./store.js";
+import type { AuditEntry, Identity, Member, Session, Verb } from "./types.js";
+import { renderJoinCode } from "./codes.js";
+import { denyVerb } from "./roles.js";
+import { JOIN_CODE_TTL, type BellmanStore } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -175,4 +177,145 @@ export async function leaveRoom(
   // with it.
   await audit(store, session, actor, "member_left", {});
   return succeed({ sessionStatus: await closeIfEmpty(store, session) });
+}
+
+/**
+ * The preamble every verb-gated operation shares: the room is live, it is not
+ * frozen, the handle is the caller's and still in the room, and the seat holds
+ * the verb.
+ *
+ * `leaveRoom` does not use it. Leaving needs no verb, and it must work on a
+ * closed room so a member can tidy up after one.
+ */
+async function gateSeat(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  verb: Verb,
+): Promise<RoomResult<{ session: Session; me: Member }>> {
+  const session = await store.getSession(sessionId);
+  // Two branches, not one, and the reason text is identical on purpose. The
+  // sentence a caller reads is unchanged from the old handler; the CODE is what
+  // a future HTTP route switches on, and answering a closed room with
+  // "not_found" here while evictMember answers "closed" would map one condition
+  // to two statuses.
+  if (!session) return refuse("not_found", "session not found or closed.");
+  if (session.closed) return refuse("closed", "session not found or closed.");
+  if (session.frozenAt !== null) return refuse("frozen", FROZEN);
+  const me = findMember(session, memberId, actor);
+  if (!me || me.leftAt !== null) {
+    return refuse("forbidden", "member_id is not yours or has left the session.");
+  }
+  const denial = denyVerb(session, me, verb);
+  if (denial) return refuse("forbidden", denial);
+  return succeed({ session, me });
+}
+
+/** Every name the manifest declares, for the sentence a bad role gets back. */
+function noSuchRole(session: Session, role: string): RoomResult<never> {
+  return refuse(
+    "not_found",
+    `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
+  );
+}
+
+/**
+ * Mint a fresh code for a seat. Issuing for a role RETIRES that role's previous
+ * code and leaves every other role's alone.
+ *
+ * `invite` and `revoke` are separate verbs, so a seat may hold one without the
+ * other. A room whose manifest gives nobody `invite` cannot be reopened by
+ * anyone, its creator included: tests/manifest.test.ts calls that a legal
+ * manifest, so it is the declared behaviour, not a hole.
+ */
+export async function issueInvite(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  role?: string,
+): Promise<RoomResult<{ code: string; role: string; expiresAt: number; replacedPrevious: boolean }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "invite");
+  if (!gate.ok) return gate;
+  const { session } = gate.value;
+
+  if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
+    return noSuchRole(session, role);
+  }
+  if (activeMembers(session).length >= session.maxMembers) {
+    return refuse(
+      "conflict",
+      `session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`
+    );
+  }
+
+  const issuedRole = role ?? session.manifest.defaultRole;
+  const previous = Boolean(session.joinCodes[issuedRole]);
+  const code = renderJoinCode(issuedRole);
+  const expiresAt = Date.now() + JOIN_CODE_TTL;
+  if (!(await store.setJoinCode(sessionId, issuedRole, code, expiresAt))) {
+    return refuse("frozen", FROZEN);
+  }
+  await store.appendEvent(session.id, {
+    type: "invite_issued",
+    fromMemberId: memberId,
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
+    refId: null,
+  });
+  await audit(store, session, actor, "invite_issued", {
+    role: issuedRole, replaced_previous: previous,
+  });
+
+  return succeed({ code, role: issuedRole, expiresAt, replacedPrevious: previous });
+}
+
+/**
+ * Close a door and leave it closed. An absent role retires EVERY code,
+ * deliberately asymmetric with issuing: over-revoking is recoverable by minting
+ * again, while under-revoking leaves a door open behind someone who believes
+ * they shut it.
+ */
+export async function revokeInvite(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  role?: string,
+): Promise<RoomResult<{ roles: string[] }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "revoke");
+  if (!gate.ok) return gate;
+  const { session } = gate.value;
+
+  if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
+    return noSuchRole(session, role);
+  }
+
+  // An expired code is not a live code, and nothing prunes joinCodes when a
+  // code merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
+  // the session-TTL sweep touch the map. So presence alone is not enough, or a
+  // bare revoke announces the closing of a door that had already shut by
+  // itself: an event, an audit row, and over-reported roles.
+  const retired = (role ? [role] : Object.keys(session.joinCodes)).filter((r) => {
+    const rec = session.joinCodes[r];
+    return rec !== undefined && Date.now() <= rec.expiresAt;
+  });
+  if (role) await store.consumeJoinCode(sessionId, role);
+  else await store.clearJoinCodes(sessionId);
+
+  if (retired.length > 0) {
+    await store.appendEvent(session.id, {
+      type: "invite_revoked",
+      fromMemberId: memberId,
+      fromUserId: actor.userId,
+      fromLabel: actor.label,
+      payload: { roles: retired },
+      refId: null,
+    });
+    await audit(store, session, actor, "invite_revoked", { roles: retired });
+  }
+
+  return succeed({ roles: retired });
 }

@@ -2085,7 +2085,7 @@ Then update the existing guarded-write calls in this file (around lines 869, 880
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: FAIL — `putGrantIfOwned` takes two arguments in `MemoryStore`.
+Expected: FAIL, but **not for the reason an earlier draft gave.** That draft said `putGrantIfOwned` takes two arguments in `MemoryStore`; it takes three, because Task 7 absorbed this task's Step 3 so that no task boundary ended with `npm run typecheck` red for a missing implementor. The new cases fail on their assertions instead — they assert audit entries that the cases themselves are the first to look for. If the suite is GREEN here, the cases are asserting nothing: say so rather than moving on.
 
 - [ ] **Step 3: Implement in `MemoryStore`**
 

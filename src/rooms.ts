@@ -28,8 +28,13 @@ import { JOIN_CODE_TTL, type BellmanStore } from "./store.js";
  *
  * A route picks 403 from `"forbidden"` rather than pattern-matching English,
  * and a route that forgets a case fails to compile rather than returning 500.
+ *
+ * `"invalid"` is the caller's mistake in a room that was found: the request
+ * named something the room does not have. It is not `"not_found"`, which is the
+ * room itself or a member of it, and a route answers 400 from the one and 404
+ * from the other.
  */
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict";
+export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
 
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not
@@ -234,6 +239,12 @@ async function gateSeat(
  * A role the manifest does not declare, refused with the names it does. Null
  * when no role was asked for, or the one asked for is declared.
  *
+ * Refused as "invalid", not "not_found": the room was found, and it is the
+ * request that names a role the room does not have. Read as "not_found", a
+ * route would answer 404 for a room that exists, or special-case invite and
+ * revoke to get 400 — matching on the operation, which is what a code is there
+ * to spare it.
+ *
  * One check for both operations, because the old handler made it once, before
  * the issue/revoke split. Revoke is where a copy that drifted would hurt: a
  * mistyped role retires nothing, so without the check it answers an empty
@@ -242,7 +253,7 @@ async function gateSeat(
 function unknownRole(session: Session, role: string | undefined): RoomResult<never> | null {
   if (role === undefined || Object.hasOwn(session.manifest.roles, role)) return null;
   return refuse(
-    "not_found",
+    "invalid",
     `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
   );
 }

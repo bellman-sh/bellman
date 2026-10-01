@@ -252,7 +252,7 @@ guard `bellman_invite` already applies on revoke.
 
 ```ts
 type RoomFailure =
-  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict";
+  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
 
 type RoomResult<T> =
   | { ok: true; value: T }
@@ -263,6 +263,11 @@ type RoomResult<T> =
 part that makes this a seam: an HTTP route picks 403 from `"forbidden"` rather
 than pattern-matching English, and a route that forgot a case fails to compile
 rather than returning 500.
+
+`"invalid"` is the caller's mistake in a room that was found: the request named
+something the room does not have, such as a role its manifest does not declare.
+It is a code of its own because `"not_found"` would make a route answer 404 for a
+room that exists, or special-case `issueInvite` and `revokeInvite` to get 400.
 
 Not a `ToolResult`, because that shape is MCP's and would make the routes
 unwrap a `content` array they have no use for. Not a throw, because the failures
@@ -363,7 +368,7 @@ result (D3).
 ### `src/rooms.ts` (new)
 
 ```ts
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict";
+export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
 export type RoomResult<T> =
   | { ok: true; value: T }
   | { ok: false; code: RoomFailure; reason: string };

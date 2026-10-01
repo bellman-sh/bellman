@@ -192,7 +192,9 @@ describe("issueInvite", () => {
 
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.code).toBe("not_found");
+    // Not "not_found": the room was found, and it is the request that is wrong.
+    // See unknownRole.
+    expect(r.code).toBe("invalid");
     expect(r.reason).toContain("declares no role");
   });
 
@@ -321,7 +323,9 @@ describe("revokeInvite", () => {
 
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.code).toBe("not_found");
+    // Not "not_found": the room was found, and it is the request that is wrong.
+    // See unknownRole.
+    expect(r.code).toBe("invalid");
     expect(r.reason).toContain("declares no role");
   });
 

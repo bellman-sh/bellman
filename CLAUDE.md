@@ -30,6 +30,7 @@ producing bugs. Read it before changing how the pieces fit together.
 - `src/billing/` — Stripe: the webhook, and the ledger of who has paid for what.
 - `src/bridge.ts` / `src/channel.ts` / `src/stop-hook.ts` — the Claude Code client side.
 - `src/worker.ts` — Workers entry. `src/index.ts` + `src/app.ts` — the Node one.
+- `extension/` — the Claude Desktop `.mcpb` bundle: its manifest, and the script that packs it.
 
 ## Writing
 
@@ -62,6 +63,11 @@ or *peers*, where a peer is any other member rather than a counterpart.
 - **Two test programs.** Anything importing `cloudflare:workers` cannot be
   imported by a vitest test; put the shape in a runtime-free module beside it
   (see `src/oauth/storage.ts`).
+- **A new tool means editing `extension/manifest.json`.** The Desktop bundle
+  declares its tools by hand, and Claude Desktop shows that list at install.
+  `tests/extension.test.ts` asserts it against a hook-mode bridge's real
+  surface — the server's tools plus the bridge's own — so the manifest cannot
+  silently fall behind. It already had: the list was missing `bellman_whoami`.
 
 ## Testing
 

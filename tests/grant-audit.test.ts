@@ -175,10 +175,9 @@ describe("grantAuditEntries, field by field", () => {
   });
 
   /**
-   * An entry has to say what moved. plan, role, org_id and source are in the
-   * detail of a grant entry, and so is expires_at; without it a source-only and
-   * an expiry-only change would file the same line, and an org reading its
-   * stream would learn that something changed on the grant but not when
+   * A grant entry states every field the rule compares: plan, role, org_id and
+   * source, and expires_at too. Without it the line for an expiry change would
+   * be silent about the expiry, and an org reading its stream could not see when
    * somebody loses access.
    */
   it.each<[string, PlanGrant | undefined, number | null]>([

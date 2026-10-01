@@ -98,8 +98,8 @@ function entry(
  * org-scoped and a pro purchase has no stream to be written to. Queuing one
  * would put a row in the outbox that has nowhere to go.
  *
- * The grant entry carries every field samePlan compares, so a line says what
- * moved and not only that something did.
+ * The grant entry states every field samePlan compares, as the grant now has
+ * it, so no change files a line that omits the field it changed.
  */
 export function grantAuditEntries(
   previous: PlanGrant | undefined,

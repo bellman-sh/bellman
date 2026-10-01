@@ -362,7 +362,11 @@ import type { BellmanStore } from "./store.js";
  * A route picks 403 from `"forbidden"` rather than pattern-matching English,
  * and a route that forgets a case fails to compile rather than returning 500.
  */
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict";
+// Implementation added a sixth: "invalid", for the caller's own mistake. An
+// undeclared role is not a missing room, and reporting it as not_found makes a
+// route answer 404 for a room that exists.
+export type RoomFailure =
+  | "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
 
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not

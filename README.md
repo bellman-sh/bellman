@@ -33,9 +33,17 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
 
-## Monetization asymmetry
+## What a plan gates
 
-Plans gate session **creation** only (`free`: pair/20-mo/4h · `pro`: swarm/500-mo/72h · `team`: 25 members/30d/org-scoping/audit). **Joining is free on every plan** — the viral loop stays open, the initiator pays. Enterprise value concentrates in `org_only` scoping and the audit trail: cross-org sessions log to *both* orgs' audit streams.
+Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
+
+| | modes | members | lifetime | rooms / month | |
+| --- | --- | --- | --- | --- | --- |
+| `free` | pair | 2 | 4 hours | 20 | |
+| `pro` | pair, swarm | 8 | 72 hours | 500 | |
+| `team` | pair, swarm | 25 | 30 days | 5,000 | `org_only` scoping, audit trail |
+
+A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
 ## Run it
 
@@ -51,7 +59,7 @@ Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** so
 
 Rotate with `npm run rotate-key`. A Worker secret can't be read back, so the map is rebuilt from `~/.config/bellman/identities.json` (identities, no keys) and every key is reminted — which is what you want after a leak anyway. The script backs up the old map, uploads, checks the new key is accepted and the old one is refused, updates the Claude Code MCP entry, and leaves the keys in `~/.config/bellman/keys.json` (mode 600). `--dry-run` shows the plan without touching the server.
 
-**Signing in.** GitHub and Google authenticate the human; Bellman issues its own token. Everyone who signs in gets the default identity — free plan, member role, no org — which is the monetization asymmetry working as designed: they can be invited into a room immediately, they just can't create one.
+**Signing in.** GitHub and Google authenticate the human; Bellman issues its own token. Everyone who signs in gets the default identity — free plan, member role, no org. They can be invited into a room immediately; creating one past the free limits is what needs a plan.
 
 `BELLMAN_USERS` (JSON map of upstream key → identity) names who gets more. `identityFor` tries four keys **in this order**, first match wins:
 

@@ -676,3 +676,39 @@ it("does not answer over RPC for the delivery", async () => {
   // It did not run.
   expect(await indexed("BELL-EVIL-01")).toEqual([undefined]);
 });
+
+/**
+ * The two methods that write what their caller hands them are `#private` as well.
+ * expireIfDue overwrites the session record with the one it is given and queues the
+ * removal of every code in it, and writeEvent writes the event it is given and any extra
+ * rows. Called over RPC with a forged record they would rewrite this room's session and
+ * reach into the registry's index, for anything holding the SESSION binding. The forged
+ * record names another room's live code, so a removal that ran would show. Neither
+ * answers, and neither ran: this object is still empty and the code is still registered.
+ */
+it("does not answer over RPC for the methods that write what their caller supplies", async () => {
+  const store = new DurableObjectStore(env as never);
+  const id = "qs_rpc_writes";
+  await store.createSession(session({ id: "qs_victim", joinCodes: oneCode(A, "peer_b") }));
+  const stub = sessionStub(id) as unknown as
+    Record<string, (...args: unknown[]) => Promise<unknown>>;
+  expect(await stub.getSession()).toBeUndefined();
+  expect(await indexed(A)).toEqual(["qs_victim"]);
+
+  // A record that is lapsed and open, so expireIfDue would act on it if it could be reached.
+  const { events: _events, ...forged } = session({
+    id, expiresAt: 1, joinCodes: { peer_b: { code: A, expiresAt: live() } },
+  });
+  const answered = (call: Promise<unknown>) =>
+    call.then(() => "answered", (err: unknown) => String(err));
+  const outcomes = {
+    expireIfDue: await answered(stub.expireIfDue(forged, Date.now())),
+    writeEvent: await answered(stub.writeEvent({ cursor: 1, type: "message" }, { "forged:row": 1 })),
+  };
+
+  expect(outcomes.expireIfDue).toMatch(/does not implement/);
+  expect(outcomes.writeEvent).toMatch(/does not implement/);
+  // Neither ran: nothing was written here, and the other room's code is still registered.
+  expect(await everything(id)).toEqual({});
+  expect(await indexed(A)).toEqual(["qs_victim"]);
+});

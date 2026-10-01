@@ -126,8 +126,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cursor and overwrites the event that is already there. A dropped message in
    * a log whose whole job is not to drop messages, and silent: the cursors stay
    * contiguous, so nothing downstream can tell.
+   *
+   * `#private`, because it writes the event and any extra rows its caller supplies, and a
+   * Durable Object answers RPC for every method on its class: TypeScript's `private` is
+   * erased at compile time.
    */
-  private async writeEvent(
+  async #writeEvent(
     e: SessionEvent,
     extra: Record<string, unknown> = {}
   ): Promise<void> {
@@ -171,7 +175,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async getSession(): Promise<Session | undefined> {
     const s = await this.stored();
     if (!s) return undefined;
-    await this.expireIfDue(s, Date.now());
+    await this.#expireIfDue(s, Date.now());
     const fresh = await this.stored();
     if (!fresh) return undefined;
     return { ...fresh, events: await this.events(0) };
@@ -284,7 +288,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (!s) throw new Error("Unknown session");
     if (s.frozenAt !== null) return null;
     const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
-    await this.writeEvent(event);
+    await this.#writeEvent(event);
     this.wake(event);
     return event;
   }
@@ -323,7 +327,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // interruption leaves the event stored with no key naming it, and the
     // retry that follows appends the duplicate this method exists to prevent.
     const stored: IdempotencyRecord = { cursor: event.cursor, print };
-    await this.writeEvent(event, { [storageKey]: stored });
+    await this.#writeEvent(event, { [storageKey]: stored });
     this.wake(event);
     return { outcome: "appended", event };
   }
@@ -416,7 +420,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
       if (name === "ttl") {
         const s = await this.stored();
-        if (s) await this.expireIfDue(s, now);
+        if (s) await this.#expireIfDue(s, now);
       }
     }
     await this.driver.reArm();
@@ -432,7 +436,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return s && !s.closed ? new Map([["ttl", s.expiresAt]]) : new Map();
   }
 
-  private async expireIfDue(s: StoredSession, now: number): Promise<void> {
+  /**
+   * `#private`, because it overwrites the session with the record it is handed and queues
+   * the registry's removal of every code in it. A Durable Object answers RPC for every
+   * method on its class, so a TypeScript `private` one would let anything holding the
+   * SESSION binding rewrite a room and reach into the registry's index.
+   */
+  async #expireIfDue(s: StoredSession, now: number): Promise<void> {
     if (s.closed || now <= s.expiresAt) return;
     // The write below clears the session's codes, so their rows leave the registry's
     // index with it, in the same transaction. Otherwise an expired room's codes stay
@@ -453,7 +463,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       refId: null,
       at: now,
     };
-    await this.writeEvent(event);
+    await this.#writeEvent(event);
     this.wake(event);
     // Last, so a poll woken above does not wait on the registry. Reached from the
     // alarm and from any read that finds the session lapsed, and both drain here

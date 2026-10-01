@@ -351,32 +351,56 @@ describe("negative control: the same calls with the guard removed", () => {
       expect(s).toBeDefined();
       expect(() => s!.manifest.mode).toThrow(TypeError);
     }
+  });
 
-    // The third read path now crashes inside the lookup itself: resolving a code
-    // per role dereferences joinCodes, which a pre-manifest row has never had.
-    await expect(store.getSessionByJoinCode(LEGACY_CODE)).rejects.toThrow(TypeError);
+  /**
+   * The third read path, and why it does not assert a crash. Resolving a code reads
+   * `joinCodes` first, which a pre-manifest row has never had, so on the plain row the lookup
+   * throws a TypeError. A test that asserted that would be satisfied by a TypeError from
+   * anywhere, a registry that cannot answer included, with the lookup never having reached
+   * the row. So the row gets the one field the lookup reads, and the assertion is the effect
+   * the guard exists to stop: the lookup resolves the code and serves a pre-manifest room.
+   */
+  it("resolves a join code to it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+    const { store } = await worldOn(unguarded, {
+      ...legacyRow(), joinCodes: oneCode(LEGACY_CODE, "peer_b"),
+    });
+
+    expect(await store.getSessionByJoinCode(LEGACY_CODE)).toMatchObject({
+      role: "peer_b", session: { id: LEGACY_ID },
+    });
   });
 
   /**
    * The same again for the two "leaves it alone" tests above, which could otherwise pass
    * because the harness never gave the row to a mutator or to alarm(). Without the guard
-   * the same calls do reach it: a mutator rewrites it, and the alarm crashes on it.
+   * the same calls do reach it and do change it.
    *
-   * The alarm used to expire the row here. It cannot now that a session queues the removal
-   * of its join codes when it expires: expireIfDue reads `joinCodes`, which a pre-manifest
-   * row has never had, so the raw row stops it before it writes anything. That is the
-   * TypeError the read paths show above, and it proves the alarm was handed the row just
-   * as an expiry would have.
+   * The alarm's row carries `joinCodes: {}`, which a real pre-manifest row never had. The
+   * expiry reads that field first, so on the plain row the alarm throws a TypeError before
+   * it writes anything. Asserting the throw would prove less than it seems: any TypeError
+   * from anywhere in the alarm satisfies it, one raised before the row was reached included,
+   * and it stops being true the day the expiry tolerates a row with no `joinCodes`, which is
+   * when the guard is the only thing keeping the alarm from rewriting it. With the field the
+   * alarm gets past that read and does the thing the guard exists to stop: it expires the row.
    */
-  it("lets a mutator rewrite it, and hands it to a due alarm", async () => {
+  it("lets a mutator rewrite it and a due alarm expire it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
 
     const viaMutator = await worldOn(unguarded);
     await viaMutator.legacy.closeSession();
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
-    const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
-    await expect(viaAlarm.legacy.alarm()).rejects.toThrow(TypeError);
+    const viaAlarm = await worldOn(unguarded, {
+      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {},
+    });
+    await viaAlarm.legacy.alarm();
+    const rows = viaAlarm.legacyStorage.snapshot();
+    expect(rows.session).toMatchObject({ closed: true });
+    // Same subset-match pitfall as the test above: assert the clear itself, exactly.
+    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
+    expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
 });
 

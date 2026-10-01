@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { pairUp } from "../helpers/flows.js";
-import { DEV_KEY, Harness, envelopes } from "../helpers/harness.js";
+import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { brief } from "../helpers/fixtures.js";
+import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
 
 /**
  * A creator removing a member. Reads stay open to the person removed — the
@@ -15,6 +16,34 @@ beforeEach(() => {
 afterEach(async () => {
   await h.close();
 });
+
+/** Both phases of joining on `joinCode`. Returns the confirm outcome for the caller to judge. */
+async function join(peer: Peer, joinCode: unknown) {
+  const preview = await peer.call("bellman_connect", { join_code: joinCode });
+  expect(preview.isError, preview.text).toBe(false);
+  return peer.call("bellman_confirm", {
+    connect_token: String(preview.data.connect_token),
+    brief: brief(),
+    capabilities: ["read_context", "receive_messages"],
+  });
+}
+
+/**
+ * A third member of a swarm room, on a fresh code. The one removed has to be
+ * somebody the room can carry on without: bellman_send refuses a room with nobody
+ * else in it, so in a pair room the creator could not say anything afterwards.
+ */
+async function joinThird(s: PairedSession) {
+  const issued = await s.creator.call("bellman_invite", {
+    session_id: s.sessionId,
+    member_id: s.creatorMemberId,
+  });
+  expect(issued.isError, issued.text).toBe(false);
+  const peer = await h.connect(DEV_KEY.outsider);
+  const confirmed = await join(peer, issued.data.join_code);
+  expect(confirmed.isError, confirmed.text).toBe(false);
+  return { peer, memberId: String(confirmed.data.member_id), cursor: Number(confirmed.data.cursor) };
+}
 
 describe("bellman_evict", () => {
   it("removes a member, who then sees why in their own sync", async () => {
@@ -86,11 +115,10 @@ describe("bellman_evict", () => {
   });
 
   // The adapter is a mapping, so what is left to get wrong is a field that stops
-  // following the operation. The tests above read `evicted` and one value of
-  // `code_retired`, and never read `session_status`: a handler that hard-coded
-  // "active" would have passed all four. Each field below is pinned at both ends
-  // of its range, in rooms where the operation answers differently, and the whole
-  // object is compared so a fourth key cannot appear unnoticed.
+  // following the operation: one hard-coded to a value, or one that never takes its
+  // other value. Each field below is pinned at both ends of its range, in rooms
+  // where the operation answers differently, and the whole object is compared so
+  // an extra key cannot appear unnoticed.
   describe("what it reports is the operation's answer, field for field", () => {
     it("says no code was retired, and the room is active, when the seat's door was already shut", async () => {
       // A pair room consumes its code when it fills, so the joiner's seat has none.
@@ -164,6 +192,92 @@ describe("bellman_evict", () => {
     });
   });
 
+  describe("what a refusal says", () => {
+    // The wording lives in evictMember, which serves every transport, and the
+    // handler only relays it. A tool name appended here would be advice that only
+    // an MCP caller can act on; an agent reading "leave the room" already knows
+    // which tool does that.
+    it("tells a creator removing themselves to leave, in words that name no tool", async () => {
+      const s = await pairUp(h);
+
+      const out = await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+      });
+
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain("leave the room");
+      expect(out.text).not.toContain("bellman_");
+      // Refused means nothing was written: they are still in.
+      const room = await h.store.getSession(s.sessionId);
+      expect(room?.members.find((m) => m.memberId === s.creatorMemberId)?.leftAt).toBeNull();
+    });
+  });
+
+  // The description makes two promises about the person removed, and both are
+  // pinned by what happens rather than by the words, so whoever changes the
+  // behaviour has to come back and change the sentence: these fail when they do.
+  describe("what the person removed keeps", () => {
+    it("keeps returning new events to them, including what is said after", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      const out = await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+      });
+      expect(out.isError, out.text).toBe(false);
+      // The control: they really are out. Writing stopped, and reading is the claim.
+      const refused = await third.peer.call("bellman_send", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+        type: "message",
+        payload: { text: "still here?" },
+      });
+      expect(refused.isError).toBe(true);
+
+      const sent = await s.creator.call("bellman_send", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+        type: "message",
+        payload: { text: "said after you were removed" },
+      });
+      expect(sent.isError, sent.text).toBe(false);
+
+      const synced = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+        since_cursor: third.cursor,
+        wait_seconds: 0,
+      });
+      expect(synced.isError, synced.text).toBe(false);
+      const said = envelopes(synced.data.events)
+        .map((e) => e.data as { type: string; payload: { text?: string } })
+        .filter((d) => d.type === "message")
+        .map((d) => d.payload.text);
+      expect(said).toEqual(["said after you were removed"]);
+    });
+
+    it("is not a ban: a fresh code seats them again, under a new handle", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      const out = await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+      });
+      expect(out.isError, out.text).toBe(false);
+      const fresh = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+      });
+      expect(fresh.isError, fresh.text).toBe(false);
+
+      const back = await join(third.peer, fresh.data.join_code);
+
+      expect(back.isError, back.text).toBe(false);
+      expect(back.data.member_id).not.toBe(third.memberId);
+    });
+  });
+
   describe("its declaration", () => {
     // The only tool that removes a person. A client uses the hints to decide how
     // hard to confirm before running a tool, so they are part of its contract.
@@ -183,6 +297,19 @@ describe("bellman_evict", () => {
 
       expect(doc).toContain("Remove someone from a room you created");
       expect(doc).toContain("retires the join code for that member's seat");
+    });
+
+    // The description once said this path "changes nothing". It shuts a live door:
+    // leaving retires no code, so a member who left on their own leaves their seat
+    // open, and a creator who read "nothing" would repeat the call over an open
+    // door and believe it shut. The behaviour is pinned above; this keeps the
+    // sentence from drifting back.
+    it("says that removing someone who already left still shuts their seat's door", async () => {
+      const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+      const doc = tools.find((t) => t.name === "bellman_evict")!.description!.replace(/\s+/g, " ");
+
+      expect(doc).toContain("still retires their seat's code if one is live");
+      expect(doc).not.toContain("changes nothing");
     });
   });
 });

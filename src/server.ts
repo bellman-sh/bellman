@@ -773,9 +773,9 @@ Returns: { left: true, session_status }`,
       title: "Remove a member from a room you created",
       description: `Remove someone from a room you created. Only the room's creator can do this — it is not a manifest verb, so no seat grants it and no role can be given it.
 
-Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. Other roles' codes are unaffected, and so is anyone else already in the room.
+Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. Other roles' codes are unaffected, and so is anyone else already in the room. Removal is not a ban: any live code seats them again.
 
-Reads stay open to the person removed: the history was theirs too, and taking it away is not what removal is for. What stops is writing — their next bellman_send is refused.
+Reads stay open to the person removed: the history was theirs too. That includes what is said after — their bellman_sync keeps returning new events for as long as the room lives — so removal does not keep later messages from them. What stops is writing: their next bellman_send is refused.
 
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
@@ -785,6 +785,9 @@ Errors: only the creator may call it; you cannot evict yourself (use bellman_lea
         session_id: z.string().min(4),
         member_id: z.string().min(4),
       },
+      // idempotentHint is retry-safety, and strictly false in one case: a code minted
+      // for the evicted seat between two calls is live, so the second call retires it.
+      // That is the over-revoke bias, and minting again recovers it.
       annotations: {
         readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false,
       },

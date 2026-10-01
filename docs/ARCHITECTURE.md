@@ -440,6 +440,9 @@ treat these as plus or minus ten percent:
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
+Tool definitions were re-measured on 2026-10-01. The three rows below that one
+are from the original measurement and have not been re-measured since.
+
 `bellman_start` alone is 1,462 tokens, 30% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also

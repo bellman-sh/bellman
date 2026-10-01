@@ -509,18 +509,27 @@ describe("a failed index write does not fail the operation it indexes", () => {
     const { store, registryStorage } = await worldOn(storeDo);
     refuse(registryStorage, ["us:", "um:"]);
 
-    await store.createSession(session({ id: "qs_idx", joinCodes: oneCode("BELL-IDX-01", "peer_b") }));
+    // Distinct creator and seated ids, so the log can be checked for naming the
+    // right person on each index rather than the same one twice.
+    await store.createSession(session({
+      id: "qs_idx",
+      createdBy: "u_creator",
+      members: [member({ userId: "u_seated" })],
+      joinCodes: oneCode("BELL-IDX-01", "peer_b"),
+    }));
 
     expect((await store.getSession("qs_idx"))?.members).toHaveLength(1);
     expect((await store.getSessionByJoinCode("BELL-IDX-01"))?.session.id).toBe("qs_idx");
-    // Neither index took its write, and each failure was said out loud.
+    // Neither index took its write, and each failure was said out loud. A lost
+    // row is identified by the pair (user, room), so the log names both: it is
+    // the only record of what to restore.
     expect(Object.keys(registryStorage.snapshot()).filter((k) => /^(us|um):/.test(k))).toEqual([]);
     expect(logged).toHaveBeenCalledTimes(2);
     expect(logged).toHaveBeenCalledWith(
-      expect.stringContaining("us index write for qs_idx"), expect.any(Error),
+      expect.stringContaining("us index write failed for u_creator in qs_idx"), expect.any(Error),
     );
     expect(logged).toHaveBeenCalledWith(
-      expect.stringContaining("um index write for qs_idx"), expect.any(Error),
+      expect.stringContaining("um index write failed for u_seated in qs_idx"), expect.any(Error),
     );
   });
 
@@ -539,7 +548,7 @@ describe("a failed index write does not fail the operation it indexes", () => {
     expect(await store.sessionsJoinedBy("u_peer", 10)).toEqual([]);
     expect(logged).toHaveBeenCalledTimes(1);
     expect(logged).toHaveBeenCalledWith(
-      expect.stringContaining("um index write for qs_idx"), expect.any(Error),
+      expect.stringContaining("um index write failed for u_peer in qs_idx"), expect.any(Error),
     );
   });
 

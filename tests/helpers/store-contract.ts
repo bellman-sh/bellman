@@ -379,9 +379,9 @@ export function describeStoreContract(
     });
 
     it("keeps two users whose ids share a prefix apart", async () => {
-      // The index is listed by prefix, so `um:u_a:` must stay a prefix of u_a's
-      // own keys only: the separator ends it, and u_ab's rooms cannot leak into
-      // u_a's listing or the reverse.
+      // A user id that is a prefix of another's must not pull the other's rooms
+      // into its listing, or the reverse. Whatever a store keys its index on,
+      // u_a lists only u_a's rooms and u_ab only u_ab's.
       await store.createSession(session({ id: "qs_of_a", createdBy: "u_a", members: [] }));
       await store.createSession(session({ id: "qs_of_ab", createdBy: "u_ab", members: [] }));
       await store.addMember("qs_of_a", member({ memberId: "m_a", userId: "u_a" }));

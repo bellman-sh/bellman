@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { purchaseGrant } from "../src/billing/grants.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
 import type { PlanGrant } from "../src/types.js";
 
@@ -106,20 +107,77 @@ describe("revokeAuditEntries", () => {
  * agree could not tell.
  */
 const billing: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: "cus_1" } };
+const DAY = 86_400_000;
 
 describe("grantAuditEntries, field by field", () => {
   /**
-   * Plan, role and org are the whole comparison. A redelivered Stripe event
-   * rewrites grantedAt and nothing else; an admin saving a grant again changes
-   * who granted it. Neither tells an org anything. The cost is that a change to
-   * source or expiry alone is not recorded either.
+   * grantedBy is who performed the write, and the entry already names that as
+   * its actor, so a second admin re-asserting an identical grant has told the
+   * org nothing new. grantedAt is the brief's case above: every write sets it.
    */
-  it.each<[string, Partial<PlanGrant>]>([
-    ["grantedBy", { grantedBy: "u_other" }],
-    ["source", { source: "purchase" }],
-    ["expiresAt", { expiresAt: NOW + 86_400_000 }],
-  ])("records nothing when only %s differs", (_field, over) => {
-    expect(grantAuditEntries(grant(), grant(over), admin, NOW)).toEqual([]);
+  it("records nothing when only grantedBy differs", () => {
+    expect(grantAuditEntries(grant(), grant({ grantedBy: "u_other" }), admin, NOW)).toEqual([]);
+  });
+
+  /**
+   * Source decides whether billing may still touch a grant. A team admin saving
+   * their own key over a purchase grant leaves plan, role and org as they were
+   * and takes it out of billing's hands for good: putGrantIfSource answers
+   * "conflict" from then on, so the subscription can no longer update or revoke
+   * it. That is what an org's stream is for, and a change of source either way
+   * is one.
+   */
+  it.each<[string, string, string]>([
+    ["a purchased grant being taken over", "purchase", "operator"],
+    ["a grant being handed to billing", "operator", "purchase"],
+  ])("records %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ source: before }), grant({ source: after }), admin, NOW
+    );
+    expect(entries).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
+      action: "plan_granted",
+      detail: {
+        plan: "team", role: "admin", org_id: "org_mine", source: after,
+        replaced_plan: "team", key: "github:4242",
+      },
+    }]);
+  });
+
+  /** Expiry decides when somebody loses access: putting one on, taking it off or moving it is a change. */
+  it.each<[string, number | null, number | null]>([
+    ["none to a date", null, NOW + DAY],
+    ["a date to none", NOW + DAY, null],
+    ["one date to another", NOW + DAY, NOW + 2 * DAY],
+  ])("records an expiry changing from %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ expiresAt: before }), grant({ expiresAt: after }), admin, NOW
+    );
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  /**
+   * Source and expiry count as changes, so the check that a redelivered Stripe
+   * event records nothing has to use billing's own grant, not a fixture that
+   * happens to agree. purchaseGrant stamps grantedAt from the clock and writes
+   * the same source and expiry every time; if that stops being true, every
+   * redelivery starts appearing in the org's stream and this fails. Team only:
+   * a pro purchase has no org, so nothing is recorded for it whatever it says.
+   */
+  it("records nothing for a redelivered team purchase", () => {
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValueOnce(NOW);
+      const first = purchaseGrant("github:4242", "team", "u_github_4242");
+      clock.mockReturnValueOnce(NOW + 5_000);
+      const again = purchaseGrant("github:4242", "team", "u_github_4242");
+      // The clock did move and the grant has an org, or the check below would prove nothing.
+      expect([first.grantedAt, again.grantedAt]).toEqual([NOW, NOW + 5_000]);
+      expect(again.orgId).not.toBeNull();
+      expect(grantAuditEntries(first, again, { actorUserId: "stripe" }, NOW)).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   /**
@@ -196,6 +254,38 @@ describe("revokeAuditEntries, field by field", () => {
       at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
       action: "plan_revoked", detail: { plan: "team", key: "github:4242" },
     }]);
+  });
+});
+
+/**
+ * A falsy org id is no org, as null is. isOrgId rejects "" at the admin route
+ * and billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, and a stored record can lack the field altogether. An entry
+ * filed against such an org could never be delivered, and an undeliverable row
+ * sits at the head of the FIFO queue with every entry behind it.
+ */
+describe.each<[string, string | null]>([
+  ["an empty string", ""],
+  ["no value", undefined as unknown as null],
+])("a grant whose org is %s", (_what, empty) => {
+  const homeless = (over: Partial<PlanGrant> = {}) => grant({ orgId: empty, ...over });
+
+  it("records nothing for a first grant", () => {
+    expect(grantAuditEntries(undefined, homeless(), admin, NOW)).toEqual([]);
+  });
+
+  it("tells only the org a plan arrives in when it had none", () => {
+    const entries = grantAuditEntries(homeless(), grant(), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  it("tells only the org a plan left when it ends up with none", () => {
+    const entries = grantAuditEntries(grant(), homeless({ plan: "pro", role: "member" }), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_revoked"]]);
+  });
+
+  it("records nothing for a revocation", () => {
+    expect(revokeAuditEntries(homeless(), admin, NOW)).toEqual([]);
   });
 });
 

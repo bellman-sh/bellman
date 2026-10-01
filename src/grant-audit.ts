@@ -21,12 +21,42 @@ export interface AuditIntent {
 }
 
 /**
- * Whether a write left plan, role and org as they were. Nothing else is
- * compared: a redelivered Stripe event rewrites grantedAt and nothing more, and
- * an entry for it would say only that nothing happened.
+ * Whether an org has an audit stream to write to. The log is org-scoped, so a
+ * grant with no org has nowhere to be recorded, and an entry filed against one
+ * is a row that can never be delivered: queued, it sits at the head of a FIFO
+ * queue and holds back every entry behind it.
+ *
+ * Null is no org, and so is anything else falsy. isOrgId rejects "" at the admin
+ * route and billing derives its own org id, but putGrant is part of the store
+ * API and checks nothing, so this does not lean on those having run.
+ * grant-index.ts keeps two defences for the org id for the same reason.
+ */
+function hasOrg(orgId: string | null): orgId is string {
+  return Boolean(orgId);
+}
+
+/**
+ * Whether a write left the grant as an org's audit stream would describe it:
+ * plan, role, org, source and expiry. A change of source can take a grant out of
+ * billing's hands, and a change of expiry moves the day somebody loses access,
+ * so neither passes as a repeat.
+ *
+ * Two fields are left out on purpose. grantedAt is Date.now() on every write, so
+ * comparing it would record every redelivered Stripe event, which is the noise
+ * this check exists to remove. grantedBy is who performed the write, and the
+ * entry already carries that as its actor; comparing it would record the same
+ * fact twice, and add a line whenever a second admin re-asserts an identical
+ * grant. (key is not compared either, because previous was read under it.)
  */
 function samePlan(a: PlanGrant | undefined, b: PlanGrant): boolean {
-  return a !== undefined && a.plan === b.plan && a.role === b.role && a.orgId === b.orgId;
+  return (
+    a !== undefined &&
+    a.plan === b.plan &&
+    a.role === b.role &&
+    a.orgId === b.orgId &&
+    a.source === b.source &&
+    a.expiresAt === b.expiresAt
+  );
 }
 
 /**
@@ -59,13 +89,13 @@ function entry(
  * What a guarded grant WRITE should record. `previous` is the grant this write
  * replaced under the same key, or undefined for a first grant.
  *
- * Nothing when plan, role and org are all as they were. When the org moved, the
- * old org gets a revocation — that is the only place it will ever be recorded,
+ * Nothing when samePlan finds the grant as it was. When the org moved, the old
+ * org gets a revocation — that is the only place it will ever be recorded,
  * since the grant is re-homed rather than deleted.
  *
- * An org-less grant records nothing at all: the audit log is org-scoped and a
- * pro purchase has no stream to be written to. Queuing one would park a row
- * that can never be delivered at the head of a FIFO queue.
+ * An org-less grant records nothing at all (see hasOrg): the audit log is
+ * org-scoped and a pro purchase has no stream to be written to. Queuing one
+ * would park a row that can never be delivered at the head of a FIFO queue.
  */
 export function grantAuditEntries(
   previous: PlanGrant | undefined,
@@ -75,12 +105,12 @@ export function grantAuditEntries(
 ): AuditEntry[] {
   if (samePlan(previous, next)) return [];
   const entries: AuditEntry[] = [];
-  if (previous && previous.orgId !== null && previous.orgId !== next.orgId) {
+  if (previous && hasOrg(previous.orgId) && previous.orgId !== next.orgId) {
     entries.push(entry(previous.orgId, next.key, "plan_revoked", intent, {
       plan: previous.plan, reason: "moved to another plan", moved_to: next.orgId,
     }, now));
   }
-  if (next.orgId !== null) {
+  if (hasOrg(next.orgId)) {
     entries.push(entry(next.orgId, next.key, "plan_granted", intent, {
       plan: next.plan, role: next.role, org_id: next.orgId, source: next.source,
       ...(previous ? { replaced_plan: previous.plan } : {}),
@@ -95,6 +125,6 @@ export function revokeAuditEntries(
   intent: AuditIntent,
   now: number
 ): AuditEntry[] {
-  if (removed.orgId === null) return [];
+  if (!hasOrg(removed.orgId)) return [];
   return [entry(removed.orgId, removed.key, "plan_revoked", intent, { plan: removed.plan }, now)];
 }

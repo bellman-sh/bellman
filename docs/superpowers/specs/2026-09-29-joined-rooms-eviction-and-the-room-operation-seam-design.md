@@ -386,9 +386,24 @@ export async function leaveRoom(
 
 export async function audit(
   store: BellmanStore, session: Session, actor: Identity,
-  action: string, detail: Record<string, unknown>
+  action: string, detail: Record<string, unknown>,
+  // Orgs beyond the room's and the actor's. Default [] — every pre-existing
+  // caller is unchanged. Eviction passes the EVICTED member's org, because the
+  // actor is not always the person the entry is about.
+  alsoOrgs?: readonly (string | null)[]
 ): Promise<void>;
 ```
+
+**`alsoOrgs` defaults to nothing, and that is a trap worth naming.** A call that
+omits it compiles and writes fewer rows than it should. D13 tells a route author
+to use this helper precisely so a transport cannot "write it for one org and not
+the other" — and the default makes that outcome reachable without a type error.
+When you add an operation here, ask who the entry is *about*, not only who
+performed it. Eviction is the case where those differ; it will not be the last.
+
+Route rows are not automatically exempt either: an `invite_revoked` detail names
+a role and no person, so it must NOT carry `alsoOrgs` — a row an org cannot
+resolve to anyone is worse than none.
 
 ### `src/server.ts`
 

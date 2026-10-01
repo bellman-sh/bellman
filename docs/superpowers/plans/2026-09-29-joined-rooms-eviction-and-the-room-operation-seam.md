@@ -422,9 +422,13 @@ export async function audit(
   session: Session,
   actor: Identity,
   action: string,
-  detail: Record<string, unknown>
+  detail: Record<string, unknown>,
+  // Added during implementation: orgs beyond the room's and the actor's.
+  // Eviction passes the evicted member's, because the actor is not always the
+  // person the entry is about. Defaults to [] so no earlier caller changes.
+  alsoOrgs: readonly (string | null)[] = []
 ): Promise<void> {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId]);
+  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
   for (const orgId of orgs) {
     if (orgId === null) continue;
     const entry: AuditEntry = {
@@ -1321,7 +1325,8 @@ export async function evictMember(
   const after = (await store.getSession(sessionId)) ?? session;
   if (activeMembers(after).length === 0) await store.closeSession(sessionId);
   await audit(store, session, actor, "member_evicted", {
-    member_id: memberId, room_role: target.roomRole, code_retired: live,
+    member_id: memberId, user_id: target.userId,
+    room_role: target.roomRole, code_retired: live,
   });
 
   const closed = after.closed || activeMembers(after).length === 0;

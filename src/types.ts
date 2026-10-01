@@ -41,6 +41,7 @@ export interface Member {
 export type EventType =
   | "member_joined"
   | "member_left"
+  | "member_evicted"
   | "message"
   | "artifact"
   | "action_request"

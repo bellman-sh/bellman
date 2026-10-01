@@ -108,8 +108,8 @@ export async function audit(
 
 /**
  * The room's closing invariant: with nobody left in it, it is over. Closes the
- * room if so, and returns the status to report. Both successful paths through
- * leaveRoom end here.
+ * room if so, and returns the status to report. Every successful path through
+ * leaveRoom and evictMember ends here.
  */
 async function closeIfEmpty(store: BellmanStore, session: Session): Promise<string> {
   // Re-read: `session` predates whatever the caller has just done to it.
@@ -174,7 +174,11 @@ export async function leaveRoom(
   // Before the close, not after it. The departure is a fact from updateMember
   // on, and a leave that dies at the close should still have its record: the
   // retry cannot write it, so it must not wait on a step that has nothing to do
-  // with it.
+  // with it. The order moves the failure window rather than closing it — if
+  // this throws, an emptied room stays open until a retry heals it, where
+  // closing first would have closed the room and lost the row. That is the
+  // trade taken deliberately: a retry can restore the closing, and nothing can
+  // restore the row.
   await audit(store, session, actor, "member_left", {});
   return succeed({ sessionStatus: await closeIfEmpty(store, session) });
 }
@@ -185,7 +189,10 @@ export async function leaveRoom(
  * the verb.
  *
  * `leaveRoom` does not use it. Leaving needs no verb, and it must work on a
- * closed room so a member can tidy up after one.
+ * closed room so a member can tidy up after one. `evictMember` stays outside
+ * it too: its authority is creator-only, which no verb expresses, and it must
+ * work for a creator who has already left the room, whom a gate that requires
+ * the caller's handle to still be in it would refuse.
  */
 async function gateSeat(
   store: BellmanStore,
@@ -199,7 +206,8 @@ async function gateSeat(
   // sentence a caller reads is unchanged from the old handler; the CODE is what
   // a future HTTP route switches on. A closed room and a missing one are
   // different conditions; folding the first into "not_found" would leave a
-  // route no way to tell them apart.
+  // route no way to tell them apart. Every operation that refuses a closed room
+  // answers "closed", whether it goes through this gate or not.
   if (!session) return refuse("not_found", "session not found or closed.");
   if (session.closed) return refuse("closed", "session not found or closed.");
   if (session.frozenAt !== null) return refuse("frozen", FROZEN);
@@ -326,4 +334,118 @@ export async function revokeInvite(
   }
 
   return succeed({ roles: retired });
+}
+
+/**
+ * The room's creator removes a member.
+ *
+ * Creator-only, and outside the verb set — the same category as closing a
+ * room. Authority over a room as an object, rather than authority to act
+ * within it. An `evict` verb would let a manifest hand eviction to a joiner,
+ * and a room whose preset does that is not one anybody asked for.
+ *
+ * Not an org-admin path either. `Identity.role` is platform authority over an
+ * org and buys nothing inside a room; an org admin is not automatically
+ * anything in a room, and a room's creator need not be an org admin. That is
+ * why the check lives here and not in `src/roles.ts`.
+ *
+ * Removal is soft, as a leave is: the record stays, with `leftAt` set, and
+ * `activeMembers` already reads that as out. Events carry their sender's
+ * `fromMemberId`, `fromUserId` and `fromLabel`, so history reads the same
+ * either way, but deleting the record would leave every earlier event naming a
+ * member the roster no longer holds, to keep the present tidy.
+ */
+export async function evictMember(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  targetMemberId: string,
+): Promise<RoomResult<{ evicted: boolean; codeRetired: string | null; sessionStatus: string }>> {
+  const session = await store.getSession(sessionId);
+  if (!session) return refuse("not_found", "session not found.");
+  if (session.closed) return refuse("closed", "session is closed.");
+  if (session.frozenAt !== null) return refuse("frozen", FROZEN);
+  if (session.createdBy !== actor.userId) {
+    return refuse("forbidden", "only the person who created this room can remove a member from it.");
+  }
+
+  // A direct lookup, NOT findMember: that helper requires the handle to belong
+  // to the caller, which is the one thing eviction has to do differently.
+  const target = session.members.find((m) => m.memberId === targetMemberId);
+  if (!target) return refuse("not_found", "no member with that member_id is in this room.");
+  if (target.userId === actor.userId) {
+    return refuse("forbidden", "you cannot evict yourself — use bellman_leave.");
+  }
+
+  if (target.leftAt !== null) {
+    // The same contract as leaveRoom's early return: it is for not saying the
+    // removal twice, not licence to skip the closing. A retry landing here
+    // closes a room an interrupted eviction left empty and open. See
+    // leaveRoom for why only the closing is restored, and #59 for the outbox
+    // marker that would complete it.
+    return succeed({
+      evicted: true,
+      codeRetired: null,
+      sessionStatus: await closeIfEmpty(store, session),
+    });
+  }
+
+  // The door shuts BEFORE the member is recorded out, and that order is the
+  // point. `leftAt` is the commit point: once it is set, every retry takes the
+  // early return above, so anything not done by then is never done. Retiring
+  // the code afterwards would mean a crash in between leaves the member out
+  // with their seat's door still open — the removal that undoes itself, which
+  // is the thing this operation exists to prevent, and nothing could heal it.
+  // This order fails the other way: member still in, door shut, and a retry
+  // finishes the eviction. It finds the code already gone, so what it records
+  // under-reports the retirement — the end state is right and the record is
+  // thin. Over-revoking is recoverable by minting again; under-revoking is not.
+  const rec = session.joinCodes[target.roomRole];
+  const live = rec !== undefined && Date.now() <= rec.expiresAt;
+  if (live) await store.consumeJoinCode(sessionId, target.roomRole);
+
+  await store.updateMember(sessionId, targetMemberId, { leftAt: Date.now() });
+
+  // The events read in the order a person would tell it — the member went,
+  // then the door shut — even though the store writes went the other way. A
+  // null return means the room froze in the gap; the member is already out, so
+  // it is tolerated rather than unwound.
+  await store.appendEvent(sessionId, {
+    type: "member_evicted",
+    // No member handle to name: creator authority is on the user, and a
+    // creator who has left the room still holds it. "system" is the existing
+    // marker for a server-originated event; the creator is in fromUserId.
+    fromMemberId: "system",
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
+    refId: null,
+  });
+  if (live) {
+    await store.appendEvent(sessionId, {
+      type: "invite_revoked",
+      fromMemberId: "system",
+      fromUserId: actor.userId,
+      fromLabel: actor.label,
+      payload: { roles: [target.roomRole] },
+      refId: null,
+    });
+  }
+
+  // Before the close, as in leaveRoom: the eviction is a fact from
+  // updateMember on, and its record must not wait on a step unrelated to it.
+  // The order moves the failure window rather than closing it — if this throws,
+  // an emptied room stays open until a retry heals it, where closing first
+  // would have closed the room and lost the row. That is the trade taken
+  // deliberately: a retry can restore the closing, and nothing can restore the
+  // row.
+  await audit(store, session, actor, "member_evicted", {
+    member_id: targetMemberId, room_role: target.roomRole, code_retired: live,
+  });
+
+  return succeed({
+    evicted: true,
+    codeRetired: live ? target.roomRole : null,
+    sessionStatus: await closeIfEmpty(store, session),
+  });
 }

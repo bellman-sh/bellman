@@ -106,11 +106,8 @@ export async function audit(
 
 /**
  * The room's closing invariant: with nobody left in it, it is over. Closes the
- * room if so, and returns the status to report.
- *
- * Both successful paths through leaveRoom end here. The first departure closes
- * the room behind it, and a retry has to be able to do the same for one that
- * died before it got there.
+ * room if so, and returns the status to report. Both successful paths through
+ * leaveRoom end here.
  */
 async function closeIfEmpty(store: BellmanStore, session: Session): Promise<string> {
   // Re-read: `session` predates whatever the caller has just done to it.
@@ -132,10 +129,9 @@ async function closeIfEmpty(store: BellmanStore, session: Session): Promise<stri
  * A member departs. The room closes behind the last one out.
  *
  * Reads stay open to a member who left — history is still theirs — so a
- * departed handle is not an error here; leaving again is a no-op. It announces
- * and audits nothing, so a caller retrying after a lost response does not tell
- * the room the same departure twice. The only thing a repeat can still do is
- * finish closing a room the first attempt left empty.
+ * departed handle is not an error here. Leaving again is a no-op — it
+ * announces and audits nothing — except that it closes a room the first
+ * attempt left empty and open.
  */
 export async function leaveRoom(
   store: BellmanStore,
@@ -149,13 +145,14 @@ export async function leaveRoom(
   if (!me) return refuse("forbidden", "member_id is not yours.");
 
   if (me.leftAt !== null) {
-    // Nothing to announce or audit, which is all this early return is for: a
-    // retry must not say the same departure twice. It does not excuse the room
-    // from closing. A leave that died between recording the departure and
-    // closing the room leaves it empty but open, and a retry landing here is
-    // how that heals. The announcement and audit row are not replayed; nothing
-    // records whether the first attempt got that far, and a wrong guess says it
-    // twice.
+    // The early return is for not saying a departure twice, and no more than
+    // that: it is not licence to skip the closing. A leave that died between
+    // recording the departure and closing the room leaves it empty but open,
+    // and a retry landing here is how that heals. Only the closing is restored,
+    // on purpose. The announcement could be replayed safely through
+    // appendEventOnce under a stable key, but this path writes it with
+    // appendEvent, and the audit row has no idempotent write at all. The outbox
+    // marker that would complete the repair is #59.
     return succeed({ sessionStatus: await closeIfEmpty(store, session) });
   }
 
@@ -172,7 +169,10 @@ export async function leaveRoom(
     refId: null,
   });
 
-  const status = await closeIfEmpty(store, session);
+  // Before the close, not after it. The departure is a fact from updateMember
+  // on, and a leave that dies at the close should still have its record: the
+  // retry cannot write it, so it must not wait on a step that has nothing to do
+  // with it.
   await audit(store, session, actor, "member_left", {});
-  return succeed({ sessionStatus: status });
+  return succeed({ sessionStatus: await closeIfEmpty(store, session) });
 }

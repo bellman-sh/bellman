@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { member, session } from "./helpers/fixtures.js";
 import { MemoryStore } from "../src/store.js";
-import { activeMembers, leaveRoom } from "../src/rooms.js";
+import { activeMembers, audit, leaveRoom } from "../src/rooms.js";
 import type { Identity } from "../src/types.js";
 
 /**
@@ -34,7 +34,7 @@ describe("leaveRoom", () => {
     if (!r.ok) return;
     expect(r.value.sessionStatus).toBe("active");
     const after = await store.getSession("qs_test");
-    expect(after?.members.find((m) => m.memberId === "m_peer")?.leftAt).not.toBeNull();
+    expect(after?.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
   });
 
   it("refuses a handle that belongs to someone else", async () => {
@@ -79,7 +79,7 @@ describe("leaveRoom", () => {
     expect(r.value.sessionStatus).toBe("closed");
   });
 
-  it("announces and audits a departure once, however often the call is repeated", async () => {
+  it("announces and audits nothing more when a completed leave is repeated", async () => {
     await store.createSession(session({
       members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -94,20 +94,24 @@ describe("leaveRoom", () => {
     expect(rows.filter((a) => a.action === "member_left")).toHaveLength(1);
   });
 
-  // A leave that died after announcing and before closing leaves the room empty
-  // but open. The retry is how it heals, and it has to heal without announcing
-  // a second time: that is the one thing the early return is there to prevent.
+  // A leave that died after announcing and auditing, and before closing, leaves
+  // the room empty but open. The retry is how it heals, and it has to heal
+  // without saying the departure a second time: that is what the early return
+  // is there to prevent.
   it("closes a room a half-completed leave left empty, without announcing again", async () => {
     await store.createSession(session({ members: [member({ leftAt: Date.now() })] }));
+    const before = (await store.getSession("qs_test"))!;
     await store.appendEvent("qs_test", {
       type: "member_left", fromMemberId: "m_creator", fromUserId: "u_jesse",
       fromLabel: "jesse@codenerd", payload: { label: "jesse@codenerd" }, refId: null,
     });
-    const before = (await store.getSession("qs_test"))!;
-    expect(before.closed, "setup: the room should still be open").toBe(false);
-    expect(activeMembers(before), "setup: nobody should be in it").toHaveLength(0);
+    await audit(store, before, jesse, "member_left", {});
     const eventsBefore = await store.eventsAfter("qs_test", 0);
     const auditBefore = await store.auditForOrg("org_codenerd", 50);
+    expect(before.closed, "setup: the room should still be open").toBe(false);
+    expect(activeMembers(before), "setup: nobody should be in it").toHaveLength(0);
+    expect(eventsBefore, "setup: the departure should already be announced").toHaveLength(1);
+    expect(auditBefore, "setup: the departure should already be audited").toHaveLength(1);
 
     const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
 
@@ -117,6 +121,33 @@ describe("leaveRoom", () => {
     expect((await store.getSession("qs_test"))?.closed).toBe(true);
     expect(await store.eventsAfter("qs_test", 0)).toEqual(eventsBefore);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual(auditBefore);
+  });
+
+  // The departure is a fact from the moment it is recorded, so its audit row is
+  // written then and not behind the room's closing. A leave that dies at the
+  // close keeps its record, which the retry has no way to write; all the retry
+  // has to do is finish the close. This builds that state by failing the real
+  // close, where the case above builds it by hand.
+  it("keeps the audit row of a leave that failed at the close, and the retry finishes closing", async () => {
+    await store.createSession(session({ members: [member()] }));
+    vi.spyOn(store, "closeSession").mockRejectedValueOnce(new Error("close failed"));
+
+    await expect(leaveRoom(store, jesse, "qs_test", "m_creator")).rejects.toThrow("close failed");
+
+    const afterFailure = await store.auditForOrg("org_codenerd", 50);
+    expect(afterFailure.filter((a) => a.action === "member_left")).toHaveLength(1);
+    expect((await store.getSession("qs_test"))?.closed, "the failed close leaves the room open").toBe(false);
+
+    const retry = await leaveRoom(store, jesse, "qs_test", "m_creator");
+
+    expect(retry.ok, JSON.stringify(retry)).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.value.sessionStatus).toBe("closed");
+    expect((await store.getSession("qs_test"))?.closed).toBe(true);
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "member_left")).toHaveLength(1);
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.filter((a) => a.action === "member_left")).toHaveLength(1);
   });
 
   // The other edge of the same repair: a departed member repeating the call must

@@ -44,6 +44,14 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
  */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 
+/**
+ * WebSocket.readyState from CLOSING (2) up, CLOSING and CLOSED: the socket is on
+ * its way out or gone. A literal, and not WebSocket.CLOSING, so this does not
+ * depend on which WebSocket global the program has: the Workers runtime's, or
+ * Node's under the tests. Both use 2 and 3.
+ */
+const WS_CLOSING = 2;
+
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -277,9 +285,10 @@ export class SessionDO extends DurableObject {
    * constructor).
    *
    * After this close the runtime goes on listing the socket until its peer
-   * acknowledges, and a send to it throws. Measured: still listed 23 s on, for
-   * a peer that never answered. wake() sends to each socket inside its own try,
-   * so a socket in that state costs one logged error per append and nothing else.
+   * acknowledges, reading CLOSING, and a send to it throws. Measured: still
+   * listed 23 s on, for a peer that never answered, and the same on an instance
+   * revived after eviction. wake() skips a socket that reads CLOSING or CLOSED,
+   * so one that has sent a frame costs the room no send and no log line.
    */
   async webSocketMessage(ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
     ws.close(1003, "This socket is receive-only. Send with bellman_send over /mcp.");
@@ -510,12 +519,27 @@ export class SessionDO extends DurableObject {
       // One socket must not starve the rest. getWebSockets() returns a list, and
       // a send that threw would end this loop with every later socket missing
       // the event, after the waiter arm had run and the event was stored. So
-      // each socket is its own try: log, skip, carry on. A send does throw in
-      // workerd: to a socket webSocketMessage has closed for sending, which the
-      // runtime goes on listing until its peer acknowledges. The cursor moves
-      // only after a send that returned, and a reconnect replays from the
-      // cursor its client names (fetch).
+      // each socket is its own try: log, skip, carry on. A send can still throw,
+      // for a socket that closes between the readyState check below and the
+      // send. The cursor moves only after a send that returned, and a reconnect
+      // replays from the cursor its client names (fetch).
       try {
+        // A socket that is closing or closed is skipped, before anything is read
+        // from it, and is not an error worth a log line. The common case is one
+        // webSocketMessage has closed, and a client sending a frame is what the
+        // receive-only rule exists for, so this is a normal path: the runtime
+        // goes on listing the socket until its peer acknowledges, reading
+        // CLOSING (still listed 23 s on for a peer that never did, and the same
+        // on an instance revived after eviction; measured), and a send to it
+        // throws. Left to the catch below, a client that sends again and again
+        // is one logged failure per append.
+        //
+        // That is all this decides: do not bother. It says nothing about what a
+        // socket has received, and one can close between this check and the
+        // send, which is what the catch is for. Only CLOSING and CLOSED skip, so
+        // a reading nobody expected still sends and delivery cannot stop
+        // silently on it.
+        if (ws.readyState >= WS_CLOSING) continue;
         const att = ws.deserializeAttachment() as SocketAttachment | null;
         // Fail closed on a missing attachment. fetch() attaches before it sends,
         // so every accepted socket has one; a null here means something is

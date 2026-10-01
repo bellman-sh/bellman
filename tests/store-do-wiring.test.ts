@@ -176,7 +176,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
  * socket open. A close the runtime would refuse therefore fails here too, with
  * the runtime's own message, instead of passing. send() THROWS after close(),
  * while the runtime goes on listing the socket until its peer acknowledges the
- * close.
+ * close, and readyState reads CLOSING for that whole time.
  */
 const MAX_ATTACHMENT_BYTES = 16384;
 const MAX_CLOSE_REASON_BYTES = 123;
@@ -187,6 +187,12 @@ function fakeSocket() {
   return {
     sent,
     get closed() { return closed; },
+    // OPEN (1) until close(), CLOSING (2) after it. That is what workerd reads on
+    // a socket whose peer has not acknowledged a close: from the close until the
+    // ack, on the instance that closed it and on one revived after eviction
+    // (measured, 1.20260926.1). The fake has no peer to acknowledge, so it never
+    // reaches CLOSED (3); a test that needs 3 defines the property.
+    get readyState() { return closed ? 2 : 1; },
     send: (data: string) => {
       if (closed) throw new Error("Can't call WebSocket send() after close().");
       sent.push(data);
@@ -1147,12 +1153,11 @@ describe("wake: socket delivery", () => {
   });
 
   it("does not let a socket that throws starve the others, or fail the append", async () => {
-    // A send does throw in workerd: to a socket that webSocketMessage has closed
-    // for sending (the receive-only rule) and whose peer has not yet
-    // acknowledged, which the runtime goes on listing. "leaves delivery to the
-    // other members alone" under "receive-only" drives that cause; this one
-    // throws from the fake directly, so it holds whatever the cause. If a
-    // throw ended the loop, getWebSockets() returns a list and every later
+    // A send can throw in workerd: to a socket that closed between wake()'s
+    // readyState check and its send, which "wake() and a socket that
+    // webSocketMessage has closed" under "receive-only" drives. This one throws
+    // from the fake on a socket that reads OPEN, so it holds whatever the cause.
+    // If a throw ended the loop, getWebSockets() returns a list and every later
     // socket would miss the event, after the waiter arm had run and the event
     // was stored, and the append would fail for a sender whose message is safe.
     const { doi, ctx, post } = await world();
@@ -1311,28 +1316,83 @@ describe("receive-only", () => {
     expect(ctx.autoResponses[0]).toMatchObject({ request: "ping", response: "pong" });
   });
 
-  it("leaves delivery to the other members alone once one socket is closed for sending", async () => {
-    // After webSocketMessage closes a socket, the runtime goes on listing it
-    // until its peer acknowledges, and a send to it throws (measured in workerd;
-    // the fake does the same). wake() rides that out socket by socket: the
-    // others get the event and the append succeeds.
-    const { doi, ctx } = await world();
-    await doi.fetch(upgrade("m2"));
-    await doi.webSocketMessage(ctx.sockets[0] as never, "anything");
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      await expect(doi.appendEvent({
+  describe("wake() and a socket that webSocketMessage has closed", () => {
+    // A client sending a frame is the expected case (D1), so a socket closed 1003
+    // is a normal path and not an edge. The runtime goes on listing it until its
+    // peer acknowledges, reading CLOSING, and a send to it throws (measured in
+    // workerd, and modelled by the fake). Left to the per-socket catch, every
+    // append in that window logs a failed delivery for it, and a client that
+    // reconnects and sends again becomes sustained error noise.
+    const post = (doi: InstanceType<typeof storeDo.SessionDO>, n: number) =>
+      doi.appendEvent({
         type: "message", fromMemberId: "m9", fromUserId: "u9",
-        fromLabel: "peer", payload: { n: 1 }, refId: null,
-      })).resolves.toMatchObject({ cursor: 1 });
+        fromLabel: "peer", payload: { n }, refId: null,
+      });
 
-      expect(ctx.sockets[1].sent).toHaveLength(1);
-      expect(ctx.sockets[0].sent).toEqual([]);
-      expect(log).toHaveBeenCalledTimes(1);
-      expect(String(log.mock.calls[0][1])).toMatch(/send\(\) after close\(\)/);
-    } finally {
-      log.mockRestore();
-    }
+    // Three members' sockets: [0] and [2] open, [1] has sent a frame and been closed.
+    const fanOut = async () => {
+      const { doi, ctx } = await world();
+      await doi.fetch(upgrade("m2"));
+      await doi.fetch(upgrade("m3"));
+      await doi.webSocketMessage(ctx.sockets[1] as never, "anything");
+      return { doi, ctx };
+    };
+
+    it.each([
+      ["closing", undefined],
+      ["closed", 3],
+    ])("skips a socket that is %s: no send, no log, and its open peers still get the event", async (_state, forced) => {
+      const { doi, ctx } = await fanOut();
+      const gone = ctx.sockets[1];
+      if (forced !== undefined) Object.defineProperty(gone, "readyState", { value: forced });
+      const send = vi.spyOn(gone, "send");
+      const read = vi.spyOn(gone, "deserializeAttachment");
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(post(doi, 1)).resolves.toMatchObject({ cursor: 1 });
+        // One comparison, with the open peers' delivery in it: "no send, no log"
+        // alone is satisfied by a wake() that delivers to nobody.
+        expect({
+          openPeersGot: [ctx.sockets[0].sent.length, ctx.sockets[2].sent.length],
+          sendsTried: send.mock.calls.length,
+          attachmentsRead: read.mock.calls.length,
+          logged: log.mock.calls.length,
+        }).toEqual({ openPeersGot: [1, 1], sendsTried: 0, attachmentsRead: 0, logged: 0 });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("still contains a send that fails after the check passed", async () => {
+      // A socket can close between the readyState check and the send, and that is
+      // what the per-socket catch is for. Forced to read OPEN, the closed fake
+      // passes the check and its send throws as workerd's does: the failure is
+      // logged once, not swallowed, and nobody else loses the event.
+      const { doi, ctx } = await fanOut();
+      Object.defineProperty(ctx.sockets[1], "readyState", { value: 1 });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(post(doi, 1)).resolves.toMatchObject({ cursor: 1 });
+        expect({
+          openPeersGot: [ctx.sockets[0].sent.length, ctx.sockets[2].sent.length],
+          logged: log.mock.calls.length,
+          error: String(log.mock.calls[0]?.[1]),
+        }).toEqual({
+          openPeersGot: [1, 1], logged: 1, error: expect.stringMatching(/send\(\) after close\(\)/),
+        });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("sends to a socket whose readyState is nothing it recognises", async () => {
+      // Skipping rests on positive knowledge that a socket is closing, and only
+      // on that. A reading nobody expected must not silently stop delivery.
+      const { doi, ctx } = await world();
+      Object.defineProperty(ctx.sockets[0], "readyState", { value: undefined });
+      await post(doi, 1);
+      expect(ctx.sockets[0].sent).toHaveLength(1);
+    });
   });
 
   describe("when the peer closes, or the connection drops or breaks", () => {

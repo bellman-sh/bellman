@@ -532,20 +532,20 @@ export function createBridge(opts: BridgeOptions) {
         if (out.session_status === "closed") disarm(memberId);
         /**
          * An agent that syncs for itself can be the one who learns it was
-         * evicted, and it has to retire the handle here rather than leave that
-         * to the watcher: seenThrough has just moved the watcher's cursor past
-         * the event, so the watcher would never see the event it retires on and
-         * would poll a room this member is out of for the life of the process.
-         * Nothing is lost by it. The agent has the event in the result it is
-         * about to be handed, which is the delivery the watcher's order
-         * (deliver, then retire) exists to guarantee.
+         * evicted, and it has to record that here rather than leave it to the
+         * watcher: seenThrough has just moved the watcher's cursor past the
+         * event, so the watcher would never see the event that tells it to stop,
+         * and would poll a room this member is out of for the life of the
+         * process. Nothing is lost by it. The agent has the event in the result
+         * it is about to be handed, which is the delivery the watcher's order
+         * (deliver, then stop) exists to guarantee.
          */
-        if (showsEvictionOf(out.events, memberId)) retire(memberId);
+        if (showsEvictionOf(out.events, memberId)) markDeparted(memberId);
         break;
       }
       case "bellman_leave":
         // The membership is over, whatever the agent syncs afterwards: see `departed`.
-        retire(memberId);
+        markDeparted(memberId);
         break;
     }
   }
@@ -575,7 +575,7 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   /** The membership behind this handle ended: stop watching it for good. See `departed`. */
-  function retire(memberId: string): void {
+  function markDeparted(memberId: string): void {
     departed.add(memberId);
     disarm(memberId);
   }
@@ -706,16 +706,17 @@ export function createBridge(opts: BridgeOptions) {
        *
        * Nothing else would stop it: bellman_sync keeps answering a member who
        * is out, because reads stay open to them, and the room is not closed.
-       * A bellman_leave the agent called would have retired this watcher on
+       * A bellman_leave the agent called would have disarmed this watcher on
        * the way past; an eviction is a thing that happened TO this member, so
        * the event is the only signal there is. An agent's own bellman_sync can
        * be the one to receive it, which observe() answers the same way.
        *
-       * Retired, not just disarmed, so that a sync the agent makes afterwards
-       * cannot start a watcher on a room this member is out of: see `departed`.
+       * Marked departed, not just disarmed, so that a sync the agent makes
+       * afterwards cannot start a watcher on a room this member is out of: see
+       * `departed`.
        */
       if (showsEvictionOf(out.events, w.memberId)) {
-        retire(w.memberId);
+        markDeparted(w.memberId);
         return;
       }
 

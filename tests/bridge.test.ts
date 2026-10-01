@@ -399,8 +399,8 @@ describe("channel delivery", () => {
 
   // A member who is out can still read, so a later sync of theirs answers. The first three cases
   // below are the three places the bridge learns a membership ended, and each has to leave that
-  // answer unable to start a watcher. The fourth is the opposite kind of stop, one that is not a
-  // retirement and has to re-arm, like the rejected connection in "a watcher whose poll is
+  // answer unable to start a watcher. The fourth is the opposite kind of stop: it does not end the
+  // membership, so it has to re-arm, like the rejected connection in "a watcher whose poll is
   // rejected gives up ..., and a tool call recovers it".
 
   it("does not start watching again for a member evicted from the room", async () => {
@@ -424,7 +424,7 @@ describe("channel delivery", () => {
 
   it("does not start watching again after the agent's own sync showed the eviction", async () => {
     // Parked, as above: only the agent's own syncs reach the bridge, so the first one is what
-    // retires the handle.
+    // records the departure.
     const polls = parkedPolls(DEV_KEY.peer);
     const a = await open(DEV_KEY.jesse);
     const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
@@ -466,7 +466,7 @@ describe("channel delivery", () => {
   it("a watcher whose sync is refused as not its own stops, and a later tool call starts it again", async () => {
     // "Not yours" is about who is asking, as when a different sign-in holds the connection, and not
     // about whether the member is still in. Signing back in has to be able to start the watch again,
-    // so this stop is not a retirement.
+    // so this stop does not end the membership.
     let refusing = true;
     const remote = async (): Promise<Remote> => {
       const real = await remoteFor(store, DEV_KEY.jesse);

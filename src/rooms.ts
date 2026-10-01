@@ -411,7 +411,10 @@ export async function evictMember(
   const target = session.members.find((m) => m.memberId === targetMemberId);
   if (!target) return refuse("not_found", "no member with that member_id is in this room.");
   if (target.userId === actor.userId) {
-    return refuse("forbidden", "you cannot evict yourself — use bellman_leave.");
+    // Names no tool and no route. This module serves every transport, and a panel
+    // user cannot call an MCP tool: advice naming one is advice half the callers
+    // cannot act on. An agent reading "leave the room" knows which tool does that.
+    return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
   }
 
   // A code that has expired is not a live one, though nothing prunes it (see

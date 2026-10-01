@@ -11,7 +11,8 @@ import {
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
 import {
-  FROZEN, activeMembers, audit, findMember, issueInvite, leaveRoom, revokeInvite, sessionStatus,
+  FROZEN, activeMembers, audit, evictMember, findMember, issueInvite, leaveRoom, revokeInvite,
+  sessionStatus,
 } from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
@@ -762,6 +763,43 @@ Returns: { left: true, session_status }`,
     async ({ session_id, member_id }): Promise<ToolResult> => {
       const r = await leaveRoom(s, identity, session_id, member_id);
       return r.ok ? ok({ left: true, session_status: r.value.sessionStatus }) : fail(r.reason);
+    }
+  );
+
+  // -------------------------------------------------------------- bellman_evict
+  server.registerTool(
+    "bellman_evict",
+    {
+      title: "Remove a member from a room you created",
+      description: `Remove someone from a room you created. Only the room's creator can do this — it is not a manifest verb, so no seat grants it and no role can be given it.
+
+Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. Other roles' codes are unaffected, and so is anyone else already in the room.
+
+Reads stay open to the person removed: the history was theirs too, and taking it away is not what removal is for. What stops is writing — their next bellman_send is refused.
+
+Args: session_id, member_id (THEIRS, not yours)
+Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
+Everyone in the room sees a member_evicted event, so removal is never silent, and the person removed sees it too. Removing the last active member closes the room.
+Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
+      inputSchema: {
+        session_id: z.string().min(4),
+        member_id: z.string().min(4),
+      },
+      annotations: {
+        readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false,
+      },
+    },
+    async ({ session_id, member_id }): Promise<ToolResult> => {
+      // member_id is the TARGET's, not the caller's: every sibling tool takes the
+      // caller's own handle in this slot. The creator-only check lives in evictMember.
+      const r = await evictMember(s, identity, session_id, member_id);
+      return r.ok
+        ? ok({
+            evicted: r.value.evicted,
+            code_retired: r.value.codeRetired,
+            session_status: r.value.sessionStatus,
+          })
+        : fail(r.reason);
     }
   );
 

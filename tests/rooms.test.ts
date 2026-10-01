@@ -432,7 +432,11 @@ describe("evictMember", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe("forbidden");
-    expect(r.reason).toContain("bellman_leave");
+    expect(r.reason).toContain("cannot evict yourself");
+    expect(r.reason).toContain("leave the room");
+    // This module serves every transport, and a panel user cannot call an MCP
+    // tool: a refusal that names one hands half its callers advice they cannot act on.
+    expect(r.reason).not.toContain("bellman_");
   });
 
   /** REVIEW FOCUS 3 — authority is on createdBy, not on holding a live seat. */

@@ -218,10 +218,31 @@ guard `bellman_invite` already applies on revoke.
 - **Evicting yourself is refused**, pointing at `bellman_leave`. The two
   operations write different events, and a creator who wants out should produce
   the honest one.
-- **Evicting an already-departed member succeeds and changes nothing** — no
-  second `leftAt`, no event, no audit row. `bellman_leave` is idempotent the
-  same way, and a panel that retries a request should not double-write a
-  timeline.
+- **Evicting an already-departed member succeeds and does not repeat itself** —
+  no second `leftAt`, no second `member_evicted`, no second audit row for the
+  removal. `bellman_leave` is idempotent the same way, and a panel that retries
+  a request should not double-write a timeline.
+
+  **Amended during implementation.** This decision originally said the path
+  "changes nothing", and that turned out to be wrong in a way that undid the
+  operation. `leaveRoom` does not retire join codes, so a member who leaves
+  voluntarily leaves their seat's code live *and* frees the seat. A creator
+  evicting them then got `evicted: true` over an open door, and the person could
+  redeem the same code and walk back in — D9's "removal that undoes itself",
+  reached by the one path D9 did not consider. It was invisible too, because
+  `codeRetired: null` already meant "the code had expired".
+
+  So the early return heals rather than merely returning: it retires a live code
+  for that seat, announces `invite_revoked`, audits it, and reports
+  `codeRetired` truthfully. `member_evicted` does not re-fire — the removal
+  already happened, and an announced removal that did not happen is worse than a
+  silent one. The door's audit row carries no extra org, unlike the removal's:
+  its detail names a role and no person, and a row an org cannot resolve to
+  anyone is worse than none.
+
+  The general rule, which also governs `leaveRoom`'s early return: **an early
+  return exists so an operation does not say the same thing twice, never so it
+  can skip an invariant.**
 - **Evicting the last active member closes the room**, by the same re-read that
   `bellman_leave` performs. An empty room is over however it emptied.
 

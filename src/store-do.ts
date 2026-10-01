@@ -53,6 +53,46 @@ export class SessionDO extends DurableObject {
   private waiters: Waiter[] = [];
 
   /**
+   * Registers the ping auto-response, once per construction and not in fetch
+   * beside the accept.
+   *
+   * The runtime answers a text frame "ping" with "pong" itself: no JavaScript
+   * runs and this object is not constructed. Without it a client keepalive
+   * reaches this object, and a ping to an evicted one revives it (measured),
+   * which undoes the saving this socket exists for. Nothing would fail:
+   * delivery works, the tests pass, and the only symptom is the bill. Any frame
+   * that is not that text reaches webSocketMessage and is closed, so a client's
+   * keepalive has to be exactly that.
+   *
+   * Where to register was settled against workerd 1.20260926.1 at compat date
+   * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
+   * left idle for 25 to 30 s so they were evicted. The Worker counted
+   * constructor runs from outside the objects, which is how "answered by the
+   * runtime" was told from "answered by us".
+   *  - Registered here, before any socket exists, it is answered by the
+   *    runtime. A control that never registered had the ping delivered to its
+   *    handler, so the probe could tell the two apart.
+   *  - The runtime holds the pair for the object, not per socket and not in
+   *    this instance. A registration made after a socket was accepted covers
+   *    that socket, and an object revived by a frame or by a request, whose
+   *    constructor had not set it, still had it. So registering in fetch would
+   *    work too, and setting it again on every revival here is redundant, not
+   *    required.
+   *  - It does not keep an idle object resident. One that registered and never
+   *    held a socket was evicted like one that never registered.
+   *
+   * Here rather than in fetch because it is state of the object. This covers a
+   * socket however it is accepted, fetch being the only accept site today, and
+   * leaves fetch's read, attach, accept and send to be about the socket. The
+   * cost is one small object and one call per construction, a poll-only room's
+   * included. Not measured.
+   */
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
+
+  /**
    * The one raw read of the "session" record. Everything in this class reads it
    * through here, so hydrateStoredSession's rules reach all of it: getSession
    * (and the facade's getSession and getSessionByJoinCode with it), every
@@ -212,6 +252,80 @@ export class SessionDO extends DurableObject {
 
     return new Response(null, { status: 101, webSocket: client });
   }
+
+  /**
+   * The socket is receive-only, and this is where that is enforced rather than
+   * merely intended.
+   *
+   * A send over the socket would need bellman_send's verb check, frozen guard,
+   * idempotency record, payload-depth limit and audit write reimplemented at a
+   * second entry point and kept behaviourally identical to the first (spec D1).
+   * Adding that is a deliberate act, and it starts here: whoever adds a
+   * protocol message has to take this close out first.
+   *
+   * Closed, not ignored: an ignored frame leaves a client believing it spoke.
+   * 1003 is "unsupported data", and the reason is what a developer reads in
+   * their client's close event, so it says where to send. Nothing in the frame
+   * is read, parsed or stored: peer content is untrusted, and the safest thing
+   * to do with a client's bytes here is nothing.
+   *
+   * The reason has to stay within 123 bytes of UTF-8. ws.close() throws above
+   * that, and the throw leaves the socket open (both measured), so enforcement
+   * would become an exception. The test fake throws there too.
+   *
+   * A frame equal to the auto-response's request never arrives here (see the
+   * constructor).
+   *
+   * After this close the runtime goes on listing the socket until its peer
+   * acknowledges, and a send to it throws. Measured: still listed 23 s on, for
+   * a peer that never answered. wake() sends to each socket inside its own try,
+   * so a socket in that state costs one logged error per append and nothing else.
+   */
+  async webSocketMessage(ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
+    ws.close(1003, "This socket is receive-only. Send with bellman_send over /mcp.");
+  }
+
+  /**
+   * The peer closed, or the connection dropped. A drop arrives here too, as
+   * code 1006 and wasClean false.
+   *
+   * There is nothing to prune. The runtime drops the socket from
+   * getWebSockets() on its own, measured after a polite close, a bare TCP FIN
+   * and an RST, with this handler and without it, and this object keeps no list
+   * of sockets of its own.
+   *
+   * What this is for is the answer. The runtime does not complete a close
+   * handshake the peer started. With an empty handler, or none (the same, in
+   * every case measured), the peer's close never completes: Node's WebSocket
+   * client gave up after about 10 s and reported 1006, unclean. Replying
+   * completes it in milliseconds. Neither this handler nor webSocketError is
+   * needed for the object to hibernate or for a socket to leave
+   * getWebSockets(). An object with neither was evicted and revived like one
+   * with both, and a client close woke it either way.
+   *
+   * Always 1000, never the peer's own code. A peer that calls close() with no
+   * argument arrives as 1005, and ws.close(1005) throws, as do 1004, 1006 and
+   * 1015, the codes RFC 6455 reserves. Echoing the code, the obvious thing to
+   * write, therefore fails for the first client that closes politely and says
+   * nothing: the handler throws and the close never completes (measured). RFC
+   * 6455 says an endpoint typically echoes the code, not that it must. This
+   * also runs when the peer acknowledges the close webSocketMessage started,
+   * and replying to a socket already closed does not throw (measured).
+   */
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+    ws.close(1000, "closing");
+  }
+
+  /**
+   * A protocol error from the peer: a reserved opcode, or a compressed frame on
+   * a connection that never negotiated compression (the two measured). The
+   * runtime sends its own Close, 1002, and drops the socket from
+   * getWebSockets() without help from this handler (measured with and without
+   * it), so there is nothing to answer and nothing to prune. Empty on purpose.
+   * It is here to state the answer for each of the lifecycle's three events,
+   * not because the runtime needs it.
+   */
+  async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {}
 
   /** Returns the retired code, so the caller can drop it from the registry. */
   async consumeJoinCode(role: string): Promise<string | null> {
@@ -396,10 +510,11 @@ export class SessionDO extends DurableObject {
       // One socket must not starve the rest. getWebSockets() returns a list, and
       // a send that threw would end this loop with every later socket missing
       // the event, after the waiter arm had run and the event was stored. So
-      // each socket is its own try: log, skip, carry on. Unproven but cheap: no
-      // send has been observed to throw in workerd, so this is a guard and not
-      // a known failure. The cursor moves only after a send that returned, and
-      // a reconnect replays from the cursor its client names (fetch).
+      // each socket is its own try: log, skip, carry on. A send does throw in
+      // workerd: to a socket webSocketMessage has closed for sending, which the
+      // runtime goes on listing until its peer acknowledges. The cursor moves
+      // only after a send that returned, and a reconnect replays from the
+      // cursor its client names (fetch).
       try {
         const att = ws.deserializeAttachment() as SocketAttachment | null;
         // Fail closed on a missing attachment. fetch() attaches before it sends,

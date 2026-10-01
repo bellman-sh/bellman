@@ -38,6 +38,12 @@ vi.stubGlobal("WebSocketPair", class {
   1 = fakeSocket();
 });
 
+// workerd global too. SessionDO registers one with the ctx; the fake ctx keeps
+// whatever it is handed, so a test reads the pair back as `request` and `response`.
+vi.stubGlobal("WebSocketRequestResponsePair", class {
+  constructor(public request: string, public response: string) {}
+});
+
 // workerd answers an upgrade with a Response of status 101 carrying a
 // `webSocket`. Node's Response throws a RangeError on any status outside
 // 200-599, so SessionDO.fetch, which is written for workerd, cannot return
@@ -162,8 +168,18 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
  * V8's serialization: for 1,400 ids it gives 16,833 bytes, the figure workerd
  * reported, and the boundary matches too (1,362 ids fit, 1,363 do not). An
  * attachment never set reads back as null, as it does in workerd.
+ *
+ * close() and send() model what workerd measurably does (1.20260926.1, compat
+ * date 2026-09-01). close() THROWS for a code it refuses (below 1000, 5000 and
+ * up, and 1004, 1005, 1006 and 1015, which RFC 6455 reserves) and for a reason
+ * over 123 bytes of UTF-8, and a throw inside webSocketMessage leaves the
+ * socket open. A close the runtime would refuse therefore fails here too, with
+ * the runtime's own message, instead of passing. send() THROWS after close(),
+ * while the runtime goes on listing the socket until its peer acknowledges the
+ * close.
  */
 const MAX_ATTACHMENT_BYTES = 16384;
+const MAX_CLOSE_REASON_BYTES = 123;
 function fakeSocket() {
   const sent: string[] = [];
   let attachment: unknown = undefined;
@@ -171,8 +187,21 @@ function fakeSocket() {
   return {
     sent,
     get closed() { return closed; },
-    send: (data: string) => { sent.push(data); },
-    close: (code: number, reason: string) => { closed = { code, reason }; },
+    send: (data: string) => {
+      if (closed) throw new Error("Can't call WebSocket send() after close().");
+      sent.push(data);
+    },
+    close: (code: number, reason: string) => {
+      if (code < 1000 || code >= 5000 || code === 1004 || code === 1005 || code === 1006 || code === 1015) {
+        throw new Error(`Invalid WebSocket close code: ${code}.`);
+      }
+      if (new TextEncoder().encode(reason).byteLength > MAX_CLOSE_REASON_BYTES) {
+        throw new Error(
+          `WebSocket close reason must not be longer than ${MAX_CLOSE_REASON_BYTES} bytes when UTF-8 encoded.`,
+        );
+      }
+      closed = { code, reason };
+    },
     serializeAttachment: (v: unknown) => {
       const bytes = serialize(v).byteLength;
       if (bytes > MAX_ATTACHMENT_BYTES) {
@@ -1118,12 +1147,14 @@ describe("wake: socket delivery", () => {
   });
 
   it("does not let a socket that throws starve the others, or fail the append", async () => {
-    // Unproven but cheap: no send has been observed to throw in workerd. If one
-    // did, getWebSockets() returns a list and the loop would end at it: every
-    // later socket would miss the event, after the waiter arm had run and the
-    // event was stored, and the append would fail for a sender whose message is
-    // safe. The throw here comes from a fake, to prove the guard, not to
-    // describe a failure that has happened.
+    // A send does throw in workerd: to a socket that webSocketMessage has closed
+    // for sending (the receive-only rule) and whose peer has not yet
+    // acknowledged, which the runtime goes on listing. "leaves delivery to the
+    // other members alone" under "receive-only" drives that cause; this one
+    // throws from the fake directly, so it holds whatever the cause. If a
+    // throw ended the loop, getWebSockets() returns a list and every later
+    // socket would miss the event, after the waiter arm had run and the event
+    // was stored, and the append would fail for a sender whose message is safe.
     const { doi, ctx, post } = await world();
     for (const member of ["m1", "m2", "m3"]) await doi.fetch(open(ctx, 0, member));
     const boom = new Error("send failed");
@@ -1199,6 +1230,131 @@ describe("wake: socket delivery", () => {
     }
     expect(ctx.sockets[0].sent).toEqual([]);
     expect((ctx.sockets[0].deserializeAttachment() as { cursor: number }).cursor).toBe(0);
+  });
+});
+
+/**
+ * The socket's other half: what a client may not do over it, and the lifecycle
+ * the runtime delivers to SessionDO. fetch and wake() are tested above; these
+ * are webSocketMessage, webSocketClose, webSocketError and the auto-response the
+ * constructor registers.
+ *
+ * Where a handler does something, an assertion that something did NOT happen
+ * (nothing appended, nothing written) sits in one toEqual with the thing that
+ * did: a socket closed 1003, or acknowledged with 1000. Alone, "nothing written"
+ * is satisfied by a handler that does nothing at all. webSocketError does
+ * nothing by design, so its test can only show that it returns and writes
+ * nothing, and the throwing and writing versions of it are what turn that red.
+ *
+ * The auto-response itself cannot be exercised here. The runtime answers a
+ * matching frame without running any JavaScript, so there is no handler to call,
+ * and no test in this file can see an object not being woken. What it can pin is
+ * the registration: that it exists, at construction, with the right strings.
+ * That it works, and what it does and does not cover, was measured against real
+ * workerd; the constructor's comment says how.
+ */
+describe("receive-only", () => {
+  const upgrade = (members = "m1") =>
+    new Request("https://do/ws?cursor=0", {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  const world = async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.fetch(upgrade());
+    return { doi, ctx, storage, ws: ctx.sockets[0] };
+  };
+
+  it.each([
+    ["a text frame", "anything"],
+    ["a message shaped like a bellman_send", JSON.stringify({ type: "message", payload: {} })],
+    ["a binary frame", new ArrayBuffer(8)],
+  ])("closes a socket that sends %s", async (_what, frame) => {
+    const { doi, ws } = await world();
+    await doi.webSocketMessage(ws as never, frame);
+    expect(ws.closed?.code).toBe(1003);
+  });
+
+  it("says where to send instead, within the close reason's size limit", async () => {
+    const { doi, ws } = await world();
+    await doi.webSocketMessage(ws as never, "anything");
+    expect(ws.closed).toMatchObject({ code: 1003, reason: expect.stringContaining("bellman_send") });
+    // The fake throws above this size, as workerd does, so a longer reason fails
+    // the close itself first; this puts the number where a reader looks.
+    expect(new TextEncoder().encode(ws.closed!.reason).byteLength).toBeLessThanOrEqual(123);
+  });
+
+  it("appends nothing when a client sends", async () => {
+    const { doi, storage, ws } = await world();
+    const before = {
+      writes: storage.writes, puts: storage.puts, alarms: storage.alarms.length,
+      events: (await doi.eventsAfter(0)).length,
+    };
+    await doi.webSocketMessage(ws as never, JSON.stringify({ type: "message", payload: {} }));
+    expect({
+      closedWith: ws.closed?.code,
+      keysWritten: storage.writes - before.writes,
+      puts: storage.puts - before.puts,
+      alarmsSet: storage.alarms.length - before.alarms,
+      eventsAppended: (await doi.eventsAfter(0)).length - before.events,
+    }).toEqual({ closedWith: 1003, keysWritten: 0, puts: 0, alarmsSet: 0, eventsAppended: 0 });
+  });
+
+  it("registers a ping auto-response when the object is built, so a keepalive never wakes it", () => {
+    // Before any fetch: the registration belongs to the object, not to an
+    // upgrade. See the constructor for why that placement.
+    const ctx = fakeCtx(fakeStorage({ session: currentRow(), cursor: 0 }));
+    new storeDo.SessionDO(ctx as never, {} as never);
+    expect(ctx.autoResponses).toHaveLength(1);
+    expect(ctx.autoResponses[0]).toMatchObject({ request: "ping", response: "pong" });
+  });
+
+  it("leaves delivery to the other members alone once one socket is closed for sending", async () => {
+    // After webSocketMessage closes a socket, the runtime goes on listing it
+    // until its peer acknowledges, and a send to it throws (measured in workerd;
+    // the fake does the same). wake() rides that out socket by socket: the
+    // others get the event and the append succeeds.
+    const { doi, ctx } = await world();
+    await doi.fetch(upgrade("m2"));
+    await doi.webSocketMessage(ctx.sockets[0] as never, "anything");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: { n: 1 }, refId: null,
+      })).resolves.toMatchObject({ cursor: 1 });
+
+      expect(ctx.sockets[1].sent).toHaveLength(1);
+      expect(ctx.sockets[0].sent).toEqual([]);
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0][1])).toMatch(/send\(\) after close\(\)/);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  describe("when the peer closes, or the connection drops or breaks", () => {
+    it.each([
+      ["a polite close", 1000, "bye", true],
+      ["a close with no status code, which arrives as 1005", 1005, "", true],
+      ["an application's own code", 4000, "app", true],
+      ["a connection that dropped, which arrives as 1006", 1006, "WebSocket disconnected without sending Close frame.", false],
+    ])("acknowledges %s, so the peer's close completes", async (_what, code, reason, clean) => {
+      const { doi, storage, ws } = await world();
+      const before = storage.writes;
+      await doi.webSocketClose(ws as never, code, reason, clean);
+      expect({ closedWith: ws.closed?.code, keysWritten: storage.writes - before })
+        .toEqual({ closedWith: 1000, keysWritten: 0 });
+    });
+
+    it("takes an error from the runtime without throwing or writing", async () => {
+      const { doi, storage, ws } = await world();
+      const before = storage.writes;
+      await expect(doi.webSocketError(ws as never, new Error("boom"))).resolves.toBeUndefined();
+      expect(storage.writes - before).toBe(0);
+    });
   });
 });
 

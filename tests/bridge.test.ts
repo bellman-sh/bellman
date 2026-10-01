@@ -281,6 +281,34 @@ describe("channel delivery", () => {
 
     expect(a.bridge.watching()).toHaveLength(0);
   });
+
+  it("stops watching a room this member was evicted from", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    expect(b.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+
+    // The event reaches the human first. Nothing else would: bellman_sync
+    // keeps answering a member who is out, because reads stay open to them,
+    // and the room is not closed.
+    await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
+    await until(() => b.bridge.watching().length === 0);
+  });
+
+  it("keeps watching when the member evicted is somebody else", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    await until(() => channelEvents(a).some((e) => e.meta.type === "member_evicted"));
+
+    // The creator is still in the room, so the event is news, not an exit.
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
 });
 
 describe("hook delivery (the fallback)", () => {

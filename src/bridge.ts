@@ -629,6 +629,26 @@ export function createBridge(opts: BridgeOptions) {
       }
       w.delivered = Math.max(w.delivered, Number(out.cursor ?? w.delivered));
 
+      /**
+       * Evicted. The event has already been delivered above, so the human
+       * knows why this stopped.
+       *
+       * Nothing else would stop it: bellman_sync keeps answering a member who
+       * is out, because reads stay open to them, and the room is not closed.
+       * A bellman_leave the agent called would have disarmed this watcher on
+       * the way past; an eviction is a thing that happened TO this member, so
+       * the event is the only signal there is.
+       */
+      const evicted = (out.events ?? []).some(
+        (e) =>
+          e.data.type === "member_evicted" &&
+          (e.data.payload as { member_id?: string } | null)?.member_id === w.memberId
+      );
+      if (evicted) {
+        disarm(w.memberId);
+        return;
+      }
+
       if (out.session_status === "closed") {
         disarm(w.memberId);
         return;

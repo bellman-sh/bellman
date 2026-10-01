@@ -1096,7 +1096,7 @@ describe("evictMember", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.code).toBe("forbidden");
-    expect(r.reason).toContain("bellman_leave");
+    expect(r.reason).toContain("leave the room");
   });
 
   /** REVIEW FOCUS 3 — authority is on createdBy, not on holding a live seat. */
@@ -1500,7 +1500,7 @@ Reads stay open to the person removed: the history was theirs too, and taking it
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired, session_status }
 Everyone in the room sees a member_evicted event, so removal is never silent, and the person removed sees it too. Removing the last active member closes the room.
-Errors: only the creator may call it; you cannot evict yourself (leave the room instead); a frozen room refuses, as it refuses every write. Removing someone who already left does not repeat the removal, but it does shut their seat's door if it is still open.`,
+Errors: only the creator may call it; you cannot evict yourself (leave the room instead); a frozen room refuses, as it refuses joining, sending and inviting — though not leaving, which must never trap anyone inside. Removing someone who already left does not repeat the removal, but it does shut their seat's door if it is still open.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),

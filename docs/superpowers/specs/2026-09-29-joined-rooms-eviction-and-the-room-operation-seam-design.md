@@ -215,9 +215,11 @@ guard `bellman_invite` already applies on revoke.
 
 ### D10 — Self-eviction refused, re-eviction a no-op, last member out closes the room.
 
-- **Evicting yourself is refused**, pointing at `bellman_leave`. The two
+- **Evicting yourself is refused**, pointing at leaving instead. The two
   operations write different events, and a creator who wants out should produce
-  the honest one.
+  the honest one. The sentence does **not** name `bellman_leave`: `src/rooms.ts`
+  is transport-neutral and an HTTP route calls it too, so naming one transport's
+  tool would give half its callers advice they cannot act on.
 - **Evicting an already-departed member succeeds and does not repeat itself** —
   no second `leftAt`, no second `member_evicted`, no second audit row for the
   removal. `bellman_leave` is idempotent the same way, and a panel that retries
@@ -409,9 +411,11 @@ return r.ok ? ok(shape(r.value)) : fail(r.reason);
 4. The target handle is absent from `session.members` — `not_found`. This is a
    direct lookup, not `findMember`: `findMember` requires the handle to be the
    caller's, which is the thing eviction has to do differently (D6).
-5. `target.userId === actor.userId` returns `forbidden`, naming `bellman_leave`
-   (D10).
-6. `target.leftAt !== null` returns `ok` having written nothing (D10).
+5. `target.userId === actor.userId` returns `forbidden`, pointing at leaving
+   instead — not at `bellman_leave`, for the transport reason in D10.
+6. `target.leftAt !== null` takes the early return (D10). It does not repeat the
+   removal, but it is not a no-op: it retires a live code for that seat,
+   announces `invite_revoked`, audits it, and closes an emptied room.
 7. `updateMember(sessionId, memberId, { leftAt: Date.now() })`.
 8. `appendEvent` of `member_evicted`, carrying the evicted label and room role.
    A `null` return means the session froze in the gap; the member is already

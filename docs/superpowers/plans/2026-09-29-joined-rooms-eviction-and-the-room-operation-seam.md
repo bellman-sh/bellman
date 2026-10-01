@@ -1277,7 +1277,7 @@ export async function evictMember(
   const target = session.members.find((m) => m.memberId === memberId);
   if (!target) return refuse("not_found", "no member with that member_id is in this room.");
   if (target.userId === actor.userId) {
-    return refuse("forbidden", "you cannot evict yourself — use bellman_leave.");
+    return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
   }
   if (target.leftAt !== null) {
     return succeed({ evicted: true, codeRetired: null, sessionStatus: sessionStatus(session) });
@@ -1500,7 +1500,7 @@ Reads stay open to the person removed: the history was theirs too, and taking it
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired, session_status }
 Everyone in the room sees a member_evicted event, so removal is never silent, and the person removed sees it too. Removing the last active member closes the room.
-Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); a frozen room refuses, as it refuses every write. Removing someone who already left succeeds and changes nothing.`,
+Errors: only the creator may call it; you cannot evict yourself (leave the room instead); a frozen room refuses, as it refuses every write. Removing someone who already left does not repeat the removal, but it does shut their seat's door if it is still open.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),

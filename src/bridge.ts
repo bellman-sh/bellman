@@ -362,6 +362,33 @@ export function createBridge(opts: BridgeOptions) {
   const pollWait = opts.pollWaitSeconds ?? MAX_WAIT_SECONDS;
   const whoami = opts.whoami ?? ((): WhoAmI => ({ source: "env", label: null }));
   const watches = new Map<string, Watch>(); // keyed by member_id
+  /**
+   * Handles whose membership has ENDED, by leaving or by removal. Such a handle is
+   * dead for good: rejoining mints a new member_id, so nothing can make this one
+   * live again, and arm() refuses it whatever ended it.
+   *
+   * That is not "every handle that was disarmed". Most disarms stop a watcher that
+   * could be wanted again, and giveUp() depends on it: its log line says peer
+   * events "will not arrive until a later Bellman tool call successfully
+   * reconnects", and that tool call is observe() arming the handle once more. A
+   * handle given up on because the connection dropped is still a live member.
+   * Refuse to re-arm it and a recoverable drop becomes a watcher that stays dead,
+   * silently. A sync the server refused as "not yours" is about who is asking (a
+   * different sign-in, say), not about whether the member is still in. A closed
+   * room needs no entry: every sync reports session_status.
+   *
+   * Without the record, the next bellman_sync the agent makes for a member who is
+   * out starts a watcher again. Reads stay open to them, so the sync answers, and
+   * a sync from past the eviction holds no event for the bridge to act on: it
+   * would poll that room for the life of the process.
+   *
+   * This is tidiness, not a boundary. A removed member can still read the room
+   * with bellman_sync directly, and none of that changes. What it settles is that
+   * the bridge stops polling a room its member is not in, and its human stops
+   * receiving pushes from it. In memory only: a bridge restarted after the removal
+   * has neither the event nor this record.
+   */
+  const departed = new Set<string>();
   let closed = false;
   let remotePromise: Promise<Remote> | undefined;
   /** What remotePromise last resolved to. Lets a retire check identity without awaiting. */
@@ -502,27 +529,29 @@ export function createBridge(opts: BridgeOptions) {
         const cursor = Number(out.cursor ?? 0);
         arm(sessionId, memberId, cursor);
         seenThrough(memberId, cursor);
+        if (out.session_status === "closed") disarm(memberId);
         /**
          * An agent that syncs for itself can be the one who learns it was
-         * evicted, and it has to disarm here rather than leave that to the
-         * watcher: seenThrough has just moved the watcher's cursor past the
-         * event, so the watcher would never see the event it disarms on and
+         * evicted, and it has to retire the handle here rather than leave that
+         * to the watcher: seenThrough has just moved the watcher's cursor past
+         * the event, so the watcher would never see the event it retires on and
          * would poll a room this member is out of for the life of the process.
          * Nothing is lost by it. The agent has the event in the result it is
          * about to be handed, which is the delivery the watcher's order
-         * (deliver, then disarm) exists to guarantee.
+         * (deliver, then retire) exists to guarantee.
          */
-        if (out.session_status === "closed" || showsEvictionOf(out.events, memberId)) disarm(memberId);
+        if (showsEvictionOf(out.events, memberId)) retire(memberId);
         break;
       }
       case "bellman_leave":
-        disarm(memberId);
+        // The membership is over, whatever the agent syncs afterwards: see `departed`.
+        retire(memberId);
         break;
     }
   }
 
   function arm(sessionId: string, memberId: string, cursor: number): void {
-    if (closed || !sessionId || !memberId || watches.has(memberId)) return;
+    if (closed || !sessionId || !memberId || watches.has(memberId) || departed.has(memberId)) return;
     const w: Watch = { sessionId, memberId, delivered: cursor, active: true };
     watches.set(memberId, w);
     persistMemberships();
@@ -543,6 +572,12 @@ export function createBridge(opts: BridgeOptions) {
     w.active = false;
     watches.delete(memberId);
     persistMemberships();
+  }
+
+  /** The membership behind this handle ended: stop watching it for good. See `departed`. */
+  function retire(memberId: string): void {
+    departed.add(memberId);
+    disarm(memberId);
   }
 
   function persistMemberships(): void {
@@ -671,13 +706,16 @@ export function createBridge(opts: BridgeOptions) {
        *
        * Nothing else would stop it: bellman_sync keeps answering a member who
        * is out, because reads stay open to them, and the room is not closed.
-       * A bellman_leave the agent called would have disarmed this watcher on
+       * A bellman_leave the agent called would have retired this watcher on
        * the way past; an eviction is a thing that happened TO this member, so
        * the event is the only signal there is. An agent's own bellman_sync can
        * be the one to receive it, which observe() answers the same way.
+       *
+       * Retired, not just disarmed, so that a sync the agent makes afterwards
+       * cannot start a watcher on a room this member is out of: see `departed`.
        */
       if (showsEvictionOf(out.events, w.memberId)) {
-        disarm(w.memberId);
+        retire(w.memberId);
         return;
       }
 

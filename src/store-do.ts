@@ -45,12 +45,13 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 type SocketAttachment = { memberIds: string[]; cursor: number };
 
 /**
- * WebSocket.readyState from CLOSING (2) up, CLOSING and CLOSED: the socket is on
- * its way out or gone. A literal, and not WebSocket.CLOSING, so this does not
+ * WebSocket.readyState for a socket on its way out (CLOSING) or gone (CLOSED).
+ * Literals, and not WebSocket.CLOSING and WebSocket.CLOSED, so this does not
  * depend on which WebSocket global the program has: the Workers runtime's, or
  * Node's under the tests. Both use 2 and 3.
  */
 const WS_CLOSING = 2;
+const WS_CLOSED = 3;
 
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
@@ -67,16 +68,19 @@ export class SessionDO extends DurableObject {
    * The runtime answers a text frame "ping" with "pong" itself: no JavaScript
    * runs and this object is not constructed. Without it a client keepalive
    * reaches this object, and a ping to an evicted one revives it (measured),
-   * which undoes the saving this socket exists for. Nothing would fail:
-   * delivery works, the tests pass, and the only symptom is the bill. Any frame
-   * that is not that text reaches webSocketMessage and is closed, so a client's
-   * keepalive has to be exactly that.
+   * which undoes the saving this socket exists for. Delivery would still work,
+   * so nothing on the delivery path would show it; a test pins the registration
+   * for that reason, and what a revival costs is the spec's unmeasured billing
+   * risk. Any frame that is not that text reaches webSocketMessage and is
+   * closed, so a client's keepalive has to be exactly that.
    *
    * Where to register was settled against workerd 1.20260926.1 at compat date
    * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
    * left idle for 25 to 30 s so they were evicted. The Worker counted
    * constructor runs from outside the objects, which is how "answered by the
-   * runtime" was told from "answered by us".
+   * runtime" was told from "answered by us". All of it ran in local workerd
+   * under `wrangler dev`; production is unmeasured. "Measured" in this comment,
+   * in the socket handlers below and in wake() means that setup.
    *  - Registered here, before any socket exists, it is answered by the
    *    runtime. A control that never registered had the ping delivered to its
    *    handler, so the probe could tell the two apart.
@@ -517,12 +521,16 @@ export class SessionDO extends DurableObject {
     let frame: string | undefined;
     for (const ws of this.ctx.getWebSockets()) {
       // One socket must not starve the rest. getWebSockets() returns a list, and
-      // a send that threw would end this loop with every later socket missing
-      // the event, after the waiter arm had run and the event was stored. So
-      // each socket is its own try: log, skip, carry on. A send can still throw,
-      // for a socket that closes between the readyState check below and the
-      // send. The cursor moves only after a send that returned, and a reconnect
-      // replays from the cursor its client names (fetch).
+      // a throw would end this loop with every later socket missing the event,
+      // after the waiter arm had run and the event was stored. So each socket is
+      // its own try: log, skip, carry on. The cause known today is building the
+      // frame, JSON.stringify(publicEvent(event)), which sits inside the try and
+      // which "contains a frame that cannot be built" drives. The one send
+      // failure observed, to a socket that is closing, is skipped below instead
+      // of caught; a send to a socket that reads OPEN has not been observed to
+      // throw, and the catch stays for the cause nobody has seen. The cursor
+      // moves only after a send that returned, and a reconnect replays from the
+      // cursor its client names (fetch).
       try {
         // A socket that is closing or closed is skipped, before anything is read
         // from it, and is not an error worth a log line. The common case is one
@@ -535,11 +543,14 @@ export class SessionDO extends DurableObject {
         // is one logged failure per append.
         //
         // That is all this decides: do not bother. It says nothing about what a
-        // socket has received, and one can close between this check and the
-        // send, which is what the catch is for. Only CLOSING and CLOSED skip, so
-        // a reading nobody expected still sends and delivery cannot stop
-        // silently on it.
-        if (ws.readyState >= WS_CLOSING) continue;
+        // socket has received. Exactly CLOSING and CLOSED skip, so a reading
+        // nobody expected still sends and delivery cannot stop silently on it.
+        // CLOSED is defensive. workerd reports 3 inside webSocketClose, after
+        // the peer acknowledges a close this object started, and the socket is
+        // gone from getWebSockets() afterwards, so wake() has not been seen to
+        // meet a CLOSED socket. The arm stays because a send to one cannot
+        // succeed.
+        if (ws.readyState === WS_CLOSING || ws.readyState === WS_CLOSED) continue;
         const att = ws.deserializeAttachment() as SocketAttachment | null;
         // Fail closed on a missing attachment. fetch() attaches before it sends,
         // so every accepted socket has one; a null here means something is

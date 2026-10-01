@@ -1153,13 +1153,14 @@ describe("wake: socket delivery", () => {
   });
 
   it("does not let a socket that throws starve the others, or fail the append", async () => {
-    // A send can throw in workerd: to a socket that closed between wake()'s
-    // readyState check and its send, which "wake() and a socket that
-    // webSocketMessage has closed" under "receive-only" drives. This one throws
-    // from the fake on a socket that reads OPEN, so it holds whatever the cause.
-    // If a throw ended the loop, getWebSockets() returns a list and every later
-    // socket would miss the event, after the waiter arm had run and the event
-    // was stored, and the append would fail for a sender whose message is safe.
+    // No send to a socket that reads OPEN has been observed to throw in workerd.
+    // The throw here comes from the fake, on a socket that reads OPEN, to prove
+    // the guard whatever the cause; it does not describe a failure that has
+    // happened. (The send failure that has, to a socket that is closing, is
+    // skipped in wake() and covered under "receive-only".) If a throw ended the
+    // loop, getWebSockets() returns a list and every later socket would miss
+    // the event, after the waiter arm had run and the event was stored, and the
+    // append would fail for a sender whose message is safe.
     const { doi, ctx, post } = await world();
     for (const member of ["m1", "m2", "m3"]) await doi.fetch(open(ctx, 0, member));
     const boom = new Error("send failed");
@@ -1363,11 +1364,12 @@ describe("receive-only", () => {
       }
     });
 
-    it("still contains a send that fails after the check passed", async () => {
-      // A socket can close between the readyState check and the send, and that is
-      // what the per-socket catch is for. Forced to read OPEN, the closed fake
-      // passes the check and its send throws as workerd's does: the failure is
-      // logged once, not swallowed, and nobody else loses the event.
+    it("still contains and logs a send that throws on a socket that reads OPEN", async () => {
+      // No send to a socket that reads OPEN has been observed to throw, so this
+      // forces one: the closed fake is made to read OPEN, passes the check, and
+      // its send throws as workerd's does on a closed socket. Whatever the real
+      // cause turns out to be, the catch must hold: the failure is logged once,
+      // not swallowed by the skip, and nobody else loses the event.
       const { doi, ctx } = await fanOut();
       Object.defineProperty(ctx.sockets[1], "readyState", { value: 1 });
       const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -1385,11 +1387,15 @@ describe("receive-only", () => {
       }
     });
 
-    it("sends to a socket whose readyState is nothing it recognises", async () => {
-      // Skipping rests on positive knowledge that a socket is closing, and only
-      // on that. A reading nobody expected must not silently stop delivery.
+    it.each([
+      ["undefined", undefined],
+      ["4, past CLOSED", 4],
+    ])("sends to a socket whose readyState is %s, which is nothing it recognises", async (_what, reading) => {
+      // Skipping rests on positive knowledge that a socket is closing or closed,
+      // exactly CLOSING (2) and CLOSED (3), and only on that. A reading nobody
+      // expected must not silently stop delivery, and a threshold (>= 2) would.
       const { doi, ctx } = await world();
-      Object.defineProperty(ctx.sockets[0], "readyState", { value: undefined });
+      Object.defineProperty(ctx.sockets[0], "readyState", { value: reading });
       await post(doi, 1);
       expect(ctx.sockets[0].sent).toHaveLength(1);
     });

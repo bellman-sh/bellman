@@ -616,18 +616,27 @@ export class AuditDO extends DurableObject {
    * pass no id and always append.
    */
   async append(entry: AuditEntry, intentId?: string): Promise<void> {
-    if (intentId !== undefined && (await this.ctx.storage.get(deliveredKey(intentId)))) return;
-    const seq = ((await this.ctx.storage.get<number>("seq")) ?? 0) + 1;
-    // Entry, sequence and delivery marker in one write. Split, an interruption
-    // leaves one without the others: an entry with no sequence is overwritten by
-    // the next entry; a marker with no entry makes the redelivery skip an entry
-    // that never landed; an entry with no marker is appended again by the
-    // redelivery. An audit log that can quietly drop or double the record of a
-    // privilege change is not an audit log.
-    await this.ctx.storage.put<unknown>({
-      [auditKey(seq)]: entry,
-      seq,
-      ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
+    // The look at the marker and the write that sets it are one transaction, so a
+    // second delivery of the same intent cannot get between them, even if a later
+    // edit puts an await there that opens the input gate (a timer, a call to
+    // another object). Bare, that edit lets both deliveries find no marker, and
+    // both append.
+    await this.ctx.storage.transaction(async (txn) => {
+      if (intentId !== undefined && (await txn.get(deliveredKey(intentId)))) return;
+      const seq = ((await txn.get<number>("seq")) ?? 0) + 1;
+      // Entry, sequence and delivery marker in one write, in this transaction.
+      // Committed apart (in another transaction, or by a write after this one
+      // closes), an interruption between the commits leaves one without the
+      // others: an entry with no sequence is overwritten by the next entry; a
+      // marker with no entry makes the redelivery skip an entry that never
+      // landed; an entry with no marker is appended again by the redelivery. An
+      // audit log that can quietly drop or double the record of a privilege
+      // change is not an audit log.
+      await txn.put<unknown>({
+        [auditKey(seq)]: entry,
+        seq,
+        ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
+      });
     });
   }
 

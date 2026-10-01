@@ -109,6 +109,14 @@ export interface BellmanStore {
    * that is everything; in the Durable Objects store it starts at its deploy, so
    * a handle held before then is not listed (see `RegistryDO.indexMembership`).
    *
+   * Nor is every handle held since that deploy. The Durable Objects store logs a
+   * failed index write rather than throwing it, deliberately, so that a registry
+   * failure cannot abort a join whose seat had already committed; nothing
+   * rebuilds the row it lost (see `DurableObjectStore.writeIndex`). A creator's
+   * room takes two such writes, one per listing, and either can fail alone, so
+   * the room can be in `sessionsCreatedBy` and absent from here, or the reverse.
+   * Absence from this list is not proof that the user never held a handle.
+   *
    * Ids only, like `sessionsCreatedBy`, and no status parameter. The consumers
    * it is meant for do not agree on what counts as current: the control panel
    * hides closed rooms, a freeze sweep wants exactly the live ones. Encoding

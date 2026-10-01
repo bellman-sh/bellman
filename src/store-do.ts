@@ -547,6 +547,14 @@ export class RegistryDO extends DurableObject {
    * fills itself in as sessions reach their TTL. Older rooms have no list to
    * enumerate (see `us:`), so for them expiry is the only repair. Until then a
    * joined room is missing from one screen, which is not a room lost.
+   *
+   * **Members who joined after this deploy can be missing too, creators
+   * included.** `DurableObjectStore` puts this row once the seat has committed,
+   * and logs a failed put rather than throwing it (`writeIndex`), deliberately:
+   * a throw would report a failed join for a seat that had already landed.
+   * Nothing rebuilds the row. The gap above only shrinks, as those rooms expire;
+   * this one also grows whenever a put fails. A creator's `us:` row is a
+   * separate put, so either row can land without the other.
    */
   async indexMembership(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`um:${userId}:${sessionId}`, Date.now());

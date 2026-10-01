@@ -532,13 +532,13 @@ export function createBridge(opts: BridgeOptions) {
         if (out.session_status === "closed") disarm(memberId);
         /**
          * An agent that syncs for itself can be the one who learns it was
-         * evicted, and it has to record that here rather than leave it to the
-         * watcher: seenThrough has just moved the watcher's cursor past the
-         * event, so the watcher would never see the event that tells it to stop,
-         * and would poll a room this member is out of for the life of the
-         * process. Nothing is lost by it. The agent has the event in the result
-         * it is about to be handed, which is the delivery the watcher's order
-         * (deliver, then stop) exists to guarantee.
+         * evicted, and it has to mark the member departed here (see `departed`)
+         * rather than leave it to the watcher: seenThrough has just moved the
+         * watcher's cursor past the event, so the watcher would never see the
+         * event that tells it to stop, and would poll a room this member is out
+         * of for the life of the process. Nothing is lost by it. The agent has
+         * the event in the result it is about to be handed, which is the
+         * delivery the watcher's order (deliver, then stop) exists to guarantee.
          */
         if (showsEvictionOf(out.events, memberId)) markDeparted(memberId);
         break;
@@ -706,7 +706,7 @@ export function createBridge(opts: BridgeOptions) {
        *
        * Nothing else would stop it: bellman_sync keeps answering a member who
        * is out, because reads stay open to them, and the room is not closed.
-       * A bellman_leave the agent called would have disarmed this watcher on
+       * A bellman_leave the agent called would have stopped this watcher on
        * the way past; an eviction is a thing that happened TO this member, so
        * the event is the only signal there is. An agent's own bellman_sync can
        * be the one to receive it, which observe() answers the same way.

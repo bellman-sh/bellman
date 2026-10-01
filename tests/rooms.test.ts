@@ -594,7 +594,7 @@ describe("evictMember", () => {
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.map((a) => a.detail)).toEqual([
-      { member_id: "m_peer", room_role: "peer_b", code_retired: false },
+      { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", code_retired: false },
     ]);
   });
 
@@ -663,7 +663,7 @@ describe("evictMember", () => {
     expect(revoked.payload).toEqual({ roles: ["peer_b"] });
   });
 
-  it("audits the eviction, naming the member and whether a code was retired", async () => {
+  it("audits the eviction, naming the seat, the person and whether a code was retired", async () => {
     await store.createSession(peopled());
 
     await evictMember(store, jesse, "qs_test", "m_peer");
@@ -674,8 +674,24 @@ describe("evictMember", () => {
       action: "member_evicted",
       sessionId: "qs_test",
       actorUserId: "u_jesse",
-      detail: { member_id: "m_peer", room_role: "peer_b", code_retired: true },
+      detail: { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", code_retired: true },
     });
+  });
+
+  // member_id is per connection, so one person in the room twice holds two, and it
+  // says which seat went. user_id says whose it was. Neither answers the other's
+  // question, and an org reading its own log needs the second, because the handle
+  // means nothing outside the room.
+  it("audits which seat went and whose it was when one person holds two", async () => {
+    await store.createSession(session({ maxMembers: 4, members: [member()] }));
+    await store.addMember("qs_test", member({ memberId: "m_a", userId: "u_peer", roomRole: "peer_b" }));
+    await store.addMember("qs_test", member({ memberId: "m_b", userId: "u_peer", roomRole: "peer_b" }));
+
+    await evictMember(store, jesse, "qs_test", "m_a");
+
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].detail).toMatchObject({ member_id: "m_a", user_id: "u_peer" });
   });
 
   // The eviction is a fact from updateMember on, so its audit row is written then
@@ -740,16 +756,22 @@ describe("evictMember", () => {
 
     await evictMember(store, jesse, "qs_test", "m_peer");
 
+    // The detail names the person, not only the handle: member_id means nothing
+    // outside the room, so without user_id this org could see that one of its
+    // members was removed and not which one.
     const theirs = await store.auditForOrg("org_other", 50);
     expect(theirs).toHaveLength(1);
     expect(theirs[0]).toMatchObject({
       action: "member_evicted",
       sessionId: "qs_test",
       actorUserId: "u_jesse",
-      detail: { member_id: "m_peer", room_role: "peer_b", code_retired: true },
+      detail: { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", code_retired: true },
     });
-    const ours = await store.auditForOrg("org_codenerd", 50);
-    expect(ours.filter((a) => a.action === "member_evicted")).toHaveLength(1);
+    const ours = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
+    expect(ours).toHaveLength(1);
+    // The same detail in every org's copy: an admin in the room's org cannot resolve
+    // the handle either.
+    expect(ours[0].detail).toEqual(theirs[0].detail);
   });
 
   // The extra org is a union, not an addition: an evicted member in the room's own

@@ -452,8 +452,14 @@ export async function evictMember(
   //
   // The evicted member's org is named as well. The actor here is the creator, not
   // the member, so unless that org is also the room's it would get no row.
+  //
+  // The detail names the person as well as the seat. member_id is per connection
+  // and only resolves inside the room, so an org reading its own log needs
+  // user_id to see which of its people was removed. member_id stays, because it
+  // says which seat went when one person holds two.
   await audit(store, session, actor, "member_evicted", {
-    member_id: targetMemberId, room_role: target.roomRole, code_retired: live,
+    member_id: targetMemberId, user_id: target.userId,
+    room_role: target.roomRole, code_retired: live,
   }, [target.orgId]);
 
   return succeed({

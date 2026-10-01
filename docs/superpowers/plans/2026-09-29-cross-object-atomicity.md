@@ -2295,9 +2295,15 @@ Add `import type { AuditIntent } from "../grant-audit.js";` and drop the now-unu
 - [ ] **Step 3: Run the suites to see what moved**
 
 Run: `npx vitest run tests/billing-grants.test.ts tests/oauth-flow.test.ts`
-Expected: several FAIL — the cases asserting audit entry shape now assert behaviour owned by `grant-audit.ts` and the contract suite.
 
-Read each failure before editing it. A test that fails after a change knows something the source does not say, and on this repo that has twice turned out to be the test being right.
+**Expect GREEN, not failures.** Task 7's implementer applied Steps 1 and 2 temporarily and measured it: with both in place, `typecheck`, `typecheck:worker`, `build` and all 1022 root tests pass, and no assertion rewrite was needed. An earlier draft of this step predicted several failures; that prediction was wrong.
+
+So the work here is the opposite of what it looks like. **Do not hunt for failures that are not there.** Instead check whether any test now passes for a NEW reason:
+
+- `tests/billing-grants.test.ts` asserted audit entries while `reconcilePurchase` wrote them itself. After Step 2 it writes none, yet those assertions still pass — because `MemoryStore` audits internally now. Confirm each one still observes what its name claims, rather than observing the store doing the store's job.
+- For each such test, break the thing it names — make `grantAuditEntries` return `[]` — and confirm it goes red. A test that survives that is asserting nothing about billing.
+
+Read each failure, if any appears, before editing it. A test that fails after a change knows something the source does not say, and on this repo that has twice turned out to be the test being right.
 
 - [ ] **Step 4: Update the moved assertions**
 

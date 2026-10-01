@@ -200,6 +200,9 @@ calling `bellman_sync`, `bellman_sync` calls `waitForEvents`, and
 let frame: string | undefined;   // built once, and only if a socket is due
 for (const ws of this.ctx.getWebSockets()) {
   try {
+    // Already closing or closed: do not bother. The receive-only rule closes a
+    // socket that sends, and workerd keeps it listed until its peer acks.
+    if (ws.readyState === WS_CLOSING || ws.readyState === WS_CLOSED) continue;
     const att = ws.deserializeAttachment();
     // Fail closed: a socket whose cursor we do not know gets nothing, since
     // over-delivering is the worse of the two wrong answers.
@@ -644,9 +647,16 @@ bus), new `tests/bus.test.ts`, `tests/helpers/fake-bellman.ts`,
   observed; this one is Cloudflare's documentation. The first bill after
   deployment is the test, and the pricing work is deliberately deferred until
   it can be read.
-- **Inbound frames may bill as requests.** D1 makes the socket receive-only, so
-  the exposure is a keepalive at most, and `setWebSocketAutoResponse` keeps
-  even that from waking the object. Confirm against a bill.
+- **Inbound frames may bill as requests, and "a keepalive at most" was wrong.**
+  D1 makes the socket receive-only and `setWebSocketAutoResponse` keeps a
+  matching ping from waking the object. But a client that ignores the 1003
+  close keeps reaching `webSocketMessage` once per frame — measured, six frames
+  in two seconds gave six handler runs, with the socket staying listed and
+  reading CLOSING until the client dropped TCP. A polite close wakes a
+  hibernated object too. Enforcement holds (`ws.close` never throws on a
+  repeat, so a chatty client cannot turn it into an exception), but the
+  *billing* exposure is one invocation per unwanted frame, not zero. Confirm
+  against a bill.
 - **A stored event that cannot be projected poisons its room's replay.**
   `fetch` maps `publicEvent` over every missed event with no per-event guard —
   deliberately, so a failure accepts no socket rather than half a replay. But

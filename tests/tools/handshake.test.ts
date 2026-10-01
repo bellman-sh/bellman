@@ -939,3 +939,20 @@ describe("bellman_connect accepts every join code bellman_start can mint", () =>
     expect((preview.data.room as { your_role: string }).your_role).toBe(longRole);
   });
 });
+
+describe("bellman_start lists the room for its creator", () => {
+  // The store contract proves createSession indexes the members it is handed.
+  // This proves the tool hands it the creator, which a store test can only
+  // imitate: a contract case that seats the creator by hand stays green while
+  // the tool seats them some other way (#49, D4).
+  it("puts the room it just created in both of the creator's listings", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+
+    const sessionId = String(started.data.session_id);
+    expect(await h.store.sessionsCreatedBy(jesse.identity.userId, 10)).toContain(sessionId);
+    expect(await h.store.sessionsJoinedBy(jesse.identity.userId, 10)).toContain(sessionId);
+  });
+});

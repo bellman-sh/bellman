@@ -2359,7 +2359,7 @@ Both adopt a mechanism already merged and reviewed, and they touch disjoint file
 
 **Interfaces:**
 - Consumes: `drain`, `dueKey`, `enqueueRows`, `OUTBOX_SEQ`, `OutboxRow` from `src/outbox.js`
-- Produces: `SessionDO extends DurableObject<BellmanEnv>`; `SessionDO.setJoinCode` returning `Promise<boolean>`; `SessionDO.enqueueOnly(s)` as a test seam
+- Produces: `SessionDO extends DurableObject<BellmanEnv>`; `SessionDO.setJoinCode` returning `Promise<boolean>`. **No public test seam** — see Step 3.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2414,9 +2414,15 @@ it("recovers a registration whose inline attempt never ran", async () => {
   const store = new DurableObjectStore(env as never);
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_lost"));
 
-  await runInDurableObject(stub, async (instance: SessionDO) => {
-    await instance.enqueueOnly(session("qs_lost", "BELL-BBB-02") as never);
+  // No public seam for this. Switch the inline delivery off from inside the
+  // object, the way Task 7's worker test does: TypeScript's `private` is a
+  // compile-time check, so a test can reach the field while nothing in the
+  // production class exists for the purpose.
+  type Driver = { deliverNow?: () => Promise<void> };
+  await runInDurableObject(stub, (instance: SessionDO) => {
+    (instance as unknown as { driver: Driver }).driver.deliverNow = async () => {};
   });
+  await store.createSession(session("qs_lost", "BELL-BBB-02") as never);
   await abortAllDurableObjects();
 
   // Unjoinable, and the intent is still queued.
@@ -2456,7 +2462,7 @@ it("queues nothing when setJoinCode is refused", async () => {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `npm run test:worker -- join-code-outbox`
-Expected: FAIL — `enqueueOnly` does not exist on `SessionDO`.
+Expected: FAIL, because `SessionDO` has no `driver` field yet — the delivery-off helper cannot find it. An earlier draft predicted `enqueueOnly` does not exist; there is no `enqueueOnly`, by the ruling in Step 3.
 
 - [ ] **Step 3: Implement**
 
@@ -2511,13 +2517,21 @@ Split `createSession` so the commit and the delivery are separate methods — th
 ```ts
   /**
    * Commit the session, its seed events, its cursor and the intent to register
-   * its join codes. One write, for the reason the seed already gave: separately
+   * its join codes, then try to deliver.
+   *
+   * One write for the commit, for the reason the seed already gave: separately
    * committed, an interruption leaves a session whose code nothing can resolve.
    *
-   * Public only so a test can reproduce an isolate dying between this and the
-   * delivery below. Production goes through createSession.
+   * There is deliberately NO public method that commits without delivering.
+   * Task 7 added one to `RegistryDO` and it was removed: every method on a
+   * Durable Object is reachable over RPC by anything holding the binding, and
+   * TypeScript's `private` is compile-time only, so a method that commits a
+   * change while skipping its delivery is reachable however it is marked. A test
+   * that needs that state switches `driver.deliverNow` off from inside the
+   * object instead. Use `#private` for any helper here that must not be callable
+   * over RPC.
    */
-  async enqueueOnly(s: Session): Promise<void> {
+  async createSession(s: Session): Promise<void> {
     const { events, ...rest } = s;
     const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
     for (const e of events) seeded[eventKey(e.cursor)] = e;
@@ -2529,10 +2543,6 @@ Split `createSession` so the commit and the delivery are separate methods — th
     ));
     await this.ctx.storage.put<unknown>(seeded);
     await this.reArm();
-  }
-
-  async createSession(s: Session): Promise<void> {
-    await this.enqueueOnly(s);
     await this.deliverNow();
   }
 ```

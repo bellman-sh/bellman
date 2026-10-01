@@ -10,7 +10,7 @@ import {
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
-import { FROZEN, activeMembers, audit, findMember, sessionStatus } from "./rooms.js";
+import { FROZEN, activeMembers, audit, findMember, leaveRoom, sessionStatus } from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
@@ -821,32 +821,8 @@ Returns: { left: true, session_status }`,
       },
     },
     async ({ session_id, member_id }): Promise<ToolResult> => {
-      const session = await s.getSession(session_id);
-      if (!session) return fail("session not found.");
-      const me = findMember(session, member_id, identity);
-      if (!me) return fail("member_id is not yours.");
-      if (me.leftAt !== null) return ok({ left: true, session_status: sessionStatus(session) });
-
-      await s.updateMember(session.id, member_id, { leftAt: Date.now() });
-      await s.appendEvent(session.id, {
-        type: "member_left",
-        fromMemberId: member_id,
-        fromUserId: identity.userId,
-        fromLabel: identity.label,
-        payload: { label: identity.label },
-        refId: null,
-      });
-
-      // Re-read: `session` predates the departure.
-      const after = (await s.getSession(session_id)) ?? session;
-      if (activeMembers(after).length === 0) await s.closeSession(session_id);
-      await audit(s, session, identity, "member_left", {});
-
-      // Closed wins over frozen: an empty room is over either way, and telling
-      // someone their room is frozen when it has no members left to thaw for
-      // would point them at paying to fix something payment will not fix.
-      const closed = after.closed || activeMembers(after).length === 0;
-      return ok({ left: true, session_status: closed ? "closed" : sessionStatus(after) });
+      const r = await leaveRoom(s, identity, session_id, member_id);
+      return r.ok ? ok({ left: true, session_status: r.value.sessionStatus }) : fail(r.reason);
     }
   );
 

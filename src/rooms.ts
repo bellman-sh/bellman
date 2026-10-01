@@ -103,3 +103,52 @@ export async function audit(
     await store.appendAudit(entry);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
+
+/**
+ * A member departs. The room closes behind the last one out.
+ *
+ * Reads stay open to a member who left — history is still theirs — so a
+ * departed handle is not an error here: leaving again refuses nothing and
+ * changes nothing. A caller retrying after a lost response would otherwise
+ * announce, and audit, the same departure twice.
+ */
+export async function leaveRoom(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+): Promise<RoomResult<{ sessionStatus: string }>> {
+  const session = await store.getSession(sessionId);
+  if (!session) return refuse("not_found", "session not found.");
+  const me = findMember(session, memberId, actor);
+  if (!me) return refuse("forbidden", "member_id is not yours.");
+  if (me.leftAt !== null) return succeed({ sessionStatus: sessionStatus(session) });
+
+  await store.updateMember(session.id, memberId, { leftAt: Date.now() });
+  // The result is ignored on purpose. A frozen room swallows the announcement
+  // (null) but still lets a member leave: freezing refuses sending, joining and
+  // inviting, and must not trap anyone inside.
+  await store.appendEvent(session.id, {
+    type: "member_left",
+    fromMemberId: memberId,
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    payload: { label: actor.label },
+    refId: null,
+  });
+
+  // Re-read: `session` predates the departure.
+  const after = (await store.getSession(sessionId)) ?? session;
+  if (activeMembers(after).length === 0) await store.closeSession(sessionId);
+  await audit(store, session, actor, "member_left", {});
+
+  // Closed wins over frozen: an empty room is over either way, and telling
+  // someone their room is frozen when it has no members left to thaw for
+  // would point them at paying to fix something payment will not fix.
+  const closed = after.closed || activeMembers(after).length === 0;
+  return succeed({ sessionStatus: closed ? "closed" : sessionStatus(after) });
+}

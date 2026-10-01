@@ -199,7 +199,9 @@ export default {
      * Worker reads the query, resolves the identity, asks the object which
      * members that identity owns, and then BUILDS the upgrade request. A
      * client setting x-bellman-members itself therefore achieves nothing,
-     * because its request is not the one the object ever sees.
+     * because its request is not the one the object ever sees. Nothing reads
+     * that list yet (see SocketAttachment in store-do.ts); this is what keeps
+     * it trustworthy for whatever reads it first.
      */
     if (url.pathname === "/ws") {
       // A handshake is a GET (RFC 6455 section 4.1). workerd cannot complete an

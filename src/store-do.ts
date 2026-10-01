@@ -41,6 +41,20 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 /**
  * What a hibernating socket remembers. The runtime rejects more than 16 KB;
  * fetch says how close this can get.
+ *
+ * Nothing reads `memberIds` today. wake() reads only `cursor` and carries the
+ * rest along unchanged, and every member of a room receives every event (spec
+ * D1a), so delivery does not depend on whose socket it is. It is kept for what
+ * has to find a socket by member, the use in view being to close the sockets of
+ * a member who has left. Nothing does that yet.
+ *
+ * Whatever reads it first can trust it, because of where it comes from:
+ * membersOf answered it, and fetch received it in a request the Worker built
+ * (see the /ws route in worker.ts), never in a header the client sent. A
+ * forged x-bellman-members reaches nothing. tests/worker-ws.test.ts pins that
+ * the Worker never forwards a caller's request; it guards the day this field is
+ * read, not a path that is exploitable now. If the field is removed, that test
+ * can go with it; until then, keep both.
  */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 

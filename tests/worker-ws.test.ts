@@ -179,6 +179,13 @@ describe("GET /ws", () => {
     expect(reached).toEqual([]);
   });
 
+  // This pins a discipline, not a live exploit. Nothing reads the member list on
+  // a socket today (SocketAttachment.memberIds in store-do.ts), so a forged
+  // x-bellman-members has nothing to change. The Worker must still never forward
+  // a caller's request, because the field is kept for what will read it, and the
+  // day something does, a forwarded header is a membership a caller claims for
+  // itself. If the field is removed, this can go with it; until then, do not
+  // delete it as dead because it guards nothing yet.
   it("hands the object a request built here, carrying no client header", async () => {
     const { call, asked } = await world({ memberIds: ["m1", "m3"], closed: false });
     await call("https://b/ws?session=qs_1&cursor=7&members=m_someone_else", {

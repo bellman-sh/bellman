@@ -18,7 +18,7 @@ describe("grantAuditEntries", () => {
       action: "plan_granted",
       detail: {
         plan: "team", role: "admin", org_id: "org_mine", source: "operator",
-        key: "github:4242",
+        expires_at: null, key: "github:4242",
       },
     }]);
   });
@@ -58,8 +58,7 @@ describe("grantAuditEntries", () => {
   /**
    * Review Focus 1. The audit log is org-scoped, so an org-less grant — every
    * pro purchase — has nowhere to be recorded. Emitting a row for one would
-   * queue something that can never be delivered, and it sits at the head of a
-   * FIFO queue blocking everything behind it.
+   * queue something with nowhere to go.
    */
   it("records nothing for an org-less grant", () => {
     expect(grantAuditEntries(
@@ -120,6 +119,25 @@ describe("grantAuditEntries, field by field", () => {
   });
 
   /**
+   * Writing the same grant again must read as no change whatever the grant says.
+   * The fixture's own values (a team plan, an admin, no expiry) are the only ones
+   * the cases above compare, so a rule that recognised only those would still
+   * pass them. An admin saving the same expiring grant twice is the noise this
+   * check exists to remove, and it needs a case of its own.
+   */
+  it.each<[string, Partial<PlanGrant>]>([
+    ["a pro plan", { plan: "pro" }],
+    ["a member role", { role: "member" }],
+    ["another org", { orgId: "org_other" }],
+    ["a purchase source", { source: "purchase" }],
+    ["an expiry that is still the same date", { expiresAt: NOW + DAY }],
+  ])("records nothing when %s is written again", (_what, over) => {
+    expect(
+      grantAuditEntries(grant(over), grant({ ...over, grantedAt: NOW + 5 }), admin, NOW)
+    ).toEqual([]);
+  });
+
+  /**
    * Source decides whether billing may still touch a grant. A team admin saving
    * their own key over a purchase grant leaves plan, role and org as they were
    * and takes it out of billing's hands for good: putGrantIfSource answers
@@ -139,7 +157,7 @@ describe("grantAuditEntries, field by field", () => {
       action: "plan_granted",
       detail: {
         plan: "team", role: "admin", org_id: "org_mine", source: after,
-        replaced_plan: "team", key: "github:4242",
+        expires_at: null, replaced_plan: "team", key: "github:4242",
       },
     }]);
   });
@@ -154,6 +172,23 @@ describe("grantAuditEntries, field by field", () => {
       grant({ expiresAt: before }), grant({ expiresAt: after }), admin, NOW
     );
     expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  /**
+   * An entry has to say what moved. plan, role, org_id and source are in the
+   * detail of a grant entry, and so is expires_at; without it a source-only and
+   * an expiry-only change would file the same line, and an org reading its
+   * stream would learn that something changed on the grant but not when
+   * somebody loses access.
+   */
+  it.each<[string, PlanGrant | undefined, number | null]>([
+    ["a first grant with an expiry", undefined, NOW + DAY],
+    ["an expiry put on", grant({ expiresAt: null }), NOW + DAY],
+    ["an expiry taken off", grant({ expiresAt: NOW + DAY }), null],
+    ["an expiry moved", grant({ expiresAt: NOW + DAY }), NOW + 2 * DAY],
+  ])("states the new expiry when it records %s", (_what, previous, expiry) => {
+    const [entry] = grantAuditEntries(previous, grant({ expiresAt: expiry }), admin, NOW);
+    expect(entry.detail.expires_at).toBe(expiry);
   });
 
   /**
@@ -234,7 +269,7 @@ describe("grantAuditEntries, field by field", () => {
         action: "plan_granted",
         detail: {
           plan: "team", role: "admin", org_id: "org_new", source: "purchase",
-          replaced_plan: "pro", stripe_customer: "cus_1", key: "github:4242",
+          expires_at: null, replaced_plan: "pro", stripe_customer: "cus_1", key: "github:4242",
         },
       },
     ]);
@@ -260,9 +295,10 @@ describe("revokeAuditEntries, field by field", () => {
 /**
  * A falsy org id is no org, as null is. isOrgId rejects "" at the admin route
  * and billing derives its own org id, but putGrant is part of the store API and
- * checks nothing, and a stored record can lack the field altogether. An entry
- * filed against such an org could never be delivered, and an undeliverable row
- * sits at the head of the FIFO queue with every entry behind it.
+ * checks nothing, and a stored record can lack the field altogether. A Durable
+ * Object namespace accepts "" and undefined as names, so an entry filed against
+ * one is delivered, to a stream no org reads; undefined names the same object as
+ * an org called "undefined", which isOrgId allows.
  */
 describe.each<[string, string | null]>([
   ["an empty string", ""],
@@ -312,7 +348,8 @@ describe("every entry", () => {
    */
   it("lets the caller replace every field the store fills in, except key", () => {
     const said = {
-      plan: "x", role: "x", org_id: "x", source: "x", reason: "x", moved_to: "x", replaced_plan: "x",
+      plan: "x", role: "x", org_id: "x", source: "x", expires_at: "x",
+      reason: "x", moved_to: "x", replaced_plan: "x",
     };
     const intent: AuditIntent = {
       actorUserId: "stripe", detail: { ...said, stripe_customer: "cus_1", key: "github:evil" },

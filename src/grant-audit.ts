@@ -22,14 +22,15 @@ export interface AuditIntent {
 
 /**
  * Whether an org has an audit stream to write to. The log is org-scoped, so a
- * grant with no org has nowhere to be recorded, and an entry filed against one
- * is a row that can never be delivered: queued, it sits at the head of a FIFO
- * queue and holds back every entry behind it.
+ * grant with no org has nowhere to be recorded.
  *
- * Null is no org, and so is anything else falsy. isOrgId rejects "" at the admin
- * route and billing derives its own org id, but putGrant is part of the store
- * API and checks nothing, so this does not lean on those having run.
- * grant-index.ts keeps two defences for the org id for the same reason.
+ * Null is no org, and so is anything else falsy. A Durable Object namespace
+ * accepts "" and undefined as names, so an entry filed against one is delivered,
+ * to a stream no org reads (undefined names the same object as an org called
+ * "undefined", which isOrgId allows). isOrgId rejects "" at the admin route and
+ * billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, so this does not lean on those having run. grant-index.ts
+ * keeps two defences for the org id for the same reason.
  */
 function hasOrg(orgId: string | null): orgId is string {
   return Boolean(orgId);
@@ -95,7 +96,10 @@ function entry(
  *
  * An org-less grant records nothing at all (see hasOrg): the audit log is
  * org-scoped and a pro purchase has no stream to be written to. Queuing one
- * would park a row that can never be delivered at the head of a FIFO queue.
+ * would put a row in the outbox that has nowhere to go.
+ *
+ * The grant entry carries every field samePlan compares, so a line says what
+ * moved and not only that something did.
  */
 export function grantAuditEntries(
   previous: PlanGrant | undefined,
@@ -113,6 +117,7 @@ export function grantAuditEntries(
   if (hasOrg(next.orgId)) {
     entries.push(entry(next.orgId, next.key, "plan_granted", intent, {
       plan: next.plan, role: next.role, org_id: next.orgId, source: next.source,
+      expires_at: next.expiresAt,
       ...(previous ? { replaced_plan: previous.plan } : {}),
     }, now));
   }

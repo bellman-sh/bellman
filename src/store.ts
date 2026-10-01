@@ -230,6 +230,21 @@ export class MemoryStore implements BellmanStore {
     const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
     mine.add(stored.id);
     this.byCreator.set(stored.createdBy, mine);
+    // The members a session is created with are seated directly — bellman_start
+    // hands over the creator in `members` and never calls addMember — so they
+    // are indexed here. addMember indexes everyone who joins afterwards.
+    for (const m of stored.members) this.indexMember(m.userId, stored.id);
+  }
+
+  /**
+   * The one place the joined index is written, so the two ways of seating a
+   * member cannot drift apart. Keyed by user, so a second handle for the same
+   * person in the same room is the same entry.
+   */
+  private indexMember(userId: string, sessionId: string): void {
+    const joined = this.byMember.get(userId) ?? new Set<string>();
+    joined.add(sessionId);
+    this.byMember.set(userId, joined);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -284,11 +299,8 @@ export class MemoryStore implements BellmanStore {
     if (!s) return false;
     if (s.frozenAt !== null) return false;
     s.members.push(detach(member));
-    // After the guards, so a refused add leaves no trace in the listing. Keyed
-    // by user, so a second machine joining the same room is the same entry.
-    const joined = this.byMember.get(member.userId) ?? new Set<string>();
-    joined.add(sessionId);
-    this.byMember.set(member.userId, joined);
+    // After the guards, so a refused add leaves no trace in the listing.
+    this.indexMember(member.userId, sessionId);
     return true;
   }
 

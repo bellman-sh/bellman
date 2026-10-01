@@ -540,11 +540,12 @@ export class RegistryDO extends DurableObject {
    * from two machines is one entry — the put is idempotent, and the panel wants
    * the room once.
    *
-   * **Members who joined before this deploy are not in here.** A backfill is
-   * possible in principle — `us:` enumerates creators and each session lists
-   * its members — and is not worth walking the registry for a listing that
-   * fills itself in as sessions reach their TTL. Until then a joined room is
-   * missing from one screen, which is not a room lost.
+   * **Members who joined before this deploy are not in here, creators of rooms
+   * that already existed included.** A backfill is possible in principle — `us:`
+   * enumerates creators and each session lists its members — and is not worth
+   * walking the registry for a listing that fills itself in as sessions reach
+   * their TTL. Until then a joined room is missing from one screen, which is
+   * not a room lost.
    */
   async indexMembership(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`um:${userId}:${sessionId}`, Date.now());
@@ -627,6 +628,12 @@ export class DurableObjectStore implements BellmanStore {
     // transaction spanning it — the same gap as the join code above, tracked on
     // #62. A missed index entry means a room that is not frozen, not one lost.
     await this.registry.indexSession(s.createdBy, s.id);
+    // The members a session is created with are seated directly — bellman_start
+    // hands over the creator in `members` and never calls addMember — so the
+    // joined index is written here as well as in addMember. Another write into a
+    // second object with no transaction spanning it, tracked on #62; a lost one
+    // costs a row on one screen, not a seat.
+    for (const m of s.members) await this.registry.indexMembership(m.userId, s.id);
   }
 
   async getSession(id: string): Promise<Session | undefined> {

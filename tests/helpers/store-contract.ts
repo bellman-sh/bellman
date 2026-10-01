@@ -387,14 +387,34 @@ export function describeStoreContract(
     });
 
     it("lists the creator's own room, because the creator holds a handle too", async () => {
-      // session() seats member() — m_creator / u_jesse — at members[0], but
-      // createSession does not call addMember, so the creator is indexed when
-      // their handle is added the way bellman_start adds it.
-      await store.createSession(session({ id: "qs_mine", createdBy: "u_jesse", members: [] }));
-      await store.addMember("qs_mine", member({ userId: "u_jesse" }));
+      // The production path. bellman_start passes the creator in `members` and
+      // never calls addMember, so createSession seats them directly and the
+      // index has to be written there. addMember is the join path; the cases
+      // around this one cover it.
+      await store.createSession(
+        session({ id: "qs_mine", createdBy: "u_jesse", members: [member({ userId: "u_jesse" })] }),
+      );
 
       expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_mine"]);
       expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+    });
+
+    it("indexes every member a session is created with, once each", async () => {
+      // The field is an array, and the index reflects all of it, not just the
+      // first seat. Two handles for one person are still one entry, as they are
+      // on the addMember path.
+      await store.createSession(session({
+        id: "qs_seated",
+        createdBy: "u_first",
+        members: [
+          member({ memberId: "m_a", userId: "u_first" }),
+          member({ memberId: "m_b", userId: "u_second" }),
+          member({ memberId: "m_c", userId: "u_second" }),
+        ],
+      }));
+
+      expect(await store.sessionsJoinedBy("u_first", 10)).toEqual(["qs_seated"]);
+      expect(await store.sessionsJoinedBy("u_second", 10)).toEqual(["qs_seated"]);
     });
 
     it("keeps listing a room after the member left it", async () => {

@@ -512,6 +512,12 @@ it("delivers every queued entry, in the order they were queued", async () => {
   for (const key of ["github:1", "github:2", "github:3"]) {
     await store.putGrantIfOwned(grant({ key }), "org_mine", { actorUserId: "u_admin" });
   }
+  // The second and third write find the first one's marker still due, and the earliest
+  // due time wins, so they arm the alarm for now. It would fire on its own and race the
+  // explicit run below, which then finds nothing scheduled. Park it far ahead; the test
+  // is the one to fire it.
+  await runInDurableObject(registry(), (_i: RegistryDO, ctx) =>
+    ctx.storage.setAlarm(Date.now() + 60_000));
   expect(await queued()).toHaveLength(3);
   await abortAllDurableObjects();
 

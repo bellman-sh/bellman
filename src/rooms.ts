@@ -185,8 +185,7 @@ export async function leaveRoom(
  * the verb.
  *
  * `leaveRoom` does not use it. Leaving needs no verb, and it must work on a
- * closed room so a member can tidy up after one. An operation whose authority
- * is not a seat's verb does not use it either.
+ * closed room so a member can tidy up after one.
  */
 async function gateSeat(
   store: BellmanStore,
@@ -198,10 +197,9 @@ async function gateSeat(
   const session = await store.getSession(sessionId);
   // Two branches, not one, and the reason text is identical on purpose. The
   // sentence a caller reads is unchanged from the old handler; the CODE is what
-  // a future HTTP route switches on. A closed room is one condition and takes
-  // one code from whichever operation refuses it, through this gate or not;
-  // answering "not_found" here would send a route to a different status
-  // depending on which operation turned the caller away.
+  // a future HTTP route switches on. A closed room and a missing one are
+  // different conditions; folding the first into "not_found" would leave a
+  // route no way to tell them apart.
   if (!session) return refuse("not_found", "session not found or closed.");
   if (session.closed) return refuse("closed", "session not found or closed.");
   if (session.frozenAt !== null) return refuse("frozen", FROZEN);
@@ -214,8 +212,17 @@ async function gateSeat(
   return succeed(session);
 }
 
-/** Every name the manifest declares, for the sentence a bad role gets back. */
-function noSuchRole(session: Session, role: string): RoomResult<never> {
+/**
+ * A role the manifest does not declare, refused with the names it does. Null
+ * when no role was asked for, or the one asked for is declared.
+ *
+ * One check for both operations, because the old handler made it once, before
+ * the issue/revoke split. Revoke is where a copy that drifted would hurt: a
+ * mistyped role retires nothing, so without the check it answers an empty
+ * success, and an open door reads as shut.
+ */
+function unknownRole(session: Session, role: string | undefined): RoomResult<never> | null {
+  if (role === undefined || Object.hasOwn(session.manifest.roles, role)) return null;
   return refuse(
     "not_found",
     `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
@@ -223,8 +230,9 @@ function noSuchRole(session: Session, role: string): RoomResult<never> {
 }
 
 /**
- * Mint a fresh code for a seat. Issuing for a role RETIRES that role's previous
- * code and leaves every other role's alone.
+ * Mint a fresh code for a seat: the named role's, or the manifest's default
+ * when none is named. Issuing for a role RETIRES that role's previous code and
+ * leaves every other role's alone.
  *
  * `invite` and `revoke` are separate verbs, so a seat may hold one without the
  * other. A room whose manifest gives nobody `invite` cannot be reopened by
@@ -242,9 +250,8 @@ export async function issueInvite(
   if (!gate.ok) return gate;
   const session = gate.value;
 
-  if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
-    return noSuchRole(session, role);
-  }
+  const bad = unknownRole(session, role);
+  if (bad) return bad;
   if (activeMembers(session).length >= session.maxMembers) {
     return refuse(
       "conflict",
@@ -291,9 +298,8 @@ export async function revokeInvite(
   if (!gate.ok) return gate;
   const session = gate.value;
 
-  if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
-    return noSuchRole(session, role);
-  }
+  const bad = unknownRole(session, role);
+  if (bad) return bad;
 
   // An expired code is not a live code, and nothing prunes joinCodes when a
   // code merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and

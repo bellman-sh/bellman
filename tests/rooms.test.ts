@@ -262,4 +262,18 @@ describe("revokeInvite", () => {
     if (!r.ok) return;
     expect(r.value.roles).toEqual([]);
   });
+
+  // Without the guard a mistyped role retires nothing and answers { roles: [] },
+  // which is also the honest answer for a role with no live code. The caller
+  // cannot tell them apart, and believes a door is shut that is still open.
+  it("refuses a role the manifest does not declare", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator", "scribe");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("not_found");
+    expect(r.reason).toContain("declares no role");
+  });
 });

@@ -363,7 +363,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * grant's own transaction instead and delivered after it: inline when the write
    * returns, by the alarm if the isolate went away first.
    */
-  private driver = new OutboxDriver(this.ctx.storage, (row) => this.deliver(row));
+  private driver = new OutboxDriver(this.ctx.storage, (row) => this.#deliver(row));
 
   async putJoinCode(code: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`jc:${code}`, sessionId);
@@ -441,8 +441,15 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    *
    * The row id goes along as the intent id, so an entry that landed but whose
    * acknowledgement was lost is applied once when the queue retries it.
+   *
+   * This and the other methods below named with a `#` are JS-private, on purpose.
+   * TypeScript's `private` is erased at compile time, and a Durable Object answers
+   * RPC for every method on its class, so a `private` one can be called by anything
+   * holding the REGISTRY binding. These do what no caller should be able to ask for
+   * directly: file an entry in any org's stream, or commit a grant change and leave
+   * its entry undelivered.
    */
-  private async deliver(row: OutboxRow): Promise<void> {
+  async #deliver(row: OutboxRow): Promise<void> {
     if (row.kind !== "audit") throw new Error(`outbox: unknown kind ${row.kind}`);
     const entry = row.payload as AuditEntry;
     // Falsy, not `=== null`: a namespace accepts "" and undefined as names, so a
@@ -454,7 +461,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   /** Each entry becomes one queued intent, with an id the stream can dedupe on. */
-  private auditIntents(entries: AuditEntry[]): OutboxIntent[] {
+  #auditIntents(entries: AuditEntry[]): OutboxIntent[] {
     return entries.map((entry) => ({ id: crypto.randomUUID(), kind: "audit", payload: entry }));
   }
 
@@ -484,7 +491,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * there would hold the registry for as long as the audit object takes to answer.
    * The closure queues; the wrapper delivers once it has committed.
    */
-  private async putGrantIfOwnedTxn(
+  async #putGrantIfOwnedTxn(
     grant: PlanGrant,
     expectedOrgId: string | null,
     audit: AuditIntent
@@ -499,7 +506,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
-        txn, this.auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+        txn, this.#auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
       );
       // Grant, index and the intent to record it, in one commit. A refused
       // write reaches none of this, so it queues nothing.
@@ -517,12 +524,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     expectedOrgId: string | null,
     audit: AuditIntent
   ): Promise<"written" | "conflict"> {
-    const outcome = await this.putGrantIfOwnedTxn(grant, expectedOrgId, audit);
+    const outcome = await this.#putGrantIfOwnedTxn(grant, expectedOrgId, audit);
     if (outcome === "written") await this.driver.deliverNow();
     return outcome;
   }
 
-  private async deleteGrantIfOwnedTxn(
+  async #deleteGrantIfOwnedTxn(
     key: string,
     expectedOrgId: string | null,
     audit: AuditIntent
@@ -541,7 +548,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
       await txn.put<unknown>(
         await this.driver.enqueue(
-          txn, this.auditIntents(revokeAuditEntries(existing, audit, Date.now()))
+          txn, this.#auditIntents(revokeAuditEntries(existing, audit, Date.now()))
         )
       );
       return "deleted" as const;
@@ -553,12 +560,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     expectedOrgId: string | null,
     audit: AuditIntent
   ): Promise<"deleted" | "missing" | "conflict"> {
-    const outcome = await this.deleteGrantIfOwnedTxn(key, expectedOrgId, audit);
+    const outcome = await this.#deleteGrantIfOwnedTxn(key, expectedOrgId, audit);
     if (outcome === "deleted") await this.driver.deliverNow();
     return outcome;
   }
 
-  private async putGrantIfSourceTxn(
+  async #putGrantIfSourceTxn(
     grant: PlanGrant,
     expectedSource: string,
     audit: AuditIntent
@@ -569,7 +576,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       if (previous && previous.source !== expectedSource) return { outcome: "conflict" as const };
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
       const rows = await this.driver.enqueue(
-        txn, this.auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+        txn, this.#auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
       );
       await txn.put<unknown>({
         [grantKey(grant.key)]: grant,
@@ -585,12 +592,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     expectedSource: string,
     audit: AuditIntent
   ): Promise<GrantWrite> {
-    const result = await this.putGrantIfSourceTxn(grant, expectedSource, audit);
+    const result = await this.#putGrantIfSourceTxn(grant, expectedSource, audit);
     if (result.outcome === "written") await this.driver.deliverNow();
     return result;
   }
 
-  private async deleteGrantIfSourceTxn(
+  async #deleteGrantIfSourceTxn(
     key: string,
     expectedSource: string,
     audit: AuditIntent
@@ -606,7 +613,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
       await txn.put<unknown>(
         await this.driver.enqueue(
-          txn, this.auditIntents(revokeAuditEntries(existing, audit, Date.now()))
+          txn, this.#auditIntents(revokeAuditEntries(existing, audit, Date.now()))
         )
       );
       return { outcome: "deleted" as const, removed: existing };
@@ -618,7 +625,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     expectedSource: string,
     audit: AuditIntent
   ): Promise<GrantDelete> {
-    const result = await this.deleteGrantIfSourceTxn(key, expectedSource, audit);
+    const result = await this.#deleteGrantIfSourceTxn(key, expectedSource, audit);
     if (result.outcome === "deleted") await this.driver.deliverNow();
     return result;
   }

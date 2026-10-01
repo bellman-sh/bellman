@@ -693,3 +693,28 @@ it("lets the backstop fire on an empty queue, and arms nothing after it", async 
   expect(await actionsFor(store, "org_mine")).toEqual(["plan_granted"]);
   expect(await queued()).toEqual([]);
 });
+
+/**
+ * The methods that do what no caller should be able to ask for directly are `#private`,
+ * not TypeScript-`private`. The latter is erased, and a Durable Object answers RPC for
+ * every method on its class: `deliver` would file an entry in any org's stream, and a
+ * `*Txn` half would commit a grant change and leave its entry undelivered. A plain stub
+ * must not reach them, and must reach a method that is meant to be public.
+ */
+it("does not answer over RPC for the methods that must stay internal", async () => {
+  const stub = registry() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  // A public method answers, so a refusal below is about the method and not the stub.
+  expect(await stub.getGrant("github:nobody")).toBeUndefined();
+
+  const internal = [
+    "deliver", "auditIntents", "putGrantIfOwnedTxn", "deleteGrantIfOwnedTxn",
+    "putGrantIfSourceTxn", "deleteGrantIfSourceTxn",
+  ];
+  for (const name of internal) {
+    const outcome = await stub[name]({}).then(() => "answered", (err: unknown) => String(err));
+    expect(outcome, name).toMatch(/does not implement/);
+  }
+  // None of them ran.
+  expect(await queued()).toEqual([]);
+  expect(await armedAlarm()).toBeNull();
+});

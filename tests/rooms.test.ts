@@ -726,4 +726,81 @@ describe("evictMember", () => {
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.filter((a) => a.action === "member_evicted")).toHaveLength(1);
   });
+
+  // An eviction touches the evicted member's org, which need be neither the room's
+  // nor the creator's, so a log that wrote only those two would leave that org with
+  // no record that one of its members lost access to a room. A leave never has the
+  // gap: the actor there is the member, so their own org is already written.
+  it("audits a cross-org eviction in the evicted member's org too", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", orgId: "org_other", roomRole: "peer_b" })],
+    }));
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    const theirs = await store.auditForOrg("org_other", 50);
+    expect(theirs).toHaveLength(1);
+    expect(theirs[0]).toMatchObject({
+      action: "member_evicted",
+      sessionId: "qs_test",
+      actorUserId: "u_jesse",
+      detail: { member_id: "m_peer", room_role: "peer_b", code_retired: true },
+    });
+    const ours = await store.auditForOrg("org_codenerd", 50);
+    expect(ours.filter((a) => a.action === "member_evicted")).toHaveLength(1);
+  });
+
+  // The extra org is a union, not an addition: an evicted member in the room's own
+  // org still writes the one row it always did.
+  it("writes one audit row, not two, when the evicted member is in the room's own org", async () => {
+    await store.createSession(peopled());
+    const written = vi.spyOn(store, "appendAudit");
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(written.mock.calls.map(([entry]) => entry.orgId)).toEqual(["org_codenerd"]);
+  });
+
+  // A member with no org has no audit stream to write to, so naming theirs adds
+  // nothing; the room's row is still written.
+  it("writes no extra audit row for an evicted member who belongs to no org", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", orgId: null, roomRole: "peer_b" })],
+    }));
+    const written = vi.spyOn(store, "appendAudit");
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(written.mock.calls.map(([entry]) => entry.orgId)).toEqual(["org_codenerd"]);
+  });
+});
+
+// The helper's org set, driven directly: the room's, the actor's and any extras the
+// caller names, one row per distinct org and none for an org-less one.
+describe("audit", () => {
+  it("writes one row per distinct org among the room's, the actor's and the extras", async () => {
+    const room = session({ orgId: "org_room" });
+    const written = vi.spyOn(store, "appendAudit");
+
+    // org_other is new, org_room repeats the room's, and null has no stream.
+    await audit(store, room, jesse, "probe", {}, ["org_other", "org_room", null]);
+
+    expect(written.mock.calls.map(([entry]) => entry.orgId).sort())
+      .toEqual(["org_codenerd", "org_other", "org_room"]);
+  });
+
+  // What every caller that names no extra org relies on: the room's and the actor's,
+  // exactly as before the parameter existed.
+  it("writes only the room's and the actor's rows when no extra org is named", async () => {
+    const room = session({ orgId: "org_room" });
+    const written = vi.spyOn(store, "appendAudit");
+
+    await audit(store, room, jesse, "probe", {});
+
+    expect(written.mock.calls.map(([entry]) => entry.orgId).sort()).toEqual(["org_codenerd", "org_room"]);
+  });
 });

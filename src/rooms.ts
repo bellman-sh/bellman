@@ -80,6 +80,15 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
  * so each org's admins see the crossings that touched THEIR boundary —
  * without being able to read the other org's unrelated activity.
  *
+ * The involved orgs are the room's and the actor's, and that is enough while
+ * the actor is the person the entry is about: a member joining or leaving
+ * writes a row for their own org. It is not enough when the actor acts on
+ * someone else. An eviction touches the evicted member's org, which need be
+ * neither the room's nor the creator's, so that caller names it in `alsoOrgs`
+ * and the entry reaches the org whose member lost access. The parameter only
+ * adds: the room's and the actor's rows are always written, an org named twice
+ * gets one row, and an org-less member gets none.
+ *
  * It lives here rather than in a transport because a transport that writes its
  * own row is a transport that will one day write it for one org and not the
  * other.
@@ -89,9 +98,10 @@ export async function audit(
   session: Session,
   actor: Identity,
   action: string,
-  detail: Record<string, unknown>
+  detail: Record<string, unknown>,
+  alsoOrgs: readonly (string | null)[] = []
 ): Promise<void> {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId]);
+  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
   for (const orgId of orgs) {
     if (orgId === null) continue;
     const entry: AuditEntry = {
@@ -439,9 +449,12 @@ export async function evictMember(
   // would have closed the room and lost the row. That is the trade taken
   // deliberately: a retry can restore the closing, and nothing can restore the
   // row.
+  //
+  // The evicted member's org is named as well. The actor here is the creator, not
+  // the member, so unless that org is also the room's it would get no row.
   await audit(store, session, actor, "member_evicted", {
     member_id: targetMemberId, room_role: target.roomRole, code_retired: live,
-  });
+  }, [target.orgId]);
 
   return succeed({
     evicted: true,

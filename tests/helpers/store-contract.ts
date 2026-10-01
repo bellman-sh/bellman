@@ -1009,6 +1009,139 @@ export function describeStoreContract(
       }
     });
 
+    /**
+     * A grant change and the record of it are one operation. Every caller used
+     * to write the grant and then audit it, and losing the second write lost the
+     * record permanently — the retry returns "missing" and cannot tell that the
+     * change already happened.
+     */
+    it("records a guarded grant write in the affected org", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" }))
+        .toBe("written");
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => [e.action, e.actorUserId]))
+        .toEqual([["plan_granted", "u_admin"]]);
+    });
+
+    it("records nothing when a guarded write changes nothing a reader sees", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" });
+      await store.putGrantIfOwned(
+        { ...grant, grantedAt: Date.now() + 10 }, "org_mine", { actorUserId: "u_admin" }
+      );
+
+      // Exactly one, and it is the first: a length check alone would also pass
+      // against a store that recorded nothing at all.
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records a revocation against the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine",
+        { actorUserId: "u_admin", detail: { reason: "left the team" } })).toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "u_admin",
+        detail: { key: "github:4242", plan: "team", reason: "left the team" },
+      });
+    });
+
+    /**
+     * The grant is re-homed rather than deleted, so without this the org it left
+     * would never hear that it lost an admin. A team subscription ending while a
+     * pro one continues does exactly this.
+     */
+    it("records both halves when a grant moves between orgs", async () => {
+      const base = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrantIfSource({ ...base, orgId: "org_old" }, "purchase",
+        { actorUserId: "stripe" });
+      await store.putGrantIfSource({ ...base, orgId: "org_new" }, "purchase",
+        { actorUserId: "stripe" });
+
+      expect((await store.auditForOrg("org_old", 10)).map((e) => e.action))
+        .toEqual(["plan_granted", "plan_revoked"]);
+      expect((await store.auditForOrg("org_new", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records nothing for a refused guarded write, in either org", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrant({ ...base, orgId: "org_theirs" });
+
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine",
+        { actorUserId: "u_admin" })).toBe("conflict");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // The grant is untouched, so the emptiness above is about the audit
+      // rather than about the whole call having done nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    /** The deletes record too, through the source guard billing uses as well as the org one. */
+    it("records a revocation through the source guard, in the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      });
+
+      expect((await store.deleteGrantIfSource("github:4242", "purchase",
+        { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } })).outcome)
+        .toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "stripe",
+        detail: { key: "github:4242", plan: "team", reason: "subscription no longer paying" },
+      });
+    });
+
+    /** All four guarded writes, each refused: the first test of the kind covers one of them. */
+    it("records nothing for any refused guarded write, in either org", async () => {
+      const held = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_theirs",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrant(held);
+      const asAdmin = { actorUserId: "u_admin" };
+
+      expect(await store.putGrantIfOwned({ ...held, orgId: "org_mine" }, "org_mine", asAdmin))
+        .toBe("conflict");
+      expect((await store.putGrantIfSource({ ...held, orgId: "org_mine" }, "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", asAdmin)).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", asAdmin)).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:nobody", "purchase", asAdmin)).outcome)
+        .toBe("missing");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // Still there, so the emptiness above is the audit's and not a store that did nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
     /** null is a bucket, not "unscoped": org-less grants list as their own set. */
     it("lists org-less grants separately from an org's", async () => {
       (await store.putGrant({

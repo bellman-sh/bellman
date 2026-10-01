@@ -274,8 +274,21 @@ same way. The reason survives intact; only the registration mechanism changes.
 
 `ctx.setWebSocketAutoResponse()` handles ping/pong so a keepalive never wakes
 the object, which is the difference between a hibernating socket and a resident
-one. `webSocketClose` and `webSocketError` are defined so the runtime can
-hibernate at all.
+one. It is set **once in the constructor**, not per upgrade: measured against
+workerd `1.20260926.1`, the runtime holds the pair for the whole object, it
+survives eviction and revival, it covers sockets accepted before it was set,
+and it does not keep an idle object resident. Per-`fetch` also works; the
+constructor is where object-wide state belongs, and it keeps `fetch`'s pinned
+call sequence to the four steps that are actually ordered.
+
+**An earlier draft said `webSocketClose` and `webSocketError` are "defined so
+the runtime can hibernate at all". That is false, and was measured false.**
+Neither handler is required to hibernate. They exist for a smaller, real
+reason: with an empty `webSocketClose`, a polite client close hangs about ten
+seconds and then ends in 1006, so the handler replies `ws.close(1000)` to
+complete the handshake. Echoing the peer's code is wrong — a close with no code
+reads back as 1005 and throws. `webSocketError` genuinely has nothing to do and
+stays empty.
 
 ### D6 — The socket path does not go through `BellmanStore`.
 

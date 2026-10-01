@@ -1172,22 +1172,31 @@ In `src/store-do.ts`, in `SessionDO`, after `fetch`:
     ws.close(1003, "This socket is receive-only. Send with bellman_send over /mcp.");
   }
 
-  async webSocketClose(_ws: WebSocket, _code: number, _reason: string, _clean: boolean): Promise<void> {
-    // The runtime drops it from getWebSockets(); there is no list of our own
-    // to prune. Defined because the Hibernation API requires a handler.
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _clean: boolean): Promise<void> {
+    // Complete the closing handshake. NOT required to hibernate — that was a
+    // false claim in an earlier draft of this plan. Measured: with an empty
+    // body a polite client close hangs about ten seconds and ends in 1006.
+    // Do not echo the peer's code: a close with no code reads back as 1005,
+    // and closing with 1005 throws.
+    ws.close(1000);
   }
 
   async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {
-    // Same. A socket that errors is already gone from getWebSockets().
+    // Genuinely nothing to do. The runtime has already dropped the socket from
+    // getWebSockets(), and we keep no list of our own to prune.
   }
 ```
 
-and in `fetch`, immediately before `this.ctx.acceptWebSocket(server)`:
+and in the **constructor**, not in `fetch`:
 
 ```ts
     // Answered by the runtime without waking this object. Without it a
     // keepalive would revive the DO on every interval, which is the whole
-    // saving undone.
+    // saving undone, silently, with every test still green.
+    //
+    // Once per object rather than per upgrade: the runtime holds the pair for
+    // the object's lifetime, it survives eviction, and it covers sockets
+    // accepted before it was set. Measured against workerd 1.20260926.1.
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair("ping", "pong")
     );

@@ -435,12 +435,12 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~3,730** | every request, whether or not you are in a room |
+| Tool definitions | **~4,820** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-`bellman_start` alone is 1,352 tokens, 36% of the tool budget, paid even by
+`bellman_start` alone is 1,462 tokens, 30% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

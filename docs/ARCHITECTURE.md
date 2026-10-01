@@ -100,7 +100,7 @@ only to turn polling into push.
 
 ## 3. Why the server is remote-first
 
-This is the load-bearing decision, and cloud agents are why.
+Every other decision here rests on this one, and cloud agents are why.
 
 A Claude Code cloud session runs in Anthropic's infrastructure. You did not
 launch it, you cannot pass it flags, and there is no machine of yours for it to

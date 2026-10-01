@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { buildServer } from "./server.js";
+import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
@@ -103,10 +104,10 @@ const unauthorized = (oauth?: OAuthConfig) =>
  * than 401 every caller as though their credentials were wrong.
  *
  * The dev table is kept out twice over. resolveIdentity falls back to it
- * (qk_dev_jesse: team plan, admin role) when it is handed no key map, and each
- * caller tests `env.BELLMAN_KEYS` before calling it. With neither a map nor
- * OAuth, either that test or this guard refuses the dev key on its own. With
- * OAuth on and no map this guard passes, and that test is all that stands
+ * (qk_dev_jesse: team plan, admin role) when it is handed no key map, and
+ * resolveCaller tests `env.BELLMAN_KEYS` before calling it. With neither a map
+ * nor OAuth, either that test or this guard refuses the dev key on its own.
+ * With OAuth on and no map this guard passes, and that test is all that stands
  * between the dev key and a public URL. Local runs supply the map through
  * .dev.vars, so dev exercises the same path production does.
  */
@@ -117,6 +118,34 @@ function unconfigured(env: WorkerEnv, oauth?: OAuthConfig): Response | undefined
     { jsonrpc: "2.0", error: { code: -32002, message: "Server is not configured with an identity key map" }, id: null },
     { status: 503 }
   );
+}
+
+/**
+ * Who is calling, or null. An OAuth access token first, then the static key
+ * map. The bearer key path stays for stdio clients and scripts, which the spec
+ * says should take credentials from the environment rather than run an OAuth
+ * flow.
+ *
+ * Both routes resolve through here, so what counts as a caller cannot differ
+ * between them: a copy hardened on one route and not the other leaves the
+ * weaker one as the way in.
+ *
+ * The `env.BELLMAN_KEYS` test below is not a shortcut. resolveIdentity falls
+ * back to the dev table (qk_dev_jesse: team plan, admin role) when it is handed
+ * no key map, so it is never called without one. `unconfigured` refuses a
+ * deploy with neither a map nor OAuth, but with OAuth on and no map it passes,
+ * and this test is all that stands between the dev key and a public URL.
+ */
+async function resolveCaller(
+  request: Request,
+  env: WorkerEnv,
+  oauth?: OAuthConfig
+): Promise<Identity | null> {
+  const header = request.headers.get("authorization") ?? undefined;
+  const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
+  let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
+  if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+  return identity;
 }
 
 export default {
@@ -199,10 +228,7 @@ export default {
         return new Response("cursor must be a non-negative integer", { status: 400 });
       }
 
-      const header = request.headers.get("authorization") ?? undefined;
-      const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
-      let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
-      if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+      const identity = await resolveCaller(request, env, oauth);
       if (!identity) return unauthorized(oauth);
 
       const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
@@ -232,13 +258,7 @@ export default {
     const blocked = unconfigured(env, oauth);
     if (blocked) return blocked;
 
-    // An OAuth access token first, then the static key map. The bearer key path
-    // stays for stdio clients and scripts, which the spec says should take
-    // credentials from the environment rather than run an OAuth flow.
-    const header = request.headers.get("authorization") ?? undefined;
-    const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
-    let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
-    if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+    const identity = await resolveCaller(request, env, oauth);
     if (!identity) return unauthorized(oauth);
 
     try {

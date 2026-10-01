@@ -75,6 +75,22 @@ const AUTH = { authorization: "Bearer qk_test_jesse" };
 const OK: Answer = { memberIds: ["m1"], closed: false };
 const ROOM = "https://b/ws?session=qs_1&cursor=0";
 
+const SECRET = "oauth-secret-oauth-secret-oauth-secret";
+const oauth = { BELLMAN_TOKEN_SECRET: SECRET, AUTH: {} };
+// Minted the way the token endpoint does, for the origin the request arrives
+// on. /ws accepts what /mcp accepts, so the audience is /mcp's.
+const accessToken = (userId: string, aud = "https://b/mcp") =>
+  signJwt(
+    {
+      iss: "https://b",
+      sub: userId,
+      aud,
+      bellman: { userId, orgId: null, plan: "free", role: "member", label: userId },
+    },
+    SECRET,
+    600
+  );
+
 describe("GET /ws", () => {
   it("upgrades a member of the room", async () => {
     const { call, reached } = await world(OK);
@@ -212,22 +228,6 @@ describe("GET /ws", () => {
 });
 
 describe("GET /ws with OAuth on", () => {
-  const SECRET = "oauth-secret-oauth-secret-oauth-secret";
-  const oauth = { BELLMAN_TOKEN_SECRET: SECRET, AUTH: {} };
-  // Minted the way the token endpoint does, for the origin the request arrives
-  // on: /ws accepts what /mcp accepts, so the audience is /mcp's.
-  const accessToken = (userId: string) =>
-    signJwt(
-      {
-        iss: "https://b",
-        sub: userId,
-        aud: "https://b/mcp",
-        bellman: { userId, orgId: null, plan: "free", role: "member", label: userId },
-      },
-      SECRET,
-      600
-    );
-
   it("admits an access token with no key map configured", async () => {
     const { call, reached } = await world(OK, { ...oauth, BELLMAN_KEYS: undefined });
     const res = await call(ROOM, { authorization: `Bearer ${await accessToken("u9")}` });
@@ -243,9 +243,9 @@ describe("GET /ws with OAuth on", () => {
 
   it("does not fall back to the dev keys when there is no key map", async () => {
     // The fail-closed guard passes here, because OAuth is configured. What is
-    // left between qk_dev_jesse (team plan, admin role) and this URL is that the
-    // routes never call resolveIdentity without a map, which is what makes it
-    // fall back to the dev table.
+    // left between qk_dev_jesse (team plan, admin role) and this URL is that
+    // resolveCaller never calls resolveIdentity without a map, which is what
+    // makes it fall back to the dev table.
     const { call, mcp, reached } = await world(OK, { ...oauth, BELLMAN_KEYS: undefined });
     const dev = { authorization: "Bearer qk_dev_jesse" };
     expect((await call(ROOM, dev)).status, "/ws").toBe(401);
@@ -261,5 +261,37 @@ describe("GET /ws with OAuth on", () => {
       'Bearer resource_metadata="https://b/.well-known/oauth-protected-resource"'
     );
     expect(reached).toEqual([]);
+  });
+});
+
+describe("/ws and /mcp resolve the caller the same way", () => {
+  // One truth table, asked of both routes. /ws admits a caller when it upgrades.
+  // /mcp admits one when it gets past authentication, which for a POST with no
+  // body means any status but 401. A copy of the resolution that is weaker, or
+  // stricter, on one route than the other fails here whichever route it is on.
+  it("admits the same callers on both, in every deployment", async () => {
+    const callers: Record<string, Record<string, string>> = {
+      "no credentials": {},
+      "an unknown key": { authorization: "Bearer qk_test_nobody" },
+      "a static key": AUTH,
+      "an access token": { authorization: `Bearer ${await accessToken("u9")}` },
+      "a token minted for another audience": {
+        authorization: `Bearer ${await accessToken("u9", "https://elsewhere.example/mcp")}`,
+      },
+      "a dev key": { authorization: "Bearer qk_dev_jesse" },
+    };
+    const deployments = [
+      { name: "key map only", env: {}, admitted: ["a static key"] },
+      { name: "key map and OAuth", env: oauth, admitted: ["a static key", "an access token"] },
+      { name: "OAuth only", env: { ...oauth, BELLMAN_KEYS: undefined }, admitted: ["an access token"] },
+    ];
+    for (const d of deployments) {
+      const { call, mcp } = await world(OK, d.env);
+      for (const [who, headers] of Object.entries(callers)) {
+        const expected = d.admitted.includes(who);
+        expect((await call(ROOM, headers)).status === 101, `${d.name}: /ws, ${who}`).toBe(expected);
+        expect((await mcp(headers)).status !== 401, `${d.name}: /mcp, ${who}`).toBe(expected);
+      }
+    }
   });
 });

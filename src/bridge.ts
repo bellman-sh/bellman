@@ -211,6 +211,32 @@ function textOf(result: CallToolResult): string {
 }
 
 /**
+ * Whether these events show `memberId` being evicted.
+ *
+ * One definition for the two places the bridge reads a member's events: the
+ * watcher's poll, and an agent's own bellman_sync as observe() sees it. Two
+ * copies would drift, and the drift would go toward one of them matching too
+ * much.
+ *
+ * The type is checked before the payload because the payload of everything a
+ * peer can send is the peer's: a message can carry any member_id, and a joiner
+ * reads every member's id off the roster bellman_confirm returns. Only the
+ * server writes a member_evicted, and a peer cannot send that kind. Drop the
+ * type check and a peer stops another member's watcher by naming them, with
+ * nothing to tell that member why their room went quiet.
+ */
+function showsEvictionOf(events: unknown, memberId: string): boolean {
+  return (
+    Array.isArray(events) &&
+    events.some(
+      (e: WireEnvelope) =>
+        e.data.type === "member_evicted" &&
+        (e.data.payload as { member_id?: string } | null)?.member_id === memberId
+    )
+  );
+}
+
+/**
  * What the bridge lists for a tool the server listed. The server requires a manifest, and a host that
  * honours the schema it is shown will not make a call that leaves a required argument out: shown the
  * server's own listing, it would refuse the very call .bellman/room.yaml exists to make possible, and the
@@ -476,7 +502,17 @@ export function createBridge(opts: BridgeOptions) {
         const cursor = Number(out.cursor ?? 0);
         arm(sessionId, memberId, cursor);
         seenThrough(memberId, cursor);
-        if (out.session_status === "closed") disarm(memberId);
+        /**
+         * An agent that syncs for itself can be the one who learns it was
+         * evicted, and it has to disarm here rather than leave that to the
+         * watcher: seenThrough has just moved the watcher's cursor past the
+         * event, so the watcher would never see the event it disarms on and
+         * would poll a room this member is out of for the life of the process.
+         * Nothing is lost by it. The agent has the event in the result it is
+         * about to be handed, which is the delivery the watcher's order
+         * (deliver, then disarm) exists to guarantee.
+         */
+        if (out.session_status === "closed" || showsEvictionOf(out.events, memberId)) disarm(memberId);
         break;
       }
       case "bellman_leave":
@@ -637,14 +673,10 @@ export function createBridge(opts: BridgeOptions) {
        * is out, because reads stay open to them, and the room is not closed.
        * A bellman_leave the agent called would have disarmed this watcher on
        * the way past; an eviction is a thing that happened TO this member, so
-       * the event is the only signal there is.
+       * the event is the only signal there is. An agent's own bellman_sync can
+       * be the one to receive it, which observe() answers the same way.
        */
-      const evicted = (out.events ?? []).some(
-        (e) =>
-          e.data.type === "member_evicted" &&
-          (e.data.payload as { member_id?: string } | null)?.member_id === w.memberId
-      );
-      if (evicted) {
+      if (showsEvictionOf(out.events, w.memberId)) {
         disarm(w.memberId);
         return;
       }

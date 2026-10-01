@@ -64,6 +64,32 @@ async function remoteFor(store: BellmanStore, key: string): Promise<Remote> {
   };
 }
 
+/**
+ * A remote whose watcher polls are parked until `release()`. The polls are the calls that wait,
+ * and the only ones the bridge makes on its own; everything an agent calls passes straight
+ * through. So a test can act through the agent's own tools while the watcher is known to be
+ * unable to react, and anything that changes is the tools' doing.
+ */
+function parkedPolls(key: string): { remote: () => Promise<Remote>; release: () => void } {
+  let release!: () => void;
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    release,
+    remote: async () => {
+      const real = await remoteFor(store, key);
+      return {
+        ...real,
+        callTool: async (params) => {
+          if (params.name === "bellman_sync" && Number(params.arguments?.wait_seconds) > 0) await parked;
+          return real.callTool(params);
+        },
+      };
+    },
+  };
+}
+
 async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await check())) {
@@ -326,6 +352,48 @@ describe("channel delivery", () => {
     });
     await until(() => channelEvents(a).some((e) => e.meta.type === "message"));
 
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
+
+  it("stops watching when the agent's own sync shows this member was evicted", async () => {
+    // The watcher's polls are parked, so it cannot be what reacts: only the sync below can tell
+    // the bridge. That sync also moves the watcher's cursor past the eviction, so a watcher left
+    // armed would never see the event it disarms on, and would poll the room for the life of the
+    // process.
+    const polls = parkedPolls(DEV_KEY.peer);
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    try {
+      const { sessionId, joinerMember } = await pair(a, b);
+      expect(b.bridge.watching()).toHaveLength(1);
+
+      await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+      const synced = await b.call("bellman_sync", {
+        session_id: sessionId, member_id: joinerMember, since_cursor: 0, wait_seconds: 0,
+      });
+      const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+      expect(types).toContain("member_evicted");
+
+      expect(b.bridge.watching()).toHaveLength(0);
+    } finally {
+      polls.release();
+    }
+  });
+
+  it("keeps watching when the agent's own sync shows somebody else's eviction", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    const synced = await a.call("bellman_sync", {
+      session_id: sessionId, member_id: creatorMember, since_cursor: 0, wait_seconds: 0,
+    });
+    const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+    expect(types).toContain("member_evicted");
+
+    // The creator is still in the room, so the sync showed them news, not their own exit.
     expect(a.bridge.watching()).toHaveLength(1);
   });
 });

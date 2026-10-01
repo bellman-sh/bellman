@@ -309,6 +309,25 @@ describe("channel delivery", () => {
     // The creator is still in the room, so the event is news, not an exit.
     expect(a.bridge.watching()).toHaveLength(1);
   });
+
+  it("is not disarmed by a peer message that names this member", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    // The payload is peer content, and an ordinary one: bellman_send takes any object, and a
+    // joiner reads every member's id off the roster bellman_confirm returns. A member id inside
+    // a message is not an eviction. Only the event the server writes for one is, and a peer
+    // cannot send that kind.
+    await b.call("bellman_send", {
+      session_id: sessionId, member_id: joinerMember, type: "message",
+      payload: { member_id: creatorMember },
+    });
+    await until(() => channelEvents(a).some((e) => e.meta.type === "message"));
+
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
 });
 
 describe("hook delivery (the fallback)", () => {

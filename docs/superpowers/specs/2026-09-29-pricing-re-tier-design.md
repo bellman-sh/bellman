@@ -130,7 +130,7 @@ A single integer: how many of this user's rooms may be un-expired at once.
 `tests/auth.test.ts:108` carries a deliberate tripwire:
 
 > **INVARIANT 1: entitlements gate session CREATION only.** If a join-side
-> field ever appears here, joining has stopped being free and the viral loop is
+> field ever appears here, joining has stopped being free and being invited
 > broken — this test is the tripwire.
 
 `maxLiveRooms` satisfies it by construction. It is read once in

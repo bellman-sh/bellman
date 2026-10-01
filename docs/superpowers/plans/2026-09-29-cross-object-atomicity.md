@@ -27,7 +27,7 @@
 
 Five failure modes the spec implies that no task's happy path exercises. Each has a test assigned to the task that owns the code.
 
-1. **A grant with `orgId: null` must enqueue nothing.** `appendAudit` returns early for a null org (`store-do.ts:751`), so a row enqueued for one could never be delivered and would block the head of the queue forever. Pro purchases are the common case. → Task 7.
+1. **A grant with a falsy `orgId` must enqueue nothing.** The audit log is org-scoped, and `appendAudit` returns early for a null org (`store-do.ts:837`). A row queued for one is not a stall: a Durable Object namespace accepts `""`, `null` and `undefined` as names, so such a row is *delivered* — into a stream no org reads, and `idFromName(undefined)` names the same object as an org called `"undefined"`, which `isOrgId` allows. Pro purchases are the common org-less case. Two guards keep them out: `grantAuditEntries`' `hasOrg` (Task 6) and `deliver`'s own check (Task 7). → Task 7.
 2. **A guarded write returning `conflict` or `missing` must enqueue nothing.** A rejected write leaving an audit trace is the bug #44 fixed on the admin path, reintroduced through a different door. → Task 7.
 3. **An org move emits two rows; a delivery failure between them must lose neither and reorder neither.** FIFO plus head-of-line blocking is what guarantees it, and nothing else does. → Task 3.
 4. **`setJoinCode` on a frozen session returns `false` and must enqueue nothing.** Otherwise a frozen room's rotated code gets registered anyway. → Task 10.
@@ -1584,11 +1584,15 @@ it("queues and records nothing when a guarded write is refused", async () => {
 
 /**
  * Review Focus 1. Every pro purchase is org-less, so the audit log has no stream
- * for it. A queued row for one is not a stall: a Durable Object namespace accepts
- * "" and undefined as names, so such a row is DELIVERED, into a stream no org
- * reads — and `idFromName(undefined)` names the same object as an org called
- * "undefined", which isOrgId allows. The empty-string case below is the one that
- * exercises that, because `deliver` drops a null-org row on its own.
+ * for it. A queued row for one would not stall: a namespace accepts "", null and
+ * undefined as names, so it is DELIVERED, into a stream no org reads — and
+ * `idFromName(undefined)` names the same object as an org called "undefined",
+ * which isOrgId allows.
+ *
+ * Two guards keep such a row out: `hasOrg` in grantAuditEntries, and `deliver`'s
+ * own `!entry.orgId`. So an empty queue after the call cannot tell which one did
+ * the work — `deliver` returning normally makes `drain` delete the row either
+ * way. Step 6's control 3 removes BOTH, which is the only way to see either fail.
  */
 it("queues nothing for an org-less grant", async () => {
   const store = new DurableObjectStore(env as never);
@@ -1602,6 +1606,29 @@ it("queues nothing for an org-less grant", async () => {
 
   expect(await queued()).toEqual([]);
   expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", orgId: null });
+});
+
+/**
+ * The same, for an org id a namespace WOULD accept as a name. `putGrant` validates
+ * nothing, so a grant like this can reach the store even though the admin route's
+ * isOrgId and billing's derived org id both refuse it. If both guards were gone the
+ * entry would land in the stream of org "" and in one named "null" — read back here,
+ * so the test fails on a misfile rather than only on a queue that is not empty.
+ */
+it("queues nothing, and misfiles nothing, for an org id that is not a real org", async () => {
+  const store = new DurableObjectStore(env as never);
+
+  await store.putGrant(grant({ key: "github:9", orgId: "" as never, plan: "pro", role: "member", source: "purchase" }));
+  const written = await store.putGrantIfSource(
+    grant({ key: "github:9", orgId: "" as never, plan: "team", role: "admin", source: "purchase" }),
+    "purchase",
+    { actorUserId: "stripe" }
+  );
+  expect(written.outcome).toBe("written");
+
+  expect(await queued()).toEqual([]);
+  expect(await store.auditForOrg("", 10)).toEqual([]);
+  expect(await store.auditForOrg("null", 10)).toEqual([]);
 });
 ```
 
@@ -1927,7 +1954,11 @@ Three of these assert emptiness and would go green against a store that never au
 
 1. Make `auditRows` `return {}` unconditionally. The first test must fail with `expected [] to deeply equal [ [ 'plan_granted', 'u_admin', 'github:4242' ] ]`, and the second on its `toHaveLength(1)`.
 2. Move the `auditRows` call *above* the `conflict` return in `putGrantIfOwnedTxn`. The refused-write test must fail with a queued row.
-3. Drop the `hasOrg(next.orgId)` guard in `grantAuditEntries` (Task 6). **Check which test actually goes red.** The NULL case may stay green: `deliver` drops a null-org row and `drain` then deletes it, so the queue is empty again by the time the call returns. The empty-string case is the one that must fail, because that row is delivered to a stream no org reads. If neither fails, the test is not testing the guard — say so rather than reporting the control as run.
+3. Remove **both** org guards together: `hasOrg(next.orgId)` in `grantAuditEntries` (Task 6) and `deliver`'s own `!entry.orgId` (this task). The second needs a cast to compile, which is fine — vitest does not typecheck. Only with both gone can either test fail: `deliver` returning normally makes `drain` delete the row, so with one guard left the queue is empty again by the time the call returns and nothing is observable.
+
+   With both removed, the null row reaches `idFromName(null)` — the stream of an org called `"null"` — and the empty one reaches `idFromName("")`. Both tests must fail, and the misfile assertions (`auditForOrg("")`, `auditForOrg("null")`) are what catch it rather than the queue check.
+
+   **Removing `hasOrg` alone is expected to stay green**, and that is not a defect in the test — it is what having two defences means. Task 6's own unit tests are what pin `hasOrg`: removing it at the grant site dies to 6 of them. Do not weaken `deliver`'s guard to make a control go red.
 
 Restore after each. Quote all three.
 

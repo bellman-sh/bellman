@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type {
-  AuditEntry, Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent, Verb,
+  Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent, Verb,
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
@@ -10,6 +10,7 @@ import {
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
+import { FROZEN, activeMembers, audit, findMember, sessionStatus } from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
@@ -101,17 +102,6 @@ function untrusted<T>(origin: { memberId: string; label: string }, data: T) {
   return { trust: "untrusted", origin, data };
 }
 
-function activeMembers(s: Session): Member[] {
-  return s.members.filter((m) => m.leftAt === null);
-}
-
-function findMember(s: Session, memberId: string, identity: Identity): Member | undefined {
-  const m = s.members.find((mm) => mm.memberId === memberId);
-  // A member handle can only be driven by the identity that created it.
-  if (!m || m.userId !== identity.userId) return undefined;
-  return m;
-}
-
 function publicMember(m: Member) {
   return {
     member_id: m.memberId,
@@ -193,47 +183,9 @@ function publicEvent(e: SessionEvent) {
   };
 }
 
-/**
- * Enterprise audit trail. Cross-org sessions write one entry per involved org
- * so each org's admins see the crossings that touched THEIR boundary —
- * without being able to read the other org's unrelated activity.
- */
-async function audit(
-  store: BellmanStore,
-  session: Session,
-  actor: Identity,
-  action: string,
-  detail: Record<string, unknown>
-): Promise<void> {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId]);
-  for (const orgId of orgs) {
-    if (orgId === null) continue;
-    const entry: AuditEntry = {
-      at: Date.now(),
-      orgId,
-      sessionId: session.id,
-      actorUserId: actor.userId,
-      action,
-      detail,
-    };
-    await store.appendAudit(entry);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Server factory — one McpServer per request, bound to the caller's identity
 // ---------------------------------------------------------------------------
-
-/**
- * Refused while frozen, allowed while frozen: writes stop, reads do not.
- *
- * Freezing is what a lapsed plan does to a room, and it has to be reversible
- * without costing anyone their work — so membership, history and sync all keep
- * working, and only sending, joining and inviting are refused.
- */
-const FROZEN =
-  "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
-  "history is still readable, but nothing new can be sent or joined until the plan is restored.";
 
 /**
  * An event the caller can rely on, or a thrown refusal.
@@ -256,9 +208,6 @@ async function appendOrFrozen(
   if (!event) throw new FrozenError();
   return event;
 }
-
-const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
-  session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
 export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });

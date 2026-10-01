@@ -1254,9 +1254,12 @@ it("queues and records nothing when a guarded write is refused", async () => {
 });
 
 /**
- * Review Focus 1. Every pro purchase is org-less. A row queued for one could
- * never be delivered, and it would sit at the head of a FIFO queue blocking
- * every audit entry behind it.
+ * Review Focus 1. Every pro purchase is org-less, so the audit log has no stream
+ * for it. A queued row for one is not a stall: a Durable Object namespace accepts
+ * "" and undefined as names, so such a row is DELIVERED, into a stream no org
+ * reads — and `idFromName(undefined)` names the same object as an org called
+ * "undefined", which isOrgId allows. The empty-string case below is the one that
+ * exercises that, because `deliver` drops a null-org row on its own.
  */
 it("queues nothing for an org-less grant", async () => {
   const store = new DurableObjectStore(env as never);
@@ -1363,8 +1366,8 @@ Add these members to `RegistryDO`:
    *
    * Returned rather than written, because the point is that the grant change and
    * the record of it commit together. Empty for an org-less grant: the audit log
-   * is org-scoped, and a row that could never be delivered would sit at the head
-   * of a FIFO queue blocking everything behind it.
+   * is org-scoped, so queuing one would put a row in the outbox that has nowhere
+   * to go. `grantAuditEntries` is what keeps them out; see its `hasOrg`.
    */
   private async auditRows(
     txn: { get<T>(key: string): Promise<T | undefined> },
@@ -1394,7 +1397,11 @@ Add these members to `RegistryDO`:
   private async deliver(row: OutboxRow): Promise<void> {
     if (row.kind !== "audit") throw new Error(`outbox: unknown kind ${row.kind}`);
     const entry = row.payload as AuditEntry;
-    if (entry.orgId === null) return; // no stream to deliver it to; drop the row
+    // Falsy, not `=== null`: a namespace accepts "" and undefined as names, so a
+    // malformed entry would be delivered into a stream no org reads rather than
+    // failing. grantAuditEntries already refuses to build one; this is the second
+    // defence, for the same reason grant-index.ts keeps two for the org id.
+    if (!entry.orgId) return; // no stream to deliver it to; drop the row
     await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
   }
 
@@ -1591,7 +1598,7 @@ Three of these assert emptiness and would go green against a store that never au
 
 1. Make `auditRows` `return {}` unconditionally. The first test must fail with `expected [] to deeply equal [ [ 'plan_granted', 'u_admin', 'github:4242' ] ]`, and the second on its `toHaveLength(1)`.
 2. Move the `auditRows` call *above* the `conflict` return in `putGrantIfOwnedTxn`. The refused-write test must fail with a queued row.
-3. Drop the `next.orgId !== null` guard in `grantAuditEntries` (Task 6). The org-less test must fail with a queued row.
+3. Drop the `hasOrg(next.orgId)` guard in `grantAuditEntries` (Task 6). **Check which test actually goes red.** The NULL case may stay green: `deliver` drops a null-org row and `drain` then deletes it, so the queue is empty again by the time the call returns. The empty-string case is the one that must fail, because that row is delivered to a stream no org reads. If neither fails, the test is not testing the guard — say so rather than reporting the control as run.
 
 Restore after each. Quote all three.
 

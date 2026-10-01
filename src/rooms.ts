@@ -104,6 +104,26 @@ export async function audit(
   }
 }
 
+/**
+ * The room's closing invariant: with nobody left in it, it is over. Closes the
+ * room if so, and returns the status to report.
+ *
+ * Both successful paths through leaveRoom end here. The first departure closes
+ * the room behind it, and a retry has to be able to do the same for one that
+ * died before it got there.
+ */
+async function closeIfEmpty(store: BellmanStore, session: Session): Promise<string> {
+  // Re-read: `session` predates whatever the caller has just done to it.
+  const now = (await store.getSession(session.id)) ?? session;
+  const empty = activeMembers(now).length === 0;
+  if (empty) await store.closeSession(session.id);
+
+  // Closed wins over frozen: an empty room is over either way, and telling
+  // someone their room is frozen when it has no members left to thaw for
+  // would point them at paying to fix something payment will not fix.
+  return now.closed || empty ? "closed" : sessionStatus(now);
+}
+
 // ---------------------------------------------------------------------------
 // Operations
 // ---------------------------------------------------------------------------
@@ -112,9 +132,10 @@ export async function audit(
  * A member departs. The room closes behind the last one out.
  *
  * Reads stay open to a member who left — history is still theirs — so a
- * departed handle is not an error here: leaving again refuses nothing and
- * changes nothing. A caller retrying after a lost response would otherwise
- * announce, and audit, the same departure twice.
+ * departed handle is not an error here; leaving again is a no-op. It announces
+ * and audits nothing, so a caller retrying after a lost response does not tell
+ * the room the same departure twice. The only thing a repeat can still do is
+ * finish closing a room the first attempt left empty.
  */
 export async function leaveRoom(
   store: BellmanStore,
@@ -126,7 +147,17 @@ export async function leaveRoom(
   if (!session) return refuse("not_found", "session not found.");
   const me = findMember(session, memberId, actor);
   if (!me) return refuse("forbidden", "member_id is not yours.");
-  if (me.leftAt !== null) return succeed({ sessionStatus: sessionStatus(session) });
+
+  if (me.leftAt !== null) {
+    // Nothing to announce or audit, which is all this early return is for: a
+    // retry must not say the same departure twice. It does not excuse the room
+    // from closing. A leave that died between recording the departure and
+    // closing the room leaves it empty but open, and a retry landing here is
+    // how that heals. The announcement and audit row are not replayed; nothing
+    // records whether the first attempt got that far, and a wrong guess says it
+    // twice.
+    return succeed({ sessionStatus: await closeIfEmpty(store, session) });
+  }
 
   await store.updateMember(session.id, memberId, { leftAt: Date.now() });
   // The result is ignored on purpose. A frozen room swallows the announcement
@@ -141,14 +172,7 @@ export async function leaveRoom(
     refId: null,
   });
 
-  // Re-read: `session` predates the departure.
-  const after = (await store.getSession(sessionId)) ?? session;
-  if (activeMembers(after).length === 0) await store.closeSession(sessionId);
+  const status = await closeIfEmpty(store, session);
   await audit(store, session, actor, "member_left", {});
-
-  // Closed wins over frozen: an empty room is over either way, and telling
-  // someone their room is frozen when it has no members left to thaw for
-  // would point them at paying to fix something payment will not fix.
-  const closed = after.closed || activeMembers(after).length === 0;
-  return succeed({ sessionStatus: closed ? "closed" : sessionStatus(after) });
+  return succeed({ sessionStatus: status });
 }

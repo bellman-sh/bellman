@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { member, session } from "./helpers/fixtures.js";
 import { MemoryStore } from "../src/store.js";
-import { leaveRoom } from "../src/rooms.js";
+import { activeMembers, leaveRoom } from "../src/rooms.js";
 import type { Identity } from "../src/types.js";
 
 /**
@@ -92,5 +92,48 @@ describe("leaveRoom", () => {
     expect(events.filter((e) => e.type === "member_left")).toHaveLength(1);
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.filter((a) => a.action === "member_left")).toHaveLength(1);
+  });
+
+  // A leave that died after announcing and before closing leaves the room empty
+  // but open. The retry is how it heals, and it has to heal without announcing
+  // a second time: that is the one thing the early return is there to prevent.
+  it("closes a room a half-completed leave left empty, without announcing again", async () => {
+    await store.createSession(session({ members: [member({ leftAt: Date.now() })] }));
+    await store.appendEvent("qs_test", {
+      type: "member_left", fromMemberId: "m_creator", fromUserId: "u_jesse",
+      fromLabel: "jesse@codenerd", payload: { label: "jesse@codenerd" }, refId: null,
+    });
+    const before = (await store.getSession("qs_test"))!;
+    expect(before.closed, "setup: the room should still be open").toBe(false);
+    expect(activeMembers(before), "setup: nobody should be in it").toHaveLength(0);
+    const eventsBefore = await store.eventsAfter("qs_test", 0);
+    const auditBefore = await store.auditForOrg("org_codenerd", 50);
+
+    const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("closed");
+    expect((await store.getSession("qs_test"))?.closed).toBe(true);
+    expect(await store.eventsAfter("qs_test", 0)).toEqual(eventsBefore);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual(auditBefore);
+  });
+
+  // The other edge of the same repair: a departed member repeating the call must
+  // never close a room that the members still in it are using.
+  it("leaves the room open for the members still in it when a departed member leaves again", async () => {
+    await store.createSession(session({
+      members: [
+        member(),
+        member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() }),
+      ],
+    }));
+
+    const r = await leaveRoom(store, peer, "qs_test", "m_peer");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("active");
+    expect((await store.getSession("qs_test"))?.closed).toBe(false);
   });
 });

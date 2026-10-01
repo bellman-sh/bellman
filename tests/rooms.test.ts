@@ -444,10 +444,13 @@ describe("evictMember", () => {
 
   // The early return heals, it does not merely return.
   it("closes a room an interrupted eviction left empty and open", async () => {
-    // The state an eviction that died between updateMember and the close
-    // leaves behind: the target is out, nobody is active, the room is open.
+    // The state an eviction that died between updateMember and the close leaves
+    // behind: the target is out, nobody is active, the room is open. Its door is
+    // already shut, because an eviction shuts it before it records the member out,
+    // so there is no code here for the early return to retire.
     await store.createSession(session({
       maxMembers: 4,
+      joinCodes: {},
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -460,11 +463,16 @@ describe("evictMember", () => {
     expect((await store.getSession("qs_test"))?.closed).toBe(true);
     // The heal restores the closing and nothing else.
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
 
-  it("succeeds and writes nothing for a member who already left", async () => {
+  // Nothing is owed here: the seat's door is already shut (an eviction shuts it
+  // first, and a room that has filled has cleared every code), so there is nothing
+  // to retire, and the removal was already said once.
+  it("succeeds and writes nothing for a member who already left, when their seat's door is already shut", async () => {
     await store.createSession(session({
       maxMembers: 4,
+      joinCodes: {},
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -473,8 +481,156 @@ describe("evictMember", () => {
 
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.codeRetired).toBeNull();
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
+  });
+
+  // leaveRoom retires no code, so a member who left on their own leaves their seat's
+  // code live and the seat free, and whoever holds the code walks back in. Evicting
+  // them is how the creator shuts that door: an early return that skipped it would
+  // answer "evicted" and leave the removal to undo itself, and nothing downstream
+  // could tell that from a code that had expired. A room that has filled has cleared
+  // its codes, so this is the case for rooms that are not full, swarm and hub rooms.
+  it("shuts a seat's door that a leave left open, without announcing the removal again", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b",
+                        leftAt: Date.now() })],
+    }));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
+    expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door is shut").toBeUndefined();
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.map((e) => e.type), "the removal is not announced again").toEqual(["invite_revoked"]);
+    expect(events[0]).toMatchObject({
+      fromMemberId: "system", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+      payload: { roles: ["peer_b"] },
+    });
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      action: "invite_revoked", sessionId: "qs_test", actorUserId: "u_jesse", detail: { roles: ["peer_b"] },
+    });
+  });
+
+  // An invite_revoked row names a role and no person, so it goes to the room's org
+  // and the creator's, as revokeInvite's does, and not to the departed member's:
+  // that org could not tell whom it concerned, and a row it cannot resolve to
+  // anyone is worse than none.
+  it("audits the door's closing in the room's org and not the departed member's", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", orgId: "org_other", roomRole: "peer_b",
+                        leftAt: Date.now() })],
+    }));
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(await store.auditForOrg("org_other", 50)).toEqual([]);
+    const ours = await store.auditForOrg("org_codenerd", 50);
+    expect(ours.map((a) => a.action)).toEqual(["invite_revoked"]);
+  });
+
+  // The announcement and the audit row come after the retirement, never before it:
+  // an announced closing of a door that did not shut is worse than a silent one. A
+  // failure to shut it leaves the door open and nothing said, which is where a retry
+  // starts.
+  it("announces and audits nothing when a departed member's door could not be shut, and the retry shuts it", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+    vi.spyOn(store, "consumeJoinCode").mockRejectedValueOnce(new Error("consume failed"));
+
+    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("consume failed");
+
+    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
+    expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.role, "the door is still open").toBe("peer_b");
+
+    const retry = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(retry.ok, JSON.stringify(retry)).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.value.codeRetired).toBe("peer_b");
+    expect(await store.getSessionByJoinCode("BELL-TEST-01")).toBeUndefined();
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+  });
+
+  // Retire, announce, audit, and only then close: whatever came after the close
+  // would be lost, because every later call refuses on "closed". This fails the real
+  // close in a room the departed member's eviction has emptied.
+  it("shuts the door and keeps its record when the close fails, and the retry finishes closing", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member({ leftAt: Date.now() }),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+    vi.spyOn(store, "closeSession").mockRejectedValueOnce(new Error("close failed"));
+
+    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("close failed");
+
+    expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door is shut").toBeUndefined();
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+    expect((await store.getSession("qs_test"))?.closed, "the failed close leaves the room open").toBe(false);
+
+    const retry = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(retry.ok, JSON.stringify(retry)).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.value.sessionStatus).toBe("closed");
+    expect((await store.getSession("qs_test"))?.closed).toBe(true);
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+  });
+
+  // The door's closing cannot repeat. It is guarded by the state, not by skipping the
+  // work: once the code is gone a second eviction finds nothing to retire.
+  it("writes nothing more when a departed member's door has already been shut", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+
+    const first = await evictMember(store, jesse, "qs_test", "m_peer");
+    const again = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(first.ok, JSON.stringify(first)).toBe(true);
+    expect(again.ok, JSON.stringify(again)).toBe(true);
+    if (!first.ok || !again.ok) return;
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+  });
+
+  // An expired code is not an open door, so there is no closing to announce.
+  it("retires nothing for a member who already left when the seat's code had expired", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      joinCodes: { peer_b: { code: "BELL-OLD-01", expiresAt: Date.now() - 1000 } },
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
 
   it("retires nothing when the seat's code had already expired", async () => {
@@ -598,10 +754,11 @@ describe("evictMember", () => {
     ]);
   });
 
-  // `leftAt` is the commit point: once it is set a retry takes the early return,
-  // which retires nothing. So the door is shut first, and a failure to shut it
-  // must leave the member in, where a retry starts from the beginning. The other
-  // order leaves them out with the door open, and no retry can reach it.
+  // The door is shut before the member is recorded out, so there is never a moment
+  // when they are out and it is open: a failure to shut it must leave the member in,
+  // where a retry starts from the beginning. The early return would shut it on a
+  // retry in the other order too, but only once someone retries, and until then the
+  // member could redeem the code and walk back in.
   it("leaves the member in when the door could not be shut, so a retry can finish", async () => {
     await store.createSession(peopled());
     vi.spyOn(store, "consumeJoinCode").mockRejectedValueOnce(new Error("consume failed"));
@@ -645,7 +802,7 @@ describe("evictMember", () => {
 
   // Labels are distinct here, because the fixture gives everyone the creator's
   // and an event that named the wrong person would otherwise read as right.
-  it("names the creator on the events and the evicted member in the payload", async () => {
+  it("names the creator on the eviction's event and the evicted member in its payload", async () => {
     await store.createSession(session({
       maxMembers: 4,
       members: [member(),
@@ -654,9 +811,22 @@ describe("evictMember", () => {
 
     await evictMember(store, jesse, "qs_test", "m_peer");
 
-    const [evicted, revoked] = await store.eventsAfter("qs_test", 0);
+    const [evicted] = await store.eventsAfter("qs_test", 0);
     expect(evicted.fromLabel).toBe("jesse@codenerd");
     expect(evicted.payload).toEqual({ member_id: "m_peer", label: "peer@codenerd", room_role: "peer_b" });
+  });
+
+  it("announces the door's closing from the system, naming the creator and the seat", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member(),
+                member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    const [, revoked] = await store.eventsAfter("qs_test", 0);
+    expect(revoked.type).toBe("invite_revoked");
     expect(revoked.fromMemberId).toBe("system");
     expect(revoked.fromUserId).toBe("u_jesse");
     expect(revoked.fromLabel).toBe("jesse@codenerd");
@@ -758,20 +928,17 @@ describe("evictMember", () => {
 
     // The detail names the person, not only the handle: member_id means nothing
     // outside the room, so without user_id this org could see that one of its
-    // members was removed and not which one.
+    // members was removed and not which one. Each org's row is held to the same
+    // literal, because a comparison of the two rows with each other would pass for
+    // any pair that agreed, and audit() builds both from one object.
+    const detail = { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", code_retired: true };
     const theirs = await store.auditForOrg("org_other", 50);
     expect(theirs).toHaveLength(1);
-    expect(theirs[0]).toMatchObject({
-      action: "member_evicted",
-      sessionId: "qs_test",
-      actorUserId: "u_jesse",
-      detail: { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", code_retired: true },
-    });
+    expect(theirs[0]).toMatchObject({ action: "member_evicted", sessionId: "qs_test", actorUserId: "u_jesse" });
+    expect(theirs[0].detail).toEqual(detail);
     const ours = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
     expect(ours).toHaveLength(1);
-    // The same detail in every org's copy: an admin in the room's org cannot resolve
-    // the handle either.
-    expect(ours[0].detail).toEqual(theirs[0].detail);
+    expect(ours[0].detail).toEqual(detail);
   });
 
   // The extra org is a union, not an addition: an evicted member in the room's own

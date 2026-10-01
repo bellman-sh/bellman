@@ -347,6 +347,28 @@ export async function revokeInvite(
 }
 
 /**
+ * Tell the room a seat's code was retired by its creator. From "system" for the
+ * reason member_evicted is: there is no member handle to name.
+ */
+async function announceDoorShut(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  role: string,
+): Promise<void> {
+  // A null return means the room froze in the gap. The code is already retired,
+  // so it is tolerated rather than unwound.
+  await store.appendEvent(sessionId, {
+    type: "invite_revoked",
+    fromMemberId: "system",
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    payload: { roles: [role] },
+    refId: null,
+  });
+}
+
+/**
  * The room's creator removes a member.
  *
  * Creator-only, and outside the verb set — the same category as closing a
@@ -364,6 +386,11 @@ export async function revokeInvite(
  * `fromMemberId`, `fromUserId` and `fromLabel`, so history reads the same
  * either way, but deleting the record would leave every earlier event naming a
  * member the roster no longer holds, to keep the present tidy.
+ *
+ * A member who already left can still be evicted, and it is not a no-op:
+ * `leaveRoom` retires no code, so their seat's code may still be live and the
+ * seat free, and evicting them shuts that door. Only the removal is not said a
+ * second time.
  */
 export async function evictMember(
   store: BellmanStore,
@@ -387,31 +414,48 @@ export async function evictMember(
     return refuse("forbidden", "you cannot evict yourself — use bellman_leave.");
   }
 
+  // A code that has expired is not a live one, though nothing prunes it (see
+  // revokeInvite), so a code's presence alone does not mean the door is open.
+  const rec = session.joinCodes[target.roomRole];
+  const live = rec !== undefined && Date.now() <= rec.expiresAt;
+
   if (target.leftAt !== null) {
-    // The same contract as leaveRoom's early return: it is for not saying the
-    // removal twice, not licence to skip the closing. A retry landing here
-    // closes a room an interrupted eviction left empty and open. See
-    // leaveRoom for why only the closing is restored, and #59 for the outbox
-    // marker that would complete it.
+    // The early return is for not saying the removal twice, not licence to skip
+    // what is still owed, and two things can be. The closing: a retry landing here
+    // closes a room an interrupted eviction left empty and open. And the door:
+    // leaveRoom retires no code, so a member who left on their own leaves their
+    // seat's code live and the seat free, and whoever holds the code walks back in.
+    // Neither says the removal again: its announcement and audit row cannot be
+    // replayed safely as they are written (see leaveRoom, and #59). The door's
+    // closing is new, so it is announced and audited, and it cannot repeat: it is
+    // guarded by `live`, and the first closing made that false.
+    if (live) {
+      await store.consumeJoinCode(sessionId, target.roomRole);
+      await announceDoorShut(store, actor, sessionId, target.roomRole);
+      // As revokeInvite writes it: the room's org and the creator's, and no more.
+      // The row names a role and no person, so the departed member's org could not
+      // tell whom it concerned, and a row an org cannot resolve to anyone is worse
+      // than none.
+      await audit(store, session, actor, "invite_revoked", { roles: [target.roomRole] });
+    }
+    // Last, as below: whatever came after the close would be lost, because every
+    // later call refuses on "closed".
     return succeed({
       evicted: true,
-      codeRetired: null,
+      codeRetired: live ? target.roomRole : null,
       sessionStatus: await closeIfEmpty(store, session),
     });
   }
 
-  // The door shuts BEFORE the member is recorded out, and that order is the
-  // point. `leftAt` is the commit point: once it is set, every retry takes the
-  // early return above, so anything not done by then is never done. Retiring
-  // the code afterwards would mean a crash in between leaves the member out
-  // with their seat's door still open — the removal that undoes itself, which
-  // is the thing this operation exists to prevent, and nothing could heal it.
-  // This order fails the other way: member still in, door shut, and a retry
-  // finishes the eviction. It finds the code already gone, so what it records
-  // under-reports the retirement — the end state is right and the record is
-  // thin. Over-revoking is recoverable by minting again; under-revoking is not.
-  const rec = session.joinCodes[target.roomRole];
-  const live = rec !== undefined && Date.now() <= rec.expiresAt;
+  // The door shuts BEFORE the member is recorded out, so this operation never
+  // leaves them out with their seat's door still open: the removal that undoes
+  // itself, which is what it exists to prevent. The early return above would shut
+  // it on a retry, but only once someone retries, and until then the member could
+  // redeem the code and walk back in. This order fails the other way: member
+  // still in, door shut, and a retry finishes the eviction. It finds the code
+  // already gone, so what it records under-reports the retirement — the end state
+  // is right and the record is thin. Over-revoking is recoverable by minting
+  // again; under-revoking leaves a door open behind someone who believes it shut.
   if (live) await store.consumeJoinCode(sessionId, target.roomRole);
 
   await store.updateMember(sessionId, targetMemberId, { leftAt: Date.now() });
@@ -431,16 +475,7 @@ export async function evictMember(
     payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
     refId: null,
   });
-  if (live) {
-    await store.appendEvent(sessionId, {
-      type: "invite_revoked",
-      fromMemberId: "system",
-      fromUserId: actor.userId,
-      fromLabel: actor.label,
-      payload: { roles: [target.roomRole] },
-      refId: null,
-    });
-  }
+  if (live) await announceDoorShut(store, actor, sessionId, target.roomRole);
 
   // Before the close, as in leaveRoom: the eviction is a fact from
   // updateMember on, and its record must not wait on a step unrelated to it.
@@ -449,18 +484,19 @@ export async function evictMember(
   // would have closed the room and lost the row. That is the trade taken
   // deliberately: a retry can restore the closing, and nothing can restore the
   // row.
-  //
-  // The evicted member's org is named as well. The actor here is the creator, not
-  // the member, so unless that org is also the room's it would get no row.
-  //
-  // The detail names the person as well as the seat. member_id is per connection
-  // and only resolves inside the room, so an org reading its own log needs
-  // user_id to see which of its people was removed. member_id stays, because it
-  // says which seat went when one person holds two.
-  await audit(store, session, actor, "member_evicted", {
-    member_id: targetMemberId, user_id: target.userId,
-    room_role: target.roomRole, code_retired: live,
-  }, [target.orgId]);
+  await audit(
+    store, session, actor, "member_evicted",
+    {
+      // The seat and the person. member_id is per connection and only resolves
+      // inside the room, so user_id is what lets an org reading its own log see
+      // which of its people went; member_id stays for when one person holds two.
+      member_id: targetMemberId, user_id: target.userId,
+      room_role: target.roomRole, code_retired: live,
+    },
+    // The evicted member's org as well. The actor here is the creator, not the
+    // member, so unless that org is also the room's it would get no row.
+    [target.orgId],
+  );
 
   return succeed({
     evicted: true,

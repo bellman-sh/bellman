@@ -416,6 +416,12 @@ export async function evictMember(
 
   // A code that has expired is not a live one, though nothing prunes it (see
   // revokeInvite), so a code's presence alone does not mean the door is open.
+  //
+  // Reading it from the state is also what makes a repeated eviction write
+  // nothing: the first one consumed the code. A consequence comes with that,
+  // chosen rather than overlooked: a fresh code minted for this role between two
+  // evictions of the same member is live, so the second retires it. That is the
+  // over-revoke bias again, and minting once more recovers it.
   const rec = session.joinCodes[target.roomRole];
   const live = rec !== undefined && Date.now() <= rec.expiresAt;
 

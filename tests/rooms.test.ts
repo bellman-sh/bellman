@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { member, session } from "./helpers/fixtures.js";
+import { manifestFixture, member, oneCode, session } from "./helpers/fixtures.js";
+import { resolveManifest } from "../src/manifest.js";
 import { MemoryStore } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
-import type { Identity } from "../src/types.js";
+import type { Identity, Member } from "../src/types.js";
 
 /**
  * The operations in src/rooms.ts, driven directly. The authority rules are the
@@ -347,6 +348,24 @@ describe("evictMember", () => {
     members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
   });
 
+  /**
+   * A swarm room: the creator, and a watcher in `observer`. The swarm's default
+   * seat is `helper`, so here the target's own seat and the room's default one
+   * are different, which the pair-preset rooms above cannot show. The caller
+   * says which seats hold a live code.
+   */
+  const swarmRoom = (codes: ReturnType<typeof oneCode>, watcher: Partial<Member> = {}) => {
+    const manifest = resolveManifest(manifestFixture({ preset: "swarm" }));
+    return session({
+      manifest,
+      maxMembers: 4,
+      joinCodes: codes,
+      members: [member({ roomRole: manifest.creatorRole }),
+                member({ memberId: "m_watcher", userId: "u_peer", label: "peer@codenerd", roomRole: "observer",
+                        ...watcher })],
+    });
+  };
+
   it("removes the member, retires their seat's code, and says so", async () => {
     await store.createSession(peopled());
 
@@ -633,6 +652,77 @@ describe("evictMember", () => {
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
 
+  // Every pair-preset case here seats its target in peer_b, which is also that
+  // preset's default role, so none of them can tell the target's own seat from the
+  // room's default one. With several seats the two differ, and an eviction that read
+  // the wrong one would retire an innocent seat's code and leave the evicted member's
+  // door open: the failure this operation exists to prevent, with collateral. Here
+  // helper is the default seat and the watcher sits in observer.
+  it("shuts only a departed member's own seat, in a room with several", async () => {
+    await store.createSession(swarmRoom(
+      { ...oneCode("BELL-HELPER-01", "helper"), ...oneCode("BELL-WATCH-01", "observer") },
+      { leftAt: Date.now() },
+    ));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_watcher");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
+    expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.map((e) => e.type)).toEqual(["invite_revoked"]);
+    expect(events[0].payload).toEqual({ roles: ["observer"] });
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.map((a) => a.detail)).toEqual([{ roles: ["observer"] }]);
+  });
+
+  // The same, for a member still in the room: every place the eviction names a seat
+  // is the evicted member's, and the default seat's code is not touched.
+  it("shuts only an evicted member's own seat, in a room with several", async () => {
+    await store.createSession(swarmRoom(
+      { ...oneCode("BELL-HELPER-01", "helper"), ...oneCode("BELL-WATCH-01", "observer") },
+    ));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_watcher");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
+    expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
+    const [evicted, revoked] = await store.eventsAfter("qs_test", 0);
+    expect(evicted.type).toBe("member_evicted");
+    expect(evicted.payload).toEqual({ member_id: "m_watcher", label: "peer@codenerd", room_role: "observer" });
+    expect(revoked.type).toBe("invite_revoked");
+    expect(revoked.payload).toEqual({ roles: ["observer"] });
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.map((a) => a.detail)).toEqual([
+      { member_id: "m_watcher", user_id: "u_peer", room_role: "observer", code_retired: true },
+    ]);
+  });
+
+  // The default seat's door is open and the evicted member's seat holds no code, so
+  // there is no door of theirs to shut: the default seat's must not be read as theirs,
+  // announced, or retired. This is also the case that tells a lookup by the target's
+  // seat from one by the room's default, which the cases above agree on.
+  it("retires nothing when only another seat holds a live code", async () => {
+    await store.createSession(swarmRoom(oneCode("BELL-HELPER-01", "helper")));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_watcher");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.map((a) => a.detail)).toEqual([
+      { member_id: "m_watcher", user_id: "u_peer", room_role: "observer", code_retired: false },
+    ]);
+  });
+
   it("retires nothing when the seat's code had already expired", async () => {
     await store.createSession(session({
       maxMembers: 4,
@@ -814,6 +904,7 @@ describe("evictMember", () => {
     const [evicted] = await store.eventsAfter("qs_test", 0);
     expect(evicted.fromLabel).toBe("jesse@codenerd");
     expect(evicted.payload).toEqual({ member_id: "m_peer", label: "peer@codenerd", room_role: "peer_b" });
+    expect(evicted.refId, "an eviction is not a reply to anything").toBeNull();
   });
 
   it("announces the door's closing from the system, naming the creator and the seat", async () => {
@@ -831,6 +922,7 @@ describe("evictMember", () => {
     expect(revoked.fromUserId).toBe("u_jesse");
     expect(revoked.fromLabel).toBe("jesse@codenerd");
     expect(revoked.payload).toEqual({ roles: ["peer_b"] });
+    expect(revoked.refId, "a door's closing is not a reply to anything").toBeNull();
   });
 
   it("audits the eviction, naming the seat, the person and whether a code was retired", async () => {

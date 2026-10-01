@@ -185,7 +185,8 @@ export async function leaveRoom(
  * the verb.
  *
  * `leaveRoom` does not use it. Leaving needs no verb, and it must work on a
- * closed room so a member can tidy up after one.
+ * closed room so a member can tidy up after one. An operation whose authority
+ * is not a seat's verb does not use it either.
  */
 async function gateSeat(
   store: BellmanStore,
@@ -193,13 +194,14 @@ async function gateSeat(
   sessionId: string,
   memberId: string,
   verb: Verb,
-): Promise<RoomResult<{ session: Session; me: Member }>> {
+): Promise<RoomResult<Session>> {
   const session = await store.getSession(sessionId);
   // Two branches, not one, and the reason text is identical on purpose. The
   // sentence a caller reads is unchanged from the old handler; the CODE is what
-  // a future HTTP route switches on, and answering a closed room with
-  // "not_found" here while evictMember answers "closed" would map one condition
-  // to two statuses.
+  // a future HTTP route switches on. A closed room is one condition and takes
+  // one code from whichever operation refuses it, through this gate or not;
+  // answering "not_found" here would send a route to a different status
+  // depending on which operation turned the caller away.
   if (!session) return refuse("not_found", "session not found or closed.");
   if (session.closed) return refuse("closed", "session not found or closed.");
   if (session.frozenAt !== null) return refuse("frozen", FROZEN);
@@ -209,7 +211,7 @@ async function gateSeat(
   }
   const denial = denyVerb(session, me, verb);
   if (denial) return refuse("forbidden", denial);
-  return succeed({ session, me });
+  return succeed(session);
 }
 
 /** Every name the manifest declares, for the sentence a bad role gets back. */
@@ -238,7 +240,7 @@ export async function issueInvite(
 ): Promise<RoomResult<{ code: string; role: string; expiresAt: number; replacedPrevious: boolean }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "invite");
   if (!gate.ok) return gate;
-  const { session } = gate.value;
+  const session = gate.value;
 
   if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
     return noSuchRole(session, role);
@@ -287,7 +289,7 @@ export async function revokeInvite(
 ): Promise<RoomResult<{ roles: string[] }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "revoke");
   if (!gate.ok) return gate;
-  const { session } = gate.value;
+  const session = gate.value;
 
   if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
     return noSuchRole(session, role);

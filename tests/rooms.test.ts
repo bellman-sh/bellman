@@ -218,6 +218,24 @@ describe("issueInvite", () => {
     if (r.ok) return;
     expect(r.code).toBe("frozen");
   });
+
+  // The gate answers a closed room with its own code and a missing room with
+  // another, in one sentence. The sentence is the old handler's, so no MCP output
+  // moves; the code is what a route switches on, and folding the closed branch
+  // into "not_found" would map a closed room to the missing room's status.
+  it("answers a closed room with its own code, in the missing room's sentence", async () => {
+    await store.createSession(session({ closed: true }));
+
+    const closed = await issueInvite(store, jesse, "qs_test", "m_creator");
+    const missing = await issueInvite(store, jesse, "qs_ghost", "m_creator");
+
+    expect(closed.ok).toBe(false);
+    expect(missing.ok).toBe(false);
+    if (closed.ok || missing.ok) return;
+    expect(closed.code).toBe("closed");
+    expect(missing.code).toBe("not_found");
+    expect(closed.reason).toBe(missing.reason);
+  });
 });
 
 describe("revokeInvite", () => {

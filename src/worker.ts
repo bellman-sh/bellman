@@ -173,6 +173,14 @@ export default {
      * because its request is not the one the object ever sees.
      */
     if (url.pathname === "/ws") {
+      // A handshake is a GET (RFC 6455 section 4.1). workerd cannot complete an
+      // upgrade on any other method, and by the time it says so with a 500 the
+      // object has accepted a socket: measured under wrangler dev, where a POST
+      // carrying `Upgrade: websocket` cleared everything below. So this comes
+      // first, ahead of authentication, as /mcp's does for anything but a POST.
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
       if (request.headers.get("upgrade") !== "websocket") {
         return new Response("Expected a WebSocket upgrade", { status: 426 });
       }

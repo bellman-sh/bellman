@@ -64,8 +64,8 @@ async function world(answer: Answer | ((userId: string) => Answer), env: Record<
     REGISTRY: { idFromName: (n: string) => n, get: () => ({}) },
     ...env,
   } as never;
-  const call = (url: string, headers: Record<string, string> = {}) =>
-    worker.fetch(new Request(url, { headers: { upgrade: "websocket", ...headers } }), bound);
+  const call = (url: string, headers: Record<string, string> = {}, method = "GET") =>
+    worker.fetch(new Request(url, { method, headers: { upgrade: "websocket", ...headers } }), bound);
   const mcp = (headers: Record<string, string> = {}) =>
     worker.fetch(new Request("https://b/mcp", { method: "POST", headers }), bound);
   return { call, mcp, asked, reached };
@@ -138,6 +138,28 @@ describe("GET /ws", () => {
     const { call, reached } = await world(OK);
     const res = await call(ROOM, { ...AUTH, upgrade: "" });
     expect(res.status).toBe(426);
+    expect(reached).toEqual([]);
+  });
+
+  it("refuses a method other than GET before the object is reached", async () => {
+    // A handshake is a GET. Without this, a POST carrying `Upgrade: websocket`
+    // cleared authentication and reached the object, which accepted a socket
+    // before workerd answered the client with a 500.
+    const { call, reached } = await world(OK);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+      const res = await call(ROOM, AUTH, method);
+      expect(reached, `${method}: the object must not be reached`).toEqual([]);
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow"), method).toBe("GET");
+    }
+  });
+
+  it("answers 405 ahead of every other check", async () => {
+    // Not an upgrade and not authenticated: 426 and 401 both apply, and neither
+    // gets to answer for a method that was never going to be served.
+    const { call, reached } = await world(OK);
+    const res = await call(ROOM, { upgrade: "" }, "POST");
+    expect(res.status).toBe(405);
     expect(reached).toEqual([]);
   });
 

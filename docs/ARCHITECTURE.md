@@ -388,7 +388,7 @@ produced three separately filed bugs:
 | Issue | The two objects | What can go wrong |
 |---|---|---|
 | [#59](../../../issues/59) | RegistryDO + AuditDO | a durable grant change whose audit entry is lost permanently, because the retry cannot tell the mutation already happened |
-| [#62](../../../issues/62) | SessionDO + RegistryDO | a consumed single-use join code that stays redeemable |
+| [#62](../../../issues/62) | SessionDO + RegistryDO | a consumed single-use join code that stays redeemable; a joined-rooms index entry (`um:`) lost after the member was added, leaving a room out of one listing |
 | [#69](../../../issues/69) | AuthDO + RegistryDO | an older subscription state landing after a newer cancellation, leaving paid access nobody is paying for |
 
 Within one object the problem is tractable and has been solved in place:

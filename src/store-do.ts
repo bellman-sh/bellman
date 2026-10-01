@@ -529,6 +529,33 @@ export class RegistryDO extends DurableObject {
     return [...map.keys()].map((k) => k.slice(prefix.length));
   }
 
+  /**
+   * `um:<userId>:<sessionId>` — which rooms a person holds a handle in.
+   *
+   * The same shape as `us:` above, and the same injectivity argument: two
+   * variable segments, and neither can contain the separator. A user id is
+   * `u_[A-Za-z0-9_-]+` and a session id is `qs_<uuid>`.
+   *
+   * Keyed by user rather than by member, so a person who joined the same room
+   * from two machines is one entry — the put is idempotent, and the panel wants
+   * the room once.
+   *
+   * **Members who joined before this deploy are not in here.** A backfill is
+   * possible in principle — `us:` enumerates creators and each session lists
+   * its members — and is not worth walking the registry for a listing that
+   * fills itself in as sessions reach their TTL. Until then a joined room is
+   * missing from one screen, which is not a room lost.
+   */
+  async indexMembership(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`um:${userId}:${sessionId}`, Date.now());
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    const prefix = `um:${userId}:`;
+    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
   async recordCreate(userId: string): Promise<void> {
     const key = `cr:${userId}`;
     const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
@@ -640,7 +667,18 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
-    return this.session(sessionId).addMember(member);
+    const added = await this.session(sessionId).addMember(member);
+    // Gated on the result: addMember refuses an unknown or frozen session, and
+    // indexing regardless would put rooms into a person's joined listing that
+    // they were turned away from.
+    //
+    // A second write into a second object with no transaction spanning it —
+    // the same gap as the join code and the creator index, tracked on #62. The
+    // failure is a listing, not a membership: SessionDO.members stays
+    // authoritative and the index is reconstructible from it, so a lost write
+    // costs a row on one screen.
+    if (added) await this.registry.indexMembership(member.userId, sessionId);
+    return added;
   }
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {
@@ -660,6 +698,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     return this.registry.sessionsCreatedBy(userId, limit);
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsJoinedBy(userId, limit);
   }
 
   async appendEvent(

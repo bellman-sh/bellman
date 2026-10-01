@@ -103,6 +103,16 @@ export interface BellmanStore {
    * for quota cannot answer that: they are timestamps, not identities.
    */
   sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
+  /**
+   * Rooms in which this user has ever held a member handle — created, joined,
+   * left and closed alike.
+   *
+   * Ids only, like `sessionsCreatedBy`, and no status parameter. Its two
+   * callers do not agree on what counts as current: the control panel hides
+   * closed rooms, a freeze sweep wants exactly the live ones. Encoding either
+   * answer here would make one of them filter twice.
+   */
+  sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
 
   /** Append an event. Null means the session is frozen, for the same reason. */
   appendEvent(
@@ -199,6 +209,7 @@ export class MemoryStore implements BellmanStore {
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
   private byCreator = new Map<string, Set<string>>();
+  private byMember = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -273,6 +284,11 @@ export class MemoryStore implements BellmanStore {
     if (!s) return false;
     if (s.frozenAt !== null) return false;
     s.members.push(detach(member));
+    // After the guards, so a refused add leaves no trace in the listing. Keyed
+    // by user, so a second machine joining the same room is the same entry.
+    const joined = this.byMember.get(member.userId) ?? new Set<string>();
+    joined.add(sessionId);
+    this.byMember.set(member.userId, joined);
     return true;
   }
 
@@ -307,6 +323,10 @@ export class MemoryStore implements BellmanStore {
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    return [...(this.byMember.get(userId) ?? [])].slice(0, limit);
   }
 
   async appendEvent(

@@ -358,6 +358,86 @@ export function describeStoreContract(
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
     });
 
+    /**
+     * The panel's main screen splits rooms a person created from rooms they
+     * joined, and only the first had an index. `um:` is the second.
+     *
+     * The store returns ids for every room the user has ever held a handle in
+     * — created, joined, left and closed alike. Filtering is the caller's, so
+     * that one index can serve a panel screen and a freeze sweep that disagree
+     * about what counts as current (D1, D4).
+     */
+    it("lists the rooms a person joined, and nobody else's", async () => {
+      await store.createSession(session({ id: "qs_hers", createdBy: "u_peer", members: [] }));
+      await store.createSession(session({ id: "qs_his", createdBy: "u_peer", members: [] }));
+      await store.addMember("qs_hers", member({ memberId: "m_1", userId: "u_jesse" }));
+      await store.addMember("qs_his", member({ memberId: "m_2", userId: "u_other" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_hers"]);
+      expect(await store.sessionsJoinedBy("u_other", 10)).toEqual(["qs_his"]);
+      expect(await store.sessionsJoinedBy("u_nobody", 10)).toEqual([]);
+    });
+
+    it("lists a room once for a person who joined it from two machines", async () => {
+      await store.createSession(session({ id: "qs_twice", members: [] }));
+      await store.addMember("qs_twice", member({ memberId: "m_laptop", userId: "u_jesse" }));
+      await store.addMember("qs_twice", member({ memberId: "m_desktop", userId: "u_jesse" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_twice"]);
+    });
+
+    it("lists the creator's own room, because the creator holds a handle too", async () => {
+      // session() seats member() — m_creator / u_jesse — at members[0], but
+      // createSession does not call addMember, so the creator is indexed when
+      // their handle is added the way bellman_start adds it.
+      await store.createSession(session({ id: "qs_mine", createdBy: "u_jesse", members: [] }));
+      await store.addMember("qs_mine", member({ userId: "u_jesse" }));
+
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+    });
+
+    it("keeps listing a room after the member left it", async () => {
+      await store.createSession(session({ id: "qs_past", members: [] }));
+      await store.addMember("qs_past", member({ memberId: "m_gone", userId: "u_jesse" }));
+      await store.updateMember("qs_past", "m_gone", { leftAt: Date.now() });
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_past"]);
+    });
+
+    /** REVIEW FOCUS 5 — status is the caller's filter, not the store's. */
+    it("keeps listing a room after it closed", async () => {
+      await store.createSession(session({ id: "qs_over", members: [] }));
+      await store.addMember("qs_over", member({ memberId: "m_was", userId: "u_jesse" }));
+      await store.closeSession("qs_over");
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_over"]);
+    });
+
+    it("honours the limit on the joined listing", async () => {
+      for (const id of ["qs_j1", "qs_j2", "qs_j3"]) {
+        await store.createSession(session({ id, members: [] }));
+        await store.addMember(id, member({ memberId: `m_${id}`, userId: "u_jesse" }));
+      }
+
+      expect(await store.sessionsJoinedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    it("indexes nothing when addMember refuses a frozen session", async () => {
+      await store.createSession(session({ id: "qs_cold", members: [] }));
+      await store.freezeSession("qs_cold", Date.now());
+
+      expect(await store.addMember("qs_cold", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    it("indexes nothing when addMember refuses an unknown session", async () => {
+      expect(await store.addMember("qs_ghost", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
     // ---------------------------------------------------------------- events
     it("assigns monotonic cursors starting at 1", async () => {
       const s = session();

@@ -236,6 +236,53 @@ describe("issueInvite", () => {
     expect(missing.code).toBe("not_found");
     expect(closed.reason).toBe(missing.reason);
   });
+
+  // The gate's membership checks. Through MCP, neither is pinned: with the first
+  // removed the call does not refuse, it throws on the missing member, and the
+  // cases there assert only that an error came back; with the second removed a
+  // member who has left mints codes freely, and nothing asks.
+  it("refuses a handle that belongs to someone else", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+
+    const r = await issueInvite(store, peer, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("forbidden");
+  });
+
+  it("refuses a member who has left the room", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [
+        member({ leftAt: Date.now() }),
+        member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
+      ],
+    }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("forbidden");
+  });
+
+  // Frozen between the gate's read and the write: the store refuses the code, and
+  // nothing may be announced or audited for a code that was never set.
+  it("announces and audits nothing when the store refuses the code", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+    vi.spyOn(store, "setJoinCode").mockResolvedValueOnce(false);
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("frozen");
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.filter((a) => a.action === "invite_issued")).toHaveLength(0);
+  });
 });
 
 describe("revokeInvite", () => {
@@ -275,5 +322,20 @@ describe("revokeInvite", () => {
     if (r.ok) return;
     expect(r.code).toBe("not_found");
     expect(r.reason).toContain("declares no role");
+  });
+
+  // Issuing is also refused by the store while frozen, so its case passes with the
+  // gate's check removed. Retiring a code has no such backstop in either store:
+  // only the gate keeps a frozen room's codes where they are.
+  it("refuses a frozen room, and retires nothing", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+    await store.freezeSession("qs_test", Date.now());
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("frozen");
+    expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.role).toBe("peer_b");
   });
 });

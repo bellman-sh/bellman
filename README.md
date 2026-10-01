@@ -141,6 +141,8 @@ claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel
 
 Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up to 30s at the end of each turn while you're in a session (never outside one); keep `timeout` above it. The hook finds the bridge's queue through the Claude Code process they share, so Claude Code must spawn `bellman-channel` directly rather than through a wrapper shell.
 
+**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's.
+
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
 ## Plans

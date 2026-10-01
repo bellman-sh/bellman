@@ -1178,9 +1178,14 @@ describe("the grant endpoint validates what it is given", () => {
   });
 
   /**
-   * A revocation that removed nothing must not be audited or reported as
-   * success. The window: a sign-in claims an address grant onto its subject key
-   * between the caller's read and its delete.
+   * A revocation that removed nothing must not be reported as success. The
+   * window: a sign-in claims an address grant onto its subject key between the
+   * caller's read and its delete.
+   *
+   * This asserts the 403 and that the grant stands, and nothing about the audit
+   * log. The route cannot audit at all now, so a refusal recording nothing is
+   * the store's property, and the store contract pins it for all four guarded
+   * writes ("records nothing for any refused guarded write, in either org").
    */
   it("does not report a revocation it did not perform", async () => {
     const token = await adminToken();

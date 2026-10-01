@@ -963,8 +963,9 @@ export function describeStoreContract(
       expect(await store.putGrantIfSource(purchase, "purchase", { actorUserId: "u_test" }))
         .toEqual({ outcome: "written", previous: undefined });
 
-      // The write reports what it replaced, so billing can tell a real change
-      // from a repeated delivery and see which org a plan moved out of.
+      // The write reports what it replaced. Nothing in production reads this
+      // (see GrantWrite), so this is the only thing keeping the two stores
+      // reporting the same thing.
       const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase", { actorUserId: "u_test" });
       expect(updated.outcome).toBe("written");
       expect(updated.previous).toMatchObject({ plan: "pro" });

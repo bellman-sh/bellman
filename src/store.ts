@@ -30,19 +30,21 @@ export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftA
  * hand out live references, so relying on them would silently break the port.
  */
 /**
- * What a source-guarded write replaced, so a caller can tell a change from a
- * repeat and see which org a grant moved out of. `removed` on GrantDelete is
- * the same report for a delete.
+ * What a source-guarded write replaced: `previous` here, `removed` on
+ * GrantDelete.
  *
- * None of this is for auditing. All four guarded writes record their own audit
- * entries in the same operation that makes the change, from the same read they
- * report here (see grant-audit.ts), so no caller audits and no caller needs
- * `previous` to decide what to record.
+ * No production code reads either field. The store contract suite is their only
+ * reader. Billing needed them while it audited for itself, to tell a change
+ * from a repeat and to see which org a grant moved out of. The store decides
+ * both now: all four guarded writes record their own audit entries in the same
+ * operation that makes the change, from the same read they report here (see
+ * grant-audit.ts). Nothing depends on the fields, so removing them breaks no
+ * caller; it means deleting them from both stores and from the contract cases
+ * that pin them.
  *
- * Only the source-guarded pair reports it. The org-guarded pair answers with
- * the outcome alone: the admin route authored the write and knows what it sent.
- * Billing is reacting to Stripe, where the same event can arrive twice and a
- * plan can move between orgs, so the pair it uses says what the write found.
+ * Only the source-guarded pair reports them, because only billing ever needed
+ * them. The org-guarded pair answers with the outcome alone: the admin route
+ * authored the write and knew what it sent.
  */
 export interface GrantWrite {
   outcome: "written" | "conflict";

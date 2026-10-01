@@ -35,6 +35,23 @@ const armedAlarm = () =>
 const actionsFor = async (store: DurableObjectStore, orgId: string) =>
   (await store.auditForOrg(orgId, 10)).map((e) => e.action);
 
+/**
+ * Turn the inline delivery off, or back on, on the instance the registry's calls are
+ * served by. With it off a guarded write commits and queues its entry and does not try
+ * to deliver it, which is what the isolate going away just before that attempt would
+ * amount to. TypeScript's `private` is a compile-time check, so the test can reach the
+ * field; nothing in the production class exists for the purpose.
+ */
+type Driver = { deliverNow?: () => Promise<void> };
+const deliveryOff = () =>
+  runInDurableObject(registry(), (instance: RegistryDO) => {
+    (instance as unknown as { driver: Driver }).driver.deliverNow = async () => {};
+  });
+const deliveryOn = () =>
+  runInDurableObject(registry(), (instance: RegistryDO) => {
+    delete (instance as unknown as { driver: Driver }).driver.deliverNow;
+  });
+
 it("audits a guarded write, and the entry is there before the caller returns", async () => {
   const store = new DurableObjectStore(env as never);
 
@@ -47,16 +64,15 @@ it("audits a guarded write, and the entry is there before the caller returns", a
 
 /**
  * The bug. The grant change commits, the audit write never happens, and there
- * is no record anywhere that it was owed. Aborting the object between the
- * commit and the inline delivery is the closest reachable analogue of the
- * isolate going away mid-request.
+ * is no record anywhere that it was owed. Turning the inline delivery off for the
+ * write and then aborting the object is the closest reachable analogue of the
+ * isolate going away between the commit and the delivery.
  */
 it("delivers an audit entry whose inline attempt never ran", async () => {
   const store = new DurableObjectStore(env as never);
 
-  await runInDurableObject(registry(), async (instance: RegistryDO) => {
-    await instance.enqueueOnly(grant(), { actorUserId: "u_admin" });
-  });
+  await deliveryOff();
+  await store.putGrantIfOwned(grant(), "org_mine", { actorUserId: "u_admin" });
   await abortAllDurableObjects();
 
   // Nothing delivered yet, and the row is still queued.
@@ -212,21 +228,17 @@ it.each(FOUR_WRITES)(
 );
 
 /**
- * The recovery test at the top, for each of the four writes. Its seam commits only
- * putGrantIfOwned, and each of the four has a transaction of its own: one that
- * queued its row and left nothing armed to find it would be recovered by no one,
- * and would pass every test that delivers inline. Here the inline attempt is made
- * a no-op for the length of the write, which is what the isolate going away just
- * before it would amount to; the alarm is then the only thing left to deliver.
+ * The recovery test at the top, for each of the four writes. Each has a transaction
+ * of its own: one that queued its row and left nothing armed to find it would be
+ * recovered by no one, and would pass every test that delivers inline. The inline
+ * attempt is switched off for the length of the write; the alarm is then the only
+ * thing left to deliver.
  */
 it.each(FOUR_WRITES)(
   "$name leaves its entry queued with an alarm armed if delivery never runs, and the alarm delivers it",
   async ({ run, action }) => {
     const store = new DurableObjectStore(env as never);
-    type Driver = { deliverNow?: () => Promise<void> };
-    await runInDurableObject(registry(), (instance: RegistryDO) => {
-      (instance as unknown as { driver: Driver }).driver.deliverNow = async () => {};
-    });
+    await deliveryOff();
 
     await run(store, { actorUserId: "u_admin" });
 
@@ -235,9 +247,7 @@ it.each(FOUR_WRITES)(
     expect(await actionsFor(store, "org_mine")).toEqual([]);
 
     // Delivery works again, and the alarm is the one to use it.
-    await runInDurableObject(registry(), (instance: RegistryDO) => {
-      delete (instance as unknown as { driver: Driver }).driver.deliverNow;
-    });
+    await deliveryOn();
     expect(await runDurableObjectAlarm(registry())).toBe(true);
 
     expect(await actionsFor(store, "org_mine")).toEqual([action]);
@@ -477,8 +487,9 @@ it.each([
  */
 it("does not append an entry twice when its delivery is repeated", async () => {
   const store = new DurableObjectStore(env as never);
-  await runInDurableObject(registry(), (instance: RegistryDO) =>
-    instance.enqueueOnly(grant(), { actorUserId: "u_admin" }));
+  await deliveryOff();
+  await store.putGrantIfOwned(grant(), "org_mine", { actorUserId: "u_admin" });
+  await deliveryOn();
   const [row] = await queuedRows();
 
   await auditStream("org_mine").append(row.payload as AuditEntry, row.id);
@@ -497,11 +508,10 @@ it("does not append an entry twice when its delivery is repeated", async () => {
  */
 it("delivers every queued entry, in the order they were queued", async () => {
   const store = new DurableObjectStore(env as never);
-  await runInDurableObject(registry(), async (instance: RegistryDO) => {
-    for (const key of ["github:1", "github:2", "github:3"]) {
-      await instance.enqueueOnly(grant({ key }), { actorUserId: "u_admin" });
-    }
-  });
+  await deliveryOff();
+  for (const key of ["github:1", "github:2", "github:3"]) {
+    await store.putGrantIfOwned(grant({ key }), "org_mine", { actorUserId: "u_admin" });
+  }
   expect(await queued()).toHaveLength(3);
   await abortAllDurableObjects();
 

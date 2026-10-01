@@ -476,15 +476,6 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * TEST SEAM. Commit a guarded write and its audit intent WITHOUT the inline
-   * delivery, so a test can reproduce an isolate dying in that gap. Nothing in
-   * production calls this.
-   */
-  async enqueueOnly(grant: PlanGrant, audit: AuditIntent): Promise<void> {
-    await this.putGrantIfOwnedTxn(grant, grant.orgId, audit);
-  }
-
-  /**
    * The transaction half of putGrantIfOwned: check, write, and queue the record of
    * it. The other three guarded writes below have the same two halves.
    *

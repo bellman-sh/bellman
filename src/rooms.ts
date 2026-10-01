@@ -441,6 +441,12 @@ export async function evictMember(
     if (live) {
       await store.consumeJoinCode(sessionId, target.roomRole);
       await announceDoorShut(store, actor, sessionId, target.roomRole);
+      // A row of its own, where the live path below folds the same closing into
+      // `member_evicted` as `code_retired`: this call writes no `member_evicted`
+      // to fold it into, because the removal already happened and not saying it
+      // twice is what this early return is for. So a query for `invite_revoked`
+      // finds this door and not the live path's.
+      //
       // As revokeInvite writes it: the room's org and the creator's, and no more.
       // The row names a role and no person, so the departed member's org could not
       // tell whom it concerned, and a row an org cannot resolve to anyone is worse

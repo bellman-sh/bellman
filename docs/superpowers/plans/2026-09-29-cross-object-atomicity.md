@@ -921,7 +921,8 @@ redelivery safe. It lands in the same write as the entry and the sequence."
 
 ```ts
 // tests/grant-audit.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { purchaseGrant } from "../src/billing/grants.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
 import type { PlanGrant } from "../src/types.js";
 
@@ -940,7 +941,7 @@ describe("grantAuditEntries", () => {
       action: "plan_granted",
       detail: {
         plan: "team", role: "admin", org_id: "org_mine", source: "operator",
-        key: "github:4242",
+        expires_at: null, key: "github:4242",
       },
     }]);
   });
@@ -980,8 +981,7 @@ describe("grantAuditEntries", () => {
   /**
    * Review Focus 1. The audit log is org-scoped, so an org-less grant — every
    * pro purchase — has nowhere to be recorded. Emitting a row for one would
-   * queue something that can never be delivered, and it sits at the head of a
-   * FIFO queue blocking everything behind it.
+   * queue something with nowhere to go.
    */
   it("records nothing for an org-less grant", () => {
     expect(grantAuditEntries(
@@ -1019,6 +1019,293 @@ describe("revokeAuditEntries", () => {
     expect(revokeAuditEntries(grant({ orgId: null }), admin, NOW)).toEqual([]);
   });
 });
+
+/**
+ * Everything from here on was added after sweeping wrong implementations of the
+ * rule against the cases above. Each case pins something those leave open.
+ *
+ * Grants here keep grantedBy as u_admin even when the intent is Stripe's: an
+ * entry's actor is the intent's, never the grant's, and a fixture where the two
+ * agree could not tell.
+ */
+const billing: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: "cus_1" } };
+const DAY = 86_400_000;
+
+describe("grantAuditEntries, field by field", () => {
+  /**
+   * grantedBy is who performed the write, and the entry already names that as
+   * its actor, so a second admin re-asserting an identical grant has told the
+   * org nothing new. grantedAt is the brief's case above: every write sets it.
+   */
+  it("records nothing when only grantedBy differs", () => {
+    expect(grantAuditEntries(grant(), grant({ grantedBy: "u_other" }), admin, NOW)).toEqual([]);
+  });
+
+  /**
+   * Writing the same grant again must read as no change whatever the grant says.
+   * The fixture's own values (a team plan, an admin, no expiry) are the only ones
+   * the cases above compare, so a rule that recognised only those would still
+   * pass them. An admin saving the same expiring grant twice is the noise this
+   * check exists to remove, and it needs a case of its own.
+   */
+  it.each<[string, Partial<PlanGrant>]>([
+    ["a pro plan", { plan: "pro" }],
+    ["a member role", { role: "member" }],
+    ["another org", { orgId: "org_other" }],
+    ["a purchase source", { source: "purchase" }],
+    ["an expiry that is still the same date", { expiresAt: NOW + DAY }],
+  ])("records nothing when %s is written again", (_what, over) => {
+    expect(
+      grantAuditEntries(grant(over), grant({ ...over, grantedAt: NOW + 5 }), admin, NOW)
+    ).toEqual([]);
+  });
+
+  /**
+   * Source decides whether billing may still touch a grant. A team admin saving
+   * their own key over a purchase grant leaves plan, role and org as they were
+   * and takes it out of billing's hands for good: putGrantIfSource answers
+   * "conflict" from then on, so the subscription can no longer update or revoke
+   * it. That is what an org's stream is for, and a change of source either way
+   * is one.
+   */
+  it.each<[string, string, string]>([
+    ["a purchased grant being taken over", "purchase", "operator"],
+    ["a grant being handed to billing", "operator", "purchase"],
+  ])("records %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ source: before }), grant({ source: after }), admin, NOW
+    );
+    expect(entries).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
+      action: "plan_granted",
+      detail: {
+        plan: "team", role: "admin", org_id: "org_mine", source: after,
+        expires_at: null, replaced_plan: "team", key: "github:4242",
+      },
+    }]);
+  });
+
+  /** Expiry decides when somebody loses access: putting one on, taking it off or moving it is a change. */
+  it.each<[string, number | null, number | null]>([
+    ["none to a date", null, NOW + DAY],
+    ["a date to none", NOW + DAY, null],
+    ["one date to another", NOW + DAY, NOW + 2 * DAY],
+  ])("records an expiry changing from %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ expiresAt: before }), grant({ expiresAt: after }), admin, NOW
+    );
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  /**
+   * A grant entry states every field the rule compares: plan, role, org_id and
+   * source, and expires_at too. Without it the line for an expiry change would
+   * be silent about the expiry, and an org reading its stream could not see when
+   * somebody loses access.
+   */
+  it.each<[string, PlanGrant | undefined, number | null]>([
+    ["a first grant with an expiry", undefined, NOW + DAY],
+    ["an expiry put on", grant({ expiresAt: null }), NOW + DAY],
+    ["an expiry taken off", grant({ expiresAt: NOW + DAY }), null],
+    ["an expiry moved", grant({ expiresAt: NOW + DAY }), NOW + 2 * DAY],
+  ])("states the new expiry when it records %s", (_what, previous, expiry) => {
+    const [entry] = grantAuditEntries(previous, grant({ expiresAt: expiry }), admin, NOW);
+    expect(entry.detail.expires_at).toBe(expiry);
+  });
+
+  /**
+   * Source and expiry count as changes, so the check that a redelivered Stripe
+   * event records nothing has to use billing's own grant, not a fixture that
+   * happens to agree. purchaseGrant stamps grantedAt from the clock and writes
+   * the same source and expiry every time; if that stops being true, every
+   * redelivery starts appearing in the org's stream and this fails. Team only:
+   * a pro purchase has no org, so nothing is recorded for it whatever it says.
+   */
+  it("records nothing for a redelivered team purchase", () => {
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValueOnce(NOW);
+      const first = purchaseGrant("github:4242", "team", "u_github_4242");
+      clock.mockReturnValueOnce(NOW + 5_000);
+      const again = purchaseGrant("github:4242", "team", "u_github_4242");
+      // The clock did move and the grant has an org, or the check below would prove nothing.
+      expect([first.grantedAt, again.grantedAt]).toEqual([NOW, NOW + 5_000]);
+      expect(again.orgId).not.toBeNull();
+      expect(grantAuditEntries(first, again, { actorUserId: "stripe" }, NOW)).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  /**
+   * A team subscription ending while a pro one continues re-homes the grant to
+   * no org. The org it left is told, and that is the only entry: nothing may be
+   * filed against the org-less side.
+   */
+  it("tells only the org a plan left when the grant becomes org-less", () => {
+    const entries = grantAuditEntries(
+      grant(), grant({ orgId: null, plan: "pro", role: "member", source: "purchase" }), billing, NOW
+    );
+    expect(entries).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "stripe",
+      action: "plan_revoked",
+      detail: {
+        plan: "team", reason: "moved to another plan", moved_to: null,
+        stripe_customer: "cus_1", key: "github:4242",
+      },
+    }]);
+  });
+
+  /**
+   * The same boundary from the other side: a pro subscriber buys team. The new
+   * org is told. The org-less side the grant came from is not written to.
+   */
+  it("tells only the org a plan arrives in when the grant was org-less", () => {
+    const entries = grantAuditEntries(
+      grant({ orgId: null, plan: "pro", role: "member", source: "purchase" }),
+      grant({ source: "purchase" }), billing, NOW
+    );
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+    expect(entries[0].detail).toMatchObject({ plan: "team", replaced_plan: "pro" });
+  });
+
+  /**
+   * Every field names the grant as it is now, except the ones that exist to say
+   * what it was. All four fields differ here, so a field read from the wrong
+   * side of the change cannot agree by accident.
+   */
+  it("describes the grant as it is now and names what it replaced", () => {
+    const previous = grant({ plan: "pro", role: "member", orgId: "org_old", source: "operator" });
+    const next = grant({ plan: "team", role: "admin", orgId: "org_new", source: "purchase" });
+    expect(grantAuditEntries(previous, next, billing, NOW)).toEqual([
+      {
+        at: NOW, orgId: "org_old", sessionId: "grant:github:4242", actorUserId: "stripe",
+        action: "plan_revoked",
+        detail: {
+          plan: "pro", reason: "moved to another plan", moved_to: "org_new",
+          stripe_customer: "cus_1", key: "github:4242",
+        },
+      },
+      {
+        at: NOW, orgId: "org_new", sessionId: "grant:github:4242", actorUserId: "stripe",
+        action: "plan_granted",
+        detail: {
+          plan: "team", role: "admin", org_id: "org_new", source: "purchase",
+          expires_at: null, replaced_plan: "pro", stripe_customer: "cus_1", key: "github:4242",
+        },
+      },
+    ]);
+  });
+
+  /** toEqual cannot see this: it treats a key holding undefined as absent. */
+  it("does not claim a first grant replaced anything", () => {
+    const [entry] = grantAuditEntries(undefined, grant(), admin, NOW);
+    expect(Object.keys(entry.detail)).not.toContain("replaced_plan");
+  });
+});
+
+describe("revokeAuditEntries, field by field", () => {
+  /** What the admin route passes: an actor, and nothing to add. */
+  it("says which plan was lost, and nothing more, when the caller adds nothing", () => {
+    expect(revokeAuditEntries(grant(), admin, NOW)).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
+      action: "plan_revoked", detail: { plan: "team", key: "github:4242" },
+    }]);
+  });
+});
+
+/**
+ * A falsy org id is no org, as null is. isOrgId rejects "" at the admin route
+ * and billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, and a stored record can lack the field altogether. A Durable
+ * Object namespace accepts "" and undefined as names, so an entry filed against
+ * one is delivered, to a stream no org reads; undefined names the same object as
+ * an org called "undefined", which isOrgId allows.
+ */
+describe.each<[string, string | null]>([
+  ["an empty string", ""],
+  ["no value", undefined as unknown as null],
+])("a grant whose org is %s", (_what, empty) => {
+  const homeless = (over: Partial<PlanGrant> = {}) => grant({ orgId: empty, ...over });
+
+  it("records nothing for a first grant", () => {
+    expect(grantAuditEntries(undefined, homeless(), admin, NOW)).toEqual([]);
+  });
+
+  it("tells only the org a plan arrives in when it had none", () => {
+    const entries = grantAuditEntries(homeless(), grant(), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  it("tells only the org a plan left when it ends up with none", () => {
+    const entries = grantAuditEntries(grant(), homeless({ plan: "pro", role: "member" }), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_revoked"]]);
+  });
+
+  it("records nothing for a revocation", () => {
+    expect(revokeAuditEntries(homeless(), admin, NOW)).toEqual([]);
+  });
+});
+
+describe("every entry", () => {
+  /**
+   * `now` is when the store committed the change. A grant's grantedAt is when it
+   * was first made, which says nothing about when this entry was written.
+   */
+  it("is stamped with the time it was given, not the grant's", () => {
+    const later = NOW + 60_000;
+    const entries = [
+      ...grantAuditEntries(undefined, grant(), admin, later),
+      ...grantAuditEntries(grant({ orgId: "org_old" }), grant({ orgId: "org_new" }), admin, later),
+      ...revokeAuditEntries(grant(), admin, later),
+    ];
+    expect(entries.map((e) => e.at)).toEqual([later, later, later, later]);
+  });
+
+  /**
+   * The caller may replace anything the store filled in — billing gives its own
+   * reason for a move — and nothing but `key`, at each of the three places an
+   * entry is made. The caller supplies every field here, so whatever the store
+   * would have said shows up as a field that failed to be replaced.
+   */
+  it("lets the caller replace every field the store fills in, except key", () => {
+    const said = {
+      plan: "x", role: "x", org_id: "x", source: "x", expires_at: "x",
+      reason: "x", moved_to: "x", replaced_plan: "x",
+    };
+    const intent: AuditIntent = {
+      actorUserId: "stripe", detail: { ...said, stripe_customer: "cus_1", key: "github:evil" },
+    };
+    const entries = [
+      ...grantAuditEntries(undefined, grant(), intent, NOW),
+      ...grantAuditEntries(grant({ orgId: "org_old" }), grant({ orgId: "org_new" }), intent, NOW),
+      ...revokeAuditEntries(grant(), intent, NOW),
+    ];
+    expect(entries).toHaveLength(4);
+    for (const e of entries) {
+      expect(e.detail).toEqual({ ...said, stripe_customer: "cus_1", key: "github:4242" });
+      expect(e.sessionId).toBe("grant:github:4242");
+    }
+  });
+
+  /**
+   * One intent serves both entries of an org move, and the store keeps hold of
+   * the grants it passes in. Writing into any of them would change what the
+   * next call sees.
+   */
+  it("leaves what it is given untouched", () => {
+    const intent: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: "cus_1" } };
+    const previous = grant({ orgId: "org_old" });
+    const next = grant({ orgId: "org_new" });
+
+    grantAuditEntries(previous, next, intent, NOW);
+    revokeAuditEntries(previous, intent, NOW);
+
+    expect(intent).toEqual({ actorUserId: "stripe", detail: { stripe_customer: "cus_1" } });
+    expect(previous).toEqual(grant({ orgId: "org_old" }));
+    expect(next).toEqual(grant({ orgId: "org_new" }));
+  });
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1035,13 +1322,15 @@ import type { AuditEntry, PlanGrant } from "./types.js";
 /**
  * What a grant change becomes in the audit log.
  *
- * This rule used to exist twice — once in the admin route and once in billing —
- * and the two diverged: #68 found a redelivered Stripe event appending a
- * plan_granted line for a change that had not happened. RegistryDO is the only
- * thing that knows the previous grant at commit time, so the rule lives beside
- * the mutation now and both callers stopped auditing.
+ * The admin route and billing each built these entries for themselves, and the
+ * two diverged: #68 found a redelivered Stripe event appending a plan_granted
+ * line for a change that had not happened. RegistryDO is the only thing that
+ * knows the previous grant at commit time, so the rule belongs beside the
+ * mutation, not in either caller.
  *
- * Runtime-free for the reason CLAUDE.md gives, same as grant-index.ts.
+ * Runtime-free, as grant-index.ts is: store-do.ts imports `cloudflare:workers`,
+ * which no vitest test can import, so a rule written inside it could not be
+ * tested at all.
  */
 
 /** What a caller contributes: who is acting, and anything extra to record. */
@@ -1050,9 +1339,44 @@ export interface AuditIntent {
   detail?: Record<string, unknown>;
 }
 
-/** Whether a write changed anything a reader would notice. */
+/**
+ * Whether an org has an audit stream to write to. The log is org-scoped, so a
+ * grant with no org has nowhere to be recorded.
+ *
+ * Null is no org, and so is anything else falsy. A Durable Object namespace
+ * accepts "" and undefined as names, so an entry filed against one is delivered,
+ * to a stream no org reads (undefined names the same object as an org called
+ * "undefined", which isOrgId allows). isOrgId rejects "" at the admin route and
+ * billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, so this does not lean on those having run. grant-index.ts
+ * keeps two defences for the org id for the same reason.
+ */
+function hasOrg(orgId: string | null): orgId is string {
+  return Boolean(orgId);
+}
+
+/**
+ * Whether a write left the grant as an org's audit stream would describe it:
+ * plan, role, org, source and expiry. A change of source can take a grant out of
+ * billing's hands, and a change of expiry moves the day somebody loses access,
+ * so neither passes as a repeat.
+ *
+ * Two fields are left out on purpose. grantedAt is Date.now() on every write, so
+ * comparing it would record every redelivered Stripe event, which is the noise
+ * this check exists to remove. grantedBy is who performed the write, and the
+ * entry already carries that as its actor; comparing it would record the same
+ * fact twice, and add a line whenever a second admin re-asserts an identical
+ * grant. (key is not compared either, because previous was read under it.)
+ */
 function samePlan(a: PlanGrant | undefined, b: PlanGrant): boolean {
-  return a !== undefined && a.plan === b.plan && a.role === b.role && a.orgId === b.orgId;
+  return (
+    a !== undefined &&
+    a.plan === b.plan &&
+    a.role === b.role &&
+    a.orgId === b.orgId &&
+    a.source === b.source &&
+    a.expiresAt === b.expiresAt
+  );
 }
 
 /**
@@ -1082,15 +1406,19 @@ function entry(
 }
 
 /**
- * What a guarded grant WRITE should record.
+ * What a guarded grant WRITE should record. `previous` is the grant this write
+ * replaced under the same key, or undefined for a first grant.
  *
- * Nothing when no field a reader sees has moved. When the org moved, the old
+ * Nothing when samePlan finds the grant as it was. When the org moved, the old
  * org gets a revocation — that is the only place it will ever be recorded,
  * since the grant is re-homed rather than deleted.
  *
- * An org-less grant records nothing at all: the audit log is org-scoped and a
- * pro purchase has no stream to be written to. Queuing one would park a row
- * that can never be delivered at the head of a FIFO queue.
+ * An org-less grant records nothing at all (see hasOrg): the audit log is
+ * org-scoped and a pro purchase has no stream to be written to. Queuing one
+ * would put a row in the outbox that has nowhere to go.
+ *
+ * The grant entry states every field samePlan compares, as the grant now has
+ * it, so no change files a line that omits the field it changed.
  */
 export function grantAuditEntries(
   previous: PlanGrant | undefined,
@@ -1100,14 +1428,15 @@ export function grantAuditEntries(
 ): AuditEntry[] {
   if (samePlan(previous, next)) return [];
   const entries: AuditEntry[] = [];
-  if (previous && previous.orgId !== null && previous.orgId !== next.orgId) {
+  if (previous && hasOrg(previous.orgId) && previous.orgId !== next.orgId) {
     entries.push(entry(previous.orgId, next.key, "plan_revoked", intent, {
       plan: previous.plan, reason: "moved to another plan", moved_to: next.orgId,
     }, now));
   }
-  if (next.orgId !== null) {
+  if (hasOrg(next.orgId)) {
     entries.push(entry(next.orgId, next.key, "plan_granted", intent, {
       plan: next.plan, role: next.role, org_id: next.orgId, source: next.source,
+      expires_at: next.expiresAt,
       ...(previous ? { replaced_plan: previous.plan } : {}),
     }, now));
   }
@@ -1120,7 +1449,7 @@ export function revokeAuditEntries(
   intent: AuditIntent,
   now: number
 ): AuditEntry[] {
-  if (removed.orgId === null) return [];
+  if (!hasOrg(removed.orgId)) return [];
   return [entry(removed.orgId, removed.key, "plan_revoked", intent, { plan: removed.plan }, now)];
 }
 ```

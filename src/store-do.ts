@@ -541,11 +541,12 @@ export class RegistryDO extends DurableObject {
    * the room once.
    *
    * **Members who joined before this deploy are not in here, creators of rooms
-   * that already existed included.** A backfill is possible in principle — `us:`
-   * enumerates creators and each session lists its members — and is not worth
-   * walking the registry for a listing that fills itself in as sessions reach
-   * their TTL. Until then a joined room is missing from one screen, which is
-   * not a room lost.
+   * that already existed included.** For the rooms `us:` knows about, a backfill
+   * is possible in principle — `us:` enumerates their creators and each session
+   * lists its members — and is not worth walking the registry for a listing that
+   * fills itself in as sessions reach their TTL. Older rooms have no list to
+   * enumerate (see `us:`), so for them expiry is the only repair. Until then a
+   * joined room is missing from one screen, which is not a room lost.
    */
   async indexMembership(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`um:${userId}:${sessionId}`, Date.now());
@@ -618,22 +619,56 @@ export class DurableObjectStore implements BellmanStore {
     return this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId));
   }
 
+  /**
+   * Write into a derived index: attempted after the authoritative state is
+   * committed, and a failure is logged rather than thrown.
+   *
+   * By the time an index is written, SessionDO has already committed the room
+   * or the seat. A write that threw from here would abort the caller after its
+   * effect had landed — a seat with no `member_joined` event and no audit row,
+   * for a joiner who is told it failed. The index is derived and SessionDO is
+   * authoritative, so swallowing costs a room missing from one listing until
+   * the index is rebuilt from the sessions.
+   *
+   * Only for indexes. The join code writes do not come through here: a join
+   * code that does not resolve is a real failure, not a missing listing row.
+   */
+  private async writeIndex(
+    index: string, sessionId: string, write: () => Promise<unknown>
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (err) {
+      console.error(
+        `${index} index write for ${sessionId} failed; that room is missing from the listing:`,
+        err,
+      );
+    }
+  }
+
   async createSession(s: Session): Promise<void> {
     await this.session(s.id).createSession(s);
+    // Authoritative, so fatal: a join code that does not resolve is a real
+    // failure, not a missing listing row.
     for (const rec of Object.values(s.joinCodes)) {
       await this.registry.putJoinCode(rec.code, s.id);
     }
-    // A lapsed plan has to find this person's rooms, and bare create counts
-    // cannot say which they are. Another write into a second object with no
-    // transaction spanning it — the same gap as the join code above, tracked on
-    // #62. A missed index entry means a room that is not frozen, not one lost.
-    await this.registry.indexSession(s.createdBy, s.id);
+    // From here on every write is an index, derived from what is committed above
+    // and attempted after it, so a failure is logged rather than thrown (see
+    // writeIndex). Each is a write into a second object with no transaction
+    // spanning it — the same gap as the join code, tracked on #62 — and a lost
+    // one costs a row in one listing, never the room.
+    //
+    // `us:` is how a lapsed plan finds this person's rooms, which bare create
+    // counts cannot say. A missed entry means a room that is not frozen.
+    await this.writeIndex("us", s.id, () => this.registry.indexSession(s.createdBy, s.id));
     // The members a session is created with are seated directly — bellman_start
     // hands over the creator in `members` and never calls addMember — so the
-    // joined index is written here as well as in addMember. Another write into a
-    // second object with no transaction spanning it, tracked on #62; a lost one
-    // costs a row on one screen, not a seat.
-    for (const m of s.members) await this.registry.indexMembership(m.userId, s.id);
+    // joined index is written here as well as in addMember. A missed entry
+    // leaves the room out of that person's joined listing.
+    for (const m of s.members) {
+      await this.writeIndex("um", s.id, () => this.registry.indexMembership(m.userId, s.id));
+    }
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -679,12 +714,16 @@ export class DurableObjectStore implements BellmanStore {
     // indexing regardless would put rooms into a person's joined listing that
     // they were turned away from.
     //
-    // A second write into a second object with no transaction spanning it —
-    // the same gap as the join code and the creator index, tracked on #62. The
-    // failure is a listing, not a membership: SessionDO.members stays
-    // authoritative and the index is reconstructible from it, so a lost write
-    // costs a row on one screen.
-    if (added) await this.registry.indexMembership(member.userId, sessionId);
+    // Attempted after the seat is committed, and a failure is logged rather than
+    // thrown (see writeIndex): the caller still has the join event and the audit
+    // row to write, and a joiner who was seated must not be told otherwise. A
+    // second write into a second object with no transaction spanning it — the
+    // same gap as the join code and the creator index, tracked on #62 — so a
+    // lost write costs the room a row in one listing and nothing else.
+    if (added) {
+      await this.writeIndex("um", sessionId, () =>
+        this.registry.indexMembership(member.userId, sessionId));
+    }
     return added;
   }
 

@@ -104,13 +104,19 @@ export interface BellmanStore {
    */
   sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
   /**
-   * Rooms in which this user has ever held a member handle — created, joined,
-   * left and closed alike.
+   * Rooms in which this user has held a member handle — created, joined, left
+   * and closed alike — for as far back as the store's index goes. In MemoryStore
+   * that is everything; in the Durable Objects store it starts at its deploy, so
+   * a handle held before then is not listed (see `RegistryDO.indexMembership`).
    *
-   * Ids only, like `sessionsCreatedBy`, and no status parameter. Its two
-   * callers do not agree on what counts as current: the control panel hides
-   * closed rooms, a freeze sweep wants exactly the live ones. Encoding either
-   * answer here would make one of them filter twice.
+   * Ids only, like `sessionsCreatedBy`, and no status parameter. The consumers
+   * it is meant for do not agree on what counts as current: the control panel
+   * hides closed rooms, a freeze sweep wants exactly the live ones. Encoding
+   * either answer here would make one of them filter twice.
+   *
+   * Order is not promised, and it differs between the stores — insertion order
+   * in MemoryStore, key order in the Durable Objects store — so which rooms
+   * survive `limit` is unspecified too.
    */
   sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
 

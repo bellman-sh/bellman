@@ -378,6 +378,19 @@ export function describeStoreContract(
       expect(await store.sessionsJoinedBy("u_nobody", 10)).toEqual([]);
     });
 
+    it("keeps two users whose ids share a prefix apart", async () => {
+      // The index is listed by prefix, so `um:u_a:` must stay a prefix of u_a's
+      // own keys only: the separator ends it, and u_ab's rooms cannot leak into
+      // u_a's listing or the reverse.
+      await store.createSession(session({ id: "qs_of_a", createdBy: "u_a", members: [] }));
+      await store.createSession(session({ id: "qs_of_ab", createdBy: "u_ab", members: [] }));
+      await store.addMember("qs_of_a", member({ memberId: "m_a", userId: "u_a" }));
+      await store.addMember("qs_of_ab", member({ memberId: "m_ab", userId: "u_ab" }));
+
+      expect(await store.sessionsJoinedBy("u_a", 10)).toEqual(["qs_of_a"]);
+      expect(await store.sessionsJoinedBy("u_ab", 10)).toEqual(["qs_of_ab"]);
+    });
+
     it("lists a room once for a person who joined it from two machines", async () => {
       await store.createSession(session({ id: "qs_twice", members: [] }));
       await store.addMember("qs_twice", member({ memberId: "m_laptop", userId: "u_jesse" }));

@@ -20,7 +20,7 @@
  * #12's Worker-side tsconfig project should absorb this file and drop the
  * exclusion.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
 // a DurableObject is just something that holds its ctx and env.
@@ -477,5 +477,83 @@ describe("SessionDO.appendEventOnce", () => {
     // this "replayed" or "conflict" rather than a fresh append.
     const after = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
     expect(after.outcome).toBe("appended");
+  });
+});
+
+describe("a failed index write does not fail the operation it indexes", () => {
+  /**
+   * By the time DurableObjectStore writes an index, SessionDO has committed the
+   * room or the seat. An index write that threw would abort the caller after the
+   * effect had landed: a seat with no member_joined event and no audit row, for
+   * a joiner who is told it failed. The index is derived and SessionDO is
+   * authoritative, so the write is logged and swallowed, and the cost is a room
+   * missing from one listing.
+   *
+   * The failure is injected by making the registry refuse the index prefixes.
+   * Every other registry write, the join code above all, still goes through.
+   */
+  const refuse = (registryStorage: ReturnType<typeof fakeStorage>, prefixes: string[]) => {
+    const realPut = registryStorage.put;
+    registryStorage.put = async (keyOrEntries: unknown, value?: unknown) => {
+      if (typeof keyOrEntries === "string" && prefixes.some((p) => keyOrEntries.startsWith(p))) {
+        throw new Error("registry unavailable");
+      }
+      return realPut(keyOrEntries, value);
+    };
+  };
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("createSession still creates the room, and its join code still resolves", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["us:", "um:"]);
+
+    await store.createSession(session({ id: "qs_idx", joinCodes: oneCode("BELL-IDX-01", "peer_b") }));
+
+    expect((await store.getSession("qs_idx"))?.members).toHaveLength(1);
+    expect((await store.getSessionByJoinCode("BELL-IDX-01"))?.session.id).toBe("qs_idx");
+    // Neither index took its write, and each failure was said out loud.
+    expect(Object.keys(registryStorage.snapshot()).filter((k) => /^(us|um):/.test(k))).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(2);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("us index write for qs_idx"), expect.any(Error),
+    );
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write for qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("addMember still seats the member, and still says it did", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    await store.createSession(session({ id: "qs_idx", members: [] }));
+    refuse(registryStorage, ["um:"]);
+
+    expect(await store.addMember("qs_idx", member({ memberId: "m_joiner", userId: "u_peer" })))
+      .toBe(true);
+
+    expect((await store.getSession("qs_idx"))?.members.map((m) => m.memberId))
+      .toEqual(["m_joiner"]);
+    // The whole cost: one row missing from one listing.
+    expect(await store.sessionsJoinedBy("u_peer", 10)).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write for qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("but a join code that cannot be registered still fails createSession", async () => {
+    // The contrast that keeps the rule about indexes. A join code is
+    // authoritative: one that does not resolve is a real failure, not a missing
+    // listing row, so it is neither swallowed nor logged here.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["jc:"]);
+
+    await expect(
+      store.createSession(session({ id: "qs_nocode", joinCodes: oneCode("BELL-NOPE-01", "peer_b") })),
+    ).rejects.toThrow("registry unavailable");
+    expect(logged).not.toHaveBeenCalled();
   });
 });

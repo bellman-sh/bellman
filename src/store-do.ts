@@ -517,7 +517,18 @@ export class RegistryDO extends DurableObject {
    * no list to backfill from, so the gap cannot be closed by a migration; it
    * closes by itself as those sessions reach their TTL and expire. Until then
    * a lapse will not freeze them, which means a room outliving its plan rather
-   * than a room lost, and only for rooms that already existed.
+   * than a room lost.
+   *
+   * **Sessions created after this deploy can be missing too.**
+   * `DurableObjectStore` puts this row once the room has committed, and logs a
+   * failed put rather than throwing it (`writeIndex`), deliberately: a throw
+   * would report a failed create for a room that already exists. Nothing
+   * rebuilds the row, so the outcome is the one above: a lapse cannot freeze a
+   * room it cannot find, and the room keeps working on a plan that no longer
+   * pays for it. The gap above only shrinks, as those rooms expire; this one
+   * also grows whenever a put fails. A creator's `um:` row is a separate put, so
+   * either row can land without the other, and a room can be listed for its
+   * creator and still be out of a lapse's reach.
    */
   async indexSession(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
@@ -635,7 +646,10 @@ export class DurableObjectStore implements BellmanStore {
    * or the seat. A write that threw from here would abort the caller after its
    * effect had landed — a seat with no `member_joined` event and no audit row,
    * for a joiner who is told it failed. The index is derived and SessionDO is
-   * authoritative, so swallowing costs a room missing from one listing.
+   * authoritative, so swallowing costs a room missing from one listing. What
+   * that costs depends on the listing: for `um:` a room missing from its
+   * member's list, for `us:` a room a lapse cannot freeze, which outlives the
+   * plan that pays for it.
    *
    * The row stays missing. Nothing rebuilds an index today: re-deriving `um:`
    * from SessionDO.members needs a list of sessions to walk, and the only list

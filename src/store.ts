@@ -101,6 +101,17 @@ export interface BellmanStore {
    * Sessions this user created, newest first is not promised — only that a
    * lapsed plan can find the rooms it has to freeze. The create *counts* used
    * for quota cannot answer that: they are timestamps, not identities.
+   *
+   * That promise has two exceptions, both in the Durable Objects store, and a
+   * miss costs more than a row missing from a list: a lapse freezes the rooms
+   * this names, so a room it misses is not frozen and keeps working on a plan
+   * that no longer pays for it. The index starts at its deploy, so a room
+   * created before then is not listed (see `RegistryDO.indexSession`). And a
+   * failed index write is logged rather than thrown, deliberately, so that a
+   * registry failure cannot abort a create whose room had already committed;
+   * nothing rebuilds the row it lost (see `DurableObjectStore.writeIndex`). A
+   * creator's room takes two such writes, one per listing, and either can fail
+   * alone, so a room can be in `sessionsJoinedBy` and absent from here.
    */
   sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
   /**

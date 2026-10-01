@@ -2,6 +2,8 @@ import type {
   AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
+import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
 const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -146,33 +148,39 @@ export interface BellmanStore {
   putGrant(grant: PlanGrant): Promise<void>;
   deleteGrant(key: string): Promise<void>;
   /**
-   * Write a grant only if the key is unowned or already belongs to `expectedOrgId`.
+   * Write a grant only if the key is unowned or already belongs to
+   * `expectedOrgId`, and record what changed.
    *
-   * The ownership check and the write are one operation because they cannot be
-   * two: a Durable Object's input gate covers one invocation, so a caller that
+   * The check, the write and the audit intent are one operation. A caller that
    * reads with getGrant and then writes has given the object a window to serve
-   * somebody else's write for the same key in between.
+   * another org's write in between; a caller that writes and then audits has
+   * given it a window to lose the record of a change that already happened.
+   * `audit` carries only what the store cannot see — who is acting, and any
+   * detail to annotate the entry with. See grant-audit.ts for the rule.
    */
-  putGrantIfOwned(grant: PlanGrant, expectedOrgId: string | null): Promise<"written" | "conflict">;
+  putGrantIfOwned(
+    grant: PlanGrant, expectedOrgId: string | null, audit: AuditIntent
+  ): Promise<"written" | "conflict">;
+  /** Delete a grant only if it belongs to `expectedOrgId`, and say what happened. */
+  deleteGrantIfOwned(
+    key: string, expectedOrgId: string | null, audit: AuditIntent
+  ): Promise<"deleted" | "missing" | "conflict">;
   /**
-   * Delete a grant only if it belongs to `expectedOrgId`, and say what happened.
+   * Write a grant only if the key is unowned or already carries
+   * `expectedSource`.
    *
-   * "missing" and "conflict" are distinct on purpose: the caller must not audit
-   * a revocation that did not occur, and must not report success for one.
+   * The second writer. An admin claims a key by org, which is what
+   * putGrantIfOwned checks; billing claims by having written it, because a
+   * lapsing subscription must not revoke a plan an operator granted by hand.
+   * Same atomicity argument either way.
    */
-  deleteGrantIfOwned(key: string, expectedOrgId: string | null): Promise<"deleted" | "missing" | "conflict">;
-  /**
-   * Write a grant only if the key is unowned or already carries `expectedSource`.
-   *
-   * There are two writers with two different claims on a key. An admin claims
-   * by org, which is what putGrantIfOwned checks; billing claims by having
-   * written the record itself, because a subscription lapsing is no reason to
-   * revoke a plan an operator granted by hand. Same atomicity argument either
-   * way: the check and the write cannot be two calls.
-   */
-  putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite>;
+  putGrantIfSource(
+    grant: PlanGrant, expectedSource: string, audit: AuditIntent
+  ): Promise<GrantWrite>;
   /** Delete a grant only if it carries `expectedSource`, and say what happened. */
-  deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete>;
+  deleteGrantIfSource(
+    key: string, expectedSource: string, audit: AuditIntent
+  ): Promise<GrantDelete>;
   /**
    * Re-file a grant under a new key, atomically. A no-op if `from` has none.
    *
@@ -473,9 +481,21 @@ export class MemoryStore implements BellmanStore {
     this.grants.delete(key);
   }
 
+  /**
+   * No outbox here. There is one process and one array, so the audit write
+   * cannot fail independently of the grant write and there is no gap to
+   * protect. The Durable Object store needs one because its audit lives in a
+   * different object; both owe the same observable result, which is what the
+   * contract suite checks.
+   */
+  private recordAudit(entries: AuditEntry[]): void {
+    for (const entry of entries) this.audit.push(detach(entry));
+  }
+
   async putGrantIfOwned(
     grant: PlanGrant,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"written" | "conflict"> {
     // liveGrant, not the raw map: a lapsed grant is defined as absent
     // everywhere else, and reading past that here would let a dead record from
@@ -483,34 +503,43 @@ export class MemoryStore implements BellmanStore {
     const existing = this.liveGrant(grant.key);
     if (existing && existing.orgId !== expectedOrgId) return "conflict";
     this.grants.set(grant.key, detach(grant));
+    this.recordAudit(grantAuditEntries(existing, grant, audit, Date.now()));
     return "written";
   }
 
   async deleteGrantIfOwned(
     key: string,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"deleted" | "missing" | "conflict"> {
     const existing = this.liveGrant(key);
     if (!existing) return "missing";
     if (existing.orgId !== expectedOrgId) return "conflict";
     this.grants.delete(key);
+    this.recordAudit(revokeAuditEntries(existing, audit, Date.now()));
     return "deleted";
   }
 
-  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
+  async putGrantIfSource(
+    grant: PlanGrant, expectedSource: string, audit: AuditIntent
+  ): Promise<GrantWrite> {
     const previous = this.liveGrant(grant.key);
     if (previous && previous.source !== expectedSource) return { outcome: "conflict" };
     this.grants.set(grant.key, detach(grant));
+    this.recordAudit(grantAuditEntries(previous, grant, audit, Date.now()));
     // Detached after the write, because the caller is handed this and the
     // stored object must not be reachable through it.
     return { outcome: "written", previous: previous && detach(previous) };
   }
 
-  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
+  async deleteGrantIfSource(
+    key: string, expectedSource: string, audit: AuditIntent
+  ): Promise<GrantDelete> {
     const removed = this.liveGrant(key);
     if (!removed) return { outcome: "missing" };
     if (removed.source !== expectedSource) return { outcome: "conflict" };
     this.grants.delete(key);
+    this.recordAudit(revokeAuditEntries(removed, audit, Date.now()));
     return { outcome: "deleted", removed: detach(removed) };
   }
 

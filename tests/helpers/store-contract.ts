@@ -866,7 +866,7 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, orgId: "org_theirs" }));
 
-      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine"))
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine", { actorUserId: "u_test" }))
         .toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
     });
@@ -877,8 +877,8 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfOwned(base, "org_mine")).toBe("written");
-      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine")).toBe("written");
+      expect(await store.putGrantIfOwned(base, "org_mine", { actorUserId: "u_test" })).toBe("written");
+      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine", { actorUserId: "u_test" })).toBe("written");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
     });
 
@@ -892,11 +892,11 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine")).toBe("missing");
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", { actorUserId: "u_test" })).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("conflict");
       expect(await store.getGrant("github:4242")).toBeDefined();
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs")).toBe("deleted");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs", { actorUserId: "u_test" })).toBe("deleted");
       expect(await store.getGrant("github:4242")).toBeUndefined();
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
     });
@@ -917,7 +917,7 @@ export function describeStoreContract(
       expect(await store.putGrantIfOwned({
         key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
-      }, "org_mine")).toBe("written");
+      }, "org_mine", { actorUserId: "u_test" })).toBe("written");
 
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_mine" });
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
@@ -932,7 +932,7 @@ export function describeStoreContract(
         expiresAt: Date.now() - 1,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("missing");
     });
 
     /**
@@ -948,9 +948,9 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, source: "operator" }));
 
-      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase")).outcome)
+      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase", { actorUserId: "u_test" })).outcome)
         .toBe("conflict");
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", source: "operator" });
     });
 
@@ -960,20 +960,20 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfSource(purchase, "purchase"))
+      expect(await store.putGrantIfSource(purchase, "purchase", { actorUserId: "u_test" }))
         .toEqual({ outcome: "written", previous: undefined });
 
       // The write reports what it replaced, so billing can tell a real change
       // from a repeated delivery and see which org a plan moved out of.
-      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase");
+      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase", { actorUserId: "u_test" });
       expect(updated.outcome).toBe("written");
       expect(updated.previous).toMatchObject({ plan: "pro" });
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
 
-      const gone = await store.deleteGrantIfSource("github:4242", "purchase");
+      const gone = await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" });
       expect(gone.outcome).toBe("deleted");
       expect(gone.removed).toMatchObject({ plan: "team" });
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("missing");
       expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual([]);
     });
 
@@ -998,8 +998,8 @@ export function describeStoreContract(
       // it. In this order a store that reads before yielding will let the
       // delete run against the record the put already replaced.
       const [put] = await Promise.all([
-        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine"),
-        store.deleteGrantIfSource("github:4242", "purchase"),
+        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine", { actorUserId: "u_test" }),
+        store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" }),
       ]);
 
       // Either order of completion is fine. What must not happen is the delete

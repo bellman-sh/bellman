@@ -8,7 +8,8 @@ import type {
 import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
-import { OutboxDriver } from "./outbox.js";
+import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -353,7 +354,17 @@ export class SessionDO extends DurableObject {
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
 
-export class RegistryDO extends DurableObject {
+export class RegistryDO extends DurableObject<BellmanEnv> {
+  /**
+   * The queue of audit entries this object owes the per-org streams.
+   *
+   * A grant change is committed here and the record of it is filed in another
+   * object, so the two cannot share a transaction. The entry is queued in the
+   * grant's own transaction instead and delivered after it: inline when the write
+   * returns, by the alarm if the isolate went away first.
+   */
+  private driver = new OutboxDriver(this.ctx.storage, (row) => this.deliver(row));
+
   async putJoinCode(code: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`jc:${code}`, sessionId);
   }
@@ -425,9 +436,67 @@ export class RegistryDO extends DurableObject {
     await this.dropGrant(existing);
   }
 
-  async putGrantIfOwned(
+  /**
+   * One audit entry, into its org's stream.
+   *
+   * The row id goes along as the intent id, so an entry that landed but whose
+   * acknowledgement was lost is applied once when the queue retries it.
+   */
+  private async deliver(row: OutboxRow): Promise<void> {
+    if (row.kind !== "audit") throw new Error(`outbox: unknown kind ${row.kind}`);
+    const entry = row.payload as AuditEntry;
+    // Falsy, not `=== null`: a namespace accepts "" and undefined as names, so a
+    // malformed entry would be delivered into a stream no org reads rather than
+    // failing. grantAuditEntries already refuses to build one; this is the second
+    // defence, for the same reason grant-index.ts keeps two for the org id.
+    if (!entry.orgId) return; // no stream to deliver it to; drop the row
+    await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
+  }
+
+  /** Each entry becomes one queued intent, with an id the stream can dedupe on. */
+  private auditIntents(entries: AuditEntry[]): OutboxIntent[] {
+    return entries.map((entry) => ({ id: crypto.randomUUID(), kind: "audit", payload: entry }));
+  }
+
+  /**
+   * The backstop for the inline delivery. It fires after OUTBOX_GRACE_MS, finds
+   * an empty queue and does nothing, unless the inline attempt never ran or is
+   * still waiting on an audit object that has stopped answering.
+   *
+   * The closing reArm() is the safety net SessionDO.alarm has too: a fired alarm is
+   * consumed, so whatever is still due must have one scheduled before this returns.
+   * The drain re-arms for itself after a failed delivery, so this covers a path
+   * that returns without having done so; nothing reaches it today.
+   */
+  async alarm(): Promise<void> {
+    for (const name of await this.driver.dueNow()) {
+      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+    }
+    await this.driver.reArm();
+  }
+
+  /**
+   * TEST SEAM. Commit a guarded write and its audit intent WITHOUT the inline
+   * delivery, so a test can reproduce an isolate dying in that gap. Nothing in
+   * production calls this.
+   */
+  async enqueueOnly(grant: PlanGrant, audit: AuditIntent): Promise<void> {
+    await this.putGrantIfOwnedTxn(grant, grant.orgId, audit);
+  }
+
+  /**
+   * The transaction half of putGrantIfOwned: check, write, and queue the record of
+   * it. The other three guarded writes below have the same two halves.
+   *
+   * Nothing that awaits another object runs inside a transaction closure. Every
+   * other call to this object waits until the closure commits, so a delivery in
+   * there would hold the registry for as long as the audit object takes to answer.
+   * The closure queues; the wrapper delivers once it has committed.
+   */
+  private async putGrantIfOwnedTxn(
     grant: PlanGrant,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"written" | "conflict"> {
     return this.ctx.storage.transaction(async (txn) => {
       const stored = await txn.get<PlanGrant>(grantKey(grant.key));
@@ -438,44 +507,103 @@ export class RegistryDO extends DurableObject {
       if (previous && previous.orgId !== expectedOrgId) return "conflict" as const;
       // The stale entry to clear is the one actually in storage, expired or not.
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
-      await txn.put(grantKey(grant.key), grant);
-      await txn.put(orgIndexKey(grant.orgId, grant.key), grant);
+      const rows = await this.driver.enqueue(
+        txn, this.auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+      );
+      // Grant, index and the intent to record it, in one commit. A refused
+      // write reaches none of this, so it queues nothing.
+      await txn.put<unknown>({
+        [grantKey(grant.key)]: grant,
+        [orgIndexKey(grant.orgId, grant.key)]: grant,
+        ...rows,
+      });
       return "written" as const;
     });
   }
 
-  async deleteGrantIfOwned(
+  async putGrantIfOwned(
+    grant: PlanGrant,
+    expectedOrgId: string | null,
+    audit: AuditIntent
+  ): Promise<"written" | "conflict"> {
+    const outcome = await this.putGrantIfOwnedTxn(grant, expectedOrgId, audit);
+    if (outcome === "written") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  private async deleteGrantIfOwnedTxn(
     key: string,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"deleted" | "missing" | "conflict"> {
     return this.ctx.storage.transaction(async (txn) => {
       const existing = await txn.get<PlanGrant>(grantKey(key));
       if (!existing) return "missing" as const;
       if (lapsed(existing)) {
         // Already gone as far as every reader is concerned; tidy it away and
-        // say so, rather than reporting a revocation of something inert.
+        // say so, rather than reporting a revocation of something inert — and
+        // record nothing, for the same reason.
         for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
         return "missing" as const;
       }
       if (existing.orgId !== expectedOrgId) return "conflict" as const;
       for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+      await txn.put<unknown>(
+        await this.driver.enqueue(
+          txn, this.auditIntents(revokeAuditEntries(existing, audit, Date.now()))
+        )
+      );
       return "deleted" as const;
     });
   }
 
-  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
+  async deleteGrantIfOwned(
+    key: string,
+    expectedOrgId: string | null,
+    audit: AuditIntent
+  ): Promise<"deleted" | "missing" | "conflict"> {
+    const outcome = await this.deleteGrantIfOwnedTxn(key, expectedOrgId, audit);
+    if (outcome === "deleted") await this.driver.deliverNow();
+    return outcome;
+  }
+
+  private async putGrantIfSourceTxn(
+    grant: PlanGrant,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantWrite> {
     return this.ctx.storage.transaction(async (txn) => {
       const stored = await txn.get<PlanGrant>(grantKey(grant.key));
       const previous = stored && !lapsed(stored) ? stored : undefined;
       if (previous && previous.source !== expectedSource) return { outcome: "conflict" as const };
       for (const stale of staleIndexKeys(stored, grant)) await txn.delete(stale);
-      await txn.put(grantKey(grant.key), grant);
-      await txn.put(orgIndexKey(grant.orgId, grant.key), grant);
+      const rows = await this.driver.enqueue(
+        txn, this.auditIntents(grantAuditEntries(previous, grant, audit, Date.now()))
+      );
+      await txn.put<unknown>({
+        [grantKey(grant.key)]: grant,
+        [orgIndexKey(grant.orgId, grant.key)]: grant,
+        ...rows,
+      });
       return { outcome: "written" as const, previous };
     });
   }
 
-  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
+  async putGrantIfSource(
+    grant: PlanGrant,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantWrite> {
+    const result = await this.putGrantIfSourceTxn(grant, expectedSource, audit);
+    if (result.outcome === "written") await this.driver.deliverNow();
+    return result;
+  }
+
+  private async deleteGrantIfSourceTxn(
+    key: string,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantDelete> {
     return this.ctx.storage.transaction(async (txn) => {
       const existing = await txn.get<PlanGrant>(grantKey(key));
       if (!existing) return { outcome: "missing" as const };
@@ -485,8 +613,23 @@ export class RegistryDO extends DurableObject {
       }
       if (existing.source !== expectedSource) return { outcome: "conflict" as const };
       for (const storageKey of allKeysFor(existing)) await txn.delete(storageKey);
+      await txn.put<unknown>(
+        await this.driver.enqueue(
+          txn, this.auditIntents(revokeAuditEntries(existing, audit, Date.now()))
+        )
+      );
       return { outcome: "deleted" as const, removed: existing };
     });
+  }
+
+  async deleteGrantIfSource(
+    key: string,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantDelete> {
+    const result = await this.deleteGrantIfSourceTxn(key, expectedSource, audit);
+    if (result.outcome === "deleted") await this.driver.deliverNow();
+    return result;
   }
 
   async moveGrant(fromKey: string, toKey: string): Promise<void> {
@@ -805,24 +948,34 @@ export class DurableObjectStore implements BellmanStore {
 
   async putGrantIfOwned(
     grant: PlanGrant,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"written" | "conflict"> {
-    return this.registry.putGrantIfOwned(grant, expectedOrgId);
+    return this.registry.putGrantIfOwned(grant, expectedOrgId, audit);
   }
 
   async deleteGrantIfOwned(
     key: string,
-    expectedOrgId: string | null
+    expectedOrgId: string | null,
+    audit: AuditIntent
   ): Promise<"deleted" | "missing" | "conflict"> {
-    return this.registry.deleteGrantIfOwned(key, expectedOrgId);
+    return this.registry.deleteGrantIfOwned(key, expectedOrgId, audit);
   }
 
-  async putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite> {
-    return this.registry.putGrantIfSource(grant, expectedSource);
+  async putGrantIfSource(
+    grant: PlanGrant,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantWrite> {
+    return this.registry.putGrantIfSource(grant, expectedSource, audit);
   }
 
-  async deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete> {
-    return this.registry.deleteGrantIfSource(key, expectedSource);
+  async deleteGrantIfSource(
+    key: string,
+    expectedSource: string,
+    audit: AuditIntent
+  ): Promise<GrantDelete> {
+    return this.registry.deleteGrantIfSource(key, expectedSource, audit);
   }
 
   async moveGrant(fromKey: string, toKey: string): Promise<void> {

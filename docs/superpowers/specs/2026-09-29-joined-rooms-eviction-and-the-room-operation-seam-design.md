@@ -399,14 +399,14 @@ export async function audit(
 ): Promise<void>;
 ```
 
-**`alsoOrgs` defaults to nothing, and that is a trap worth naming.** A call that
+**`alsoOrgs` defaults to nothing, and the default is a trap.** A call that
 omits it compiles and writes fewer rows than it should. D13 tells a route author
 to use this helper precisely so a transport cannot "write it for one org and not
 the other" — and the default makes that outcome reachable without a type error.
 When you add an operation here, ask who the entry is *about*, not only who
 performed it. Eviction is the case where those differ; it will not be the last.
 
-Route rows are not automatically exempt either: an `invite_revoked` detail names
+Nor does every row want it: an `invite_revoked` detail names
 a role and no person, so it must NOT carry `alsoOrgs` — a row an org cannot
 resolve to anyone is worse than none.
 
@@ -436,15 +436,27 @@ return r.ok ? ok(shape(r.value)) : fail(r.reason);
 6. `target.leftAt !== null` takes the early return (D10). It does not repeat the
    removal, but it is not a no-op: it retires a live code for that seat,
    announces `invite_revoked`, audits it, and closes an emptied room.
-7. `updateMember(sessionId, memberId, { leftAt: Date.now() })`.
-8. `appendEvent` of `member_evicted`, carrying the evicted label and room role.
-   A `null` return means the session froze in the gap; the member is already
-   out, so this is tolerated rather than unwound — `bellman_leave` treats its
-   own append the same way.
-9. If a live code exists for `target.roomRole`: `consumeJoinCode`, then
-   `invite_revoked` (D9). An expired code is not live and produces nothing.
-10. Re-read the session; if `activeMembers` is empty, `closeSession`.
-11. `audit(..., "member_evicted", { member_id, room_role, code_retired })`.
+7. **If a live code exists for `target.roomRole`, `consumeJoinCode` — before
+   the member is recorded out, not after.** `leftAt` is the commit point: once
+   it is set, every retry takes the early return, so anything not done by then
+   is never done. Retiring afterwards would leave a crash window with the
+   member out and their door open, which no retry could heal. This order fails
+   the other way instead — member still in, door shut — and a retry redoes it
+   whole. An expired code is not live and produces nothing.
+8. `updateMember(sessionId, targetMemberId, { leftAt: Date.now() })`.
+9. `appendEvent` of `member_evicted`, then `invite_revoked` if a code was
+   retired. The events read in the order a person would tell it, even though
+   the store writes went the other way. A `null` return means the session froze
+   in the gap; the member is already out, so this is tolerated rather than
+   unwound — `bellman_leave` treats its own append the same way.
+10. `audit(..., "member_evicted", { member_id, user_id, room_role,
+    code_retired }, [target.orgId])` — **before** the close, and carrying the
+    evicted member's org. The eviction is a fact from step 8 on and its record
+    must not wait on an unrelated step; and the actor is the creator, so
+    without the extra org a member of a third org is removed with no row in
+    their own org's log.
+11. `closeIfEmpty` last. Anything after the close would be lost, because every
+    later call refuses on `closed`.
 
 Steps 7 through 11 touch `SessionDO`, `RegistryDO` (through `consumeJoinCode`)
 and `AuditDO`, with no transaction across them — the #59 and #62 class again.

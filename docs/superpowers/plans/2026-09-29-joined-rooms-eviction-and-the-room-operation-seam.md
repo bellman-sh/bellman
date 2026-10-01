@@ -328,7 +328,7 @@ diffs a reviewer can read.
 
 **Interfaces:**
 - Consumes: nothing from Task 1.
-- Produces: from `src/rooms.ts` — `RoomFailure`, `RoomResult<T>`, `succeed<T>(value): RoomResult<T>`, `refuse(code, reason): RoomResult<never>`, `FROZEN: string`, `activeMembers(s: Session): Member[]`, `findMember(s: Session, memberId: string, identity: Identity): Member | undefined`, `sessionStatus(session: { closed: boolean; frozenAt: number | null }): string`, `audit(store, session, actor, action, detail): Promise<void>`.
+- Produces: from `src/rooms.ts` — `RoomFailure`, `RoomResult<T>`, `succeed<T>(value): RoomResult<T>`, `refuse(code, reason): RoomResult<never>`, `FROZEN: string`, `activeMembers(s: Session): Member[]`, `findMember(s: Session, memberId: string, identity: Identity): Member | undefined`, `sessionStatus(session: { closed: boolean; frozenAt: number | null }): string`, `audit(store, session, actor, action, detail, alsoOrgs?): Promise<void>` (the sixth parameter was added during implementation; see Task 5).
 
 - [ ] **Step 1: Create `src/rooms.ts`**
 
@@ -1331,7 +1331,7 @@ export async function evictMember(
   await audit(store, session, actor, "member_evicted", {
     member_id: memberId, user_id: target.userId,
     room_role: target.roomRole, code_retired: live,
-  });
+  }, [target.orgId]);
 
   const closed = after.closed || activeMembers(after).length === 0;
   return succeed({

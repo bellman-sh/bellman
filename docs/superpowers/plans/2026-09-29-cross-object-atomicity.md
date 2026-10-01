@@ -1489,7 +1489,7 @@ already diverged. Runtime-free so the rule is testable without workerd."
 
 **Interfaces:**
 - Consumes: `AuditIntent`, `grantAuditEntries`, `revokeAuditEntries` from `src/grant-audit.js`; `drain`, `dueKey`, `enqueueRows`, `OUTBOX_SEQ`, `OutboxIntent`, `OutboxRow` from `src/outbox.js`
-- Produces: the four guarded writes taking a third `audit: AuditIntent` argument, return types unchanged; `RegistryDO.enqueueOnly(grant, audit)` as a test seam
+- Produces: the four guarded writes taking a third `audit: AuditIntent` argument, return types unchanged. **`enqueueOnly` below was removed in a fix round — do not write it.** Every method on a Durable Object is reachable over RPC by anything holding the binding, and TypeScript's `private` is compile-time only (probed: a plain stub's `putGrantIfOwnedTxn` returned `"written"`), so a method that commits a change while skipping its delivery is exposed however it is marked. Mark internal helpers `#private`, and switch `driver.deliverNow` off from inside the object when a test needs the un-delivered state.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1782,6 +1782,8 @@ Add these members to `RegistryDO`:
    * delivery, so a test can reproduce an isolate dying in that gap. Nothing in
    * production calls this.
    */
+  // REMOVED in a fix round; see this task's Interfaces block. Kept here only so
+  // the diff that removed it reads in context. Do not write this method.
   async enqueueOnly(grant: PlanGrant, audit: AuditIntent): Promise<void> {
     await this.putGrantIfOwnedTxn(grant, grant.orgId, audit);
   }

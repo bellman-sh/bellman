@@ -1,9 +1,34 @@
 import { describe, it, expect } from "vitest";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore, type GrantDelete, type GrantWrite } from "../src/store.js";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
 import {
   PURCHASE, canPurchaseAs, grantKeyForUser, orgForUser, purchaseGrant, reconcilePurchase,
+  type PurchaseGrantStore,
 } from "../src/billing/grants.js";
+
+/**
+ * A store that records what billing asks of it and answers with a fixed outcome.
+ *
+ * The audit entry a request becomes is the store's rule, pinned in
+ * grant-audit.test.ts and the store contract. What billing owns is the request:
+ * which guarded write, guarded on which source, on whose behalf and with what to
+ * say. Reading that back from an audit log would test the rule as well, and
+ * would pass or fail on changes to it that billing has nothing to do with.
+ */
+function spyStore(answer: { put?: GrantWrite; del?: GrantDelete } = {}) {
+  const calls: unknown[][] = [];
+  const store: PurchaseGrantStore = {
+    async putGrantIfSource(grant, expectedSource, audit) {
+      calls.push(["put", grant.key, grant.plan, expectedSource, audit]);
+      return answer.put ?? { outcome: "written" };
+    },
+    async deleteGrantIfSource(key, expectedSource, audit) {
+      calls.push(["delete", key, expectedSource, audit]);
+      return answer.del ?? { outcome: "deleted" };
+    },
+  };
+  return { store, calls };
+}
 
 describe("the key a purchase is filed under", () => {
   /**
@@ -120,7 +145,11 @@ describe("reconciling what Stripe says with what is stored", () => {
     expect(await plans.getGrant("github:4242")).toMatchObject({ plan: "team", source: "operator" });
   });
 
-  /** A purchase is a plan change like any other, and the org stream says so. */
+  /**
+   * A purchase is a plan change like any other, and the org stream says so: who
+   * made it, and for a revocation, why. What else an entry holds is the store's
+   * rule, pinned where the rule is.
+   */
   it("writes the plan change to the org audit log", async () => {
     const billing = new MemoryBillingStore();
     const plans = new MemoryStore();
@@ -139,7 +168,44 @@ describe("reconciling what Stripe says with what is stored", () => {
     await reconcilePurchase(user, billing, plans);
 
     const after = await plans.auditForOrg("org_u_github_4242", 10);
-    expect(after.map((e) => e.action)).toEqual(["plan_granted", "plan_revoked"]);
+    expect(after.map((e) => [e.actorUserId, e.action]))
+      .toEqual([["stripe", "plan_granted"], ["stripe", "plan_revoked"]]);
+    expect(after[1]).toMatchObject({ detail: { reason: "subscription no longer paying" } });
+  });
+
+  /**
+   * The store records the change, so billing's part is the request: who is
+   * acting, and what the store cannot see for itself. A write names the customer
+   * that paid. Compared whole, so a detail billing was never meant to send fails
+   * it as surely as a missing one.
+   */
+  it("tells the store who is acting, and which customer paid, on a write", async () => {
+    const billing = new MemoryBillingStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", sub("team"));
+    const { store, calls } = spyStore();
+
+    expect(await reconcilePurchase(user, billing, store)).toBe("written");
+
+    expect(calls).toEqual([
+      ["put", "github:4242", "team", PURCHASE,
+        { actorUserId: "stripe", detail: { stripe_customer: "cus_A" } }],
+    ]);
+  });
+
+  /** A revocation has no customer to name, and gives the reason instead. */
+  it("tells the store who is acting, and why, on a revocation", async () => {
+    const billing = new MemoryBillingStore();
+    await billing.linkCustomer("cus_A", user);
+    await billing.recordSubscription("cus_A", "sub_1", sub("pro", "canceled"));
+    const { store, calls } = spyStore();
+
+    expect(await reconcilePurchase(user, billing, store)).toBe("deleted");
+
+    expect(calls).toEqual([
+      ["delete", "github:4242", PURCHASE,
+        { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } }],
+    ]);
   });
 
   /**
@@ -183,20 +249,24 @@ describe("reconciling what Stripe says with what is stored", () => {
       .toEqual(["plan_granted", "plan_revoked"]);
   });
 
-  /** A pro purchase has no org, so there is no org stream to write to. */
-  it("does not invent an org to audit a plan that has none", async () => {
-    const billing = new MemoryBillingStore();
-    const plans = new MemoryStore();
-    await billing.linkCustomer("cus_A", user);
-    await billing.recordSubscription("cus_A", "sub_1", { plan: "pro", status: "active", eventAt: 1 });
-
-    expect(await reconcilePurchase(user, billing, plans)).toBe("written");
-    expect(await plans.auditForOrg("org_u_github_4242", 10)).toEqual([]);
-  });
-
+  /**
+   * An id can have nothing to file a purchase against in two ways: no upstream
+   * key to file it under, or a key whose org would be too long for the store.
+   * Both are turned away before the store is asked for anything, even for a user
+   * who is paying, because the grant could not be applied after the money was
+   * taken.
+   */
   it("does nothing for a user id no purchase can be filed against", async () => {
-    expect(await reconcilePurchase("u_jesse", new MemoryBillingStore(), new MemoryStore()))
-      .toBe("unkeyable");
+    const overflows = `u_google_${"1".repeat(52)}`;
+    for (const id of ["u_jesse", overflows]) {
+      const billing = new MemoryBillingStore();
+      await billing.linkCustomer("cus_A", id);
+      await billing.recordSubscription("cus_A", "sub_1", sub("team"));
+      const { store, calls } = spyStore();
+
+      expect(await reconcilePurchase(id, billing, store), id).toBe("unkeyable");
+      expect(calls, id).toEqual([]);
+    }
   });
 
   it("says nothing was there when a user has never paid", async () => {

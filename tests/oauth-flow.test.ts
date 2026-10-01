@@ -795,16 +795,32 @@ describe("granting plans at runtime", () => {
     expect(((await res.json()) as Record<string, string>).error_description).toContain("orgId");
   });
 
-  it("writes plan changes to the org audit log", async () => {
+  /**
+   * The route does not audit; the store does, in the same operation as the
+   * write. What the route still owns is who each entry is attributed to, so that
+   * is checked on every entry, and each detail is compared whole so a route that
+   * adds something of its own fails too. The three are the shapes the store
+   * gives a first grant, a replacement (which names the plan it replaced) and a
+   * revocation (which names the plan it ended).
+   */
+  it("writes plan changes to the org audit log, under the admin who made them", async () => {
     const token = await tokenFor(admin);
-    await call("/admin/grants", as(token, {
+    const grant = (plan: string, role: string) => call("/admin/grants", as(token, {
       method: "POST",
-      body: JSON.stringify({ key: "github:97", plan: "pro", role: "member", orgId: "org_example" }),
+      body: JSON.stringify({ key: "github:97", plan, role, orgId: "org_example" }),
     }));
+    await grant("pro", "member");
+    await grant("team", "admin");
     await call("/admin/grants?key=github:97", as(token, { method: "DELETE" }));
 
     const entries = await (config.plans as MemoryStore).auditForOrg("org_example", 50);
-    expect(entries.map((e) => e.action)).toEqual(["plan_granted", "plan_revoked"]);
+    const entry = { at: expect.any(Number), orgId: "org_example", sessionId: "grant:github:97", actorUserId: "u_admin" };
+    const held = { key: "github:97", org_id: "org_example", source: "operator", expires_at: null };
+    expect(entries).toEqual([
+      { ...entry, action: "plan_granted", detail: { ...held, plan: "pro", role: "member" } },
+      { ...entry, action: "plan_granted", detail: { ...held, plan: "team", role: "admin", replaced_plan: "pro" } },
+      { ...entry, action: "plan_revoked", detail: { key: "github:97", plan: "team" } },
+    ]);
   });
 });
 

@@ -59,7 +59,7 @@ export type PlanStore = Pick<
   BellmanStore,
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
-  | "countCreatesThisMonth" | "appendAudit"
+  | "countCreatesThisMonth"
 >;
 
 export type PlanSource = "operator" | "grant" | "default";
@@ -889,30 +889,31 @@ export async function handleOAuth(
         expiresAt: body.expiresAt ?? null,
       };
       // The org check above validates what the caller CLAIMS. This checks what
-      // is stored, and does it in the same operation as the write: read-then-
-      // write let another org's admin land a grant for the same key in the gap.
-      if ((await config.plans.putGrantIfOwned(grant, identity.orgId)) === "conflict") {
+      // is stored, and does it in the same operation as the write and the audit
+      // record: read-then-write let another org's admin land a grant for the
+      // same key in the gap, and write-then-audit let the record of a change
+      // that already happened be lost with no way to retry it.
+      if ((await config.plans.putGrantIfOwned(grant, identity.orgId,
+        { actorUserId: identity.userId })) === "conflict") {
         return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
       }
-      await recordGrantAudit(config, identity, grant.orgId, "plan_granted", grant.key, {
-        plan: grant.plan, role: grant.role, org_id: grant.orgId, source: grant.source,
-      });
       return json({ granted: grant }, 201);
     }
 
     if (method === "DELETE") {
       const key = url.searchParams.get("key") ?? "";
       if (!key) return oauthError("invalid_request", "key is required");
-      // Check and delete in one operation, and act on what it actually removed.
-      // Read-then-delete could report a revocation that never happened: a
-      // sign-in in the gap claims an address grant onto its subject key, the
-      // delete finds nothing, and this would still audit plan_revoked and
-      // answer 200 while the grant carried on applying.
-      const outcome = await config.plans.deleteGrantIfOwned(key, identity.orgId);
+      // Check and delete in one operation, and answer from what it actually
+      // removed. Read-then-delete could report a revocation that never
+      // happened: a sign-in in the gap claims an address grant onto its subject
+      // key, the delete finds nothing, and this would still answer 200 while
+      // the grant carried on applying. The store records plan_revoked only for
+      // a delete that removed something, so a refusal leaves no entry either.
+      const outcome = await config.plans.deleteGrantIfOwned(key, identity.orgId,
+        { actorUserId: identity.userId });
       if (outcome !== "deleted") {
         return oauthError("insufficient_scope", "no such grant in your org", 403);
       }
-      await recordGrantAudit(config, identity, identity.orgId, "plan_revoked", key, {});
       return json({ revoked: key });
     }
 
@@ -938,30 +939,6 @@ async function caller(
     identity: claims.bellman,
     planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
   };
-}
-
-/**
- * A plan change is exactly the kind of crossing the org audit log is for.
- * It is written to the AFFECTED org, not the actor's, so the record lands where
- * the consequence does even if the two ever diverge.
- */
-async function recordGrantAudit(
-  config: OAuthConfig,
-  actor: Identity,
-  affectedOrgId: string | null,
-  action: string,
-  key: string,
-  detail: Record<string, unknown>
-): Promise<void> {
-  if (!config.plans || !affectedOrgId) return;
-  await config.plans.appendAudit({
-    at: Date.now(),
-    orgId: affectedOrgId,
-    sessionId: `grant:${key}`,
-    actorUserId: actor.userId,
-    action,
-    detail: { key, ...detail },
-  });
 }
 
 async function issueTokens(

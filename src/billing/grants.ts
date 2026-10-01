@@ -1,6 +1,7 @@
 import { ENTITLEMENTS } from "../auth.js";
-import type { AuditEntry, PlanGrant } from "../types.js";
+import type { PlanGrant } from "../types.js";
 import type { GrantDelete, GrantWrite } from "../store.js";
+import type { AuditIntent } from "../grant-audit.js";
 import { isOrgId } from "../grant-index.js";
 import type { BillingStorage } from "./ledger.js";
 
@@ -84,41 +85,10 @@ export function purchaseGrant(key: string, plan: PlanGrant["plan"], userId: stri
   };
 }
 
-/** The slice of the store billing writes through. */
+/** The slice of the store billing writes through. The store audits, not us. */
 export interface PurchaseGrantStore {
-  putGrantIfSource(grant: PlanGrant, expectedSource: string): Promise<GrantWrite>;
-  deleteGrantIfSource(key: string, expectedSource: string): Promise<GrantDelete>;
-  appendAudit(entry: AuditEntry): Promise<void>;
-}
-
-/** Whether a write actually changed anything a reader would notice. */
-function samePlan(a: PlanGrant | undefined, b: PlanGrant): boolean {
-  return a !== undefined && a.plan === b.plan && a.role === b.role && a.orgId === b.orgId;
-}
-
-/**
- * A plan change made by Stripe, in the same stream as one made by an admin.
- *
- * The audit log is org-scoped, so a pro purchase — which has no org — has
- * nowhere to be recorded and is skipped. Team purchases are the ones where
- * somebody gaining or losing admin of an org is worth a line.
- */
-async function auditPurchase(
-  plans: PurchaseGrantStore,
-  orgId: string | null,
-  action: "plan_granted" | "plan_revoked",
-  key: string,
-  detail: Record<string, unknown>
-): Promise<void> {
-  if (!orgId) return;
-  await plans.appendAudit({
-    at: Date.now(),
-    orgId,
-    sessionId: `grant:${key}`,
-    actorUserId: "stripe",
-    action,
-    detail: { key, ...detail },
-  });
+  putGrantIfSource(grant: PlanGrant, expectedSource: string, audit: AuditIntent): Promise<GrantWrite>;
+  deleteGrantIfSource(key: string, expectedSource: string, audit: AuditIntent): Promise<GrantDelete>;
 }
 
 /**
@@ -129,9 +99,14 @@ async function auditPurchase(
  * Stripe customers, and the plan is the best of them — an event tells you one
  * subscription changed, not what the total comes to.
  *
- * A grant an operator wrote by hand is never touched: a lapsing subscription
- * is not a reason to revoke a plan somebody was comped. Those come back as
+ * A grant an operator wrote by hand is never touched: a lapsing subscription is
+ * not a reason to revoke a plan somebody was comped. Those come back as
  * "conflict", which is reported, not retried — a human has to decide.
+ *
+ * The audit record is the store's job now, written in the same transaction as
+ * the grant change. Auditing here meant a failed append after a durable delete
+ * was lost for good: Stripe retried, the delete returned "missing", and the
+ * revocation never reached the org's stream.
  */
 export async function reconcilePurchase(
   userId: string,
@@ -148,38 +123,17 @@ export async function reconcilePurchase(
   const paid = await billing.paidPlan(userId);
 
   if (!paid) {
-    const { outcome, removed } = await plans.deleteGrantIfSource(key, PURCHASE);
-    if (outcome === "deleted") {
-      await auditPurchase(plans, removed?.orgId ?? null, "plan_revoked", key, {
-        plan: removed?.plan, reason: "subscription no longer paying",
-      });
-    }
+    const { outcome } = await plans.deleteGrantIfSource(key, PURCHASE, {
+      actorUserId: "stripe",
+      detail: { reason: "subscription no longer paying" },
+    });
     return outcome;
   }
 
   const grant = purchaseGrant(key, paid.plan, userId);
-  const { outcome, previous } = await plans.putGrantIfSource(grant, PURCHASE);
-  if (outcome !== "written") return outcome;
-
-  // Stripe delivers the same event twice and delivers events for changes that
-  // do not move the plan. Auditing every write would fill the org stream with
-  // lines saying nothing happened, so only a real transition is recorded.
-  if (samePlan(previous, grant)) return outcome;
-
-  // Leaving an org is a revocation for that org, and it is the only place it
-  // will ever be recorded: the grant is re-homed rather than deleted, so the
-  // plan_granted below goes to the new org and the old one would hear nothing.
-  // A team subscription ending while a pro one continues does exactly this.
-  if (previous && previous.orgId !== grant.orgId) {
-    await auditPurchase(plans, previous.orgId, "plan_revoked", key, {
-      plan: previous.plan, reason: "moved to another plan", moved_to: grant.orgId,
-    });
-  }
-
-  await auditPurchase(plans, grant.orgId, "plan_granted", key, {
-    plan: grant.plan, role: grant.role, org_id: grant.orgId, source: grant.source,
-    stripe_customer: paid.customerId,
-    ...(previous ? { replaced_plan: previous.plan } : {}),
+  const { outcome } = await plans.putGrantIfSource(grant, PURCHASE, {
+    actorUserId: "stripe",
+    detail: { stripe_customer: paid.customerId },
   });
   return outcome;
 }

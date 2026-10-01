@@ -53,7 +53,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   let writes = 0;
   let puts = 0;
   const alarms: number[] = [];
-  return {
+  const storage = {
     get writes() { return writes; },
     /**
      * put() INVOCATIONS, where `writes` counts keys. The difference is the
@@ -104,7 +104,14 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
       if (opts.limit !== undefined) keys = keys.slice(0, opts.limit);
       return new Map(keys.map((k) => [k, structuredClone(rows.get(k))]));
     },
+    /**
+     * The closure runs against this same storage, with no rollback. The real one commits
+     * or aborts its writes as a unit, and that is proven in workerd, by
+     * worker-tests/join-code-outbox.test.ts. Nothing in this file throws mid-transaction.
+     */
+    transaction: async <T>(closure: (txn: unknown) => Promise<T>): Promise<T> => closure(storage),
   };
+  return storage;
 }
 
 /** The event rows in a storage snapshot. */
@@ -143,6 +150,9 @@ function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
  * A DurableObjectStore over real SessionDO and RegistryDO instances on fake
  * storage, with the legacy session already stored and its join code already
  * registered, as a session created just before manifests shipped would be.
+ *
+ * Every SessionDO gets the same env as the facade, because a session registers its own
+ * join codes by calling the registry through its REGISTRY binding.
  */
 async function worldOn(
   { DurableObjectStore, RegistryDO, SessionDO }: StoreDo,
@@ -151,21 +161,20 @@ async function worldOn(
   const legacyStorage = fakeStorage({ session: row, cursor: 0 });
   const registryStorage = fakeStorage();
   const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
-  const sessions = new Map<string, InstanceType<typeof SessionDO>>([
-    [LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, {} as never)],
-  ]);
+  const sessions = new Map<string, InstanceType<typeof SessionDO>>();
   const env = {
     SESSION: {
       idFromName: (name: string) => name,
       get: (id: string) => {
         if (!sessions.has(id)) {
-          sessions.set(id, new SessionDO({ storage: fakeStorage() } as never, {} as never));
+          sessions.set(id, new SessionDO({ storage: fakeStorage() } as never, env as never));
         }
         return sessions.get(id)!;
       },
     },
     REGISTRY: { idFromName: (name: string) => name, get: () => registry },
   } as unknown as BellmanEnv;
+  sessions.set(LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, env as never));
 
   await registry.putJoinCode(LEGACY_CODE, LEGACY_ID);
   return {
@@ -210,9 +219,8 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     const before = legacyStorage.snapshot();
 
     await legacy.consumeJoinCode("peer_b");
-    // false, not null: #71 gave this a third outcome, where null means "set, and
-    // there was no previous code" and false means refused — here, because the row
-    // reads as gone.
+    await legacy.clearJoinCodes();
+    // False means refused — here, because the row reads as gone.
     expect(await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000)).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
@@ -265,7 +273,12 @@ describe("a current row is untouched by the guard", () => {
 
   it("still expires when its alarm fires", async () => {
     const storage = fakeStorage();
-    const doi = new storeDo.SessionDO({ storage } as never, {} as never);
+    // Its join code is registered on the way in and dropped on the way out, so it needs
+    // a registry to deliver to: without one every delivery would fail and be retried,
+    // and the test would pass over a failing path.
+    const registry = new storeDo.RegistryDO({ storage: fakeStorage() } as never, {} as never);
+    const env = { REGISTRY: { idFromName: (name: string) => name, get: () => registry } };
+    const doi = new storeDo.SessionDO({ storage } as never, env as never);
     await doi.createSession(session({ id: "qs_expired", expiresAt: Date.now() - 1 }));
 
     await doi.alarm();
@@ -282,8 +295,10 @@ describe("a current row is untouched by the guard", () => {
 
 describe("closing a session drops its registry rows", () => {
   /**
-   * Pins the wiring D7 added (commit 007eec1): DurableObjectStore.closeSession
-   * calling clearJoinCodes at the boundary where it holds the registry handle.
+   * Pins the wiring D7 added (commit 007eec1): closing a session retires every
+   * role's registry row. D7 had DurableObjectStore.closeSession call clearJoinCodes
+   * where it held the registry handle; since #62 the session queues those removals
+   * itself, and closeSession still has to call clearJoinCodes for them to happen.
    * The store-contract suite's "closing a session clears every code" test looks
    * like coverage of this but runs only against MemoryStore, a separate
    * closeSession implementation that cannot exercise this path at all.
@@ -345,9 +360,15 @@ describe("negative control: the same calls with the guard removed", () => {
   /**
    * The same again for the two "leaves it alone" tests above, which could otherwise pass
    * because the harness never gave the row to a mutator or to alarm(). Without the guard
-   * the same calls do reach it and do change it.
+   * the same calls do reach it: a mutator rewrites it, and the alarm crashes on it.
+   *
+   * The alarm used to expire the row here. It cannot now that a session queues the removal
+   * of its join codes when it expires: expireIfDue reads `joinCodes`, which a pre-manifest
+   * row has never had, so the raw row stops it before it writes anything. That is the
+   * TypeError the read paths show above, and it proves the alarm was handed the row just
+   * as an expiry would have.
    */
-  it("lets a mutator rewrite it and a due alarm expire it", async () => {
+  it("lets a mutator rewrite it, and hands it to a due alarm", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
 
     const viaMutator = await worldOn(unguarded);
@@ -355,12 +376,7 @@ describe("negative control: the same calls with the guard removed", () => {
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
     const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
-    await viaAlarm.legacy.alarm();
-    const rows = viaAlarm.legacyStorage.snapshot();
-    expect(rows.session).toMatchObject({ closed: true });
-    // Same subset-match pitfall as the test above: assert the clear itself, exactly.
-    expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
-    expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+    await expect(viaAlarm.legacy.alarm()).rejects.toThrow(TypeError);
   });
 });
 

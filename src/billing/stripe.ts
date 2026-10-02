@@ -1,5 +1,4 @@
 import type { BillingStorage } from "./ledger.js";
-import { reconcilePurchase, type PurchaseGrantStore } from "./grants.js";
 import { isRecord } from "./subscription.js";
 
 export { planForPrice } from "./subscription.js";
@@ -152,8 +151,12 @@ function parseEvent(payload: string): StripeEvent | null {
 export interface StripeWebhookConfig {
   secret: string;
   billing: BillingStorage;
-  /** Where a purchase lands. Billing owns no plan lookup of its own. */
-  plans: PurchaseGrantStore;
+  /**
+   * Reconciling is one call now rather than a ledger read plus a grant write:
+   * those two together are a decision, and split across two objects the Worker
+   * could not hold a lock over them. See #69.
+   */
+  reconcile(userId: string): Promise<"written" | "deleted" | "missing" | "conflict" | "unkeyable">;
   /** A restricted key that can read subscriptions, and nothing else. */
   apiKey: string;
   fetchImpl?: typeof fetch;
@@ -171,7 +174,7 @@ const reply = (status: number, body: Record<string, unknown>) => Response.json(b
  * is left to throw, so Stripe delivers the event again.
  */
 async function settle(userId: string, config: StripeWebhookConfig, eventId: string): Promise<string> {
-  const outcome = await reconcilePurchase(userId, config.billing, config.plans);
+  const outcome = await config.reconcile(userId);
   if (outcome === "conflict") {
     console.error(
       `stripe ${eventId}: ${userId} has a plan granted by hand, so their purchase was not applied. ` +

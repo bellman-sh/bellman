@@ -7,7 +7,9 @@ import {
   type RefreshToken, type RegisteredClient, type SweepStorage,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
+import { reconcilePurchase, type PurchaseGrantStore } from "../billing/grants.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
+import type { BellmanEnv } from "../store-do.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -31,22 +33,52 @@ const REG_CURSOR_KEY = "regs:cursor";
 /** How much stale data one registration is willing to clear. */
 const PURGE_BATCH = 200;
 
-export class AuthDO extends DurableObject {
+export class AuthDO extends DurableObject<BellmanEnv> {
   /**
    * What Stripe says each customer is paying for. The logic is BillingLedger,
    * shared with the in-memory store; this object only supplies the storage.
    *
    * The input gate is not enough on its own here: a sync awaits a fetch to
    * Stripe and other calls run meanwhile, so the ledger queues every write per
-   * customer and per user itself.
+   * customer and per user itself. A reconcile awaits the registry the same way,
+   * which is why it runs in the user's queue (see reconcile).
    */
   private ledger = new BillingLedger({
     get: <T>(key: string) => this.ctx.storage.get<T>(key),
     put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
   });
 
+  /**
+   * The grant store, reached from inside this object rather than the Worker.
+   *
+   * `#`, not `private`: every method and getter on a Durable Object answers
+   * over RPC, and TypeScript's `private` does nothing about that. This one would
+   * hand a caller a stub for the registry.
+   */
+  get #grants(): PurchaseGrantStore {
+    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+  }
+
   linkCustomer(customerId: string, userId: string): Promise<boolean> {
     return this.ledger.linkCustomer(customerId, userId);
+  }
+
+  /**
+   * Make the stored grant match what this user is currently paying for, with
+   * the whole decision inside the user's queue.
+   *
+   * It has to run here rather than in the Worker: the queue is in memory inside
+   * this object and the grant lives in RegistryDO, so holding it across two
+   * RPCs from outside is not something the Worker can do. The object that owns
+   * the serialisation performs the whole operation and calls the other itself.
+   *
+   * Lock ordering stays acyclic — linkCustomer takes customer then user, this
+   * takes user only, and nothing in RegistryDO calls back into this object.
+   */
+  reconcile(userId: string): ReturnType<typeof reconcilePurchase> {
+    return this.ledger.serializeUser(userId, () =>
+      reconcilePurchase(userId, this.ledger, this.#grants)
+    );
   }
 
   /**
@@ -318,6 +350,10 @@ export class AuthStore implements AuthStorage, BillingStorage {
 
   paidPlan(userId: string): Promise<PaidPlan | undefined> {
     return this.object.paidPlan(userId);
+  }
+
+  reconcile(userId: string): ReturnType<typeof reconcilePurchase> {
+    return this.object.reconcile(userId);
   }
 
   private get object() {

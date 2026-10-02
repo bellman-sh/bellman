@@ -105,6 +105,23 @@ export class BillingLedger implements BillingStorage {
     return run;
   }
 
+  /**
+   * Run `work` in this user's queue, the one linkCustomer takes for the user's
+   * customer list.
+   *
+   * The purchase reconcile needs it: reading the ledger and writing the grant
+   * are one decision, and between them another delivery could read a state that
+   * is about to be replaced. The queue is in memory, which only serializes
+   * anything because there is exactly one ledger — one Durable Object in
+   * production, one process in tests.
+   *
+   * `work` must not take a customer's queue. linkCustomer holds a customer's
+   * queue while it waits for this one, so the reverse order is a deadlock.
+   */
+  serializeUser<T>(userId: string, work: () => Promise<T>): Promise<T> {
+    return this.serial(`${USER}${userId}`, work);
+  }
+
   syncSubscription(customerId: string, subscriptionId: string, source: SubscriptionSource): Promise<void> {
     return this.serial(`${CUSTOMER}${customerId}`, async () => {
       // The read happens inside the customer's queue: a read that started

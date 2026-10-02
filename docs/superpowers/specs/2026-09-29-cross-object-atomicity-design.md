@@ -1,6 +1,9 @@
 # Cross-Object Atomicity — Design
 
-Status: approved design, pending implementation plan
+Status: implemented, in three pull requests: #104 (the mechanism, `src/outbox.ts`
+and named alarms), #110 (the audit path, #59), and a third for the join-code and
+purchase changes (#62, #69). Plan:
+`docs/superpowers/plans/2026-09-29-cross-object-atomicity.md`.
 Closes: #59 (the audit outbox, its remaining half), #62, #69
 Related: ARCHITECTURE.md §9, which names the pattern this implements
 Citations: by symbol rather than line, and of the code as it stood when this was
@@ -344,6 +347,9 @@ This is not assumed. The plan opens with a throwaway probe in `worker-tests/`
 that arms an alarm inside a transaction, aborts the object, and asserts
 `getAlarm()`. If it fails, the fallback is to re-arm opportunistically on the
 next RPC into the object.
+
+The probe passed, and the alarm is also discarded when the closure throws.
+`worker-tests/alarm-in-transaction.test.ts` keeps both as a standing test.
 
 ## Testing
 

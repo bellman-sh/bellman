@@ -19,7 +19,10 @@ afterEach(async () => {
  * a row with no manifest as gone, so a session without one is invisible to
  * SessionDO.stored() and its TTL is never derived: every test below would then
  * fail, or pass, because the session was unreadable and not for the reason it
- * names. No join codes, so the registry stays out of it.
+ * names. No join codes, so createSession queues no outbox row and sets no
+ * `due:outbox` marker, and the TTL is the only thing that arms this object's alarm.
+ * The registry is not out of it: the facade still writes the creator's `us:` index
+ * row there, but that touches neither this object's alarm nor its storage.
  */
 const room = (id: string, expiresAt: number) => session({ id, expiresAt, joinCodes: {} });
 

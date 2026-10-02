@@ -289,14 +289,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (s.frozenAt !== null) return null;
     const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
     await this.#writeEvent(event);
-    this.wake(event);
+    this.#wake(event);
     return event;
   }
 
   /**
-   * Atomic without a transaction: the input gate holds every other request to
-   * this object for the duration of one invocation, which is the property #71
-   * relied on for the frozen guard. The awaits below are inside that gate.
+   * Append the event unless this key has been used: the same key and content replays the
+   * first event, and the same key with different content is a conflict.
+   *
+   * Everything it decides on is read before anything is written, and the event, the
+   * cursor and the key's record go in one put, so an interruption leaves all three or
+   * none. That is not a claim that two concurrent calls cannot interleave. The input gate
+   * does not hold every other request to this object for the length of a call, and a
+   * write's await opens it. On workerd's local pool, concurrent calls have been seen to
+   * read the same cursor: both then report `appended`, and when their events differ one
+   * overwrites the other. It is rare (1 to 5 pairs in 400, for one key on a freshly
+   * created room) and the mechanism is not established. So nothing here is a guarantee
+   * against a concurrent call.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -328,7 +337,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // retry that follows appends the duplicate this method exists to prevent.
     const stored: IdempotencyRecord = { cursor: event.cursor, print };
     await this.#writeEvent(event, { [storageKey]: stored });
-    this.wake(event);
+    this.#wake(event);
     return { outcome: "appended", event };
   }
 
@@ -359,8 +368,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
   }
 
-  /** Resolve every waiter this event is past, each from its own cursor. */
-  private wake(event: SessionEvent): void {
+  /**
+   * Resolve every waiter this event is past, each from its own cursor.
+   *
+   * `#private`, because it resolves the waiting polls with whatever event it is handed,
+   * stored or not, and a Durable Object answers RPC for every method on its class:
+   * TypeScript's `private` is erased at compile time.
+   */
+  #wake(event: SessionEvent): void {
     if (this.waiters.length === 0) return;
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
@@ -464,7 +479,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       at: now,
     };
     await this.#writeEvent(event);
-    this.wake(event);
+    this.#wake(event);
     // Last, so a poll woken above does not wait on the registry. Reached from the
     // alarm and from any read that finds the session lapsed, and both drain here
     // rather than leave the rows for the next alarm.
@@ -550,7 +565,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     if (!grant) return undefined;
     // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
     if (lapsed(grant)) {
-      await this.dropGrant(grant);
+      await this.#dropGrant(grant);
       return undefined;
     }
     return grant;
@@ -559,7 +574,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async deleteGrant(key: string): Promise<void> {
     const existing = await this.ctx.storage.get<PlanGrant>(grantKey(key));
     if (!existing) return;
-    await this.dropGrant(existing);
+    await this.#dropGrant(existing);
   }
 
   /**
@@ -798,7 +813,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       for (const [storageKey, grant] of page) {
         last = storageKey;
         if (grant.expiresAt !== null && now > grant.expiresAt) {
-          await this.dropGrant(grant);
+          await this.#dropGrant(grant);
           continue;
         }
         live.push(grant);
@@ -814,8 +829,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * Remove both copies of a grant. Every delete path goes through here, and in
    * one transaction: half a delete leaves the grant listed but unresolvable,
    * or resolvable but unlisted.
+   *
+   * `#private`, because it deletes whatever grant it is handed, and a Durable Object
+   * answers RPC for every method on its class: TypeScript's `private` is erased at
+   * compile time.
    */
-  private async dropGrant(grant: PlanGrant): Promise<void> {
+  async #dropGrant(grant: PlanGrant): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       for (const storageKey of allKeysFor(grant)) {
         await txn.delete(storageKey);

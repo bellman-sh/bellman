@@ -724,3 +724,25 @@ it("does not answer over RPC for the methods that must stay internal", async () 
   expect(await queued()).toEqual([]);
   expect(await armedAlarm()).toBeNull();
 });
+
+/**
+ * `dropGrant` deletes both copies of whatever grant it is handed, and it is `#private` for
+ * the same reason: a TypeScript `private` one answers RPC, so anything holding the REGISTRY
+ * binding could remove a customer's plan by naming it. The grant below is live and
+ * org-scoped, and a drop that ran would take it out of the lookup by key and out of its
+ * org's listing. It is refused, and the grant is still there under both.
+ */
+it("does not answer over RPC for the method that deletes a grant", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.putGrant(grant());
+  const stub = registry() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  // A public method answers, so the refusal below is about the method and not the stub.
+  expect(await stub.getGrant("github:4242")).toMatchObject({ key: "github:4242" });
+
+  const outcome = await stub.dropGrant(grant()).then(() => "answered", (err: unknown) => String(err));
+
+  expect(outcome).toMatch(/does not implement/);
+  // It did not run.
+  expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team", orgId: "org_mine" });
+  expect(await store.listGrants(10, "org_mine")).toHaveLength(1);
+});

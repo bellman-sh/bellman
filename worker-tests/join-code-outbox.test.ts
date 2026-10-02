@@ -712,3 +712,54 @@ it("does not answer over RPC for the methods that write what their caller suppli
   expect(await everything(id)).toEqual({});
   expect(await indexed(A)).toEqual(["qs_victim"]);
 });
+
+/**
+ * `wake` resolves every long-poll that is waiting with the event it is handed, and it is
+ * `#private` as well. A Durable Object answers RPC for every method on its class, so a
+ * TypeScript `private` one would let anything holding the SESSION binding put an event in
+ * front of a waiting member that was never stored and never will be. The forged event
+ * below is what a wake that ran would deliver. It is refused, and the poll is still
+ * waiting afterwards: a real append is what wakes it, with the real event.
+ */
+it("does not answer over RPC for the method that wakes the waiting polls", async () => {
+  const store = new DurableObjectStore(env as never);
+  const id = "qs_rpc_wake";
+  await store.createSession(session({ id, joinCodes: {} }));
+  const stub = sessionStub(id) as unknown as
+    Record<string, (...args: unknown[]) => Promise<unknown>>;
+  // A public method answers, so the refusal below is about the method and not the stub.
+  expect(await stub.eventsAfter(0)).toEqual([]);
+
+  // A poll that is waiting. The forged wake has to arrive after it has registered, or it
+  // finds no one to wake and shows nothing, so wait for the registration itself.
+  const poll = store.waitForEvents(id, 0, 3_000);
+  poll.catch(() => {}); // a failed test has the object torn down under it
+  const waiting = () =>
+    runInDurableObject(sessionStub(id), (instance: SessionDO) =>
+      (instance as unknown as { waiters: unknown[] }).waiters.length);
+  for (let tries = 0; tries < 400 && (await waiting()) === 0; tries++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(await waiting()).toBe(1);
+
+  const forged = {
+    cursor: 1, type: "message", fromMemberId: "m_forged", fromUserId: "u_forged",
+    fromLabel: "forged", payload: { text: "forged" }, refId: null, at: 1,
+  };
+  const outcome = await stub.wake(forged).then(() => "answered", (err: unknown) => String(err));
+  expect(outcome).toMatch(/does not implement/);
+
+  // It did not run: the poll has not been woken, and is still the one waiting.
+  const woken = await Promise.race([
+    poll.then(() => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 300)),
+  ]);
+  expect(woken).toBe(false);
+  expect(await waiting()).toBe(1);
+  // A real append wakes it, and it gets that event.
+  const real = await store.appendEvent(id, {
+    type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse",
+    payload: { text: "real" }, refId: null,
+  });
+  expect(real).not.toBeNull();
+  expect(await poll).toEqual([real]);
+});

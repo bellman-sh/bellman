@@ -102,7 +102,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     const key = `${CLIENT}${client.client_id}`;
     const existed = (await this.ctx.storage.get(key)) !== undefined;
     await this.ctx.storage.put(key, client);
-    if (!existed) await this.bumpCount(1);
+    if (!existed) await this.#bumpCount(1);
   }
 
   /**
@@ -135,7 +135,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     // something. A full registry is refused without writing per-IP state, so it
     // can be retried without limit — what has to stay bounded is the work each
     // retry costs, which was a scan per request.
-    if ((await this.clientCount()) >= CLIENT_CAP) {
+    if ((await this.#clientCount()) >= CLIENT_CAP) {
       const idleUntil = await this.ctx.storage.get<number>(PURGE_IDLE_KEY);
       if (purgeDue(idleUntil, now)) {
         const { clients, buckets, complete } = await this.purgeStale(now);
@@ -149,7 +149,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
         // read taken before it is no longer what is stored.
         if (bucket) recent = await inWindow(bucket);
       }
-      if ((await this.clientCount()) >= CLIENT_CAP) return "full";
+      if ((await this.#clientCount()) >= CLIENT_CAP) return "full";
     }
 
     await this.registerClient(client);
@@ -192,13 +192,20 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * count API and the alternative is list()ing up to CLIENT_CAP entries on
    * every registration. Every insert and delete goes through registerClient or
    * purgeStale, which are the only two places this moves.
+   *
+   * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
+   * Object answers RPC for every method on its class, and TypeScript's `private` is erased
+   * at compile time. #bumpCount writes any count it is handed and #purge deletes whatever
+   * has lapsed under any prefix, so a caller that could reach them could shut every client
+   * out of registering or lift the cap. This one writes only to seed the counter from the
+   * keys that are there, but it is the same group.
    */
-  private clientCount(): Promise<number> {
+  #clientCount(): Promise<number> {
     return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
   }
 
-  private async bumpCount(by: number): Promise<void> {
-    await this.ctx.storage.put(COUNT, Math.max(0, (await this.clientCount()) + by));
+  async #bumpCount(by: number): Promise<void> {
+    await this.ctx.storage.put(COUNT, Math.max(0, (await this.#clientCount()) + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
@@ -233,7 +240,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
       this.sweepStorage, CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,
       (c) => (hasLapsed(c, now) ? { action: "delete" } : { action: "keep" })
     );
-    if (clients.reclaimed > 0) await this.bumpCount(-clients.reclaimed);
+    if (clients.reclaimed > 0) await this.#bumpCount(-clients.reclaimed);
 
     const buckets = await sweepPage<number[]>(
       this.sweepStorage, REG, REG_CURSOR_KEY, PURGE_BATCH,
@@ -260,7 +267,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   async countClients(): Promise<number> {
-    return this.clientCount();
+    return this.#clientCount();
   }
 
   async countRegistrationBuckets(): Promise<number> {
@@ -274,7 +281,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
   async putCode(code: string, value: AuthCode): Promise<void> {
     await this.ctx.storage.put(`${CODE}${code}`, value);
-    await this.purge(CODE);
+    await this.#purge(CODE);
   }
 
   /** Single use: a replayed authorization code finds nothing. */
@@ -299,7 +306,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     // exists to prevent. Promotion goes last: if it is what fails, the token
     // still works and the registration merely lapses, which is recoverable by
     // registering again. The reverse is not.
-    await this.purge(REFRESH);
+    await this.#purge(REFRESH);
     await this.ctx.storage.put(`${REFRESH}${token}`, value);
     await this.markClientUsed(value.client_id);
   }
@@ -320,8 +327,10 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * cursor re-reads page one forever, and anything expired behind a full page
    * of live entries is never reached. Refresh tokens live 30 days, so that page
    * is not hypothetical.
+   *
+   * `#private`; see #clientCount.
    */
-  private async purge(prefix: string): Promise<void> {
+  async #purge(prefix: string): Promise<void> {
     const now = Date.now();
     await sweepPage<{ expires_at: number }>(
       // The cursor must live outside the prefix it tracks, or the sweep lists

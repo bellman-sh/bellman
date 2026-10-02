@@ -426,7 +426,7 @@ widen.
    from the session record, so sessions written before named alarms still
    expire. `ob_seq`, the counter that numbers rows, sits outside the `ob:` prefix
    or its own drain would list it as a row; the OAuth purge cursor
-   (`AuthDO.purge` in `src/oauth/store.ts`) follows the same rule.
+   (`AuthDO.#purge` in `src/oauth/store.ts`) follows the same rule.
 
 It is used twice:
 
@@ -469,9 +469,11 @@ It depends on three things:
 - **Lock order is customer, then user.** `linkCustomer` holds a customer's queue
   while it waits for the user's, so work inside the user's queue must not take a
   customer's. Nothing in `RegistryDO` calls back into `AuthDO`.
-- **No timeout.** The lock is held across the registry call and the audit
-  delivery inside it, because releasing early is the bug. A registry that stops
-  answering delays one user's reconciles and links, and nobody else's.
+- **No timeout.** The lock is held across the registry call and one attempt at
+  the audit delivery inside it, because releasing early is the bug. That attempt
+  is `deliverNow()`; the alarm retries whatever did not land, outside the lock.
+  A registry that stops answering delays one user's reconciles and links, and
+  nobody else's.
 
 The #69 race was not reproduced. With the lock removed, overlapping reconciles
 came out in order in all 1,200 rounds tried, across four shapes. The window exists by
@@ -505,11 +507,15 @@ off its documentation, decide how code here is written.
 3. **TypeScript `private` is erased, and a Durable Object answers RPC for every
    method on its class.** A plain stub's `putGrantIfOwnedTxn` returned
    `"written"`, and `expireIfDue` took a forged session record naming another
-   room's live join code. Use `#private` for anything that does what no caller
-   should be able to ask for: the deliveries, the `*Txn` halves, the methods that
-   write what they are handed, `AuthDO`'s registry handle. Only Bellman's own
-   code holds these bindings today, so this closes a foot-gun, not a hole. Tests
-   in `worker-tests/` call each over a stub and expect a refusal.
+   room's live join code. Use `#private` for any method the Worker does not call
+   that writes storage or changes instance state: the deliveries, the `*Txn`
+   halves, `expireIfDue`, `writeEvent`, `dropGrant`, `wake`, `AuthDO`'s client
+   count and sweeps, and its registry handle. Four `SessionDO` helpers that only
+   read (`stored`, `events`, `nextCursor`, `derivedDue`) are still
+   TypeScript-`private` and answer RPC. Instance fields do not, and `alarm` is
+   reserved. Only Bellman's own code holds these bindings today, so this closes a
+   foot-gun, not a hole. Tests in `worker-tests/` call each over a stub and
+   expect a refusal.
 4. **A Durable Object namespace accepts `""`, `null` and `undefined` as names.**
    `idFromName(undefined)` and `idFromName(null)` name the same objects as
    `"undefined"` and `"null"`, which `isOrgId` accepts. An entry filed against a
@@ -533,9 +539,7 @@ costs a room that a lapsed plan does not freeze, not a room lost. Room activity
 is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes are guaranteed to
 reach the audit stream. `bellman_confirm`, which commits a seat and then makes a
-second-object write, is the filed case ([#116](../../../issues/116)). And
-`RegistryDO.dropGrant` and `SessionDO.wake` predate the `#private` rule and are
-still TypeScript-`private`, so a stub can call them.
+second-object write, is the filed case ([#116](../../../issues/116)).
 
 Two related classes, both of which have already bitten:
 

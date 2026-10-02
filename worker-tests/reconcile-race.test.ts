@@ -197,7 +197,7 @@ describe("a cancellation that arrives while an older reconcile is in flight", ()
       const second = track(auth.reconcile(USER)); // reads "nothing paid"
       // Unlocked, this one finishes now and removes a grant that is not there yet,
       // and the held write lands after it. Locked, it is still queued.
-      await settlesWithin(second, 300);
+      expect(await settlesWithin(second, 300)).toBe(false);
       hold.release();
       const outcomes = await Promise.all([first, second]);
 
@@ -414,5 +414,34 @@ describe("what a caller holding the binding can reach", () => {
     const stub = authStub() as unknown as Record<string, unknown>;
 
     await expect(Promise.resolve(stub[name])).rejects.toThrow();
+  });
+
+  /**
+   * The client count and the sweeps are `#private` as well, for the same reason: a
+   * TypeScript `private` method answers RPC. `bumpCount` writes the count every
+   * registration is admitted against, so a caller who could reach it could set it to the
+   * cap and shut every client out, or lower it and lift the cap. `purge` deletes whatever
+   * has lapsed under the prefix it is handed without moving that count, and `clientCount`
+   * seeds it. The registration below has lapsed, so a sweep that ran would delete it.
+   */
+  it("does not answer over RPC for the methods that move the client count or sweep entries", async () => {
+    const stub = authStub() as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    await stub.registerClient({ client_id: "c_lapsed", redirect_uris: [], created_at: 1, expires_at: 1 });
+    const stored = () =>
+      runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.get("client:c_lapsed"));
+    // A public method answers, so a refusal below is about the method and not the stub.
+    const count = await stub.countClients();
+    expect(await stored()).toBeDefined();
+
+    const attempts: Record<string, unknown[]> = {
+      bumpCount: [1_000], purge: ["client:"], clientCount: [],
+    };
+    for (const [name, args] of Object.entries(attempts)) {
+      const outcome = await stub[name](...args).then(() => "answered", (err: unknown) => String(err));
+      expect(outcome, name).toMatch(/does not implement/);
+    }
+    // None of them ran: the count has not moved and the lapsed registration is still stored.
+    expect(await stub.countClients()).toBe(count);
+    expect(await stored()).toBeDefined();
   });
 });

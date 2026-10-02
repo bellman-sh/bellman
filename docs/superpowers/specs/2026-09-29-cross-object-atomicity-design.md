@@ -149,7 +149,7 @@ ob_seq         → counter
 
 `ob_seq` sits outside the `ob:` prefix deliberately. A counter inside the prefix
 it tracks is listed by its own drain and can be set to itself — the trap already
-commented for the OAuth purge cursor, in `AuthDO.purge` (`src/oauth/store.ts`).
+commented for the OAuth purge cursor, in `AuthDO.#purge` (`src/oauth/store.ts`).
 
 **Delivery is enqueue-in-transaction, attempt inline, alarm as backstop.**
 

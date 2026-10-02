@@ -107,9 +107,9 @@ describe("plan entitlements", () => {
   });
 
   /**
-   * INVARIANT 1: entitlements gate session CREATION only. If a join-side field
-   * ever appears here, joining has stopped being free and the viral loop is
-   * broken — this test is the tripwire.
+   * INVARIANT 1: entitlements gate session CREATION only. A join-side field
+   * appearing here would mean being invited into a room had started to depend
+   * on what you pay — this test is the tripwire.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [

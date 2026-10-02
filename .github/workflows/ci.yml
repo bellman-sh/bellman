@@ -36,6 +36,15 @@ jobs:
       # see worker-tests/README.md. The script installs it before running.
       - run: npm run test:worker
 
+      # The bundle's manifest, schema-checked without packing a bundle.
+      # tests/extension.test.ts keeps its tool list in step with the code; this catches
+      # the other half — a manifest `mcpb pack` would refuse. It runs here rather than
+      # only in the release job, which fires after npm publish has already succeeded and
+      # so is too late to be a useful place to find out. Pinned to the major the manifest
+      # targets (manifest_version 0.3), so a new CLI major cannot change the verdict on a
+      # commit that did not change.
+      - run: npx --yes @anthropic-ai/mcpb@2 validate extension/manifest.json
+
   deploy:
     # Only a push to main that already passed the checks above.
     needs: verify

@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   assert(blocked.isError && blocked.text.includes("org-restricted"), "outsider blocked by org_only");
 
   const preview = await call(peer, "bellman_connect", { join_code: joinCode });
-  assert(!preview.isError, "peer previews session (free plan CAN join — the asymmetry)");
+  assert(!preview.isError, "peer previews session (a free plan can join any room)");
   assert(preview.text.includes("UNTRUSTED"), "preview wraps creator brief in untrusted envelope");
   const previewBrief = preview.data.creator_brief as { data: { goal: string } };
   assert(previewBrief.data.goal === jesseBrief.goal, "preview shows creator goal before peer ships anything");

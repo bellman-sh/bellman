@@ -485,10 +485,12 @@ off its documentation, decide how code here is written.
    transaction, and is discarded if the closure throws.** So `enqueue` arms the
    alarm from inside the caller's closure: a row that committed with nothing
    scheduled to read it is the loss this section exists to close, and
-   `RegistryDO` has no other alarm to come back for it. Probed on workerd
-   1.20260926.1 (pinned in `worker-tests/package.json`) by arming in a closure,
-   aborting the object and reading `getAlarm()`, then with a closure that
-   throws. No test keeps the probe; repeat it when that pin moves.
+   `RegistryDO` has no other alarm to come back for it.
+   `worker-tests/alarm-in-transaction.test.ts` holds the fact on its own, on
+   workerd 1.20260926.1 (pinned in `worker-tests/package.json`): it arms in a
+   closure, aborts the object and reads `getAlarm()`, then does the same with a
+   closure that throws. If it fails, the outbox's arming is unsound; the test is
+   not wrong.
 2. **Everything awaited inside a transaction closure holds every other call to
    that object until it commits.** With a 250 ms await inside `AuditDO.append`'s
    closure, a `recent()` issued mid-closure waited 220 ms; a registry call made

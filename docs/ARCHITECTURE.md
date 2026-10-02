@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md]
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md]
 last-verified-against-source: af052f0c
-last-updated: 2026-09-27
+last-updated: 2026-10-02
 ---
 
 # Bellman Architecture
@@ -100,7 +100,7 @@ only to turn polling into push.
 
 ## 3. Why the server is remote-first
 
-This is the load-bearing decision, and cloud agents are why.
+This is the decision everything else rests on, and cloud agents are why.
 
 A Claude Code cloud session runs in Anthropic's infrastructure. You did not
 launch it, you cannot pass it flags, and there is no machine of yours for it to
@@ -147,7 +147,9 @@ way to wake a client. That single fact produces the whole delivery story below.
 
 `bellman_sync` long-polls for up to 25 seconds and returns events after a
 cursor. That is the protocol-level mechanism, and every surface has it. What
-differs is whether anything *wakes the session* when a message arrives.
+differs is whether anything *wakes the session* when a message arrives. (A
+second, cheaper way to watch a room exists for clients that can reach a local
+process; it is under [two delivery paths](#two-delivery-paths) below.)
 
 ```mermaid
 flowchart TB
@@ -184,6 +186,93 @@ Two consequences worth stating plainly:
   out over a local socket — no new daemon, and it falls back to independent
   polling when the lock or socket cannot be created.
 
+### Two delivery paths
+
+A room can be watched two ways, and one function serves both: **`wake()` in
+`SessionDO` resolves the long polls held on `bellman_sync` and sends to the
+sockets held at `/ws`.** That is why the two cannot drift apart by accident. A
+hosted connector can only call tools and has no local process to hold a socket,
+so it long-polls for good; a client that can reach a local process takes the
+socket. The decisions, and what was measured to reach them, are in the
+[room delivery spec](superpowers/specs/2026-09-29-room-delivery-design.md)
+([#99](../../../issues/99)).
+
+| | `bellman_sync` long poll | `/ws` room socket |
+|---|---|---|
+| For | remote MCP clients: ChatGPT connectors, Claude's web connector | clients that can reach a local process: the bridge, once [#43](../../../issues/43) lands |
+| Held as | an in-flight request, so the object stays resident | a socket the runtime holds, so the object hibernates |
+| Scope | one member | the whole room |
+| The member's own events | dropped | included |
+| Untrusted wrapper | added at the tool boundary | left to the client |
+| Event content and shape | `publicEvent` | `publicEvent` |
+
+**They are not identical, and the difference matters.** What matches is the
+event. `publicEvent` (`src/public-event.ts`) is the one projection both paths
+use, which is why neither ever sends `fromUserId`: every member receives every
+peer's events, so the stored event would hand one user another's upstream
+identity. Everything around the event differs, because a poll is per member and
+a socket is per room. The poll is permanent, so a change to what a watcher sees
+has to land on both. And a socket frame carries no wrapper, so whatever reads it
+must frame it as untrusted and escape `<` before a model sees it, as the
+bridge's `renderEvent` does for poll results today.
+
+**Why the socket is cheaper.** A long poll is an in-flight request, an in-flight
+request keeps the object resident, and a resident object bills duration for its
+full 128 MB: 0.125 GB × 3,600 s × $12.50 per million GB-s is **$0.005625 per
+watched room-hour**, about $4.05 a month at 24/7. The included 400,000 GB-s
+covers roughly 1.23 always-watched rooms, account-wide. A hibernating socket
+holds no request, so an idle object is evicted and a quiet room stops accruing
+duration; the runtime answers a keepalive `ping` itself, so that does not wake
+it either. That duration billing stops is Cloudflare's documentation, not
+something measured here. The first bill is the test.
+
+**Why this is not an MCP transport change.** MCP (2026-07-28) defines stdio and
+Streamable HTTP. WebSocket is permitted only as a custom transport, and
+SEP-1287, the proposal to standardise it, was closed on 2025-12-03. So `/ws` is
+a delivery side-channel and not a second transport: tool calls, every write
+included, stay on `/mcp`, only the watching path moves, and both ends of `/ws`
+are Bellman's own code.
+
+**The socket is receive-only, and `webSocketMessage` enforces it.** Any client
+frame but the keepalive closes the socket with 1003. It is enforced and not left
+as a convention because a send over the socket would be a second entry to the
+write path: `bellman_send`'s verb check, frozen guard, idempotency record,
+payload-depth limit and audit write would all be duplicated there and kept
+identical to the first. Two delivery paths that must not drift is already the
+cost of this design; two send paths would double it to save a round trip. A
+future protocol message has to take that close out deliberately.
+
+**The route builds the request the object sees.** `/ws` authenticates with the
+`Authorization` header exactly as `/mcp` does, asks the object which members
+that identity owns, refuses if there are none, and then **constructs a fresh
+`Request`** carrying only what the Worker decided: the upgrade header, the
+validated cursor and those member ids. Nothing from the caller's request is
+forwarded. Forwarding the original with an identity header added is one
+forgotten overwrite from a caller setting that header themselves; a request the
+Worker built has nothing client-controlled to strip. It looks longer than it
+needs to, and that is the reason to leave it. The route also goes to the object
+directly and not through `BellmanStore`: `MemoryStore` cannot hold a hibernating
+socket, so a `watch()` on the interface could be honoured by one implementation
+only, and the conformance suite is what makes the interface a seam.
+
+**Read-and-register still applies.** `SessionDO.fetch` awaits the events the
+client missed, then attaches the cursor, accepts the socket and sends the
+replay, with nothing yielding between those. An event appended in that gap
+would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
+closes by registering its waiter with no `await` after its read (invariant 2
+below). The rule governs both paths and only the registration mechanism
+differs, a waiter pushed onto an in-memory list or a cursor attached to a socket
+the runtime holds. `wake()` is synchronous for the same reason.
+
+**One socket per (machine, room).** A socket binds to one `SessionDO`, so a
+machine watching three rooms holds three. That is already fewer than per-member
+polls hold, because a room socket carries every event in the room and the
+members of one room on one machine can share it. But the server half only makes
+that possible. The client half, [#43](../../../issues/43) in plan 2 of the spec,
+is what makes it one per machine per room rather than one per member per
+session: one bridge holds the sockets and fans out locally. Until it lands the
+bridge still long-polls, and no shipped client opens `/ws`.
+
 ## 5. Storage
 
 State lives behind one interface, `BellmanStore` (`src/store.ts`). Two
@@ -214,9 +303,11 @@ flowchart LR
 Why the split is shaped that way:
 
 - **A room maps 1:1 to a `SessionDO`.** That natively provides held long-poll
-  connections, per-room serialisation and geographic placement near whoever
-  created it. Every store method is async because a join code resolves in one
-  object and the room it names in another, and every hop is RPC.
+  connections, hibernating WebSockets, per-room serialisation and geographic
+  placement near whoever created it. Every store method is async because a join
+  code resolves in one object and the room it names in another, and every hop is
+  RPC. (`/ws` is the one route that skips the store; see
+  [two delivery paths](#two-delivery-paths).)
 - **`RegistryDO` is a singleton** because some lookups need a global namespace: a
   join code must resolve without knowing the room, and a plan grant must resolve
   from an identity key.
@@ -315,7 +406,9 @@ The invariants that encode this, and that any change has to argue against out
 loud:
 
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
-  behind a warning preamble, all the way into the model's context.
+  behind a warning preamble, all the way into the model's context. The room
+  socket ([two delivery paths](#two-delivery-paths)) sends the bare event
+  instead, so the client that reads it does the wrapping and owns this rule.
 - **`<` is escaped to `<`** so a payload cannot close the `<channel>` tag
   and impersonate the harness.
 - **An `action_request` is approved by the receiving human**, never by the
@@ -420,8 +513,10 @@ pull request.
    answers instantly — a synchronous signature would be implementable only in
    memory.
 2. `waitForEvents` must **not `await` between reading events and registering a
-   waiter**, or an event arriving in the gap wakes an empty list. Guarded writes
-   obey the same rule through a synchronous read.
+   waiter**, or an event arriving in the gap wakes an empty list. `SessionDO.fetch`
+   obeys it for a socket: read first, then attach and accept with nothing
+   yielding between. Guarded writes obey the same rule through a synchronous
+   read.
 3. **Peer content is untrusted everywhere** and stays wrapped to the model.
 4. **Reads return detached copies.** Nothing relies on shared references.
 5. **`main` moves only through merges.** The repo is colocated

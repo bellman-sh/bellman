@@ -177,10 +177,11 @@ async function main(): Promise<void> {
       // test (worker-tests/ws-delivery.test.ts) proves the mechanism; this
       // proves it against a real deployment.
       //
-      // 30 s, not the ~10 s production evicts at. Under `wrangler dev` an idle
-      // object was still the same instance after 15 s (its constructor ran
-      // once, counted from the log) and a new one after 25 s and after 30 s, so
-      // 15 s would pass here without any eviction having happened.
+      // 30 s, not the ~10 s Cloudflare documents for production. Under
+      // `wrangler dev` an idle object was still the same instance after 15 s
+      // (its constructor ran once, counted from the log) and a new one after
+      // 25 s and after 30 s, so 15 s would pass here without any eviction
+      // having happened.
       await new Promise((r) => setTimeout(r, 30_000));
 
       const arriving = nextFrame(ws, 10_000);

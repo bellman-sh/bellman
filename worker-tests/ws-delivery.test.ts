@@ -15,10 +15,11 @@
  * What that leaves for a long-poll waiter: eviction waits for in-flight
  * requests to drain, and a waiter IS an in-flight request. Measured: a 4 s poll
  * held evictAllDurableObjects() for 3.7 s and resolved empty at its own timeout.
- * So production does not evict an object with a poll in flight, and the only way
- * to tear an instance down with a waiter registered is abort. The second case
- * therefore uses abort, and pins the other half: in-memory waiter state does not
- * carry across a teardown, which is what the socket arm exists to cover.
+ * So in this pool the only way to tear an instance down with a waiter registered
+ * is abort, and the second case uses it. That makes it a weaker pin than "the
+ * same teardown" would be: it shows in-memory waiter state does not carry across
+ * a teardown, which is what the socket arm exists to cover, and it is mostly a
+ * fact about the runtime rather than about SessionDO.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {

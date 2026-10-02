@@ -124,6 +124,78 @@ async function main(): Promise<void> {
   assert(msgs.some((e) => e.data.type === "message"), `long-poll resolved on send (+${heldMs}ms after send, not 10s timeout)`);
   jCursor = Number(jSync2.data.cursor);
 
+  // --------------------------------------------------------------- /ws (#99)
+  // Only a Workers deployment serves /ws; the Node server has no such route.
+  // /healthz says which of the two BELLMAN_URL points at.
+  const runtime = await fetch(new URL("/healthz", URL_))
+    .then((r) => r.json() as Promise<{ runtime?: string }>)
+    .then((h) => h.runtime, () => undefined);
+  if (runtime !== "workers") {
+    console.log("\n— /ws delivery across eviction — skipped: needs Durable Objects (wrangler dev or a deployment)");
+  } else {
+    console.log("\n— /ws delivery across eviction —");
+    const wsBase = new URL(URL_.toString());
+    wsBase.protocol = wsBase.protocol === "https:" ? "wss:" : "ws:";
+    wsBase.pathname = "/ws";
+
+    // `headers` is an undici extension to the WebSocket constructor, not part
+    // of the standard type, so the options are cast at the call.
+    const openSocket = (key: string, session: string, cursor: number): WebSocket =>
+      new WebSocket(`${wsBase}?session=${session}&cursor=${cursor}`, {
+        headers: { authorization: `Bearer ${key}` },
+      } as never);
+
+    const opens = (sock: WebSocket): Promise<boolean> =>
+      new Promise((resolve) => {
+        sock.addEventListener("open", () => resolve(true), { once: true });
+        sock.addEventListener("error", () => resolve(false), { once: true });
+      });
+
+    const nextFrame = (sock: WebSocket, ms: number): Promise<{ payload?: { text?: string } } | undefined> =>
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve(undefined), ms);
+        sock.addEventListener("message", (e) => {
+          clearTimeout(t);
+          resolve(JSON.parse(String((e as MessageEvent).data)));
+        }, { once: true });
+      });
+
+    // A bad bearer is refused at the handshake; no socket opens.
+    const bad = openSocket("qk_not_a_real_key", jSession, 0);
+    const badOpened = await opens(bad);
+    if (badOpened) bad.close();
+    assert(!badOpened, "/ws refuses a bad bearer");
+
+    // Opened at the cursor jesse has read to, so nothing is replayed.
+    const ws = openSocket("qk_dev_jesse", jSession, jCursor);
+    const opened = await opens(ws);
+    assert(opened, "/ws upgrades a member");
+
+    if (opened) {
+      // Past the idle eviction, so the object that delivers below is a
+      // different instance from the one that accepted this socket. The workerd
+      // test (worker-tests/ws-delivery.test.ts) proves the mechanism; this
+      // proves it against a real deployment.
+      //
+      // 30 s, not the ~10 s production evicts at. Under `wrangler dev` an idle
+      // object was still the same instance after 15 s (its constructor ran
+      // once, counted from the log) and a new one after 25 s and after 30 s, so
+      // 15 s would pass here without any eviction having happened.
+      await new Promise((r) => setTimeout(r, 30_000));
+
+      const arriving = nextFrame(ws, 10_000);
+      await call(peer, "bellman_send", {
+        session_id: jSession, member_id: pMember, type: "message",
+        payload: { text: "after eviction" },
+      });
+      const frame = await arriving;
+      const delivered = frame?.payload?.text === "after eviction";
+      assert(delivered, "/ws delivers after the object was evicted and revived");
+      if (!delivered) console.log(`   got: ${frame ? JSON.stringify(frame) : "no frame within 10s"}`);
+      ws.close();
+    }
+  }
+
   console.log("\n— action request / human-approval loop —");
   const actionReq = await call(jesse, "bellman_send", {
     session_id: jSession, member_id: jMember, type: "action_request",

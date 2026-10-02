@@ -349,6 +349,28 @@ describe("issueInvite", () => {
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.filter((a) => a.action === "invite_issued")).toHaveLength(0);
   });
+
+  // The other side of that gap: the freeze lands after the code is set. The door
+  // is open and stays open, and nobody is told, because a frozen room takes no
+  // event. Tolerated rather than unwound, as an eviction's announcement is, and
+  // the tool's description says the event can be absent for this reason.
+  it("completes, unannounced, when the room freezes after the code was set", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+    const setJoinCode = store.setJoinCode.bind(store);
+    store.setJoinCode = async (sessionId, role, code, expiresAt) => {
+      const set = await setJoinCode(sessionId, role, code, expiresAt);
+      await store.freezeSession(sessionId, Date.now());
+      return set;
+    };
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect((await store.getSession("qs_test"))?.joinCodes[r.value.role]?.code).toBe(r.value.code);
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
+  });
 });
 
 describe("revokeInvite", () => {
@@ -405,6 +427,26 @@ describe("revokeInvite", () => {
     if (r.ok) return;
     expect(r.code).toBe("frozen");
     expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.role).toBe("peer_b");
+  });
+
+  // The same gap from the other side: the freeze lands after the code is retired.
+  // The door is shut and stays shut, and nobody is told.
+  it("completes, unannounced, when the room freezes after the code was retired", async () => {
+    await store.createSession(session({ maxMembers: 4 }));
+    const consumeJoinCode = store.consumeJoinCode.bind(store);
+    store.consumeJoinCode = async (sessionId, role) => {
+      await consumeJoinCode(sessionId, role);
+      await store.freezeSession(sessionId, Date.now());
+    };
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator", "peer_b");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual(["peer_b"]);
+    expect((await store.getSession("qs_test"))?.joinCodes).toEqual({});
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_revoked")).toHaveLength(0);
   });
 });
 

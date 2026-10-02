@@ -112,12 +112,20 @@ export interface BellmanStore {
    * Mark a session closed, whoever is in it. Idempotent. To close a room because
    * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then
    * calling this is the gap it exists to close.
+   *
+   * No production path calls this today. The room operations close through
+   * `closeSessionIfEmpty`, and only tests use this one. It stays as the
+   * unconditional close, which the close-a-room route #49 lists will need, and
+   * for the contract suite to set a room up closed. Do not read its presence as
+   * behaviour anything depends on.
    */
   closeSession(sessionId: string): Promise<void>;
   /**
-   * Close a session if nobody is in it, and say whether it is closed when this
-   * returns: true when this call closed it or it already was, false when a
-   * member is still in it or there is no such session.
+   * Close a session if nobody is in it. Resolves to whether the session IS closed
+   * when this returns, and not to whether this call closed it, which is how the
+   * name reads: true for a room this call closed and for one that already was,
+   * false for a room left open because a member is in it, and for one that does
+   * not exist.
    *
    * The check and the write are one operation, and cannot be two. A caller that
    * read the roster, saw it empty and then called `closeSession` would leave a
@@ -132,10 +140,11 @@ export interface BellmanStore {
    * like any other: freezing refuses writes into a room someone is in, and an
    * empty one is over either way.
    *
-   * An already-closed room answers true whoever is listed in it, and not only a
-   * room this call closed. A close can die after the room is marked closed and
-   * before the registry drops its codes, and the retry has to read the room as
-   * closed to finish that: "nothing to do" would leave the rows for good.
+   * The answer is a state and not an event, on purpose, and DurableObjectStore
+   * depends on it. An already-closed room answers true whoever is listed in it.
+   * A close can die after the room is marked closed and before the registry drops
+   * its codes, and the retry has to read the room as closed to finish that: "did
+   * this call close it" would answer false there, and leave the rows for good.
    */
   closeSessionIfEmpty(sessionId: string): Promise<boolean>;
   /** Freeze or thaw a session. null thaws. */

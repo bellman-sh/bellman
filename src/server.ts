@@ -524,7 +524,7 @@ So \`invite\` already invalidates an outstanding code, because issuing retires i
 
 Args: session_id, member_id (yours), role (optional), revoke (default false)
 Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
-Members see an invite_issued / invite_revoked event, so reopening the door is never silent. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
+Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
 Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),

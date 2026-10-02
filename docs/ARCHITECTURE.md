@@ -8,7 +8,7 @@ applies-when: |
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md]
 last-verified-against-source: af052f0c
-last-updated: 2026-09-27
+last-updated: 2026-10-02
 ---
 
 # Bellman Architecture
@@ -357,7 +357,6 @@ flowchart TB
         D5["#67 operator impersonation"]
     end
     subgraph E["Correctness debt"]
-        E1["#59 #62 #69 atomicity"]
         E2["#12 contract against the DO"]
         E3["#73 #74 #75 freeze gaps"]
         E4["#79 idempotency keys"]
@@ -381,24 +380,156 @@ sensitive values readable by membership — waits on enforcement being real.
 
 **A Durable Object's input gate covers one invocation. Nothing spans two.**
 
-Bellman's state is deliberately split across three object types, so any
-operation touching two of them has a window in the middle. That one fact has
-produced three separately filed bugs:
+Bellman's state is deliberately split across four object types, so any
+operation touching two of them has a window in the middle. That window produced
+three filed bugs, and they were two different problems:
 
-| Issue | The two objects | What can go wrong |
+| | A lost write | A misordered write |
 |---|---|---|
-| [#59](../../../issues/59) | RegistryDO + AuditDO | a durable grant change whose audit entry is lost permanently, because the retry cannot tell the mutation already happened |
-| [#62](../../../issues/62) | SessionDO + RegistryDO | a consumed single-use join code that stays redeemable |
-| [#69](../../../issues/69) | AuthDO + RegistryDO | an older subscription state landing after a newer cancellation, leaving paid access nobody is paying for |
+| Filed as | [#59](../../../issues/59), [#62](../../../issues/62) | [#69](../../../issues/69) |
+| What goes wrong | A mutation commits in one object and the write that must accompany it lands in another. Lose the second and nothing records that it was owed. | Two operations interleave and an older result lands after a newer one. |
+| What fixes it | **Durable delivery.** Persist the intent in the same transaction as the mutation, then deliver it. An alarm retries what did not arrive. | **A lock.** The whole operation runs inside the object whose queue can cover it. |
+| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO` and `SessionDO → RegistryDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
 
-Within one object the problem is tractable and has been solved in place:
-`putGrantIfOwned`, `deleteGrantIfSource`, `moveGrant` and the frozen-write
-guards are each a single transaction. Across objects there is no such move, and
-three ad-hoc patches would be worse than one pattern.
+Neither fixes the other's problem. A durable queue delivers an old write as
+reliably as a new one, and a lock does nothing for a write that was never sent;
+conflating them would have produced an outbox where a lock was needed. To tell
+which a change needs, ask what the window costs: a write that never happens, or
+a stale decision overwriting a fresh one.
+
+Within one object the problem is tractable: the guarded grant writes and
+`moveGrant` are single transactions, and the frozen-write guards are single
+invocations that await only storage. Across objects there is no transaction to
+widen.
+
+**A lost write: durable delivery.** `src/outbox.ts`:
+
+1. **One commit.** `OutboxDriver.enqueue` returns the `ob:` rows for the caller
+   to fold into its own `ctx.storage.transaction()`, and arms the alarm from
+   inside that closure (runtime fact 1 below). A call its guard refuses queues
+   nothing.
+2. **Inline, then the alarm.** `deliverNow()` runs straight after the commit, so
+   a join code resolves as soon as its room exists, and a row is deleted only
+   once its delivery returns. The alarm is armed `OUTBOX_GRACE_MS` (5 s) behind
+   the commit, so it is a backstop and not a second path: it finds the queue
+   empty unless the inline attempt never ran or the downstream is not answering.
+3. **FIFO, one drain at a time.** A failing head blocks the rows behind it, since
+   both consumers are order-sensitive, and retries back off from 1 s to a
+   5-minute cap for as long as they fail. `deliver` awaits another object, which
+   opens this one's input gate, so `deliverNow()` is single-flight, and a drain
+   stops after `MAX_DRAIN_PASSES` (100).
+4. **Named alarms.** An object has one alarm, so handlers share it: each keeps a
+   `due:<name>` row, and `alarm()` runs whichever are due, then points the alarm
+   at the soonest. `SessionDO` has two, `outbox` and `ttl`; its TTL is derived
+   from the session record, so sessions written before named alarms still
+   expire. `ob_seq`, the counter that numbers rows, sits outside the `ob:` prefix
+   or its own drain would list it as a row; the OAuth purge cursor
+   (`AuthDO.purge` in `src/oauth/store.ts`) follows the same rule.
+
+It is used twice:
+
+- **`RegistryDO → AuditDO` ([#59](../../../issues/59)).** The four guarded grant
+  writes (`putGrantIfOwned`, `deleteGrantIfOwned`, `putGrantIfSource`,
+  `deleteGrantIfSource`) take an `AuditIntent` and queue their audit entries in
+  the grant's own transaction. Auditing afterwards loses them: a delete that
+  committed and then failed to audit answers `missing` on retry. The rule for
+  what a grant change records lives once, in `src/grant-audit.ts`.
+- **`SessionDO → RegistryDO` ([#62](../../../issues/62)).** `createSession`,
+  `setJoinCode`, `consumeJoinCode`, `clearJoinCodes` and expiry queue the
+  registry's index write in the session's own transaction. Only a *missing*
+  entry, a session holding a code nothing resolves, was open: a stale `jc:` row
+  was already inert, because `getSessionByJoinCode` re-reads the session and
+  requires the code to still be in its `joinCodes`.
+
+Delivery is at least once, so each consumer absorbs a redelivery in its own way.
+`AuditDO.append` dedupes on the intent id (a `d:<id>` row written in the entry's
+transaction), because appending is not idempotent. Join-code delivery needs no
+marker: a put and a delete of one key already are.
+
+**A misordered write: a lock.** `AuthDO.reconcile`. A purchase reconcile reads
+what a user is paying for and then writes or deletes their grant in
+`RegistryDO`, one decision in two steps. Run from the Worker, they were separate
+calls and the ledger's queue was released between them, so an older `active`
+could land after a cancellation and leave paid access nobody was paying for.
+Stripe sends the deletion once, so nothing corrected it. A revision number on
+the grant would not have closed it: the dangerous case is an older write landing
+after a *delete*, which leaves nothing to compare against.
 
 The shape that works: **the object that owns the serialisation performs the
 whole operation and calls the others itself.** It has the bindings; the Worker
-is the wrong place to hold a lock.
+is the wrong place to hold a lock. `AuthDO.reconcile` runs `reconcilePurchase`
+inside `BillingLedger.serializeUser` and calls the registry from there, so a
+reconcile's write is not sent until the previous one's has been acknowledged.
+It depends on three things:
+
+- **One `AuthDO`.** The queue is a map of promises in the object's memory, so it
+  serialises only because no second instance exists.
+- **Lock order is customer, then user.** `linkCustomer` holds a customer's queue
+  while it waits for the user's, so work inside the user's queue must not take a
+  customer's. Nothing in `RegistryDO` calls back into `AuthDO`.
+- **No timeout.** The lock is held across the registry call and the audit
+  delivery inside it, because releasing early is the bug. A registry that stops
+  answering delays one user's reconciles and links, and nobody else's.
+
+The #69 race was not reproduced. With the lock removed, overlapping reconciles
+came out in order in all 1,200 rounds tried, across four shapes. The window exists by
+construction (an await later put between the read and the write, or two writes
+overtaking each other on the way to the registry), so
+`worker-tests/reconcile-race.test.ts` holds one reconcile open inside it and
+shows that the lock is what keeps the order.
+
+**What the runtime does.** Four facts, each measured on workerd rather than read
+off its documentation, decide how code here is written.
+
+1. **`setAlarm` inside a `ctx.storage.transaction()` closure commits with that
+   transaction, and is discarded if the closure throws.** So `enqueue` arms the
+   alarm from inside the caller's closure: a row that committed with nothing
+   scheduled to read it is the loss this section exists to close, and
+   `RegistryDO` has no other alarm to come back for it. Probed on workerd
+   1.20260926.1 (pinned in `worker-tests/package.json`) by arming in a closure,
+   aborting the object and reading `getAlarm()`, then with a closure that
+   throws. No test keeps the probe; repeat it when that pin moves.
+2. **Everything awaited inside a transaction closure holds every other call to
+   that object until it commits.** With a 250 ms await inside `AuditDO.append`'s
+   closure, a `recent()` issued mid-closure waited 220 ms; a registry call made
+   inside a closure held a read for 510 ms against the tests' 350 ms limit. So
+   **never put a cross-object call inside a transaction**. The closure queues and the wrapper delivers after the
+   commit (`putGrantIfOwned` calls `#putGrantIfOwnedTxn`, then `deliverNow()`).
+   The `serves other calls while it waits` tests in
+   `worker-tests/grant-audit-outbox.test.ts` and
+   `worker-tests/join-code-outbox.test.ts` fail if a delivery moves back in.
+3. **TypeScript `private` is erased, and a Durable Object answers RPC for every
+   method on its class.** A plain stub's `putGrantIfOwnedTxn` returned
+   `"written"`, and `expireIfDue` took a forged session record naming another
+   room's live join code. Use `#private` for anything that does what no caller
+   should be able to ask for: the deliveries, the `*Txn` halves, the methods that
+   write what they are handed, `AuthDO`'s registry handle. Only Bellman's own
+   code holds these bindings today, so this closes a foot-gun, not a hole. Tests
+   in `worker-tests/` call each over a stub and expect a refusal.
+4. **A Durable Object namespace accepts `""`, `null` and `undefined` as names.**
+   `idFromName(undefined)` and `idFromName(null)` name the same objects as
+   `"undefined"` and `"null"`, which `isOrgId` accepts. An entry filed against a
+   falsy org id is therefore delivered, into a stream no org reads or into the
+   stream of an org called `undefined`: a bad id misfiles instead of stalling.
+   Check an id before it names an object; `hasOrg` in `src/grant-audit.ts` and
+   the guard in `RegistryDO`'s `#deliver` are two defences for that reason.
+
+**Rolling back.** `alarm()` clears a due name only through its own branch, and its
+closing `reArm()` points the alarm back at any name still due. A `SessionDO`
+build that dispatches named alarms but predates the `outbox` branch (#62) never
+consumes a `due:outbox` row, and fires its alarm back to back, indefinitely. A
+rollback past that change has to clear those rows, and a `due:outbox` marker is
+safe to delete only when its `ob:` queue is empty, which is what the drain checks
+first. Deleted over queued rows it stops the spin and strands them, with nothing
+armed to deliver them.
+
+**Where it is not applied.** `DurableObjectStore.createSession` still calls
+`registry.indexSession` after the session commits, outside the outbox; a miss
+costs a room that a lapsed plan does not freeze, not a room lost. Room activity
+is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
+directly with no intent id and no queue, so only grant changes are guaranteed to
+reach the audit stream. And `RegistryDO.dropGrant` and `SessionDO.wake` predate
+the `#private` rule and are still TypeScript-`private`, so a stub can call them.
 
 Two related classes, both of which have already bitten:
 

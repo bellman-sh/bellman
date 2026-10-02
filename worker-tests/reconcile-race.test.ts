@@ -430,8 +430,19 @@ describe("what a caller holding the binding can reach", () => {
     const stored = () =>
       runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.get("client:c_lapsed"));
     // A public method answers, so a refusal below is about the method and not the stub.
-    const count = await stub.countClients();
+    expect(await stub.countClients()).toBeTypeOf("number");
     expect(await stored()).toBeDefined();
+
+    // Clearing the seeded counter is what makes clientCount's refusal state-visible.
+    // Its only effect is to seed this key, and registerClient and the countClients()
+    // control above have both already seeded it, so with the key in place a clientCount
+    // that ran would change nothing and only the name assertion could catch it. Cleared,
+    // the key coming back is proof one of them ran: clientCount would re-seed it and
+    // bumpCount would write seed + 1000.
+    const counter = () =>
+      runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.get("clients:count"));
+    await runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.delete("clients:count"));
+    expect(await counter()).toBeUndefined();
 
     const attempts: Record<string, unknown[]> = {
       bumpCount: [1_000], purge: ["client:"], clientCount: [],
@@ -440,8 +451,16 @@ describe("what a caller holding the binding can reach", () => {
       const outcome = await stub[name](...args).then(() => "answered", (err: unknown) => String(err));
       expect(outcome, name).toMatch(/does not implement/);
     }
-    // None of them ran: the count has not moved and the lapsed registration is still stored.
-    expect(await stub.countClients()).toBe(count);
+    // None of them ran. The counter is still gone, which bumpCount or clientCount would
+    // have rewritten, and the lapsed registration is still stored, which purge would have
+    // swept.
+    //
+    // Nothing here compares counts across that deletion. `count` was read before it, and
+    // carries the off-by-one in #122: registerClient on an unseeded object stores 2 for
+    // one client, because the seed lists the key it has already written. Re-seeding after
+    // the delete gives the true 1, so asserting the two are equal would fail now and
+    // would fail again, the other way, once #122 is fixed.
+    expect(await counter()).toBeUndefined();
     expect(await stored()).toBeDefined();
   });
 });

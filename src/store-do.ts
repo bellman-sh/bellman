@@ -300,8 +300,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Everything it decides on is read before anything is written, and the event, the
    * cursor and the key's record go in one put, so an interruption leaves all three or
    * none. That is not a claim that two concurrent calls cannot interleave. The input gate
-   * does not hold every other request to this object for the length of a call, and a
-   * write's await opens it. On workerd's local pool, concurrent calls have been seen to
+   * does not hold every other request to this object for the length of a call. On
+   * workerd's local pool, concurrent calls have been seen to
    * read the same cursor: both then report `appended`, and when their events differ one
    * overwrites the other. It is rare (1 to 5 pairs in 400, for one key on a freshly
    * created room) and the mechanism is not established. So nothing here is a guarantee

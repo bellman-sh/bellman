@@ -727,8 +727,10 @@ it("does not answer over RPC for the methods that must stay internal", async () 
 
 /**
  * `dropGrant` deletes both copies of whatever grant it is handed, and it is `#private` for
- * the same reason: a TypeScript `private` one answers RPC, so anything holding the REGISTRY
- * binding could remove a customer's plan by naming it. The grant below is live and
+ * the same reason: a TypeScript `private` one answers RPC, and nothing outside this class
+ * calls it, so it has no reason to answer. That is a narrowing, not a defence — `deleteGrant`
+ * is public because `BellmanStore` declares it, and over a stub it removes a live grant just
+ * as well. Keeping `dropGrant` private does not put a customer's plan out of reach. The grant below is live and
  * org-scoped, and a drop that ran would take it out of the lookup by key and out of its
  * org's listing. It is refused, and the grant is still there under both.
  */

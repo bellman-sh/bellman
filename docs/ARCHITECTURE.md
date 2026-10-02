@@ -507,15 +507,26 @@ off its documentation, decide how code here is written.
 3. **TypeScript `private` is erased, and a Durable Object answers RPC for every
    method on its class.** A plain stub's `putGrantIfOwnedTxn` returned
    `"written"`, and `expireIfDue` took a forged session record naming another
-   room's live join code. Use `#private` for any method the Worker does not call
-   that writes storage or changes instance state: the deliveries, the `*Txn`
-   halves, `expireIfDue`, `writeEvent`, `dropGrant`, `wake`, `AuthDO`'s client
-   count and sweeps, and its registry handle. Four `SessionDO` helpers that only
-   read (`stored`, `events`, `nextCursor`, `derivedDue`) are still
-   TypeScript-`private` and answer RPC. Instance fields do not, and `alarm` is
-   reserved. Only Bellman's own code holds these bindings today, so this closes a
-   foot-gun, not a hole. Tests in `worker-tests/` call each over a stub and
-   expect a refusal.
+   room's live join code. Use `#private` for a writing method that nothing outside
+   its own class calls: the deliveries, the `*Txn` halves, `expireIfDue`,
+   `writeEvent`, `dropGrant`, `wake`, `AuthDO`'s client count and sweeps, and its
+   registry handle.
+
+   The rule is about surface, not protection, and it is important not to read it
+   as more than that. `BellmanStore` and `AuthStorage` are facades over RPC, so
+   every method they declare has to stay public — including ones that write:
+   `RegistryDO.putGrant` and `deleteGrant`, `AuthDO.registerClient`,
+   `markClientUsed` and `purgeStale`. Over a plain stub, `deleteGrant` removes a
+   live grant, `purgeStale(now + 48h)` sweeps a registration that has not lapsed,
+   and `registerClient` moves the cap counter. So converting the methods above
+   narrows what answers RPC; it does not put a grant or the registration cap out
+   of reach. Only Bellman's own code holds these bindings, which is what makes
+   the whole group a foot-gun rather than a hole.
+
+   Four `SessionDO` helpers that only read (`stored`, `events`, `nextCursor`,
+   `derivedDue`) are still TypeScript-`private` and answer RPC; #126 tracks them.
+   Instance fields do not answer, and `alarm` is reserved. Tests in
+   `worker-tests/` call each converted method over a stub and expect a refusal.
 4. **A Durable Object namespace accepts `""`, `null` and `undefined` as names.**
    `idFromName(undefined)` and `idFromName(null)` name the same objects as
    `"undefined"` and `"null"`, which `isOrgId` accepts. An entry filed against a

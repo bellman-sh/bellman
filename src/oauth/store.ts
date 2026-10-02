@@ -195,10 +195,15 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    *
    * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
    * Object answers RPC for every method on its class, and TypeScript's `private` is erased
-   * at compile time. #bumpCount writes any count it is handed and #purge deletes whatever
-   * has lapsed under any prefix, so a caller that could reach them could shut every client
-   * out of registering or lift the cap. This one writes only to seed the counter from the
-   * keys that are there, but it is the same group.
+   * at compile time, so `private` would leave all three answering. Nothing outside this
+   * class calls them, so none of them has a reason to.
+   *
+   * That is the whole of it: less surface, not a protected counter. `registerClient`,
+   * `markClientUsed` and `purgeStale` are public because `AuthStorage` declares them, and
+   * over a stub `purgeStale(now + 48h)` sweeps a registration that has not lapsed while
+   * `registerClient` moves the counter. Anyone who could reach these three could already
+   * reach those. This one only seeds the counter from the keys that are there, and is
+   * private because it belongs to the same group, not because the seed needs guarding.
    */
   #clientCount(): Promise<number> {
     return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);

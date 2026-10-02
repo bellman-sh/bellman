@@ -496,10 +496,26 @@ runtime and do not. One test asserts both halves — a socket delivers across a
 teardown, and a waiter registered before the same teardown does not — which
 pins the difference between the two arms rather than only the presence of one.
 
-**If the pool cannot express it,** because `abortAllDurableObjects()` closes
-accepted sockets rather than leaving them hibernating, then eviction stays
-smoke-only and this decision records that the pool cannot express eviction.
-The fallback is the original D13, unchanged.
+**The contingency fired, and resolved the other way.** This decision warned
+that if `abortAllDurableObjects()` closed accepted sockets rather than leaving
+them hibernating, eviction would stay smoke-only. It does close them — measured,
+close 1006, unclean. But the pool at 0.22.0 also has
+`evictAllDurableObjects()`, which hibernates sockets and is the right call
+here. So the eviction assertion IS a per-commit gate. (`worker-tests/README.md`
+and this spec both previously said the pool could not express eviction; both
+were written before anyone looked for a second teardown.)
+
+**No single teardown both keeps sockets and kills a waiter**, because evict
+drains in-flight polls. So the companion waiter case uses abort, where the poll
+rejects rather than resolving empty — it pins a runtime fact more than it pins
+`SessionDO`'s code, and is weaker than the socket case for that reason.
+
+**The input-gate premise is now tested, and it holds.** `worker-tests` races an
+append against an upgrade and asserts the event arrives exactly once. 420 races
+swept across a 0-20 ms append lag each delivered exactly once, and the test
+discriminates: a deliberate 25 ms gap opened between the read and the
+registration was caught at lags of 3-20 ms. A zero-lag race only exercises the
+replay path, which is why the sweep matters.
 
 The smoke leg stays either way. It is the only check that runs against a real
 deployment, and a pool is a simulation of workerd's lifecycle, not a bill.

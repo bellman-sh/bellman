@@ -190,8 +190,12 @@ State lives behind one interface, `BellmanStore` (`src/store.ts`). Two
 implementations: `MemoryStore` for tests and local development,
 `DurableObjectStore` for production. A conformance suite
 (`tests/helpers/store-contract.ts`) is what makes that a real seam rather than a
-comment — though it does not yet run against the Durable Object implementation
-([#12](../../../issues/12)).
+comment, and it runs against both. The root vitest program runs it against
+`MemoryStore`; `worker-tests/` runs the same suite against `DurableObjectStore`
+in real workerd, with real Durable Objects. That second program exists because
+`src/store-do.ts` imports `cloudflare:workers`, which only workerd provides: a
+root test can load those classes over a stub and a fake storage
+(`tests/store-do-wiring.test.ts`), but cannot run real Durable Objects.
 
 ```mermaid
 flowchart LR
@@ -334,8 +338,8 @@ The roadmap groups into five tracks. Each is architecture rather than features.
 flowchart TB
     subgraph A["Rooms as declared objects"]
         A1["manifests — shipped"]
-        A2["#2 permission verbs,<br/>server-enforced"]
-        A3["#3 join codes carry a role"]
+        A2["#2 permission verbs,<br/>server-enforced — shipped"]
+        A3["#3 join codes carry<br/>a role — shipped"]
         A4["#20 sensitive values<br/>scoped to a room"]
     end
     subgraph B["Durability"]
@@ -357,9 +361,7 @@ flowchart TB
         D5["#67 operator impersonation"]
     end
     subgraph E["Correctness debt"]
-        E2["#12 contract against the DO"]
         E3["#73 #74 #75 freeze gaps"]
-        E4["#79 idempotency keys"]
     end
 
     A2 --> A4
@@ -371,10 +373,10 @@ flowchart TB
     D1 --> D3
 ```
 
-The ordering that matters: **[#2](../../../issues/2) gates a lot.** Permission
-verbs are declared in a manifest today and not enforced, so anything that grants
-authority — a scribe that can close a room, a role that can evict a member,
-sensitive values readable by membership — waits on enforcement being real.
+The ordering that mattered: **[#2](../../../issues/2) gated a lot**, and it has
+shipped. Permission verbs are declared in a manifest and enforced by the server,
+so what grants authority — a scribe that can close a room, a role that can evict
+a member, sensitive values readable by membership — has something to be built on.
 
 ## 9. Nothing spans two objects
 
@@ -530,8 +532,10 @@ armed to deliver them.
 costs a room that a lapsed plan does not freeze, not a room lost. Room activity
 is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes are guaranteed to
-reach the audit stream. And `RegistryDO.dropGrant` and `SessionDO.wake` predate
-the `#private` rule and are still TypeScript-`private`, so a stub can call them.
+reach the audit stream. `bellman_confirm`, which commits a seat and then makes a
+second-object write, is the filed case ([#116](../../../issues/116)). And
+`RegistryDO.dropGrant` and `SessionDO.wake` predate the `#private` rule and are
+still TypeScript-`private`, so a stub can call them.
 
 Two related classes, both of which have already bitten:
 

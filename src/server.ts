@@ -458,9 +458,17 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         leftAt: null,
       };
       // The guard above read the session; this is the one that counts. A freeze
-      // landing in between would otherwise let a frozen room grow, and the
-      // store refuses inside the object where there is no gap to land in.
-      if (!(await s.addMember(session.id, member))) return fail(FROZEN);
+      // or a close landing in between would otherwise seat a member in a frozen
+      // room or one that is over, and the store refuses inside the object where
+      // there is no gap to land in.
+      if (!(await s.addMember(session.id, member))) {
+        // Both guards above had passed, so the room changed since: it froze, or it
+        // closed, and the joiner is owed which. Closed wins, as it does for a
+        // leaver in rooms.ts: calling a room that is over frozen points them at
+        // paying to fix something payment will not.
+        const now = await s.getSession(session.id);
+        return fail(!now || now.closed ? "session no longer exists." : FROZEN);
+      }
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
@@ -779,17 +787,30 @@ Reads stay open to the person removed: the history was theirs too. That includes
 
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
-Everyone in the room sees a member_evicted event, so removal is never silent, and the person removed sees it too. Removing the last active member closes the room.
+Members see a member_evicted event, the person removed too, unless the room freezes at that instant: the removal still completes, unannounced. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
       },
-      // idempotentHint is retry-safety, and strictly false in one case: a code minted
-      // for the evicted seat between two calls is live, so the second call retires it.
-      // That is the over-revoke bias, and minting again recovers it.
+      // idempotentHint is false. MCP defines it by effect — calling again with the same
+      // arguments has no additional effect on the environment — and eviction can have
+      // one: a code minted for the evicted seat between two calls is live, so the second
+      // call retires it, announces that and audits it. The hint is a claim about effect
+      // and not about retry-safety, and a claim that needs an exception written beside it
+      // is false as stated.
+      //
+      // Whether to retry is a separate question, and the answer is yes. A repeat finishes
+      // an eviction that died partway, whatever of the door, the removal and the closing
+      // was left undone, and after a completed one it announces and audits nothing unless
+      // a code was minted since. That extra effect leans toward over-revoking, and
+      // minting again recovers it.
+      //
+      // bellman_leave keeps idempotentHint: true, for a real reason: once a leave has
+      // completed, a repeat announces and audits nothing, and the closing it may still
+      // finish is of a room that is already empty.
       annotations: {
-        readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false,
+        readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false,
       },
     },
     async ({ session_id, member_id }): Promise<ToolResult> => {

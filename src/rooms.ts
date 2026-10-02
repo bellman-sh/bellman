@@ -17,7 +17,7 @@
 import type { AuditEntry, Identity, Member, Session, Verb } from "./types.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
-import { JOIN_CODE_TTL, type BellmanStore } from "./store.js";
+import { JOIN_CODE_TTL, isActiveMember, type BellmanStore } from "./store.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -67,7 +67,7 @@ export const FROZEN =
   "history is still readable, but nothing new can be sent or joined until the plan is restored.";
 
 export function activeMembers(s: Session): Member[] {
-  return s.members.filter((m) => m.leftAt === null);
+  return s.members.filter(isActiveMember);
 }
 
 export function findMember(s: Session, memberId: string, identity: Identity): Member | undefined {
@@ -125,17 +125,26 @@ export async function audit(
  * The room's closing invariant: with nobody left in it, it is over. Closes the
  * room if so, and returns the status to report. Every successful path through
  * leaveRoom and evictMember ends here.
+ *
+ * The store decides and writes in one call. The shape this replaced read the
+ * room, saw it empty and then called closeSession, and a member who joined in
+ * the gap was closed over: the room ended with them in it, and its codes
+ * retired. That gap cannot be closed from this side of the store, which is why
+ * the decision moved into it. The other half is `addMember` refusing a closed
+ * room, so a join arriving after the close is turned away and not seated.
  */
 async function closeIfEmpty(store: BellmanStore, session: Session): Promise<string> {
-  // Re-read: `session` predates whatever the caller has just done to it.
-  const now = (await store.getSession(session.id)) ?? session;
-  const empty = activeMembers(now).length === 0;
-  if (empty) await store.closeSession(session.id);
-
   // Closed wins over frozen: an empty room is over either way, and telling
   // someone their room is frozen when it has no members left to thaw for
-  // would point them at paying to fix something payment will not fix.
-  return now.closed || empty ? "closed" : sessionStatus(now);
+  // would point them at paying to fix something payment will not fix. The store
+  // closes a frozen room like any other, so one that empties never reaches the
+  // status below.
+  if (await store.closeSessionIfEmpty(session.id)) return "closed";
+
+  // Left open, so the status is whatever the room is now. Re-read: `session`
+  // predates whatever the caller has just done to it.
+  const now = (await store.getSession(session.id)) ?? session;
+  return sessionStatus(now);
 }
 
 // ---------------------------------------------------------------------------

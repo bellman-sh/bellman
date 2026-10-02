@@ -281,12 +281,43 @@ describe("bellman_evict", () => {
   describe("its declaration", () => {
     // The only tool that removes a person. A client uses the hints to decide how
     // hard to confirm before running a tool, so they are part of its contract.
-    it("is destructive, and not read-only", async () => {
+    it("is destructive, not read-only, and not idempotent", async () => {
       const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
 
       expect(tools.find((t) => t.name === "bellman_evict")?.annotations).toMatchObject({
-        readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false,
+        readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false,
       });
+    });
+
+    // Why the hint above is false. MCP defines it by effect: repeating a call with
+    // the same arguments has no additional effect on its environment. This one can
+    // have one: a code minted for the seat since the first call is live, so the
+    // second call retires it, and says so. Whether to retry is a separate question
+    // with the opposite answer: a repeat is how an interrupted eviction is finished.
+    // This pins the behaviour the hint's value rests on, so that changing one
+    // without the other is a decision and not an accident.
+    it("is not free to repeat: a code minted for the seat in between is retired by the second call", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const args = { session_id: s.sessionId, member_id: s.joinerMemberId };
+      const first = await s.creator.call("bellman_evict", args);
+      expect(first.isError, first.text).toBe(false);
+      const minted = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+      });
+      expect(minted.isError, minted.text).toBe(false);
+      // The control: the new code is live, so a refusal after the repeat is the
+      // repeat's doing and not something about this caller or this room.
+      const stranger = await h.connect(DEV_KEY.outsider);
+      const before = await stranger.call("bellman_connect", { join_code: minted.data.join_code });
+      expect(before.isError, before.text).toBe(false);
+
+      const second = await s.creator.call("bellman_evict", args);
+
+      expect(second.isError, second.text).toBe(false);
+      expect(second.data.code_retired).toBe(String(minted.data.role));
+      const after = await stranger.call("bellman_connect", { join_code: minted.data.join_code });
+      expect(after.isError, after.text).toBe(true);
     });
 
     // An operation with two effects has to name both. A caller who reads only

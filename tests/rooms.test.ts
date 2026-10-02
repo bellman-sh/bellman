@@ -23,6 +23,31 @@ beforeEach(() => {
   store = new MemoryStore();
 });
 
+/**
+ * Seat `joiner` at the last moment before the room is closed: after whatever
+ * the operation read to decide it was empty, and before the write that closes
+ * it. That is the window the read-then-close shape left open, and a test cannot
+ * land a join in it any other way, because MemoryStore never yields in the
+ * middle of one of its methods.
+ *
+ * Both close methods are wrapped, and that is deliberate. Which one an operation
+ * calls is what these tests are about: wrap only the conditional close and an
+ * operation that went back to reading the roster and calling closeSession would
+ * never meet the join, and pass.
+ */
+function joinJustBeforeClose(joiner: Member): void {
+  const closeSession = store.closeSession.bind(store);
+  vi.spyOn(store, "closeSession").mockImplementation(async (id) => {
+    await store.addMember(id, joiner);
+    await closeSession(id);
+  });
+  const closeSessionIfEmpty = store.closeSessionIfEmpty.bind(store);
+  vi.spyOn(store, "closeSessionIfEmpty").mockImplementation(async (id) => {
+    await store.addMember(id, joiner);
+    return closeSessionIfEmpty(id);
+  });
+}
+
 describe("leaveRoom", () => {
   it("marks the member gone and reports the room's status", async () => {
     await store.createSession(session({
@@ -131,7 +156,7 @@ describe("leaveRoom", () => {
   // close, where the case above builds it by hand.
   it("keeps the audit row of a leave that failed at the close, and the retry finishes closing", async () => {
     await store.createSession(session({ members: [member()] }));
-    vi.spyOn(store, "closeSession").mockRejectedValueOnce(new Error("close failed"));
+    vi.spyOn(store, "closeSessionIfEmpty").mockRejectedValueOnce(new Error("close failed"));
 
     await expect(leaveRoom(store, jesse, "qs_test", "m_creator")).rejects.toThrow("close failed");
 
@@ -167,6 +192,44 @@ describe("leaveRoom", () => {
     if (!r.ok) return;
     expect(r.value.sessionStatus).toBe("active");
     expect((await store.getSession("qs_test"))?.closed).toBe(false);
+  });
+
+  // The close is decided where it is written. A member who joins after the leave
+  // has seen an empty room and before the close lands has to be left in an open
+  // room: closing over them lists someone in a room that is over, and retires
+  // the code they came in by. A leave that reads the room and then closes it
+  // fails this test, because the join lands in the gap between the two.
+  it("leaves the room open when a member joins at the last moment before the close", async () => {
+    await store.createSession(session({ maxMembers: 3, members: [member()] }));
+    joinJustBeforeClose(member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" }));
+
+    const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("active");
+    const after = (await store.getSession("qs_test"))!;
+    expect(after.closed, "closed over the member who had just joined").toBe(false);
+    expect(activeMembers(after).map((m) => m.memberId)).toEqual(["m_late"]);
+    expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door they came in by").toBeDefined();
+  });
+
+  // The retry path reaches the same closing from a different place: a departed
+  // member's repeated leave heals a room an interrupted leave left empty and
+  // open. It is a second caller of the same function, and the one a copy of the
+  // old shape could hide in, because nothing else on it looks like a race.
+  it("leaves the room open when a member joins before the close a retried leave would make", async () => {
+    await store.createSession(session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] }));
+    joinJustBeforeClose(member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" }));
+
+    const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("active");
+    const after = (await store.getSession("qs_test"))!;
+    expect(after.closed, "closed over the member who had just joined").toBe(false);
+    expect(activeMembers(after).map((m) => m.memberId)).toEqual(["m_late"]);
   });
 });
 
@@ -602,7 +665,7 @@ describe("evictMember", () => {
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
-    vi.spyOn(store, "closeSession").mockRejectedValueOnce(new Error("close failed"));
+    vi.spyOn(store, "closeSessionIfEmpty").mockRejectedValueOnce(new Error("close failed"));
 
     await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("close failed");
 
@@ -744,6 +807,48 @@ describe("evictMember", () => {
     if (!r.ok) return;
     expect(r.value.codeRetired).toBeNull();
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
+  });
+
+  // The same window as the leave's, through the other operation that ends in the
+  // closing. Both reach it through one function, so a second copy of the
+  // read-then-close in either would pass the leave's test and fail this one.
+  it("leaves the room open when a member joins at the last moment before the eviction would close it", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member({ leftAt: Date.now() }),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
+    }));
+    joinJustBeforeClose(member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("active");
+    const after = (await store.getSession("qs_test"))!;
+    expect(after.closed, "closed over the member who had just joined").toBe(false);
+    expect(activeMembers(after).map((m) => m.memberId)).toEqual(["m_late"]);
+  });
+
+  // And through the eviction's own retry path, for the reason the leave's is
+  // tested above: the member is already out, so nothing is removed or announced,
+  // and the only thing left to do is the closing.
+  it("leaves the room open when a member joins before the close a retried eviction would make", async () => {
+    await store.createSession(session({
+      maxMembers: 4,
+      members: [member({ leftAt: Date.now() }),
+                member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+    joinJustBeforeClose(member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }));
+
+    const r = await evictMember(store, jesse, "qs_test", "m_peer");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.sessionStatus).toBe("active");
+    const after = (await store.getSession("qs_test"))!;
+    expect(after.closed, "closed over the member who had just joined").toBe(false);
+    expect(activeMembers(after).map((m) => m.memberId)).toEqual(["m_late"]);
   });
 
   it("closes the room when the evicted member was the last active one", async () => {
@@ -974,7 +1079,7 @@ describe("evictMember", () => {
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
-    vi.spyOn(store, "closeSession").mockRejectedValueOnce(new Error("close failed"));
+    vi.spyOn(store, "closeSessionIfEmpty").mockRejectedValueOnce(new Error("close failed"));
 
     await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("close failed");
 

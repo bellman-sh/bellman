@@ -271,6 +271,151 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    // ------------------------------------------------- closing an empty room
+    /**
+     * A room closes when nobody is left in it, and that has to be one operation.
+     * A caller that read the roster and then called closeSession would leave a
+     * window for a member to join in, and the room would close over them with
+     * its codes retired.
+     *
+     * The answer is whether the room is closed, not whether this call closed it:
+     * a room that was already closed answers true. That is what lets a retry of
+     * a close that died partway finish the work, instead of reading as a no-op.
+     */
+    it("closeSessionIfEmpty closes a room nobody is in, and reports that it did", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty retires every code when it closes, not just the default role's", async () => {
+      const s = session({
+        members: [member({ leftAt: Date.now() })],
+        joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+      });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.closeSessionIfEmpty(s.id));
+
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
+    });
+
+    it("closeSessionIfEmpty leaves a room alone while a member is in it, and says so", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.closed).toBe(false);
+      // A refusal must not retire the door: the codes are how the room's next
+      // member gets in.
+      expect(after.joinCodes).toEqual(s.joinCodes);
+      expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.session.id).toBe(s.id);
+    });
+
+    it("closeSessionIfEmpty counts a member as out only once they have left", async () => {
+      // One gone and one still in is not an empty room, and the one who stays
+      // leaving is what empties it.
+      const s = session({
+        maxMembers: 3,
+        members: [
+          member({ leftAt: Date.now() }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
+        ],
+      });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+
+      (await store.updateMember(s.id, "m_peer", { leftAt: Date.now() }));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * Closed wins over frozen. Freezing refuses writes into a room someone is
+     * in; it is no reason to keep a room open that has nobody left to thaw it
+     * for. A guard copied from addMember's would get this wrong.
+     */
+    it("closeSessionIfEmpty closes an empty room even while it is frozen", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })], frozenAt: Date.now() });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty is idempotent on a room that is already closed", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      (await store.closeSession(s.id));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * The idempotence above holds for an already-closed room that is also empty,
+     * and would hold with no check for `closed` at all. This is the room that
+     * check exists for: closed with a member still listed, which is what the
+     * read-then-close race left behind in rooms written before it was fixed.
+     * "Someone is in it" is a reason to refuse closing an open room. A room that
+     * is closed has nothing left to refuse, and has to say so.
+     */
+    it("closeSessionIfEmpty reports a closed room closed even with a member listed in it", async () => {
+      const s = session({ closed: true });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+    });
+
+    it("closeSessionIfEmpty ignores a session that does not exist", async () => {
+      await expect(store.closeSessionIfEmpty("qs_nope")).resolves.toBe(false);
+    });
+
+    /**
+     * The two halves of one guarantee, and the case that says there is no gap
+     * between them: closeSessionIfEmpty will not close an occupied room, and
+     * addMember will not seat anyone in a closed one. Neither is enough alone.
+     * With only the first, a join landing after the close seats a member in a
+     * room that is over. With only the second, a close that decided on an old
+     * roster closes over a member who joined meanwhile.
+     *
+     * Started together, each way round, so whichever lands first wins and the
+     * other has to give way. Exactly one may succeed: both is a closed room with
+     * a member in it, and neither is a join refused by a room that never closed.
+     */
+    it.each([
+      { first: "close", second: "join" },
+      { first: "join", second: "close" },
+    ])("lets exactly one of a close and a join win when started together, $first first", async ({ first }) => {
+      const s = session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
+      const close = () => store.closeSessionIfEmpty(s.id);
+      const join = () => store.addMember(s.id, joiner);
+
+      const [a, b] = await Promise.all(first === "close" ? [close(), join()] : [join(), close()]);
+      const closed = first === "close" ? a : b;
+      const joined = first === "close" ? b : a;
+
+      const after = (await store.getSession(s.id))!;
+      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(joined);
+      expect(after.closed).toBe(closed);
+      expect(after.members.some((m) => m.memberId === "m_late")).toBe(joined);
+    });
+
     // --------------------------------------------------------------- freezing
     /**
      * Frozen is not closed. A lapsed plan must be undoable without costing
@@ -468,6 +613,28 @@ export function describeStoreContract(
     it("indexes nothing when addMember refuses an unknown session", async () => {
       expect(await store.addMember("qs_ghost", member({ memberId: "m_no", userId: "u_jesse" })))
         .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    /**
+     * The other half of closeSessionIfEmpty. A join that read the room while it
+     * was open and writes after it closed would seat a member in a room that is
+     * over: the join reports success, and the roster lists someone in a closed
+     * room, which is the state the close was written to rule out. So the refusal
+     * is the write's own and not only the reader's.
+     *
+     * There are two ways to refuse in name only, and the assertions below are one
+     * each: a seat written and then refused leaves a ghost in the roster, and an
+     * index row written before the guard lists the room for a person who was
+     * turned away.
+     */
+    it("indexes nothing when addMember refuses a closed session", async () => {
+      await store.createSession(session({ id: "qs_shut", members: [] }));
+      await store.closeSession("qs_shut");
+
+      expect(await store.addMember("qs_shut", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect((await store.getSession("qs_shut"))?.members).toEqual([]);
       expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
     });
 

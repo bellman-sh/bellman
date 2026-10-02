@@ -247,6 +247,22 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     expect(legacyStorage.alarms).toEqual([]);
     expect(legacyStorage.snapshot()).toEqual(before);
   });
+
+  it("closeSessionIfEmpty reads it as gone, so it closes nothing and writes nothing", async () => {
+    // An EMPTY room, on purpose. With someone still in it the method declines to
+    // close whether or not it read through the guard, and a bypass of the guard
+    // would leave this test green.
+    const { legacy, legacyStorage } = await worldOn(
+      storeDo,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    const before = legacyStorage.snapshot();
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(false);
+
+    expect(legacyStorage.writes).toBe(0);
+    expect(legacyStorage.snapshot()).toEqual(before);
+  });
 });
 
 describe("a current row is untouched by the guard", () => {
@@ -316,6 +332,70 @@ describe("closing a session drops its registry rows", () => {
   });
 });
 
+describe("closing an empty room drops its registry rows, and only when it closes", () => {
+  /**
+   * The registry half of closeSessionIfEmpty, which only this store has. The
+   * decision is made inside SessionDO and the rows are dropped at the facade,
+   * the one place holding the registry handle. As above, only the raw registry
+   * can tell "the codes stopped working" from "the rows were dropped": a closed
+   * room's codes stop resolving whether or not anything cleared them.
+   */
+  it("drops every role's registry row when it closes the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({
+      id: "qs_emptied",
+      members: [member({ leftAt: Date.now() })],
+      joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+    });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the rows are there to drop")
+      .toEqual(expect.arrayContaining(["jc:BELL-AAAA-01", "jc:BELL-CCCC-03"]));
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).not.toContain("jc:BELL-AAAA-01");
+    expect(keys).not.toContain("jc:BELL-CCCC-03");
+  });
+
+  // The other direction, and the one that costs most when it is wrong: a room
+  // that stays open has to keep its door. The creator is still in this one.
+  it("leaves every registry row alone when someone is still in the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({ id: "qs_occupied", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).toContain("jc:BELL-AAAA-01");
+    expect(keys).toContain("jc:BELL-CCCC-03");
+    expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
+  });
+
+  // What a close leaves behind if it dies between SessionDO and the registry:
+  // the room closed, its rows standing. The retry has to read the room as
+  // closed AND still drop the rows. A call that answered "nothing to do" for an
+  // already-closed room would leave them for good, since no later call has any
+  // reason to look.
+  it("finishes a close whose registry rows were never dropped", async () => {
+    const { store, legacy, registryStorage } = await worldOn(
+      storeDo,
+      currentRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    await store.setJoinCode(LEGACY_ID, "peer_b", "BELL-AAAA-01", Date.now() + 60_000);
+    expect(await legacy.closeSessionIfEmpty(), "setup: closed inside the object only").toBe(true);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the row outlived the close")
+      .toContain("jc:BELL-AAAA-01");
+
+    expect(await store.closeSessionIfEmpty(LEGACY_ID)).toBe(true);
+
+    expect(Object.keys(registryStorage.snapshot())).not.toContain("jc:BELL-AAAA-01");
+  });
+});
+
 describe("negative control: the same calls with the guard removed", () => {
   /**
    * Without this, every "reads as gone" above could be a broken harness returning
@@ -361,6 +441,23 @@ describe("negative control: the same calls with the guard removed", () => {
     // Same subset-match pitfall as the test above: assert the clear itself, exactly.
     expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+
+  /**
+   * The same again for closeSessionIfEmpty's own guard test above, which could
+   * otherwise pass because the harness never gave the row to the method. The room
+   * is empty, so that with the guard gone the method has something to close.
+   */
+  it("lets closeSessionIfEmpty close it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+    const { legacy, legacyStorage } = await worldOn(
+      unguarded,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(true);
+
+    expect(legacyStorage.snapshot().session).toMatchObject({ closed: true });
   });
 });
 

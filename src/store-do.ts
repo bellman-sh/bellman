@@ -6,6 +6,7 @@ import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
+import { isActiveMember } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 
@@ -143,8 +144,12 @@ export class SessionDO extends DurableObject {
   async addMember(member: Member): Promise<boolean> {
     const s = await this.stored();
     if (!s) return false;
-    // Inside the object, so nothing can freeze between this read and the write.
+    // Inside the object, so nothing can freeze or close between this read and the
+    // write. Closed is the other half of closeSessionIfEmpty: that keeps a close
+    // from landing on an occupied room, and this keeps a join from landing on a
+    // closed one.
     if (s.frozenAt !== null) return false;
+    if (s.closed) return false;
     await this.ctx.storage.put("session", { ...s, members: [...s.members, member] });
     return true;
   }
@@ -167,6 +172,31 @@ export class SessionDO extends DurableObject {
     const s = await this.stored();
     if (!s) return;
     await this.ctx.storage.put("session", { ...s, closed: true });
+  }
+
+  /**
+   * Close the room unless somebody is still in it, and say whether it is closed
+   * when this returns: true when this call closed it or it already was.
+   *
+   * One invocation, and that is the point. Every await below is a storage
+   * operation, and workerd's input gate delivers no other request to this object
+   * while one is outstanding, so nothing can join between the check and the
+   * write. A caller that read the roster itself and then called closeSession
+   * would have handed the object exactly that gap. addMember's refusal of a
+   * closed room is the other half of the same guarantee.
+   *
+   * Marks the room closed and nothing else. The join codes stay in the record
+   * for the facade to retire, because it is the one holding the registry handle:
+   * it clears them once this returns true, and the retry of a close that died in
+   * between finds them still listed and finishes the job.
+   */
+  async closeSessionIfEmpty(): Promise<boolean> {
+    const s = await this.stored();
+    if (!s) return false;
+    if (s.closed) return true;
+    if (s.members.some(isActiveMember)) return false;
+    await this.ctx.storage.put("session", { ...s, closed: true });
+    return true;
   }
 
   async freezeSession(frozenAt: number | null): Promise<void> {
@@ -740,9 +770,9 @@ export class DurableObjectStore implements BellmanStore {
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
     const added = await this.session(sessionId).addMember(member);
-    // Gated on the result: addMember refuses an unknown or frozen session, and
-    // indexing regardless would put rooms into a person's joined listing that
-    // they were turned away from.
+    // Gated on the result: addMember refuses an unknown, frozen or closed
+    // session, and indexing regardless would put rooms into a person's joined
+    // listing that they were turned away from.
     //
     // Attempted after the seat is committed, and a failure is logged rather than
     // thrown (see writeIndex): the caller still has the join event and the audit
@@ -766,6 +796,22 @@ export class DurableObjectStore implements BellmanStore {
     // SessionDO holds no registry reference, so it cannot drop registry rows.
     // We clear them here at the boundary where we have access to the registry.
     await this.clearJoinCodes(sessionId);
+  }
+
+  async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
+    // The decision is SessionDO's, made in one invocation. What follows it is
+    // cleanup in a second object, with no transaction spanning the two (the gap
+    // docs/ARCHITECTURE.md section 9 describes). A Worker that dies between them
+    // leaves a stale registry row and not an open door: getSessionByJoinCode
+    // refuses a closed session whatever the registry still holds.
+    const closed = await this.session(sessionId).closeSessionIfEmpty();
+    // Only a closed room gives up its codes, as closeSession does. A room left
+    // open keeps them, because they are how its next member gets in. And a room
+    // that was ALREADY closed gives them up too, not only one this call closed:
+    // the retry of a close that died before the registry was reached finishes
+    // the clear here, from the codes SessionDO left in the record.
+    if (closed) await this.clearJoinCodes(sessionId);
+    return closed;
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {

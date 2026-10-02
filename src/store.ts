@@ -12,6 +12,16 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt">>;
 
 /**
+ * Whether a member is still in the room: they have not left.
+ *
+ * Here, and not in rooms.ts, because the stores now decide a room is empty
+ * (`closeSessionIfEmpty`) and rooms.ts imports this module, not the reverse.
+ * `activeMembers` is built on it, so the members rooms.ts counts and the members
+ * a close is decided on are one reading of `leftAt` and cannot drift apart.
+ */
+export const isActiveMember = (m: Member): boolean => m.leftAt === null;
+
+/**
  * Storage boundary. Everything stateful goes through this interface so the
  * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
  * without touching tool logic.
@@ -82,19 +92,52 @@ export interface BellmanStore {
   /** Issue a code for one role, retiring only that role's previous code. False means frozen. */
   setJoinCode(sessionId: string, role: string, code: string, expiresAt: number): Promise<boolean>;
   /**
-   * Append a member to a session, unless it is frozen. False means frozen.
+   * Append a member to a session, unless it is frozen or closed. False means
+   * refused — frozen, closed, or no such session — and a caller that has to say
+   * which reads the session again.
    *
-   * The refusal is here rather than only in the tool, because the tool reads
+   * The refusals are here rather than only in the tool, because the tool reads
    * the session and then writes, and a freeze landing in that gap would let a
-   * frozen room grow — which is the one thing freezing is for. Unlike the
+   * frozen room grow — which is the one thing freezing is for. A close landing in
+   * it is the same gap with a worse result: a member seated in a room that is
+   * over. This is the other half of `closeSessionIfEmpty`, which keeps a close
+   * from landing on an occupied room; the pair is sound only together. Unlike the
    * cross-object races on #59 and #62, both halves live in the same object, so
    * this one can simply be made not to have a gap.
    */
   addMember(sessionId: string, member: Member): Promise<boolean>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
-  /** Mark a session closed. Idempotent. */
+  /**
+   * Mark a session closed, whoever is in it. Idempotent. To close a room because
+   * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then
+   * calling this is the gap it exists to close.
+   */
   closeSession(sessionId: string): Promise<void>;
+  /**
+   * Close a session if nobody is in it, and say whether it is closed when this
+   * returns: true when this call closed it or it already was, false when a
+   * member is still in it or there is no such session.
+   *
+   * The check and the write are one operation, and cannot be two. A caller that
+   * read the roster, saw it empty and then called `closeSession` would leave a
+   * window for a member to join in, and the room would close over them with its
+   * codes retired. Here the Durable Objects store decides inside the one object
+   * that owns the session, and MemoryStore does not yield between the two.
+   * `addMember`'s refusal of a closed session is the other half: this keeps a
+   * close from landing on an occupied room, that keeps a join from landing on a
+   * closed one, and neither is enough alone.
+   *
+   * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
+   * like any other: freezing refuses writes into a room someone is in, and an
+   * empty one is over either way.
+   *
+   * An already-closed room answers true whoever is listed in it, and not only a
+   * room this call closed. A close can die after the room is marked closed and
+   * before the registry drops its codes, and the retry has to read the room as
+   * closed to finish that: "nothing to do" would leave the rows for good.
+   */
+  closeSessionIfEmpty(sessionId: string): Promise<boolean>;
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
@@ -323,6 +366,10 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     if (s.frozenAt !== null) return false;
+    // Closed is refused for the reason frozen is: the caller read the room before
+    // this write, and a close in the gap would otherwise seat a member in a room
+    // that is over. closeSessionIfEmpty is the other half.
+    if (s.closed) return false;
     s.members.push(detach(member));
     // After the guards, so a refused add leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
@@ -346,10 +393,34 @@ export class MemoryStore implements BellmanStore {
   async closeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.closeNow(s);
+  }
+
+  async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return false;
+    // No await from here to the write, deliberately. The check and the close are
+    // one operation, and a yield between them is the window a join lands in: the
+    // same rule, and the same reason, as waitForEvents and the guarded grant
+    // writes. The Durable Objects store gets it from the input gate instead.
+    if (s.closed) return true;
+    if (s.members.some(isActiveMember)) return false;
+    this.closeNow(s);
+    return true;
+  }
+
+  /**
+   * The close itself, with no awaits in it, so both public closers can call it
+   * without yielding between their guard and their write. The same arrangement,
+   * and the same reason, as appendNow.
+   *
+   * Agrees with expireIfDue: a closed room's codes stop resolving AND stop
+   * occupying the index, rather than relying on the `closed` guard alone.
+   */
+  private closeNow(s: Session): void {
     s.closed = true;
-    // Agree with expireIfDue: a closed room's codes stop resolving AND stop
-    // occupying the index, rather than relying on the `closed` guard alone.
-    await this.clearJoinCodes(sessionId);
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    s.joinCodes = {};
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {

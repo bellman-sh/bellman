@@ -1239,6 +1239,114 @@ export function describeStoreContract(
       },
     );
 
+    // --------------------------------------------- the sender's report stamp
+    /**
+     * A `progress` send leaves two facts behind — the event, and the sending
+     * member's own `lastReportAt` — and losing the second leaves that member
+     * named silent for having answered.
+     *
+     * `bellman_send` used to patch the stamp with a second `updateMember` call
+     * after the append returned. Under Durable Objects those are two RPCs into
+     * two transactions, and `appendEvent` wakes listeners BEFORE the second one
+     * runs: a due alarm could read the committed progress event while the stale
+     * stamp still marked that member silent. So the credit is an argument to the
+     * append rather than a call after it, and the stamp rides in the event's own
+     * transaction.
+     *
+     * **These cases do not claim to prove the atomicity**, which is not
+     * observable from outside the store — MemoryStore has no gap to open and no
+     * way to show one, and the two-write hazard lives inside `SessionDO`'s
+     * transaction. What they pin is everything a caller CAN see, which is what
+     * has to be identical across implementations: the stamp lands, a replay
+     * lands it too, it never moves backwards, and an append not asked to credit
+     * moves nothing.
+     */
+    describe("crediting the sender's report", () => {
+      const reported = (over: Record<string, unknown> = {}) => ({
+        type: "progress" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+        fromLabel: "jesse", payload: { note: "on the migration" }, refId: null, ...over,
+      });
+      const stampOf = async (id: string) =>
+        (await store.getSession(id))!.members
+          .find((m) => m.memberId === "m_creator")!.lastReportAt;
+      const unstamped = () => session({ members: [member({ lastReportAt: undefined })] });
+
+      it("stamps the sender at the event's own time", async () => {
+        const s = unstamped();
+        (await store.createSession(s));
+
+        const event = (await store.appendEvent(s.id, reported(), { creditReport: true }))!;
+
+        expect(await stampOf(s.id)).toBe(event.at);
+      });
+
+      /** Type-agnostic: the store credits what it is ASKED to, never what it reads. */
+      it("leaves the stamp alone when the append does not ask for it", async () => {
+        const s = unstamped();
+        (await store.createSession(s));
+
+        (await store.appendEvent(s.id, reported()));
+
+        expect(await stampOf(s.id)).toBeUndefined();
+      });
+
+      /**
+       * A replay re-asserts the stamp; it is not a no-op for it. The old code
+       * patched inside `if (!replayed)`, so a retry skipped the credit outright
+       * and a stamp the first attempt never landed was lost for good rather than
+       * merely late.
+       *
+       * The `updateMember` below stands in for however the stamp came to be
+       * behind — a row written by a build that patched separately, or any
+       * out-of-order write. What the case pins is the promise: after a credited
+       * append, a credited replay of the same key says the same thing about the
+       * sender as the append did.
+       */
+      it("credits a replayed key too, so a retry repairs a stamp left behind", async () => {
+        const s = unstamped();
+        (await store.createSession(s));
+
+        const first = await store.appendEventOnce(
+          s.id, reported(), "p-0001", { creditReport: true },
+        );
+        if (first.outcome !== "appended") throw new Error(`first send said ${first.outcome}`);
+        expect(await stampOf(s.id)).toBe(first.event.at);
+
+        (await store.updateMember(s.id, "m_creator", { lastReportAt: first.event.at - 60_000 }));
+
+        const retry = await store.appendEventOnce(
+          s.id, reported(), "p-0001", { creditReport: true },
+        );
+
+        expect(retry.outcome).toBe("replayed");
+        expect(await stampOf(s.id)).toBe(first.event.at);
+        // And still one event: the repair is a stamp, not a second append.
+        expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+      });
+
+      /**
+       * Monotonic. A replayed or out-of-order credit must not un-credit a LATER
+       * report: the member answered at the later time, and moving the stamp back
+       * would make the next tick name it silent for a report it had made.
+       */
+      it("never moves the stamp backwards", async () => {
+        const s = unstamped();
+        (await store.createSession(s));
+
+        const first = await store.appendEventOnce(
+          s.id, reported(), "p-0001", { creditReport: true },
+        );
+        if (first.outcome !== "appended") throw new Error(`first send said ${first.outcome}`);
+
+        const later = first.event.at + 120_000;
+        (await store.updateMember(s.id, "m_creator", { lastReportAt: later }));
+
+        (await store.appendEventOnce(s.id, reported(), "p-0001", { creditReport: true }));
+
+        expect(await stampOf(s.id)).toBe(later);
+      });
+    });
+
     // ------------------------------------------------------------- long-poll
     it("waitForEvents returns immediately when events already exist", async () => {
       const s = session();

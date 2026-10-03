@@ -116,6 +116,12 @@ describe("bellman_send type=progress", () => {
    * A retry of a send that already landed must not undo a later report. The stamp
    * is the event's own time, so applying it twice would move lastReportAt back to
    * the first send's — and a tick would then ask a member that had answered.
+   *
+   * What holds it is `creditReport`'s monotonicity, in src/store.ts, and NOT a
+   * skipped patch: the replay credits, deliberately, because a caller retrying
+   * cannot know whether the first attempt landed the stamp. Break the `was >= at`
+   * guard and this case goes red, which is what pins the credit as reaching the
+   * store on the replay path at all.
    */
   it("does not move lastReportAt backwards when an earlier send is replayed", async () => {
     const p = await pairUp(h);

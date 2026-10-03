@@ -749,6 +749,62 @@ describe("SessionDO.appendEventOnce", () => {
     expect(rows[ik[0]]).toMatchObject({ cursor: 1 });
   });
 
+  /**
+   * The report stamp joins them, for the same reason one layer up.
+   *
+   * It used to be a second `s.updateMember(...)` call in `bellman_send`, AFTER
+   * the append returned — a second Durable Object RPC into a second transaction,
+   * with `#wake` firing between the two. A due alarm could therefore read the
+   * committed progress event while the stale stamp still named that member
+   * silent, and a retry skipped the patch outright, so a stamp the first attempt
+   * never landed was lost for good.
+   *
+   * Four keys in ONE call is the assertion, and it is the one the contract suite
+   * cannot make: that suite proves the stamp is THERE afterwards, which a second
+   * put satisfies just as well. Only the invocation count can tell them apart.
+   */
+  it("writes the report stamp in the same put as the event and its key", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const write = await store.appendEventOnce(
+      LEGACY_ID,
+      keyed({ type: "progress", payload: { note: "on the migration" } }),
+      "send-0001",
+      { creditReport: true },
+    );
+
+    // The event, the cursor, the key row and the session record.
+    expect(legacyStorage.writes - before).toBe(4);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+
+    if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+    const row = legacyStorage.snapshot().session as {
+      members: { memberId: string; lastReportAt?: number }[];
+    };
+    expect(row.members.find((m) => m.memberId === "m_creator")?.lastReportAt)
+      .toBe(write.event.at);
+  });
+
+  /**
+   * And an append nobody asked to credit writes no session row at all. Three
+   * keys, as the case above this block has it — the stamp is not a cost every
+   * send pays, and the store does not read the event's type to decide.
+   */
+  it("writes no session row for an append that asks for no credit", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    await store.appendEventOnce(
+      LEGACY_ID, keyed({ type: "progress", payload: { note: "unasked" } }), "send-0001",
+    );
+
+    expect(legacyStorage.writes - before).toBe(3);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+  });
+
   it("namespaces the key row per member", async () => {
     const { store, legacyStorage } = await worldOn(storeDo, currentRow());
 

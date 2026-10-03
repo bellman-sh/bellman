@@ -15,7 +15,10 @@ import {
   leaveRoom, revokeInvite, seatedMembers, sessionStatus, touchMember,
 } from "./rooms.js";
 import { STALE_AFTER_MS, presenceOf } from "./presence.js";
-import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
+import {
+  CONNECT_TOKEN_TTL, JOIN_CODE_TTL,
+  type AppendExtras, type BellmanStore, type EventWrite,
+} from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -267,9 +270,10 @@ class FrozenError extends Error {
 async function appendOrFrozen(
   s: BellmanStore,
   sessionId: string,
-  e: Parameters<BellmanStore["appendEvent"]>[1]
+  e: Parameters<BellmanStore["appendEvent"]>[1],
+  extras?: AppendExtras
 ): Promise<SessionEvent> {
-  const event = await s.appendEvent(sessionId, e);
+  const event = await s.appendEvent(sessionId, e, extras);
   if (!event) throw new FrozenError();
   return event;
 }
@@ -776,12 +780,32 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         refId: ref_id ?? null,
       };
 
+      /**
+       * A `progress` send credits this member's own `lastReportAt`, in the
+       * append's own operation.
+       *
+       * It was a second `s.updateMember(...)` call after the append, which is two
+       * Durable Object RPCs into two transactions — and `appendEvent` wakes
+       * listeners before the second one runs, so a due alarm could read the
+       * committed progress event while the stale stamp still named this member
+       * silent. Worse, the patch sat inside the `if (!replayed)` block below, so
+       * an idempotent retry skipped it outright: a stamp the first attempt never
+       * landed was lost for good rather than merely late.
+       *
+       * A flag rather than the store reading `draft.type`: nothing in either
+       * store branches on an event's kind, and this is the one write that would
+       * have made it. The decision stays here, beside the verb check and the
+       * payload validation that already established what this send is.
+       */
+      const extras: AppendExtras | undefined =
+        type === "progress" ? { creditReport: true } : undefined;
+
       let event: SessionEvent;
       let replayed = false;
       if (idempotency_key) {
         let write: EventWrite;
         try {
-          write = await s.appendEventOnce(session_id, draft, idempotency_key);
+          write = await s.appendEventOnce(session_id, draft, idempotency_key, extras);
         } catch (err) {
           // An idempotency key means the payload has to be fingerprinted, and a
           // payload this deeply nested cannot be. Said here rather than left to
@@ -805,7 +829,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         event = write.event;
         replayed = write.outcome === "replayed";
       } else {
-        event = await appendOrFrozen(s, session_id, draft);
+        event = await appendOrFrozen(s, session_id, draft, extras);
       }
 
       // Nothing below happens twice. A replay's original call did all of it,
@@ -815,16 +839,9 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (updatedBrief) {
           await s.updateMember(session_id, member_id, { brief: updatedBrief });
         }
-        // Patched here rather than inside appendEvent, so the store stays
-        // type-agnostic — nothing in it branches on an event's kind. A failed
-        // patch after a committed event leaves lastReportAt un-advanced, so the
-        // member looks like it reported EARLIER than it did and the next tick
-        // asks again; a store that inspected payloads to find out would be the
-        // worse trade. The cost of that failure is one redundant ask, which is
-        // the right direction for it to fail in.
-        if (type === "progress") {
-          await s.updateMember(session_id, member_id, { lastReportAt: event.at });
-        }
+        // The report stamp is NOT here. It rides in the append, for the reason
+        // `extras` above gives — including that this block is skipped on a
+        // replay, which is exactly where it went missing.
         await audit(s, session, identity, `sent_${type}`, {
           chars: serialized.length,
           ...(ref_id ? { ref_id } : {}),

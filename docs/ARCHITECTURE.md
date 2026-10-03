@@ -603,7 +603,13 @@ a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
 `moveGrant`, `closeSessionIfEmpty`, `seatMember`, `addMember` and the two
-appends are single transactions. `updateMember`, `closeSession` and
+appends are single transactions. An append carries the rows that belong with its
+event — the cursor, an idempotency key's record, and for a `progress` send the
+sending member's own `lastReportAt`. That last one was a second `updateMember`
+call after the append returned, which is a second transaction with the wake
+between them: a due tick could read the committed event while the stale stamp
+still named that member silent, and a retry skipped the patch outright.
+`updateMember`, `closeSession` and
 `freezeSession` are single invocations that await only storage. The input gate
 covers those, and a transaction would be the stronger form: it holds even if an
 await on anything but storage were ever put between the read and the write.

@@ -182,7 +182,7 @@ the upgrade headers, because a non-upgrade request is answered 426 before any
 of the interesting checks run — which means the probe can itself be answered
 101, so whatever socket that hands back must be destroyed rather than leaked.
 
-**Two more behaviours worth not rediscovering.** On Node 22 a refused handshake
+**Two more behaviours of the same API.** On Node 22 a refused handshake
 emits `error` and then no `close` at all, and `readyState` stays 0: the failure
 is reported, but a client that waits for `close` waits for ever (a first
 measurement waited two minutes for one). Node 25 follows the `error` with a

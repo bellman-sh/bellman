@@ -460,13 +460,15 @@ revoked grant would hold for the session's whole life."
 
 ### Task 2: The same three methods on `AuthDO`, with a sweep
 
+> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `feafe33` and `f386e69`. They add what the blocks do not have: `AuthStorage` declares the session methods (Task 1 could not, because widening the interface without an implementation reds `typecheck:worker`); a fourth method, `replanSession`, which Task 6's write-back calls so that a sign-out landing between the touch and the write-back is not undone; tests for it in both programs; and three tests for the no-yield constraint, each a sign-out in flight against `touchSession` or `replanSession`. The sweep test and Step 7 are corrected in place, because the test as first asked for could not fail. Where a block and a commit differ, the commit wins.
+
 **Files:**
 - Modify: `src/oauth/store.ts` (`AuthDO`, `AuthStore`)
 - Test: `worker-tests/auth-session.test.ts` (create)
 
 **Interfaces:**
 - Consumes: `PanelSession`, `sessionDead`, `touchDue` from Task 1; the existing `sweepPage`, `SweepStorage` and `PURGE_BATCH`.
-- Produces: `putSession`, `touchSession`, `deleteSession` on both `AuthDO` and the `AuthStore` facade, with behavior identical to `MemoryAuthStore`.
+- Produces: `putSession`, `touchSession`, `replanSession` and `deleteSession`, declared on `AuthStorage` and implemented on `AuthDO` and the `AuthStore` facade, with behavior identical to `MemoryAuthStore`, which gains `replanSession` here.
 
 - [ ] **Step 1: Read how an existing worker test reaches `AuthDO`**
 
@@ -479,8 +481,9 @@ This is the only program that can exercise the real object: anything importing `
 Create `worker-tests/auth-session.test.ts`. Mirror the import and binding style the previous step showed; the assertions are the point:
 
 ```ts
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
+import type { AuthDO } from "../src/oauth/store.js";
 import {
   SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS, type PanelSession,
 } from "../src/oauth/storage.js";
@@ -490,6 +493,13 @@ const IDENTITY: Identity = {
   userId: "u_github_4242", orgId: null, plan: "free", role: "member",
   label: "jesse@example.dev",
 };
+
+/**
+ * A fixed instant in the past. putSession sweeps with the object's own clock, so
+ * a session built from this is long dead by the time the sweep looks at it, and a
+ * second put on the same object would remove the first. The tests that use it
+ * therefore put once per object; the sweep tests build theirs from Date.now().
+ */
 const T0 = 1_700_000_000_000;
 
 const panelSession = (over: Partial<PanelSession> = {}): PanelSession => ({
@@ -500,6 +510,18 @@ const panelSession = (over: Partial<PanelSession> = {}): PanelSession => ({
 
 /** A fresh AuthDO per test, so one test's sessions are not another's. */
 const auth = (name: string) => env.AUTH.get(env.AUTH.idFromName(name));
+
+/**
+ * Which session ids an object has stored, read from inside it. For what
+ * touchSession cannot show: it drops a dead session itself when it reads one, so
+ * a record that should not be there still comes back undefined, and an assertion
+ * made through it passes whether or not the record was ever stored. Read this
+ * before touching, or the touch will have cleaned up what it was meant to find.
+ */
+const storedIds = (name: string) =>
+  runInDurableObject(auth(name), async (_i: AuthDO, ctx) => [
+    ...(await ctx.storage.list({ prefix: "sess:" })).keys(),
+  ]);
 
 describe("AuthDO sessions", () => {
   it("stores and returns a session", async () => {
@@ -593,30 +615,50 @@ describe("AuthDO sessions", () => {
       expect(await o.touchSession("sid", now), `dead at +${now - T0}ms`).toBeDefined();
     }
   });
+});
 
+describe("AuthDO session sweep", () => {
   /**
-   * The sweep, which the conformance assertions above do not reach. Its
-   * predicate has to be sessionDead rather than #purge's expires_at test: a
-   * session can die of idleness with its ceiling a week away, and the
-   * expires_at form would leave it stored for the full seven days.
+   * Store `dead`, then a live session. putSession sweeps before it writes, so
+   * the second put is the one that runs the sweep over the first. The result is
+   * read with storedIds: a session the sweep left behind still comes back
+   * undefined from touchSession, which drops it on read.
    */
-  it("sweeps a session that died of idleness, not only one past its ceiling", async () => {
-    const o = auth("s-sweep");
-    const now = Date.now();
-    await o.putSession("stale", panelSession({
-      created_at: now - 2 * SESSION_IDLE_MS,
-      last_used_at: now - 2 * SESSION_IDLE_MS,
-      expires_at: now + SESSION_TTL_MS,
-    }));
-
-    // putSession sweeps before it writes, so a second put runs the sweep.
-    await o.putSession("fresh", panelSession({
+  async function putDeadThenLive(name: string, now: number, dead: Partial<PanelSession>) {
+    const o = auth(name);
+    await o.putSession("dead", panelSession(dead));
+    await o.putSession("live", panelSession({
       created_at: now, last_used_at: now, replanned_at: now,
       expires_at: now + SESSION_TTL_MS,
     }));
+  }
 
-    expect(await o.touchSession("stale", now)).toBeUndefined();
-    expect(await o.touchSession("fresh", now)).toBeDefined();
+  /**
+   * The sweep's predicate has to be sessionDead rather than #purge's expires_at
+   * test: a session can die of idleness with its ceiling a week away, and the
+   * expires_at form would leave it stored for the full seven days.
+   */
+  it("sweeps a session that died of idleness, not only one past its ceiling", async () => {
+    const now = Date.now();
+    await putDeadThenLive("s-sweep-idle", now, {
+      created_at: now - 2 * SESSION_IDLE_MS,
+      last_used_at: now - 2 * SESSION_IDLE_MS,
+      expires_at: now + SESSION_TTL_MS,
+    });
+
+    expect(await storedIds("s-sweep-idle")).toEqual(["sess:live"]);
+  });
+
+  // The other clause. Just used, so it is not idle; only the ceiling kills it.
+  it("sweeps a session past its ceiling, although it was just used", async () => {
+    const now = Date.now();
+    await putDeadThenLive("s-sweep-ceiling", now, {
+      created_at: now - SESSION_TTL_MS - 1_000,
+      last_used_at: now,
+      expires_at: now - 1,
+    });
+
+    expect(await storedIds("s-sweep-ceiling")).toEqual(["sess:live"]);
   });
 });
 ```
@@ -733,7 +775,7 @@ export type {
 - [ ] **Step 6: Run the worker tests and confirm they pass**
 
 Run: `npm run test:worker`
-Expected: PASS, 12 new tests, and every pre-existing worker test still green.
+Expected: PASS, 13 new tests, and every pre-existing worker test still green.
 
 - [ ] **Step 7: Prove the sweep predicate matters**
 
@@ -744,7 +786,17 @@ Temporarily change `#purgeSessions`'s decide function to the `expires_at` form `
 ```
 
 Re-run `npm run test:worker`.
-Expected: "sweeps a session that died of idleness…" FAILS — `stale` is still readable, because its ceiling is a week away. The other eleven still pass, which is the point: the sweep is not covered by them. Restore `sessionDead`.
+Expected: exactly one test FAILS, "sweeps a session that died of idleness…": `dead` is still stored, because its ceiling is a week away. The assertion that discriminates is `storedIds`, the read of the object's own storage, and no assertion made through `touchSession` could. `touchSession` drops a dead session itself when it reads one, so it returns `undefined` whether the sweep deleted the record, used the `expires_at` form, or never ran. The other twelve pass, which is the point: nothing else in the file covers the sweep. Restore `sessionDead`.
+
+Then try the opposite mistake, a sweep that looks at idleness alone:
+
+```ts
+      (value) => (now - value.last_used_at > 24 * 60 * 60 * 1000 ? { action: "delete" } : { action: "keep" })
+```
+
+Expected: exactly "sweeps a session past its ceiling, although it was just used" FAILS. Restore `sessionDead`.
+
+An assertion made through `touchSession` passes under both of these mutations, under a sweep that never deletes, and with `putSession` not sweeping at all. If you write another sweep assertion, run it against all four before trusting it.
 
 - [ ] **Step 8: Verify and commit**
 
@@ -1644,7 +1696,7 @@ nothing anywhere saying why."
 - Test: `tests/panel-session.test.ts` (extend)
 
 **Interfaces:**
-- Consumes: `readSessionCookie` (Task 4); `touchSession`, `replannedAt`, `PanelSession`, `SESSION_TTL_MS` (Task 1); the existing `replanOnRefresh` and `ACCESS_TOKEN_TTL_SECONDS`.
+- Consumes: `readSessionCookie` (Task 4); `touchSession` and `replanSession`, declared on `AuthStorage` in Task 2; `replannedAt`, `PanelSession`, `SESSION_TTL_MS` (Task 1); the existing `replanOnRefresh` and `ACCESS_TOKEN_TTL_SECONDS`.
 - Produces: `caller(request, config)` returning `{ identity: Identity; planSource: string; via: "bearer" | "cookie" } | null`, and a module-private `sessionCaller`. Plus the shared test helpers below.
 
 - [ ] **Step 1: Create the shared test helpers**
@@ -1937,13 +1989,17 @@ async function sessionCaller(
   // record rather than re-resolving again. Best effort: a failed write costs a
   // repeated re-resolution, not a wrong answer, and must not cost the human
   // their session.
+  //
+  // replanSession, not putSession. Re-resolving can await the registry, so a
+  // sign-out can land between the touch above and this write, and putSession
+  // would write `stored` back whole and recreate the session the human just
+  // ended. replanSession merges the three fields into what is stored now and
+  // does nothing if the record is gone. Merging also leaves alone a
+  // last_used_at that another request bumped in the same gap, which a
+  // whole-record write would revert. This request is still answered, since it
+  // began before the sign-out; the next one finds no session.
   await config.store
-    .putSession(id, {
-      ...stored,
-      identity: current.identity,
-      plan_source: current.source,
-      replanned_at: now,
-    })
+    .replanSession(id, current.identity, current.source, now)
     .catch((err) => console.error("could not store a re-resolved panel session:", err));
   return { identity: current.identity, planSource: current.source, via: "cookie" };
 }
@@ -3255,6 +3311,7 @@ BODY
 | Decision 4 — `/admin/*` bearer-only | 9 |
 | `PanelSession`, `sessionDead`, `replannedAt` | 1 |
 | Three `AuthStorage` methods; `touchSession` atomicity; the write skip | 1, 2 |
+| `replanSession`: a sign-out between the touch and the write-back is not undone | 2 (the store), 6 (the caller) |
 | The session sweep on `sessionDead` | 2 |
 | `caller` gains `via`; re-resolution on the token's bound | 6 |
 | What a session cannot carry | 6 (structural), 9 (asserted) |

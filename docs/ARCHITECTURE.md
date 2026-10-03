@@ -329,6 +329,13 @@ bus. So a socket that fails does not undo the collapse into one connection per
 room, and a bus that fails does not cost anyone their messages. Neither is a
 dependency (invariant 6 below).
 
+And it can be chosen rather than waited for: `BELLMAN_BUS=off` makes every
+bridge poll as it did before there was a bus. A delivery path with no way out
+is a bad trade, so the escape hatch is a variable rather than a code change.
+An unrecognised value reads as off, deliberately unlike `BELLMAN_DELIVERY`'s
+unknown-means-default: a typo should leave a room on the path that has been
+in production for months, not move it onto the new one.
+
 ## 5. Storage
 
 State lives behind one interface, `BellmanStore` (`src/store.ts`). Two

@@ -37,6 +37,13 @@ the date in `wrangler.toml` would make the tests run on a different runtime
 contract than production, which is the one thing this program exists to avoid —
 so the override raises workerd instead. Bump both together.
 
+**`evictAllDurableObjects()` is the teardown that keeps sockets.**
+`abortAllDurableObjects()` closes an accepted WebSocket (1006, unclean), so it
+cannot be used to simulate hibernation; `evictAllDurableObjects()` hibernates
+them and is what `ws-delivery.test.ts` uses. The two are not
+interchangeable — evict also drains in-flight long polls, so a test that needs
+an in-memory waiter destroyed still wants abort.
+
 **The pool's config API changed at 0.22.0.** There is no
 `@cloudflare/vitest-pool-workers/config` subpath and no `defineWorkersConfig`;
 it is a plain Vite plugin, `cloudflareTest()`. `isolatedStorage` is gone too,

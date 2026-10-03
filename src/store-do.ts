@@ -9,6 +9,7 @@ import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
 import { isActiveMember } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
+import { publicEvent } from "./public-event.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 
@@ -45,6 +46,35 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 const deliveredKey = (intentId: string) => `d:${intentId}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
+
+/**
+ * What a hibernating socket remembers. The runtime rejects more than 16 KB;
+ * fetch says how close this can get.
+ *
+ * Nothing reads `memberIds` today. wake() reads only `cursor` and carries the
+ * rest along unchanged, and every member of a room receives every event (spec
+ * D1a), so delivery does not depend on whose socket it is. It is kept for what
+ * has to find a socket by member, the use in view being to close the sockets of
+ * a member who has left. Nothing does that yet.
+ *
+ * Whatever reads it first can trust it, because of where it comes from:
+ * membersOf answered it, and fetch received it in a request the Worker built
+ * (see the /ws route in worker.ts), never in a header the client sent. A
+ * forged x-bellman-members reaches nothing. tests/worker-ws.test.ts pins that
+ * the Worker never forwards a caller's request; it guards the day this field is
+ * read, not a path that is exploitable now. If the field is removed, that test
+ * can go with it; until then, keep both.
+ */
+type SocketAttachment = { memberIds: string[]; cursor: number };
+
+/**
+ * WebSocket.readyState for a socket on its way out (CLOSING) or gone (CLOSED).
+ * Literals, and not WebSocket.CLOSING and WebSocket.CLOSED, so this does not
+ * depend on which WebSocket global the program has: the Workers runtime's, or
+ * Node's under the tests. Both use 2 and 3.
+ */
+const WS_CLOSING = 2;
+const WS_CLOSED = 3;
 
 /**
  * What a join-code change owes the registry's index, as outbox intents.
@@ -91,6 +121,49 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     (row) => this.#deliver(row),
     () => this.derivedDue()
   );
+
+  /**
+   * Registers the ping auto-response, once per construction and not in fetch
+   * beside the accept.
+   *
+   * The runtime answers a text frame "ping" with "pong" itself: no JavaScript
+   * runs and this object is not constructed. Without it a client keepalive
+   * reaches this object, and a ping to an evicted one revives it (measured),
+   * which undoes the saving this socket exists for. Delivery would still work,
+   * so nothing on the delivery path would show it; a test pins the registration
+   * for that reason, and what a revival costs is the spec's unmeasured billing
+   * risk. Any frame that is not that text reaches webSocketMessage and is
+   * closed, so a client's keepalive has to be exactly that.
+   *
+   * Where to register was settled against workerd 1.20260926.1 at compat date
+   * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
+   * left idle for 25 to 30 s so they were evicted. The Worker counted
+   * constructor runs from outside the objects, which is how "answered by the
+   * runtime" was told from "answered by us". All of it ran in local workerd
+   * under `wrangler dev`; production is unmeasured. "Measured" in this comment,
+   * in the socket handlers below and in wake() means that setup.
+   *  - Registered here, before any socket exists, it is answered by the
+   *    runtime. A control that never registered had the ping delivered to its
+   *    handler, so the probe could tell the two apart.
+   *  - The runtime holds the pair for the object, not per socket and not in
+   *    this instance. A registration made after a socket was accepted covers
+   *    that socket, and an object revived by a frame or by a request, whose
+   *    constructor had not set it, still had it. So registering in fetch would
+   *    work too, and setting it again on every revival here is redundant, not
+   *    required.
+   *  - It does not keep an idle object resident. One that registered and never
+   *    held a socket was evicted like one that never registered.
+   *
+   * Here rather than in fetch because it is state of the object. This covers a
+   * socket however it is accepted, fetch being the only accept site today, and
+   * leaves fetch's read, attach, accept and send to be about the socket. The
+   * cost is one small object and one call per construction, a poll-only room's
+   * included. Not measured.
+   */
+  constructor(ctx: DurableObjectState, env: BellmanEnv) {
+    super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+  }
 
   /**
    * The one raw read of the "session" record. Everything in this class reads it
@@ -173,14 +246,187 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     }
   }
 
-  async getSession(): Promise<Session | undefined> {
+  async getSession(): Promise<StoredSession | undefined> {
     const s = await this.stored();
     if (!s) return undefined;
     await this.#expireIfDue(s, Date.now());
-    const fresh = await this.stored();
-    if (!fresh) return undefined;
-    return { ...fresh, events: await this.events(0) };
+    // Re-read: expireIfDue may have written closed=true and cleared the codes.
+    return this.stored();
   }
+
+  /**
+   * Which members this user owns here, and whether the room is closed.
+   *
+   * The authorization check for a /ws upgrade. Deliberately mirrors
+   * findMember (src/server.ts), leftAt and all: bellman_sync serves a
+   * member who has left, and two delivery paths that disagree about who may
+   * watch is exactly the drift the spec names as its standing risk.
+   *
+   * Two reasons the route asks here rather than calling getSession. This
+   * returns two fields, not the whole record (live join codes and every
+   * member's brief) across an RPC hop. And it does not expire the room as a
+   * side effect: getSession runs expireIfDue, which can write, and authorizing
+   * a watch must not.
+   *
+   * The second reason carries an obligation. The two paths must still agree
+   * on "closed", or a room past its TTL whose alarm has not fired yet reads
+   * as open here while bellman_sync, through getSession, reads it as closed.
+   * So `closed` is computed by expireIfDue's own rule (now past expiresAt)
+   * and not written. Change that rule in one place and it must change in both.
+   */
+  async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
+    const s = await this.stored();
+    if (!s) return { memberIds: [], closed: true };
+    return {
+      memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
+      closed: s.closed || Date.now() > s.expiresAt,
+    };
+  }
+
+  /**
+   * Accept a watching socket. The Worker has already authenticated the caller
+   * and asked membersOf who they are; this request is one the Worker BUILT,
+   * so nothing on it came from the client (see the /ws route in worker.ts).
+   *
+   * Read, attach, accept and send happen in this one invocation, and, its
+   * only await being a storage read, the input gate holds every other request
+   * to this object for its duration. That is CLAUDE.md's read-and-register
+   * rule, not an exemption from it: an event appended between the read and
+   * the accept would otherwise be delivered to nobody and skipped by the
+   * cursor. So the order is waitForEvents' own: await the read FIRST, then
+   * register with no await between.
+   *
+   * The gate is D5's premise and is untested here: the fake has no input gate,
+   * and the sequence test pins only that nothing else awaits. Task 8's test,
+   * which races an append against an upgrade, is what exercises it.
+   *
+   * What goes out is publicEvent(e), the shape wake() and the poll use, and not
+   * the stored event, which carries the sender's user id (spec D1a). The frames
+   * are built straight after the read, so that a failure there, like the read's
+   * and the attach's, accepts nothing.
+   *
+   * The cursor goes on before the accept. wake() has no good answer for a
+   * socket whose cursor it does not know: send it everything, or silently
+   * send it nothing. The read can throw, and so can serializeAttachment, above
+   * 16 KB. Both come before the accept, so a failure of either accepts nothing.
+   *
+   * DEPENDENCY. Attaching before accepting works, and survives eviction, in
+   * the workerd that worker-tests pins (D5 records which, and how it was
+   * measured). That is observed behaviour, not a guarantee this repo controls.
+   * Do not "tidy" this back to accept-then-attach: it reopens the stranded
+   * socket. And if a future workerd stopped persisting a pre-accept
+   * attachment, every socket would arrive with no cursor and wake() fails
+   * closed (D5), so delivery would go quiet instead of erroring. Task 8's
+   * workerd test and the smoke leg are what would catch that.
+   *
+   * The 16 KB is reachable only by churn. What goes in is the ids one identity
+   * owns in this room, departed members included: membersOf returns them on
+   * purpose, so /ws and bellman_sync agree about who may watch, and nothing
+   * removes a member. The list grows with seatings, not with the plan's cap on
+   * active members (ENTITLEMENTS in auth.ts), so it takes over a thousand
+   * seatings by one identity in one room's life. That is churn, not a breach
+   * of the cap.
+   */
+  async fetch(request: Request): Promise<Response> {
+    if (request.headers.get("upgrade") !== "websocket") {
+      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    }
+    const url = new URL(request.url);
+    const cursor = Number(url.searchParams.get("cursor"));
+    const memberIds = (request.headers.get("x-bellman-members") ?? "")
+      .split(",").filter(Boolean);
+
+    // The only await. From here to the return nothing yields.
+    const missed = await this.events(cursor);
+    const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
+
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+    const attachment: SocketAttachment = {
+      memberIds,
+      cursor: missed.length > 0 ? missed[missed.length - 1].cursor : cursor,
+    };
+    server.serializeAttachment(attachment);
+    this.ctx.acceptWebSocket(server);
+    for (const frame of frames) server.send(frame);
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * The socket is receive-only, and this is where that is enforced rather than
+   * merely intended.
+   *
+   * A send over the socket would need bellman_send's verb check, frozen guard,
+   * idempotency record, payload-depth limit and audit write reimplemented at a
+   * second entry point and kept behaviourally identical to the first (spec D1).
+   * Adding that is a deliberate act, and it starts here: whoever adds a
+   * protocol message has to take this close out first.
+   *
+   * Closed, not ignored: an ignored frame leaves a client believing it spoke.
+   * 1003 is "unsupported data", and the reason is what a developer reads in
+   * their client's close event, so it says where to send. Nothing in the frame
+   * is read, parsed or stored: peer content is untrusted, and the safest thing
+   * to do with a client's bytes here is nothing.
+   *
+   * The reason has to stay within 123 bytes of UTF-8. ws.close() throws above
+   * that, and the throw leaves the socket open (both measured), so enforcement
+   * would become an exception. The test fake throws there too.
+   *
+   * A frame equal to the auto-response's request never arrives here (see the
+   * constructor).
+   *
+   * After this close the runtime goes on listing the socket until its peer
+   * acknowledges, reading CLOSING, and a send to it throws. Measured: still
+   * listed 23 s on, for a peer that never answered, and the same on an instance
+   * revived after eviction. wake() skips a socket that reads CLOSING or CLOSED,
+   * so one that has sent a frame costs the room no send and no log line.
+   */
+  async webSocketMessage(ws: WebSocket, _message: string | ArrayBuffer): Promise<void> {
+    ws.close(1003, "This socket is receive-only. Send with bellman_send over /mcp.");
+  }
+
+  /**
+   * The peer closed, or the connection dropped. A drop arrives here too, as
+   * code 1006 and wasClean false.
+   *
+   * There is nothing to prune. The runtime drops the socket from
+   * getWebSockets() on its own, measured after a polite close, a bare TCP FIN
+   * and an RST, with this handler and without it, and this object keeps no list
+   * of sockets of its own.
+   *
+   * What this is for is the answer. The runtime does not complete a close
+   * handshake the peer started. With an empty handler, or none (the same, in
+   * every case measured), the peer's close never completes: Node's WebSocket
+   * client gave up after about 10 s and reported 1006, unclean. Replying
+   * completes it in milliseconds. Neither this handler nor webSocketError is
+   * needed for the object to hibernate or for a socket to leave
+   * getWebSockets(). An object with neither was evicted and revived like one
+   * with both, and a client close woke it either way.
+   *
+   * Always 1000, never the peer's own code. A peer that calls close() with no
+   * argument arrives as 1005, and ws.close(1005) throws, as do 1004, 1006 and
+   * 1015, the codes RFC 6455 reserves. Echoing the code, the obvious thing to
+   * write, therefore fails for the first client that closes politely and says
+   * nothing: the handler throws and the close never completes (measured). RFC
+   * 6455 says an endpoint typically echoes the code, not that it must. This
+   * also runs when the peer acknowledges the close webSocketMessage started,
+   * and replying to a socket already closed does not throw (measured).
+   */
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+    ws.close(1000, "closing");
+  }
+
+  /**
+   * A protocol error from the peer: a reserved opcode, or a compressed frame on
+   * a connection that never negotiated compression (the two measured). The
+   * runtime sends its own Close, 1002, and drops the socket from
+   * getWebSockets() without help from this handler (measured with and without
+   * it), so there is nothing to answer and nothing to prune. Empty on purpose.
+   * It is here to state the answer for each of the lifecycle's three events,
+   * not because the runtime needs it.
+   */
+  async webSocketError(_ws: WebSocket, _error: unknown): Promise<void> {}
 
   /**
    * Retire one role's code, and drop it from the registry's index.
@@ -375,6 +621,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return this.events(cursor);
   }
 
+  async eventAt(cursor: number): Promise<SessionEvent | undefined> {
+    return this.ctx.storage.get<SessionEvent>(eventKey(cursor));
+  }
+
   /**
    * The read and the registration must not be split by an await, or an event
    * appended in the gap wakes an empty waiter list and this poll hangs to its
@@ -399,17 +649,91 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * Resolve every waiter this event is past, each from its own cursor.
+   * Two arms, one event.
    *
-   * `#private`, because it resolves the waiting polls with whatever event it is handed,
-   * stored or not, and a Durable Object answers RPC for every method on its class:
-   * TypeScript's `private` is erased at compile time.
+   * Waiters are in-memory long polls and do not survive eviction; sockets are
+   * held by the runtime and do. Both are served here so that the room serves
+   * the same events in the same shape however a member is watching it, which
+   * is the property the whole two-path design rests on. It stops there. The
+   * poll then drops the caller's own events and wraps the rest in the
+   * untrusted envelope, at the tool boundary; a room socket is per room, not
+   * per member, so it carries a member's own events and leaves both to the
+   * client (spec D1a and D6).
+   *
+   * The frame is publicEvent(event), the projection the poll returns, and not
+   * the stored event: that carries fromUserId, and every member of a room
+   * receives every other member's events (spec D1a). The waiter arm resolves
+   * with the stored event because the poll projects it at the tool boundary.
+   *
+   * Synchronous on purpose. getWebSockets, deserializeAttachment, send and
+   * serializeAttachment are all sync, so nothing here yields — an await
+   * between reading a socket's cursor and sending would reopen the gap that
+   * read-and-register exists to close.
+   *
+   * `#private`, because a Durable Object answers RPC for every method on its
+   * class and TypeScript's `private` is erased at compile time. This one fans
+   * out to every socket in the room, so reachable from outside would mean an
+   * unauthenticated caller pushing frames to every watcher.
+   *
+   * main's version opened with `if (this.waiters.length === 0) return;`. That
+   * is deliberately absent here: it would skip socket delivery whenever nobody
+   * is long-polling, which is the common case once the bridge stops polling.
    */
   #wake(event: SessionEvent): void {
-    if (this.waiters.length === 0) return;
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
     for (const w of woken) w.resolve([event]);
+
+    // Built on the first socket that is due the event and shared by the rest: a
+    // poll-only room pays nothing per append, and a projection failure lands in
+    // the per-socket try below instead of failing an append whose event is
+    // already stored.
+    let frame: string | undefined;
+    for (const ws of this.ctx.getWebSockets()) {
+      // One socket must not starve the rest. getWebSockets() returns a list, and
+      // a throw would end this loop with every later socket missing the event,
+      // after the waiter arm had run and the event was stored. So each socket is
+      // its own try: log, skip, carry on. The cause known today is building the
+      // frame, JSON.stringify(publicEvent(event)), which sits inside the try and
+      // which "contains a frame that cannot be built" drives. The one send
+      // failure observed, to a socket that is closing, is skipped below instead
+      // of caught; a send to a socket that reads OPEN has not been observed to
+      // throw, and the catch stays for the cause nobody has seen. The cursor
+      // moves only after a send that returned, and a reconnect replays from the
+      // cursor its client names (fetch).
+      try {
+        // A socket that is closing or closed is skipped, before anything is read
+        // from it, and is not an error worth a log line. The common case is one
+        // webSocketMessage has closed, and a client sending a frame is what the
+        // receive-only rule exists for, so this is a normal path: the runtime
+        // goes on listing the socket until its peer acknowledges, reading
+        // CLOSING (still listed 23 s on for a peer that never did, and the same
+        // on an instance revived after eviction; measured), and a send to it
+        // throws. Left to the catch below, a client that sends again and again
+        // is one logged failure per append.
+        //
+        // That is all this decides: do not bother. It says nothing about what a
+        // socket has received. Exactly CLOSING and CLOSED skip, so a reading
+        // nobody expected still sends and delivery cannot stop silently on it.
+        // CLOSED is defensive. workerd reports 3 inside webSocketClose, after
+        // the peer acknowledges a close this object started, and the socket is
+        // gone from getWebSockets() afterwards, so wake() has not been seen to
+        // meet a CLOSED socket. The arm stays because a send to one cannot
+        // succeed.
+        if (ws.readyState === WS_CLOSING || ws.readyState === WS_CLOSED) continue;
+        const att = ws.deserializeAttachment() as SocketAttachment | null;
+        // Fail closed on a missing attachment. fetch() attaches before it sends,
+        // so every accepted socket has one; a null here means something is
+        // wrong, and over-delivering every event to a socket whose cursor we do
+        // not know is the worse of the two answers.
+        if (!att || event.cursor <= att.cursor) continue;
+        frame ??= JSON.stringify(publicEvent(event));
+        ws.send(frame);
+        ws.serializeAttachment({ ...att, cursor: event.cursor });
+      } catch (err) {
+        console.error("socket delivery failed:", err);
+      }
+    }
   }
 
   /**
@@ -458,6 +782,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The closing reArm() is what keeps the TTL alive when this ran for another
    * reason. A fired alarm is consumed, so without it a live session would be left
    * with none.
+   *
+   * It is also what covers the boundary, so the TTL needs no re-arm of its own.
+   * expireIfDue acts only once now is past expiresAt and the driver counts a handler
+   * due AT its time, so a firing exactly on expiresAt finds the TTL due, expires
+   * nothing, and reArm() points the alarm at expiresAt again, due at once. The first
+   * firing to read now > expiresAt closes the room, and a closed room derives no TTL,
+   * so that firing arms nothing. The re-arm is not strictly after the boundary: a
+   * firing can land in the same millisecond and go round once more, and the clock is
+   * what ends it. A socket-watched room is not polled, so no getSession is there to
+   * expire it lazily; this is the only thing that does.
    */
   async alarm(): Promise<void> {
     const now = Date.now();
@@ -488,6 +822,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * SESSION binding rewrite a room and reach into the registry's index.
    */
   async #expireIfDue(s: StoredSession, now: number): Promise<void> {
+    // membersOf is the other half of this rule: it answers "closed" the same way, without writing.
     if (s.closed || now <= s.expiresAt) return;
     // The write below clears the session's codes, so their rows leave the registry's
     // index with it, in the same transaction. Otherwise an expired room's codes stay
@@ -1105,11 +1440,11 @@ export class DurableObjectStore implements BellmanStore {
     }
   }
 
-  async getSession(id: string): Promise<Session | undefined> {
+  async getSession(id: string): Promise<StoredSession | undefined> {
     return this.session(id).getSession();
   }
 
-  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
     const id = await this.registry.lookupJoinCode(code);
     if (!id) return undefined;
     const session = await this.getSession(id);
@@ -1211,6 +1546,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
     return this.session(sessionId).eventsAfter(cursor);
+  }
+
+  async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
+    return this.session(sessionId).eventAt(cursor);
   }
 
   async waitForEvents(

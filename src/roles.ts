@@ -1,4 +1,5 @@
-import type { Member, RoomManifest, Session, Verb } from "./types.js";
+import type { Member, RoomManifest, Verb } from "./types.js";
+import type { StoredSession } from "./stored-session.js";
 
 /**
  * The verbs a role holds — the only place `manifest.roles` is indexed.
@@ -35,7 +36,7 @@ export function verbsOfRole(manifest: RoomManifest, role: string): readonly Verb
  * manifest role name (RoleKeyShape: `[a-z][a-z0-9_]{0,30}`) and verbs come from
  * the closed enum, so nothing here needs bounding or escaping.
  */
-export function denyVerb(session: Session, me: Member, verb: Verb): string | null {
+export function denyVerb(session: StoredSession, me: Member, verb: Verb): string | null {
   const held = verbsOfRole(session.manifest, me.roomRole);
   if (held.includes(verb)) return null;
   const holds = held.length > 0 ? held.join(", ") : "none";

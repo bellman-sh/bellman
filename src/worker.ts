@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { buildServer } from "./server.js";
+import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
@@ -98,6 +99,55 @@ const unauthorized = (oauth?: OAuthConfig) =>
     { status: 401, headers: oauth ? unauthorizedHeaders(oauth) : undefined }
   );
 
+/**
+ * Fail closed with neither a key map nor OAuth: answer 503 and log why, rather
+ * than 401 every caller as though their credentials were wrong.
+ *
+ * The dev table is kept out twice over. resolveIdentity falls back to it
+ * (qk_dev_jesse: team plan, admin role) when it is handed no key map, and
+ * resolveCaller tests `env.BELLMAN_KEYS` before calling it. With neither a map
+ * nor OAuth, either that test or this guard refuses the dev key on its own.
+ * With OAuth on and no map this guard passes, and that test is all that stands
+ * between the dev key and a public URL. Local runs supply the map through
+ * .dev.vars, so dev exercises the same path production does.
+ */
+function unconfigured(env: WorkerEnv, oauth?: OAuthConfig): Response | undefined {
+  if (env.BELLMAN_KEYS || oauth) return undefined;
+  console.error("BELLMAN_KEYS is unset — refusing to serve. Set it with: wrangler secret put BELLMAN_KEYS");
+  return Response.json(
+    { jsonrpc: "2.0", error: { code: -32002, message: "Server is not configured with an identity key map" }, id: null },
+    { status: 503 }
+  );
+}
+
+/**
+ * Who is calling, or null. An OAuth access token first, then the static key
+ * map. The bearer key path stays for stdio clients and scripts, which the spec
+ * says should take credentials from the environment rather than run an OAuth
+ * flow.
+ *
+ * Both routes resolve through here, so what counts as a caller cannot differ
+ * between them: a copy hardened on one route and not the other leaves the
+ * weaker one as the way in.
+ *
+ * The `env.BELLMAN_KEYS` test below is not a shortcut. resolveIdentity falls
+ * back to the dev table (qk_dev_jesse: team plan, admin role) when it is handed
+ * no key map, so it is never called without one. `unconfigured` refuses a
+ * deploy with neither a map nor OAuth, but with OAuth on and no map it passes,
+ * and this test is all that stands between the dev key and a public URL.
+ */
+async function resolveCaller(
+  request: Request,
+  env: WorkerEnv,
+  oauth?: OAuthConfig
+): Promise<Identity | null> {
+  const header = request.headers.get("authorization") ?? undefined;
+  const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
+  let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
+  if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+  return identity;
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -142,6 +192,67 @@ export default {
       });
     }
 
+    /**
+     * The watching path. Delivery only — tool calls stay on /mcp, which is
+     * what keeps this a side-channel rather than a second MCP transport.
+     *
+     * Nothing from the caller's request is forwarded to the object. The
+     * Worker reads the query, resolves the identity, asks the object which
+     * members that identity owns, and then BUILDS the upgrade request. A
+     * client setting x-bellman-members itself therefore achieves nothing,
+     * because its request is not the one the object ever sees. Nothing reads
+     * that list yet (see SocketAttachment in store-do.ts); this is what keeps
+     * it trustworthy for whatever reads it first.
+     */
+    if (url.pathname === "/ws") {
+      // A handshake is a GET (RFC 6455 section 4.1). Given any other method,
+      // workerd hands the request to the Worker all the same, the object accepts
+      // a socket, and workerd then answers the client 500 because it cannot
+      // complete the upgrade. Measured in bare workerd: one accepted socket per
+      // request. So this comes first, ahead of authentication, as /mcp's does for
+      // anything but a POST. Under wrangler dev the Worker is handed a GET
+      // instead, so a POST handshake there cannot show any of this.
+      if (request.method !== "GET") {
+        return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
+      }
+      if (request.headers.get("upgrade") !== "websocket") {
+        return new Response("Expected a WebSocket upgrade", { status: 426 });
+      }
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+
+      const sessionId = url.searchParams.get("session");
+      if (!sessionId) return new Response("Missing session", { status: 400 });
+
+      // Number() alone accepts "", "1.5", "1e99" and " 1". A cursor is an
+      // index into storage keys; anything else is a bad request, not a
+      // silently clamped one.
+      const raw = url.searchParams.get("cursor") ?? "";
+      const cursor = Number(raw);
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(cursor)) {
+        return new Response("cursor must be a non-negative integer", { status: 400 });
+      }
+
+      const identity = await resolveCaller(request, env, oauth);
+      if (!identity) return unauthorized(oauth);
+
+      const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
+      const { memberIds, closed } = await stub.membersOf(identity.userId);
+      // An unknown room and a closed one both come back closed from membersOf,
+      // so a caller who owns no member here cannot tell them apart: both are
+      // 404. An open room it owns nothing in is 403.
+      if (memberIds.length === 0) {
+        return new Response(closed ? "Not found" : "Forbidden", { status: closed ? 404 : 403 });
+      }
+      if (closed) return new Response("This room is closed", { status: 409 });
+
+      return stub.fetch(
+        new Request(`https://session/ws?cursor=${cursor}`, {
+          headers: { upgrade: "websocket", "x-bellman-members": memberIds.join(",") },
+        })
+      );
+    }
+
     if (url.pathname !== "/mcp") {
       return new Response("Not found", { status: 404 });
     }
@@ -149,33 +260,10 @@ export default {
       return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
     }
 
-    /**
-     * Fail closed with neither a key map nor OAuth. resolveIdentity falls back
-     * to the dev table when handed nothing, and nodejs_compat means `process`
-     * exists here — so without this guard a deploy that forgot the secret would
-     * serve qk_dev_jesse (team plan, admin role) on a public URL. Local runs
-     * supply this through .dev.vars, so dev exercises the same path production
-     * does.
-     */
-    if (!env.BELLMAN_KEYS && !oauth) {
-      console.error("BELLMAN_KEYS is unset — refusing to serve. Set it with: wrangler secret put BELLMAN_KEYS");
-      return Response.json(
-        {
-          jsonrpc: "2.0",
-          error: { code: -32002, message: "Server is not configured with an identity key map" },
-          id: null,
-        },
-        { status: 503 }
-      );
-    }
+    const blocked = unconfigured(env, oauth);
+    if (blocked) return blocked;
 
-    // An OAuth access token first, then the static key map. The bearer key path
-    // stays for stdio clients and scripts, which the spec says should take
-    // credentials from the environment rather than run an OAuth flow.
-    const header = request.headers.get("authorization") ?? undefined;
-    const bearer = header?.replace(/^Bearer\s+/i, "").trim() ?? "";
-    let identity = oauth && bearer ? await identityFromAccessToken(bearer, oauth) : null;
-    if (!identity && env.BELLMAN_KEYS) identity = resolveIdentity(header, env.BELLMAN_KEYS);
+    const identity = await resolveCaller(request, env, oauth);
     if (!identity) return unauthorized(oauth);
 
     try {

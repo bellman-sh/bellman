@@ -5,12 +5,20 @@
     "rootDir": ".",
     "types": ["node"]
   },
-  // tests/store-do-wiring.test.ts is the one test that imports src/store-do.ts. That
-  // import pulls @cloudflare/workers-types into this `types: ["node"]` program and
-  // breaks an unrelated file (scripts/rotate-key.ts:42, TS2554 on randomBytes); keeping
-  // store-do.ts itself out of this program avoids the same clash. Vitest still runs the
-  // test; only tsc skips it. Delete that last entry when #12 gives Worker-side tests
-  // their own tsconfig project.
-  "exclude": ["src/worker.ts", "src/store-do.ts", "src/oauth/store.ts", "tests/store-do-wiring.test.ts"],
+  // tests/store-do-wiring.test.ts and tests/worker-ws.test.ts are the tests that import a
+  // Workers file (src/store-do.ts and src/worker.ts). Either import pulls
+  // @cloudflare/workers-types into this `types: ["node"]` program and breaks an unrelated
+  // file (scripts/rotate-key.ts:42, TS2554 on randomBytes); keeping the Workers files
+  // themselves out of this program avoids the same clash. Vitest still runs the tests;
+  // only tsc skips them. Delete the two test entries when Worker-side tests get their own
+  // tsconfig project. #12 has since created worker-tests/ with its own program, so they
+  // could likely go now; that migration is not part of this change.
+  "exclude": [
+    "src/worker.ts",
+    "src/store-do.ts",
+    "src/oauth/store.ts",
+    "tests/store-do-wiring.test.ts",
+    "tests/worker-ws.test.ts"
+  ],
   "include": ["src", "tests", "scripts", "vitest.config.ts"]
 }

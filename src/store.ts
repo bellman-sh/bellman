@@ -2,6 +2,7 @@ import type {
   AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
+import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -81,7 +82,14 @@ export type EventWrite =
 
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
-  getSession(id: string): Promise<Session | undefined>;
+  /**
+   * The session record and its members. NOT its events.
+   *
+   * Returning StoredSession rather than Session is what stops #25 coming
+   * back: a handler that reaches for history no longer compiles, so it has
+   * to call eventsAfter or eventAt and say which events it wants.
+   */
+  getSession(id: string): Promise<StoredSession | undefined>;
   /**
    * Resolve a code to its session and the role it carries.
    *
@@ -90,7 +98,7 @@ export interface BellmanStore {
    * from the record, never from reading the string — there is no code path that
    * parses a suffix, which is what makes the tamper case fail closed.
    */
-  getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined>;
+  getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined>;
 
   /** Retire one role's code. Idempotent. */
   consumeJoinCode(sessionId: string, role: string): Promise<void>;
@@ -229,6 +237,13 @@ export interface BellmanStore {
     key: string
   ): Promise<EventWrite>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
+  /**
+   * The event at exactly this cursor, or undefined.
+   *
+   * One key, not a scan. `bellman_send` resolves an action_response's ref_id
+   * this way; reading the whole history to find one event is what #25 was.
+   */
+  eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
@@ -339,14 +354,15 @@ export class MemoryStore implements BellmanStore {
     this.byMember.set(userId, joined);
   }
 
-  async getSession(id: string): Promise<Session | undefined> {
+  async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
     if (!s) return undefined;
     this.expireIfDue(s, Date.now());
-    return detach(s);
+    const { events: _events, ...rest } = detach(s);
+    return rest;
   }
 
-  async getSessionByJoinCode(code: string): Promise<{ session: Session; role: string } | undefined> {
+  async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
     const id = this.byJoinCode.get(code);
     if (!id) return undefined;
     const session = await this.getSession(id);
@@ -528,6 +544,11 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return [];
     return detach(s.events.filter((e) => e.cursor > cursor));
+  }
+
+  async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
+    const e = this.sessions.get(sessionId)?.events.find((ev) => ev.cursor === cursor);
+    return e ? detach(e) : undefined;
   }
 
   /**

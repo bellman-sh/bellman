@@ -21,6 +21,7 @@
  * exclusion.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { serialize } from "node:v8";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
 // a DurableObject is just something that holds its ctx and env.
@@ -30,10 +31,51 @@ vi.mock("cloudflare:workers", () => ({
   },
 }));
 
+// workerd global. The DO returns client and accepts server; a test drives the
+// server side, which is the one acceptWebSocket is handed.
+vi.stubGlobal("WebSocketPair", class {
+  0 = fakeSocket();
+  1 = fakeSocket();
+});
+
+// workerd global too. SessionDO registers one with the ctx; the fake ctx keeps
+// whatever it is handed, so a test reads the pair back as `request` and `response`.
+vi.stubGlobal("WebSocketRequestResponsePair", class {
+  constructor(public request: string, public response: string) {}
+});
+
+// workerd answers an upgrade with a Response of status 101 carrying a
+// `webSocket`. Node's Response throws a RangeError on any status outside
+// 200-599, so SessionDO.fetch, which is written for workerd, cannot return
+// here without this. It makes a 101 buildable and reads `status` and
+// `webSocket` back as given. That is all it models; the rest is Node's own.
+//
+// It constrains nothing about the socket, and workerd constrains more. workerd
+// throws a RangeError for a 101 with no socket (or a null one) and for a
+// socket on a non-101 status; this builds the first and drops the socket in
+// the second. workerd does not tell the client half from the server half
+// either: sent the accepted one, it builds the 101 and the client's socket
+// closes 1006. So nothing here enforces what a 101 carries. That is asserted
+// where the response is read: "answers 101 and accepts the socket" requires a
+// socket, and requires that it is not the accepted one.
+const NodeResponse = Response;
+vi.stubGlobal("Response", class extends NodeResponse {
+  webSocket?: unknown;
+  constructor(body?: BodyInit | null, init: ResponseInit & { webSocket?: unknown } = {}) {
+    const upgrade = init.status === 101;
+    super(body, upgrade ? { ...init, status: 200 } : init);
+    if (upgrade) {
+      Object.defineProperty(this, "status", { value: 101 });
+      this.webSocket = init.webSocket;
+    }
+  }
+});
+
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
-import type { Session } from "../src/types.js";
+import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
+import { publicEvent } from "../src/public-event.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -52,6 +94,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   );
   let writes = 0;
   let puts = 0;
+  let lists = 0;
   const alarms: number[] = [];
   const storage = {
     get writes() { return writes; },
@@ -62,6 +105,11 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
      * batched commit from separate ones.
      */
     get puts() { return puts; },
+    /**
+     * list() INVOCATIONS. A list is a range scan, so a read that makes one costs
+     * O(keys in the range) where a get costs O(1) — which is what #25 was.
+     */
+    get lists() { return lists; },
     alarms,
     snapshot: (): Record<string, unknown> => structuredClone(Object.fromEntries(rows)),
     get: async (key: string) => (rows.has(key) ? structuredClone(rows.get(key)) : undefined),
@@ -97,6 +145,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     delete: async (key: string) => { writes++; return rows.delete(key); },
     setAlarm: async (at: number) => { alarms.push(at); },
     list: async (opts: { prefix?: string; start?: string; reverse?: boolean; limit?: number } = {}) => {
+      lists++;
       let keys = [...rows.keys()]
         .filter((k) => k.startsWith(opts.prefix ?? "") && k >= (opts.start ?? ""))
         .sort();
@@ -112,6 +161,116 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     transaction: async <T>(closure: (txn: unknown) => Promise<T>): Promise<T> => closure(storage),
   };
   return storage;
+}
+
+/**
+ * A fake WebSocket pair plus the slice of DurableObjectState the Hibernation
+ * API needs. The real runtime persists accepted sockets across eviction and
+ * hands them back from getWebSockets(); here a plain array stands in, which is
+ * enough for fan-out, replay and attachment logic but NOT for eviction itself.
+ * Eviction is verified by npm run smoke against real Durable Objects — see D13.
+ *
+ * serializeAttachment enforces workerd's 16 KB cap, because the order of attach
+ * and accept in fetch exists to survive that throw. It counts as workerd does,
+ * V8's serialization: for 1,400 ids it gives 16,833 bytes, the figure workerd
+ * reported, and the boundary matches too (1,362 ids fit, 1,363 do not). An
+ * attachment never set reads back as null, as it does in workerd.
+ *
+ * close() and send() model what workerd measurably does (1.20260926.1, compat
+ * date 2026-09-01). close() THROWS for a code it refuses (below 1000, 5000 and
+ * up, and 1004, 1005, 1006 and 1015, which RFC 6455 reserves) and for a reason
+ * over 123 bytes of UTF-8, and a throw inside webSocketMessage leaves the
+ * socket open. A close the runtime would refuse therefore fails here too, with
+ * the runtime's own message, instead of passing. send() THROWS after close(),
+ * while the runtime goes on listing the socket until its peer acknowledges the
+ * close, and readyState reads CLOSING for that whole time.
+ */
+const MAX_ATTACHMENT_BYTES = 16384;
+const MAX_CLOSE_REASON_BYTES = 123;
+function fakeSocket() {
+  const sent: string[] = [];
+  let attachment: unknown = undefined;
+  let closed: { code: number; reason: string } | undefined;
+  return {
+    sent,
+    get closed() { return closed; },
+    // OPEN (1) until close(), CLOSING (2) after it. That is what workerd reads on
+    // a socket whose peer has not acknowledged a close: from the close until the
+    // ack, on the instance that closed it and on one revived after eviction
+    // (measured, 1.20260926.1). The fake has no peer to acknowledge, so it never
+    // reaches CLOSED (3); a test that needs 3 defines the property.
+    get readyState() { return closed ? 2 : 1; },
+    send: (data: string) => {
+      if (closed) throw new Error("Can't call WebSocket send() after close().");
+      sent.push(data);
+    },
+    close: (code: number, reason: string) => {
+      if (code < 1000 || code >= 5000 || code === 1004 || code === 1005 || code === 1006 || code === 1015) {
+        throw new Error(`Invalid WebSocket close code: ${code}.`);
+      }
+      if (new TextEncoder().encode(reason).byteLength > MAX_CLOSE_REASON_BYTES) {
+        throw new Error(
+          `WebSocket close reason must not be longer than ${MAX_CLOSE_REASON_BYTES} bytes when UTF-8 encoded.`,
+        );
+      }
+      closed = { code, reason };
+    },
+    serializeAttachment: (v: unknown) => {
+      const bytes = serialize(v).byteLength;
+      if (bytes > MAX_ATTACHMENT_BYTES) {
+        throw new Error(
+          `A WebSocket 'attachment' cannot be larger than ${MAX_ATTACHMENT_BYTES} bytes.` +
+          `'attachment' was ${bytes} bytes.`,
+        );
+      }
+      attachment = structuredClone(v);
+    },
+    deserializeAttachment: () => (attachment === undefined ? null : structuredClone(attachment)),
+  };
+}
+
+/**
+ * The ctx every SessionDO in this file is built over, in place of a bare
+ * `{ storage }`. SessionDO is handed the whole DurableObjectState, and a
+ * hand-rolled slice of it holds only until some path first reaches a member it
+ * left out; the failure then lands in whichever test gets there first. When
+ * the object starts using more of the runtime, grow this rather than making
+ * the object tolerate a missing member, which would hide a genuinely missing
+ * binding in workerd. RegistryDO touches only storage and keeps its own.
+ */
+function fakeCtx(storage: ReturnType<typeof fakeStorage>) {
+  const sockets: ReturnType<typeof fakeSocket>[] = [];
+  const autoResponses: unknown[] = [];
+  return {
+    storage,
+    sockets,
+    autoResponses,
+    acceptWebSocket: (ws: unknown) => { sockets.push(ws as ReturnType<typeof fakeSocket>); },
+    getWebSockets: () => [...sockets],
+    setWebSocketAutoResponse: (r: unknown) => { autoResponses.push(r); },
+  };
+}
+
+/**
+ * Run `fn` with WebSocketPair wrapped, so a test can see each pair fetch
+ * builds. `seen` gets the pair as it is constructed, before fetch has touched
+ * it, which is the only moment a hook can see calls that come before the
+ * accept. The stub is put back afterwards, whether or not fn throws.
+ */
+type FakePair = { 0: ReturnType<typeof fakeSocket>; 1: ReturnType<typeof fakeSocket> };
+async function withPairs<T>(seen: (pair: FakePair) => void, fn: () => Promise<T>): Promise<T> {
+  const RealPair = globalThis.WebSocketPair;
+  globalThis.WebSocketPair = class extends RealPair {
+    constructor() {
+      super();
+      seen(this as unknown as FakePair);
+    }
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.WebSocketPair = RealPair;
+  }
 }
 
 /** The event rows in a storage snapshot. */
@@ -167,14 +326,14 @@ async function worldOn(
       idFromName: (name: string) => name,
       get: (id: string) => {
         if (!sessions.has(id)) {
-          sessions.set(id, new SessionDO({ storage: fakeStorage() } as never, env as never));
+          sessions.set(id, new SessionDO(fakeCtx(fakeStorage()) as never, env as never));
         }
         return sessions.get(id)!;
       },
     },
     REGISTRY: { idFromName: (name: string) => name, get: () => registry },
   } as unknown as BellmanEnv;
-  sessions.set(LEGACY_ID, new SessionDO({ storage: legacyStorage } as never, env as never));
+  sessions.set(LEGACY_ID, new SessionDO(fakeCtx(legacyStorage) as never, env as never));
 
   await registry.putJoinCode(LEGACY_CODE, LEGACY_ID);
   return {
@@ -205,6 +364,14 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
   it("SessionDO.getSession() reads it as gone", async () => {
     const { legacy } = await worldOn(storeDo);
     expect(await legacy.getSession()).toBeUndefined();
+  });
+
+  it("SessionDO.membersOf() reads it as an unknown room", async () => {
+    // u_jesse owns m_creator in this row. A membersOf that read the raw row
+    // would answer { memberIds: ["m_creator"], closed: false }, and /ws would
+    // open a socket onto a room every other read path already treats as gone.
+    const { legacy } = await worldOn(storeDo);
+    expect(await legacy.membersOf("u_jesse")).toEqual({ memberIds: [], closed: true });
   });
 
   it("the store facade's getSession and getSessionByJoinCode read it as gone too", async () => {
@@ -294,7 +461,7 @@ describe("a current row is untouched by the guard", () => {
     // and the test would pass over a failing path.
     const registry = new storeDo.RegistryDO({ storage: fakeStorage() } as never, {} as never);
     const env = { REGISTRY: { idFromName: (name: string) => name, get: () => registry } };
-    const doi = new storeDo.SessionDO({ storage } as never, env as never);
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, env as never);
     await doi.createSession(session({ id: "qs_expired", expiresAt: Date.now() - 1 }));
 
     await doi.alarm();
@@ -614,6 +781,927 @@ describe("SessionDO.appendEventOnce", () => {
     // this "replayed" or "conflict" rather than a fresh append.
     const after = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
     expect(after.outcome).toBe("appended");
+  });
+});
+
+/**
+ * What a session read COSTS, inside the real SessionDO. The contract suite
+ * proves what getSession returns; it cannot see how many storage operations the
+ * read made, and the count is this object's own.
+ */
+describe("SessionDO read cost", () => {
+  it("getSession does not list events", async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    await doi.appendEvent({
+      type: "message", fromMemberId: "m1", fromUserId: "u1",
+      fromLabel: "jesse", payload: { n: 1 }, refId: null,
+    });
+
+    const before = storage.lists;
+    const got = await doi.getSession();
+
+    expect(got?.id).toBe(LEGACY_ID);
+    expect(got).not.toHaveProperty("events");
+    // The whole point of #25: a session read is O(1) keys, not O(events).
+    expect(storage.lists - before).toBe(0);
+  });
+});
+
+/**
+ * SessionDO.membersOf, the /ws upgrade's authorization read. It is a SessionDO
+ * method and deliberately not a BellmanStore one (MemoryStore cannot hold a
+ * hibernatable socket), so the contract suite never reaches it and the real
+ * object over fake storage is where it is pinned.
+ */
+describe("membersOf", () => {
+  const withMembers = (...ms: Partial<Member>[]) =>
+    currentRow({ members: ms.map((m) => member(m)) });
+
+  it("returns every member that identity owns", async () => {
+    const storage = fakeStorage({
+      session: withMembers(
+        { memberId: "m1", userId: "u1" },
+        { memberId: "m2", userId: "u2" },
+        { memberId: "m3", userId: "u1" },
+      ),
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    // Review Focus #4: one identity, several members, one socket for all.
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1", "m3"], closed: false });
+  });
+
+  it("returns nothing for an identity that owns no member", async () => {
+    const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    expect(await doi.membersOf("u9")).toEqual({ memberIds: [], closed: false });
+  });
+
+  it("still returns a member who has left", async () => {
+    // Review Focus #3. findMember (src/server.ts) does not exclude
+    // leftAt, so bellman_sync still serves them. The two delivery paths
+    // must not drift, so /ws must not exclude them either.
+    const storage = fakeStorage({
+      session: withMembers({ memberId: "m1", userId: "u1", leftAt: Date.now() }),
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    expect((await doi.membersOf("u1")).memberIds).toEqual(["m1"]);
+  });
+
+  it("reports a closed room as closed, with the membership intact", async () => {
+    // Review Focus #2. A poll onto a closed room lasts 25s; a socket would
+    // last forever. The route refuses, but the distinction is made here.
+    const storage = fakeStorage({
+      session: { ...withMembers({ memberId: "m1", userId: "u1" }), closed: true },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
+  });
+
+  it("reports a room past its TTL as closed, and writes nothing", async () => {
+    // getSession closes a room past its TTL on read (expireIfDue), so
+    // bellman_sync sees it as closed while its alarm is still pending. /ws
+    // must say the same, or the two delivery paths disagree about whether the
+    // room is live. membersOf gets there by computing it: authorizing a watch
+    // must not mutate the room, and expireIfDue would write the closed flag,
+    // clear the join codes and append session_expired.
+    const storage = fakeStorage({
+      session: { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt: Date.now() - 1 },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    const before = storage.writes;
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
+    expect(storage.writes - before).toBe(0);
+    // setAlarm moves alarms and not writes, so scheduling work needs its own
+    // check. alarms starts empty because the row is seeded, not created.
+    expect(storage.alarms).toEqual([]);
+  });
+
+  it("agrees with getSession about a room at its TTL boundary", async () => {
+    // The invariant is that membersOf and getSession agree about whether a
+    // room is closed, so this compares them instead of asserting a literal per
+    // timestamp. A literal would test today's rule and need editing whenever
+    // the guard moves; a comparison goes red when the guard moves on one side
+    // only. It cannot see both sides wrong together, which is what the TTL
+    // case above is for.
+    //
+    // The clock is pinned because > and >= differ only at now === expiresAt,
+    // a millisecond a real clock almost never lands on. Two objects per row,
+    // because getSession can expire the room it reads.
+    const now = 1_000_000;
+    vi.setSystemTime(now);
+    try {
+      for (const [where, expiresAt] of [
+        ["a millisecond past", now - 1],
+        ["exactly at", now],
+        ["a millisecond short of", now + 1],
+      ] as const) {
+        const row = { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt };
+        const asked = new storeDo.SessionDO(
+          fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
+        const polled = new storeDo.SessionDO(
+          fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
+        expect((await asked.membersOf("u1")).closed, `${where} its TTL`).toBe(
+          (await polled.getSession())?.closed);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an unknown room as closed with no members", async () => {
+    const doi = new storeDo.SessionDO(fakeCtx(fakeStorage()) as never, {} as never);
+    expect(await doi.membersOf("u1")).toEqual({ memberIds: [], closed: true });
+  });
+
+  it("reads no event keys", async () => {
+    const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    // list() is how the log is scanned and get() is how one event is fetched
+    // (eventAt). A list counter alone cannot see the second.
+    const eventGets: string[] = [];
+    const get = storage.get;
+    storage.get = async (key: string) => {
+      if (key.startsWith("e:")) eventGets.push(key);
+      return get(key);
+    };
+    const before = storage.lists;
+    await doi.membersOf("u1");
+    expect(storage.lists - before).toBe(0);
+    expect(eventGets).toEqual([]);
+  });
+});
+
+/**
+ * SessionDO.fetch, the /ws upgrade. A SessionDO method and deliberately not a
+ * BellmanStore one (MemoryStore cannot hold a hibernatable socket), so the
+ * contract suite never reaches it. The fake ctx has no input gate, so nothing
+ * here can interleave with fetch. These pin what it sends and records and, in
+ * the sequence case, that attach, accept and the sends all happen before it
+ * next yields, which is what lets the real runtime's input gate make it atomic.
+ */
+describe("fetch: websocket upgrade", () => {
+  const upgrade = (cursor: number, members = "m1") =>
+    new Request("https://do/ws?cursor=" + cursor, {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  const world = async (events = 0) => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    for (let n = 1; n <= events; n++) {
+      await doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: { n }, refId: null,
+      });
+    }
+    return { doi, ctx, storage };
+  };
+
+  it("answers 101 and accepts the socket", async () => {
+    const { doi, ctx } = await world();
+    const pairs: FakePair[] = [];
+    const res = await withPairs((pair) => pairs.push(pair), () => doi.fetch(upgrade(0)));
+    expect(res.status).toBe(101);
+    expect(ctx.sockets).toHaveLength(1);
+    expect(pairs).toHaveLength(1);
+    // The client half goes out on the 101 and the server half is the one
+    // accepted: both are identities against the pair fetch built. Weaker
+    // checks admit real faults. "Truthy and not the accepted half" passes for
+    // the whole pair or for {}. "Is the client half" alone passes when fetch
+    // accepts the client half too, so the socket it returns is the accepted
+    // one. Neither this fake nor the runtime's API objects to that last fault:
+    // handed the accepted half, workerd builds the 101 and fetch returns
+    // normally, and it shows only when a connection is used (no frames, close
+    // 1006).
+    const { webSocket } = res as unknown as { webSocket?: unknown };
+    expect(webSocket).toBe(pairs[0][0]);
+    expect(ctx.sockets[0]).toBe(pairs[0][1]);
+  });
+
+  it("replays exactly what was missed, and nothing already seen", async () => {
+    const { doi, ctx } = await world(5);
+    await doi.fetch(upgrade(3));
+    const got = ctx.sockets[0].sent.map((s) => JSON.parse(s).cursor);
+    expect(got).toEqual([4, 5]);
+  });
+
+  it("replays the public event, not the stored one", async () => {
+    // Spec D1a, on the replay path: the same projection wake() sends. A member
+    // who reconnects must not be told by the replay what a live member is not.
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(0));
+
+    const stored = await doi.eventsAfter(0);
+    expect(stored).toHaveLength(2);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s))).toEqual(stored.map(publicEvent));
+    for (const frame of ctx.sockets[0].sent) expect(frame).not.toContain("fromUserId");
+  });
+
+  it("replays nothing when the cursor is current", async () => {
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(2));
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("stores the members and the replayed cursor on the attachment", async () => {
+    const { doi, ctx } = await world(3);
+    await doi.fetch(upgrade(1, "m1,m3"));
+    expect(ctx.sockets[0].deserializeAttachment())
+      .toEqual({ memberIds: ["m1", "m3"], cursor: 3 });
+  });
+
+  it("keeps the requested cursor on the attachment when nothing was replayed", async () => {
+    const { doi, ctx } = await world(2);
+    await doi.fetch(upgrade(2));
+    expect(ctx.sockets[0].deserializeAttachment())
+      .toEqual({ memberIds: ["m1"], cursor: 2 });
+  });
+
+  it("refuses a request that is not an upgrade", async () => {
+    const { doi, ctx } = await world();
+    const res = await doi.fetch(new Request("https://do/ws?cursor=0"));
+    expect(res.status).toBe(426);
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("accepts no socket when reading the missed events fails", async () => {
+    // Read first, then attach and accept (spec D5). Accepted before the read,
+    // a socket outlives a failed read with no attachment, and wake() has no
+    // good answer for a socket whose cursor it does not know: send it
+    // everything, or silently send it nothing.
+    const { doi, ctx, storage } = await world(2);
+    storage.list = async () => { throw new Error("storage unavailable"); };
+
+    await expect(doi.fetch(upgrade(0))).rejects.toThrow("storage unavailable");
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("accepts no socket when a frame cannot be built", async () => {
+    // fetch builds the frames straight after the read, before the attach and
+    // the accept, so a failure there accepts nothing, as the read's and the
+    // attach's do. An event whose time cannot be formatted is such a failure:
+    // publicEvent throws on it. Build the frames after the accept and the
+    // request still fails, but with a socket left accepted.
+    const { doi, ctx } = await world();
+    doi.events = async () => [{
+      cursor: 1, at: Number.NaN, type: "message", fromMemberId: "m9",
+      fromUserId: "u9", fromLabel: "peer", payload: {}, refId: null,
+    }];
+
+    await expect(doi.fetch(upgrade(0))).rejects.toThrow(/Invalid time value/);
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("reads, then attaches, accepts and sends, without yielding in between", async () => {
+    // D5 as one assertion: the read, then attach, accept and send, with
+    // nothing yielding between them. The whole sequence is compared, so any
+    // reordering shows. The fake has no input gate to interleave, so "yield"
+    // stands in for one. It marks the first await fetch reaches after the
+    // read returns (or its return, if it reaches none), so what is logged
+    // before it ran without yielding, and the sequence ends with it. An await
+    // after the last send is allowed: nothing is left to register by then.
+    //
+    // "yield" is queued when the read SETTLES, not at accept. Queued at
+    // accept it cannot see an await anywhere before the accept: between the
+    // read and the pair, the pair and the attach, or the attach and the
+    // accept. "Simplifying" it to accept time silently drops three of the
+    // four windows.
+    //
+    // It also needs fetch to await the hooked promise itself, with no hop:
+    // the marker sits behind fetch's continuation only then. Awaiting a
+    // wrapper (the public eventsAfter, D5's name for the read) or chaining
+    // `.then(x => x)` adds a hop, the marker overtakes fetch, and this goes
+    // red on correct code. A `yield` right after `read` has two causes the
+    // log cannot tell apart, a hop or an await added before the attach, so
+    // look at how fetch awaits the read first. Hook whatever fetch awaits
+    // directly.
+    //
+    // events() is the one thing fetch awaits, and the server socket does not
+    // exist until fetch builds the pair, so the hooks go on events() and on the
+    // WebSocketPair constructor (restored after). The attach comes before the
+    // accept, so a hook installed at accept would never see it.
+    const { doi, ctx } = await world(2);
+    const calls: string[] = [];
+
+    const events = doi.events.bind(doi);
+    doi.events = (after?: number) => {
+      calls.push("read");
+      const read = events(after);
+      read.then(() => queueMicrotask(() => calls.push("yield")), () => {});
+      return read;
+    };
+
+    const accept = ctx.acceptWebSocket;
+    ctx.acceptWebSocket = (ws) => { calls.push("accept"); accept(ws); };
+
+    await withPairs((pair) => {
+      const server = pair[1];
+      const { serializeAttachment, send } = server;
+      server.serializeAttachment = (v) => { calls.push("attach"); serializeAttachment(v); };
+      server.send = (data) => { calls.push("send"); send(data); };
+    }, () => doi.fetch(upgrade(0)));
+
+    expect(calls).toEqual(["read", "attach", "accept", "send", "send", "yield"]);
+  });
+
+  it("accepts no socket when the attachment is over the runtime's cap", async () => {
+    // Attach before accept (spec D5). Attached after, an over-cap attachment
+    // throws with the socket already accepted and carrying no cursor. The fake
+    // enforces workerd's 16 KB cap, so 1,400 ids reproduces it: workerd threw
+    // at exactly this size, and left an accepted socket with no attachment.
+    // What the fake cannot show is that an attachment set before the accept
+    // persists in workerd. That is the dependency named in fetch, and Task 8's.
+    const { doi, ctx } = await world(2);
+    const ids = Array.from({ length: 1400 }, (_, i) => "m_" + i.toString(16).padStart(8, "0"));
+
+    await expect(doi.fetch(upgrade(0, ids.join(",")))).rejects.toThrow("cannot be larger than 16384 bytes");
+    expect(ctx.sockets).toHaveLength(0);
+  });
+});
+
+/**
+ * wake()'s socket arm. wake() is private and reached through its three callers,
+ * appendEvent, appendEventOnce and the TTL alarm (by way of expireIfDue), so
+ * these drive those. The waiter arm is the long poll that remote MCP clients
+ * keep using, and it stays: "still resolves a long-poll waiter" pins that both
+ * arms serve one event.
+ */
+describe("wake: socket delivery", () => {
+  const world = async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    const post = (n: number) => doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n }, refId: null,
+    });
+    return { doi, ctx, post };
+  };
+  const open = (ctx: ReturnType<typeof fakeCtx>, cursor: number, members = "m1") =>
+    new Request("https://do/ws?cursor=" + cursor, {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  it("sends an appended event to a watching socket", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    await post(1);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).payload)).toEqual([{ n: 1 }]);
+  });
+
+  it("fans out to every socket", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0, "m1"));
+    await doi.fetch(open(ctx, 0, "m2"));
+    await post(1);
+    expect(ctx.sockets).toHaveLength(2);
+    for (const ws of ctx.sockets) expect(ws.sent).toHaveLength(1);
+  });
+
+  it("advances each socket's attachment as it sends", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    await post(1);
+    await post(2);
+    expect((ctx.sockets[0].deserializeAttachment() as { cursor: number }).cursor).toBe(2);
+  });
+
+  it("skips a socket already past the event", async () => {
+    const { doi, ctx, post } = await world();
+    await post(1);
+    // Connects at cursor 1: it has already seen event 1 and must not get it.
+    await doi.fetch(open(ctx, 1));
+    const ws = ctx.sockets[0];
+    expect(ws.sent).toEqual([]);
+    await post(2);
+    expect(ws.sent.map((s) => JSON.parse(s).cursor)).toEqual([2]);
+  });
+
+  it("sends nothing to a socket that claimed a cursor ahead of the room", async () => {
+    // The guard's ONLY real trigger, and the reason the test above cannot
+    // prove it. A socket's attachment starts at the cursor the client named
+    // and cursors only rise, so in ordinary flow event.cursor is always
+    // above att.cursor and the guard never fires — remove it and the test
+    // above still passes. It fires when a client names a cursor the room
+    // has not reached, and then it must: that client has claimed to have
+    // seen through 10, so 1 and 2 are not news to it.
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 10));
+    await post(1);
+    await post(2);
+    expect(ctx.sockets[0].sent).toEqual([]);
+
+    // ...and it starts receiving once the room passes what it claimed.
+    for (let n = 3; n <= 11; n++) await post(n);
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).cursor)).toEqual([11]);
+  });
+
+  it("still resolves a long-poll waiter", async () => {
+    const { doi, ctx, post } = await world();
+    await doi.fetch(open(ctx, 0));
+    const polling = doi.waitForEvents(0, 5_000);
+    await post(1);
+    expect((await polling).map((e) => e.cursor)).toEqual([1]);
+    // Both arms, one event. The long poll is permanent for remote clients.
+    expect(ctx.sockets[0].sent).toHaveLength(1);
+  });
+
+  it("delivers session_expired over the socket too", async () => {
+    const storage = fakeStorage({
+      session: { ...currentRow(), expiresAt: Date.now() - 1 }, cursor: 0,
+    });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.fetch(open(ctx, 0));
+    await doi.alarm();
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
+  });
+
+  // The cases below pin what the seven above leave open.
+
+  it("sends an event appended with a key, and does not resend it on a replay", async () => {
+    // appendEventOnce is the second of wake()'s three callers: it is what
+    // bellman_send calls when it carries an idempotency_key. A retry finds the
+    // stored event and returns it without appending, so nothing wakes and the
+    // socket must not see it a second time.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const send = () => doi.appendEventOnce({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    }, "send-0001");
+
+    expect((await send()).outcome).toBe("appended");
+    expect((await send()).outcome).toBe("replayed");
+    expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).payload)).toEqual([{ n: 1 }]);
+  });
+
+  it("sends nothing to a socket that has no attachment", async () => {
+    // Fail closed. fetch attaches before it accepts, so a socket it accepts
+    // always carries one; a socket without one is a symptom that something is
+    // wrong, and the DEPENDENCY paragraph on fetch names one way. Its cursor is
+    // unknown, so it gets nothing rather than every event. fakeSocket reads an
+    // attachment that was never set back as null, as workerd does.
+    const { doi, ctx, post } = await world();
+    ctx.acceptWebSocket(fakeSocket());
+    await post(1);
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("does not yield between reading a socket's cursor and sending", async () => {
+    // wake() is synchronous: getWebSockets, deserializeAttachment, send and
+    // serializeAttachment all are, and an await between reading a socket's
+    // cursor and sending would reopen the gap that read-and-register exists to
+    // close.
+    //
+    // wake() is #private, so it cannot be reached by name; this goes through
+    // appendEvent and watches the socket. A microtask is queued at the moment
+    // the socket's cursor is read, and if anything yielded before the send that
+    // microtask would have run by then. Looking at the socket after awaiting
+    // appendEvent could not tell: a continuation queued inside wake() still
+    // runs before appendEvent's caller resumes.
+    //
+    // What this does not see is a yield before the cursor is read. That is not
+    // the gap, and it cannot be seen from outside: nothing observable happens
+    // between appendEvent's last write and the first read.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const ws = ctx.sockets[0];
+    const read = ws.deserializeAttachment;
+    const send = ws.send;
+    let yielded = false;
+    let yieldedAtSend: boolean | undefined;
+    ws.deserializeAttachment = () => { queueMicrotask(() => { yielded = true; }); return read(); };
+    ws.send = (data: string) => { yieldedAtSend = yielded; send(data); };
+
+    await doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    });
+
+    expect(ws.sent).toHaveLength(1);
+    expect(yieldedAtSend).toBe(false);
+  });
+
+  it("sends the public event, not the stored one", async () => {
+    // Spec D1a. The stored event carries fromUserId, the sender's upstream
+    // identity (u_github_4242 and the like), and every member of a room
+    // receives every other member's events. So the frame is publicEvent(event):
+    // the projection the poll returns, one shape for both transports.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const event = await doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u_github_4242",
+      fromLabel: "peer", payload: { n: 1 }, refId: null,
+    });
+
+    const frame = ctx.sockets[0].sent[0];
+    expect(frame).not.toContain("4242");
+    expect(Object.keys(JSON.parse(frame)).sort())
+      .toEqual(["at", "cursor", "from", "payload", "ref_id", "type"]);
+    expect(JSON.parse(frame)).toEqual(publicEvent(event!));
+  });
+
+  it("does not let a socket that throws starve the others, or fail the append", async () => {
+    // No send to a socket that reads OPEN has been observed to throw in workerd.
+    // The throw here comes from the fake, on a socket that reads OPEN, to prove
+    // the guard whatever the cause; it does not describe a failure that has
+    // happened. (The send failure that has, to a socket that is closing, is
+    // skipped in wake() and covered under "receive-only".) If a throw ended the
+    // loop, getWebSockets() returns a list and every later socket would miss
+    // the event, after the waiter arm had run and the event was stored, and the
+    // append would fail for a sender whose message is safe.
+    const { doi, ctx, post } = await world();
+    for (const member of ["m1", "m2", "m3"]) await doi.fetch(open(ctx, 0, member));
+    const boom = new Error("send failed");
+    ctx.sockets[1].send = () => { throw boom; };
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(post(1)).resolves.toMatchObject({ cursor: 1 });
+
+      // Both neighbours got it. The one that threw did not, and keeps its old
+      // cursor: the cursor moves only after a send that returned.
+      expect(ctx.sockets[0].sent).toHaveLength(1);
+      expect(ctx.sockets[2].sent).toHaveLength(1);
+      const cursorOf = (i: number) =>
+        (ctx.sockets[i].deserializeAttachment() as { cursor: number }).cursor;
+      expect([cursorOf(0), cursorOf(1), cursorOf(2)]).toEqual([1, 0, 1]);
+
+      // Logged once, with the error itself.
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls[0]).toContain(boom);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  // An event whose time publicEvent cannot format. It is the detector for the
+  // two cases below: wherever a frame is built for it, publicEvent throws.
+  //
+  // wake() is #private, so these reach it through appendEvent, which is what calls
+  // it. appendEvent stamps the event with Date.now(), so the clock is what is made
+  // to read NaN, and only for the append: the event is stored with `at: NaN` and
+  // new Date(NaN) cannot be formatted. Called through appendEvent, the second case
+  // is also the thing it says: an append that must not fail.
+  const appendUnformattable = async (doi: InstanceType<typeof storeDo.SessionDO>) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Number.NaN);
+    try {
+      return await doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: {}, refId: null,
+      });
+    } finally {
+      clock.mockRestore();
+    }
+  };
+
+  it("builds no frame for a socket that is not due the event", async () => {
+    // The frame is built on the first socket that is due the event, not on
+    // every append: a poll-only room has no sockets and pays nothing per
+    // append, and a room whose sockets are all past the event pays nothing
+    // either. Built eagerly, the unformattable event throws out of wake() with
+    // no socket to blame. Built for a socket that is not due it, the failure is
+    // caught by the per-socket try and logged. Built lazily, nothing is built,
+    // so nothing throws and nothing is logged.
+    const { doi, ctx } = await world();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull(); // no sockets at all
+
+      await doi.fetch(open(ctx, 5)); // a socket already past the next cursor, 2
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+    expect(ctx.sockets[0].sent).toEqual([]);
+  });
+
+  it("contains a frame that cannot be built, so it cannot fail the append", async () => {
+    // The frame is built inside the per-socket try, after the guard, so a
+    // projection failure is one more thing that try contains: it does not fail
+    // an append whose event is already stored. Nothing is sent, and the socket
+    // keeps its cursor.
+    const { doi, ctx } = await world();
+    await doi.fetch(open(ctx, 0));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull();
+      expect(log).toHaveBeenCalledTimes(1);
+      expect(String(log.mock.calls[0][1])).toMatch(/Invalid time value/);
+    } finally {
+      log.mockRestore();
+    }
+    expect(ctx.sockets[0].sent).toEqual([]);
+    expect((ctx.sockets[0].deserializeAttachment() as { cursor: number }).cursor).toBe(0);
+  });
+});
+
+/**
+ * The socket's other half: what a client may not do over it, and the lifecycle
+ * the runtime delivers to SessionDO. fetch and wake() are tested above; these
+ * are webSocketMessage, webSocketClose, webSocketError and the auto-response the
+ * constructor registers.
+ *
+ * Where a handler does something, an assertion that something did NOT happen
+ * (nothing appended, nothing written) sits in one toEqual with the thing that
+ * did: a socket closed 1003, or acknowledged with 1000. Alone, "nothing written"
+ * is satisfied by a handler that does nothing at all. webSocketError does
+ * nothing by design, so its test can only show that it returns and writes
+ * nothing, and the throwing and writing versions of it are what turn that red.
+ *
+ * The auto-response itself cannot be exercised here. The runtime answers a
+ * matching frame without running any JavaScript, so there is no handler to call,
+ * and no test in this file can see an object not being woken. What it can pin is
+ * the registration: that it exists, at construction, with the right strings.
+ * That it works, and what it does and does not cover, was measured against real
+ * workerd; the constructor's comment says how.
+ */
+describe("receive-only", () => {
+  const upgrade = (members = "m1") =>
+    new Request("https://do/ws?cursor=0", {
+      headers: { upgrade: "websocket", "x-bellman-members": members },
+    });
+
+  const world = async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    await doi.fetch(upgrade());
+    return { doi, ctx, storage, ws: ctx.sockets[0] };
+  };
+
+  it.each([
+    ["a text frame", "anything"],
+    ["a message shaped like a bellman_send", JSON.stringify({ type: "message", payload: {} })],
+    ["a binary frame", new ArrayBuffer(8)],
+  ])("closes a socket that sends %s", async (_what, frame) => {
+    const { doi, ws } = await world();
+    await doi.webSocketMessage(ws as never, frame);
+    expect(ws.closed?.code).toBe(1003);
+  });
+
+  it("says where to send instead, within the close reason's size limit", async () => {
+    const { doi, ws } = await world();
+    await doi.webSocketMessage(ws as never, "anything");
+    expect(ws.closed).toMatchObject({ code: 1003, reason: expect.stringContaining("bellman_send") });
+    // The fake throws above this size, as workerd does, so a longer reason fails
+    // the close itself first; this puts the number where a reader looks.
+    expect(new TextEncoder().encode(ws.closed!.reason).byteLength).toBeLessThanOrEqual(123);
+  });
+
+  it("appends nothing when a client sends", async () => {
+    const { doi, storage, ws } = await world();
+    const before = {
+      writes: storage.writes, puts: storage.puts, alarms: storage.alarms.length,
+      events: (await doi.eventsAfter(0)).length,
+    };
+    await doi.webSocketMessage(ws as never, JSON.stringify({ type: "message", payload: {} }));
+    expect({
+      closedWith: ws.closed?.code,
+      keysWritten: storage.writes - before.writes,
+      puts: storage.puts - before.puts,
+      alarmsSet: storage.alarms.length - before.alarms,
+      eventsAppended: (await doi.eventsAfter(0)).length - before.events,
+    }).toEqual({ closedWith: 1003, keysWritten: 0, puts: 0, alarmsSet: 0, eventsAppended: 0 });
+  });
+
+  it("registers a ping auto-response when the object is built, so a keepalive never wakes it", () => {
+    // Before any fetch: the registration belongs to the object, not to an
+    // upgrade. See the constructor for why that placement.
+    const ctx = fakeCtx(fakeStorage({ session: currentRow(), cursor: 0 }));
+    new storeDo.SessionDO(ctx as never, {} as never);
+    expect(ctx.autoResponses).toHaveLength(1);
+    expect(ctx.autoResponses[0]).toMatchObject({ request: "ping", response: "pong" });
+  });
+
+  describe("wake() and a socket that webSocketMessage has closed", () => {
+    // A client sending a frame is the expected case (D1), so a socket closed 1003
+    // is a normal path and not an edge. The runtime goes on listing it until its
+    // peer acknowledges, reading CLOSING, and a send to it throws (measured in
+    // workerd, and modelled by the fake). Left to the per-socket catch, every
+    // append in that window logs a failed delivery for it, and a client that
+    // reconnects and sends again becomes sustained error noise.
+    const post = (doi: InstanceType<typeof storeDo.SessionDO>, n: number) =>
+      doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: { n }, refId: null,
+      });
+
+    // Three members' sockets: [0] and [2] open, [1] has sent a frame and been closed.
+    const fanOut = async () => {
+      const { doi, ctx } = await world();
+      await doi.fetch(upgrade("m2"));
+      await doi.fetch(upgrade("m3"));
+      await doi.webSocketMessage(ctx.sockets[1] as never, "anything");
+      return { doi, ctx };
+    };
+
+    it.each([
+      ["closing", undefined],
+      ["closed", 3],
+    ])("skips a socket that is %s: no send, no log, and its open peers still get the event", async (_state, forced) => {
+      const { doi, ctx } = await fanOut();
+      const gone = ctx.sockets[1];
+      if (forced !== undefined) Object.defineProperty(gone, "readyState", { value: forced });
+      const send = vi.spyOn(gone, "send");
+      const read = vi.spyOn(gone, "deserializeAttachment");
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(post(doi, 1)).resolves.toMatchObject({ cursor: 1 });
+        // One comparison, with the open peers' delivery in it: "no send, no log"
+        // alone is satisfied by a wake() that delivers to nobody.
+        expect({
+          openPeersGot: [ctx.sockets[0].sent.length, ctx.sockets[2].sent.length],
+          sendsTried: send.mock.calls.length,
+          attachmentsRead: read.mock.calls.length,
+          logged: log.mock.calls.length,
+        }).toEqual({ openPeersGot: [1, 1], sendsTried: 0, attachmentsRead: 0, logged: 0 });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("still contains and logs a send that throws on a socket that reads OPEN", async () => {
+      // No send to a socket that reads OPEN has been observed to throw, so this
+      // forces one: the closed fake is made to read OPEN, passes the check, and
+      // its send throws as workerd's does on a closed socket. Whatever the real
+      // cause turns out to be, the catch must hold: the failure is logged once,
+      // not swallowed by the skip, and nobody else loses the event.
+      const { doi, ctx } = await fanOut();
+      Object.defineProperty(ctx.sockets[1], "readyState", { value: 1 });
+      const log = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        await expect(post(doi, 1)).resolves.toMatchObject({ cursor: 1 });
+        expect({
+          openPeersGot: [ctx.sockets[0].sent.length, ctx.sockets[2].sent.length],
+          logged: log.mock.calls.length,
+          error: String(log.mock.calls[0]?.[1]),
+        }).toEqual({
+          openPeersGot: [1, 1], logged: 1, error: expect.stringMatching(/send\(\) after close\(\)/),
+        });
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it.each([
+      ["undefined", undefined],
+      ["4, past CLOSED", 4],
+    ])("sends to a socket whose readyState is %s, which is nothing it recognises", async (_what, reading) => {
+      // Skipping rests on positive knowledge that a socket is closing or closed,
+      // exactly CLOSING (2) and CLOSED (3), and only on that. A reading nobody
+      // expected must not silently stop delivery, and a threshold (>= 2) would.
+      const { doi, ctx } = await world();
+      Object.defineProperty(ctx.sockets[0], "readyState", { value: reading });
+      await post(doi, 1);
+      expect(ctx.sockets[0].sent).toHaveLength(1);
+    });
+  });
+
+  describe("when the peer closes, or the connection drops or breaks", () => {
+    it.each([
+      ["a polite close", 1000, "bye", true],
+      ["a close with no status code, which arrives as 1005", 1005, "", true],
+      ["an application's own code", 4000, "app", true],
+      ["a connection that dropped, which arrives as 1006", 1006, "WebSocket disconnected without sending Close frame.", false],
+    ])("acknowledges %s, so the peer's close completes", async (_what, code, reason, clean) => {
+      const { doi, storage, ws } = await world();
+      const before = storage.writes;
+      await doi.webSocketClose(ws as never, code, reason, clean);
+      expect({ closedWith: ws.closed?.code, keysWritten: storage.writes - before })
+        .toEqual({ closedWith: 1000, keysWritten: 0 });
+    });
+
+    it("takes an error from the runtime without throwing or writing", async () => {
+      const { doi, storage, ws } = await world();
+      const before = storage.writes;
+      await expect(doi.webSocketError(ws as never, new Error("boom"))).resolves.toBeUndefined();
+      expect(storage.writes - before).toBe(0);
+    });
+  });
+});
+
+/**
+ * The TTL alarm at its boundary. createSession arms the alarm once, and
+ * expireIfDue's guard is `now <= expiresAt`, so a firing that lands exactly on
+ * the boundary expires nothing. That would have gone unnoticed while
+ * bellman_sync called getSession on every poll, which expires the room lazily.
+ * A member watching over a socket does not poll, so on a quiet room nothing
+ * calls it, and the alarm has to finish the job itself.
+ *
+ * It does, through the named-alarm driver and with no re-arm of its own:
+ * alarm() ends in reArm(), which points the alarm back at the TTL for as long
+ * as the room is open. These tests pin that, and the two ends of it: the loop
+ * stops once the room is closed, and a firing that lands early does not make an
+ * alarm that is already due.
+ *
+ * The clock is pinned with vi.setSystemTime and put back in a finally, as in
+ * membersOf's boundary case: a test cannot make a real clock read exactly
+ * expiresAt.
+ */
+describe("SessionDO.alarm: the TTL re-arm", () => {
+  it("points the alarm back at the TTL when it fires exactly on the boundary", async () => {
+    // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
+    // landing exactly on expiresAt expires nothing. Without the driver's
+    // closing reArm() the room is then immortal until something calls
+    // getSession, and a room watched over sockets is not polled.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+
+    try {
+      vi.setSystemTime(at); // fire exactly on the boundary
+      await doi.alarm();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+    // At the TTL, which is no later than this firing's own clock: due at once.
+    expect(storage.alarms).toEqual([at]);
+  });
+
+  it("closes the room on the first firing past the boundary, and arms nothing after it", async () => {
+    // Why the loop terminates, run rather than argued. The re-arm is set for
+    // expiresAt, not after it, so the firing it buys can land in the same
+    // millisecond and find the boundary again; that one re-arms the same way.
+    // The first firing to read now > expiresAt closes the room, and a closed
+    // room derives no TTL, so that firing arms nothing: an alarm set for a time
+    // already behind the clock would be due the moment it was set, and would set
+    // the next one the same way.
+    //
+    // A room with no join code. Expiring one that holds a code queues the registry's
+    // removal of it, and that is the outbox's alarm, not the TTL's: it is armed on
+    // purpose and would be counted here. This test is about the TTL, so the room has
+    // nothing for the outbox to do.
+    const at = Date.now() + 10_000;
+    const storage = fakeStorage({
+      session: { ...currentRow({ joinCodes: {} }), expiresAt: at }, cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    try {
+      vi.setSystemTime(at);
+      await doi.alarm(); // the boundary firing: nothing to expire, TTL kept
+      await doi.alarm(); // the firing it buys, in the same millisecond: the same again
+      expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+      expect(storage.alarms).toEqual([at, at]);
+
+      vi.setSystemTime(at + 1); // the clock moves on
+      await doi.alarm();
+
+      expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: true });
+      expect(storage.alarms).toEqual([at, at]); // no third
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-arm a room that is already closed", async () => {
+    // closeSession leaves the TTL alarm pending, so it still fires on a room
+    // that is already closed, and expireIfDue returns early on it without
+    // writing. Nothing is left to expire, so nothing is re-armed.
+    const storage = fakeStorage({
+      session: { ...currentRow(), closed: true, expiresAt: Date.now() - 1 }, cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    await doi.alarm();
+
+    expect(storage.alarms).toEqual([]);
+  });
+
+  it("points a firing that lands before the room is due at the TTL, still ahead of the clock", async () => {
+    // An alarm set for expiresAt is expected to run at or after it, so a firing
+    // before it points to a handler clock that disagrees with the one that
+    // scheduled the alarm. The contract suite's frozen fake clock is such a
+    // disagreement. Nothing is due, so nothing expires, and the closing reArm()
+    // sets the TTL: at expiresAt, which this clock still reads as ahead. An
+    // alarm set at or behind the clock would be due at once and re-armed again,
+    // until the object is torn down.
+    const at = Date.now() + 10_000;
+    const early = at - 5_000;
+    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    try {
+      vi.setSystemTime(early); // early: not due, and not on the boundary
+      await doi.alarm();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+    expect(storage.alarms).toEqual([at]);
+    expect(storage.alarms[0]).toBeGreaterThan(early);
   });
 });
 

@@ -496,13 +496,17 @@ it("shows an expiry's event to every call before it waits on the registry", asyn
   // Past the commit, inside the drain.
   await new Promise((resolve) => setTimeout(resolve, 100));
   const midway = await store.getSession(id);
+  // getSession no longer carries events (#25): it returns the session record
+  // and members only, so a caller that wants history asks for it. Read before
+  // midwayAt so the timing assertion below still measures the same window.
+  const midwayEvents = await store.eventsAfter(id, 0);
   const midwayAt = Date.now();
   const woken = await poll;
   await expiring;
 
   expect(woken.map((e) => e.type)).toEqual(["session_expired"]);
   expect(midway?.closed).toBe(true);
-  expect(midway?.events.map((e) => e.type)).toEqual(["session_expired"]);
+  expect(midwayEvents.map((e) => e.type)).toEqual(["session_expired"]);
   // Both were answered while the registry was still being told. It takes two removals at
   // 300 ms each, so the drain finishes long after.
   expect(midwayAt - started).toBeLessThan(350);

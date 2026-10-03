@@ -16,6 +16,8 @@ import {
 } from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
+import type { StoredSession } from "./stored-session.js";
+import { publicEvent } from "./public-event.js";
 
 const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
@@ -152,7 +154,7 @@ function publicMember(m: Member) {
  * lookup back into this function: a preview that over-promised by a single verb
  * is the failure this whole design exists to prevent.
  */
-function roomPreview(session: Session, viewerRole: string) {
+function roomPreview(session: StoredSession, viewerRole: string) {
   const m = session.manifest;
   const creator = session.members[0];
   const roles: Record<string, Verb[]> = {};
@@ -172,17 +174,6 @@ function roomPreview(session: Session, viewerRole: string) {
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },
     ),
-  };
-}
-
-function publicEvent(e: SessionEvent) {
-  return {
-    cursor: e.cursor,
-    type: e.type,
-    from: { member_id: e.fromMemberId, label: e.fromLabel },
-    payload: e.payload,
-    ref_id: e.refId,
-    at: new Date(e.at).toISOString(),
   };
 }
 
@@ -623,8 +614,15 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       }
       if (type === "action_response") {
         if (!ref_id) return fail("action_response requires ref_id (the cursor id of the action_request).");
-        const req = session.events.find((e) => String(e.cursor) === ref_id && e.type === "action_request");
-        if (!req) return fail(`no action_request with cursor id ${ref_id}.`);
+        // One key, not the whole history (#25). String-compared, not numeric:
+        // "007" never matched cursor 7 and must not start to.
+        const at = Number(ref_id);
+        const req = Number.isSafeInteger(at) && at > 0
+          ? await s.eventAt(session_id, at)
+          : undefined;
+        if (!req || String(req.cursor) !== ref_id || req.type !== "action_request") {
+          return fail(`no action_request with cursor id ${ref_id}.`);
+        }
         if (req.fromMemberId === member_id) return fail("you cannot respond to your own action_request.");
       }
       // Validated here so an invalid brief never appends an event; applied

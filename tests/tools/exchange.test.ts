@@ -159,6 +159,43 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     expect(badRef.text).toContain("no action_request with cursor id 999");
   });
 
+  it("rejects an action_response whose ref_id names no action_request", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+    const chat = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "message", payload: { text: "not a request" },
+    });
+    const real = String(ask.data.cursor);
+    const respond = (ref_id: string) => p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id, payload: { ok: true },
+    });
+
+    const refs = [
+      "9999", "007", "abc", "-1", "0", "1e3",
+      // Numbers that equal a real request's cursor without being its decimal
+      // string. Only these can catch an implementation that compares numbers:
+      // the refs above name no event in this room, so they are refused either way.
+      `00${real}`, `${real}.0`, `+${real}`, ` ${real}`, `${real}e0`,
+      // An event that exists and is not an action_request.
+      String(chat.data.cursor),
+    ];
+    for (const ref of refs) {
+      const r = await respond(ref);
+      expect(r.isError, `ref_id ${ref} should be refused`).toBe(true);
+      expect(r.text).toContain(`no action_request with cursor id ${ref}`);
+    }
+
+    // Positive control: the request answers to its exact string, so every
+    // refusal above is about the ref_id and not about who is responding.
+    const ok = await respond(real);
+    expect(ok.isError, ok.text).toBe(false);
+  });
+
   it("refuses a self-approved action request", async () => {
     const p = await pairUp(h);
     const req = await p.creator.call("bellman_send", {
@@ -254,14 +291,15 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
       });
     }
 
-    const events = (await h.store.getSession(p.sessionId))!.events;
+    const events = await h.store.eventsAfter(p.sessionId, 0);
     const cursors = events.map((e) => e.cursor);
     expect(cursors).toEqual([...cursors].sort((a, b) => a - b));
     expect(new Set(cursors).size).toBe(cursors.length);
 
-    // Replaying from cursor 0 returns the same history, unchanged.
-    const replay = (await h.store.eventsAfter(p.sessionId, 0));
-    expect(replay.map((e) => e.payload)).toEqual(events.map((e) => e.payload));
+    // Replaying from a later cursor returns the tail of the same history,
+    // unchanged. From cursor 0 it would only repeat the read above.
+    const tail = await h.store.eventsAfter(p.sessionId, cursors[0]);
+    expect(tail).toEqual(events.slice(1));
   });
 
   it("isolates sessions from each other entirely", async () => {

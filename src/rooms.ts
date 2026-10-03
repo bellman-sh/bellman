@@ -14,7 +14,8 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, Session, Verb } from "./types.js";
+import type { AuditEntry, Identity, Member, Verb } from "./types.js";
+import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import { JOIN_CODE_TTL, isActiveMember, type BellmanStore } from "./store.js";
@@ -66,11 +67,11 @@ export const FROZEN =
   "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
   "history is still readable, but nothing new can be sent or joined until the plan is restored.";
 
-export function activeMembers(s: Session): Member[] {
+export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
 }
 
-export function findMember(s: Session, memberId: string, identity: Identity): Member | undefined {
+export function findMember(s: StoredSession, memberId: string, identity: Identity): Member | undefined {
   const m = s.members.find((mm) => mm.memberId === memberId);
   // A member handle can only be driven by the identity that created it.
   if (!m || m.userId !== identity.userId) return undefined;
@@ -100,7 +101,7 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
  */
 export async function audit(
   store: BellmanStore,
-  session: Session,
+  session: StoredSession,
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
@@ -133,7 +134,7 @@ export async function audit(
  * the decision moved into it. The other half is `addMember` refusing a closed
  * room, so a join arriving after the close is turned away and not seated.
  */
-async function closeIfEmpty(store: BellmanStore, session: Session): Promise<string> {
+async function closeIfEmpty(store: BellmanStore, session: StoredSession): Promise<string> {
   // Closed wins over frozen: an empty room is over either way, and telling
   // someone their room is frozen when it has no members left to thaw for
   // would point them at paying to fix something payment will not fix. The store
@@ -224,7 +225,7 @@ async function gateSeat(
   sessionId: string,
   memberId: string,
   verb: Verb,
-): Promise<RoomResult<Session>> {
+): Promise<RoomResult<StoredSession>> {
   const session = await store.getSession(sessionId);
   // Two branches, not one, and the reason text is identical on purpose. The
   // sentence a caller reads is unchanged from the old handler; the CODE is what
@@ -259,7 +260,7 @@ async function gateSeat(
  * mistyped role retires nothing, so without the check it answers an empty
  * success, and an open door reads as shut.
  */
-function unknownRole(session: Session, role: string | undefined): RoomResult<never> | null {
+function unknownRole(session: StoredSession, role: string | undefined): RoomResult<never> | null {
   if (role === undefined || Object.hasOwn(session.manifest.roles, role)) return null;
   return refuse(
     "invalid",

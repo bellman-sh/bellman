@@ -362,8 +362,30 @@ use `$XDG_CONFIG_HOME/bellman` (`src/credentials.ts:47`) and inboxes use
 `~/.claude/bellman/inbox` (`src/inbox.ts:121`). This is runtime state, so it
 belongs beside the inbox.
 
-`sun_path` caps around 104 bytes on macOS. That is a genuine fallback trigger
-under a long home directory, not a theoretical one, and D11 is what catches it.
+`sun_path` caps around 104 bytes on macOS, a genuine fallback trigger under a
+long home directory rather than a theoretical one. **It is also a correctness
+boundary, not tidiness.** Node 22 *truncates* an over-long socket path; Node 25
+refuses it with `EINVAL`. Truncation is the dangerous half: two identities whose
+hashes differ only past the cut would silently share a bus, which is precisely
+what hashing the credential into the path exists to prevent. So the length check
+is what keeps identities apart, and D11 catches the refusal.
+
+**Measured correction: macOS gives the bind loser `EEXIST`, not
+`EADDRINUSE`.** The paragraph above names the POSIX code; the platform we
+develop on does not use it. 31 of 40 race trials failed before both codes were
+handled. Treat either as "someone won, connect instead".
+
+**Residual: this election can still produce two coordinators.** Measured at
+about 1 in 160 real-process races (8 racers, macOS). No event is lost — a
+subscriber that loses its bus races again and catches up from its own cursor —
+and only a lock would close it, which this decision rejects. What *was* fixed is
+the harm: a replaced coordinator's shutdown used to unlink its successor's
+socket, turning a rare race into an outage caused by cleanup. A coordinator now
+records its socket's inode at `listen()` and unlinks only if the inode still
+matches, so it cannot delete a file it no longer owns. That is an identity check
+on its own file, not a liveness heuristic about processes.
+
+Linux is unmeasured.
 
 ### D9 — The bus delivers a gapless ordered stream from the cursor you named.
 

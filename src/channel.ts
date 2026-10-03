@@ -35,6 +35,7 @@
 import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, type Delivery, type Remote, type WhoAmI } from "./bridge.js";
+import { busCredentials } from "./credentials.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
@@ -100,6 +101,14 @@ const bridge = createBridge({
   inboxDir,
   remote: connect,
   whoami,
+  /**
+   * One upstream connection per room, shared by every bridge on this machine (#43, #99). It is asked for when the
+   * first membership is armed and not before, so nothing is read and no socket made at launch: a signed-in bridge
+   * has no identity to name a bus after until it has signed in. A BELLMAN_KEY names the bus and signs a room's
+   * upgrade; signed in, the person (not the token, which changes every ten minutes) names it and whatever token
+   * the credential file holds signs it. Where the bus cannot be had the bridge polls as it always did.
+   */
+  bus: { url, ...busCredentials(url, key) },
   log,
 });
 
@@ -110,6 +119,8 @@ async function shutdown(): Promise<void> {
   // Before close(), not after. close() awaits the connect in flight, and a
   // sign-in is the one that can hold for as long as a human takes.
   signingIn.abort();
+  // close() also closes the local bus, and that is what removes this bridge's socket file if it was the
+  // coordinator. The bridges that were its subscribers race again and one takes over, each from its own cursor.
   await bridge.close().catch(() => undefined);
   if (inboxDir) rmSync(inboxDir, { recursive: true, force: true });
   /**

@@ -16,6 +16,7 @@
 - **Nothing importing `cloudflare:workers` can be imported by a vitest test.** `src/oauth/store.ts`, `src/worker.ts` and `src/store-do.ts` are excluded from the Node build. Shapes and pure logic go in `src/oauth/storage.ts`, which stays importable from plain Node.
 - **`npm run verify` before every commit.** It is `typecheck && typecheck:worker && build && test && test:worker`.
 - **Read and register in the same turn** — no `await` between a read and the write that depends on it, in any method that must be atomic.
+- **A test for an operation on one record must have another record present that the operation must not touch, and assert it survives untouched.** A single-record test cannot distinguish "operates on the record I named" from "operates on everything": the claim that the named record changed has a second producer, that every record changed. This plan has met that gap in the sweep tests, in `deleteSession`'s, in the writes of `touchSession` and `replanSession`, and in `touchSession`'s drop of a dead session. A drop written as `deleteAll()` on the singleton `AuthDO` passed every test, and would have taken every session, every refresh token, every client registration and the billing ledger with it. The rule binds route tests as well: a sign-out test needs a second session that stays signed in.
 - **A room holds many members, not two.** Never write "the other session" or "two sessions" in code, comments, commits or docs. Say *members*, *the room*, or *peers*.
 - **`main` moves only through merges.** Work stays on `mcfearsome/a-browser-session-for-dash-the-panel-signs-in-wi` and lands by PR.
 - **No new MCP tool, so `extension/manifest.json` is untouched.** If a task finds itself editing it, that task has gone out of scope.
@@ -2549,11 +2550,16 @@ describe("/auth/signout", () => {
       },
     }));
 
-  it("invalidates the session server-side", async () => {
-    const sid = await seedSession(cfg);
+  it("invalidates the session server-side, and only that one", async () => {
+    const mine = await seedSession(cfg, "mine");
+    const yours = await seedSession(cfg, "yours");
 
-    expect((await signout(sid)).status).toBe(204);
-    expect((await route(withCookie("/auth/session", sid))).status).toBe(401);
+    expect((await signout(mine)).status).toBe(204);
+
+    expect((await route(withCookie("/auth/session", mine))).status).toBe(401);
+    // Another browser stays signed in. A test with a single session to end
+    // passes a sign-out that ends every session.
+    expect((await route(withCookie("/auth/session", yours))).status).toBe(200);
   });
 
   it("clears the cookie with every attribute that set it", async () => {
@@ -2677,12 +2683,17 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./br
 Run: `npx vitest run tests/panel-session.test.ts`
 Expected: PASS.
 
-- [ ] **Step 6: Prove sign-out really is server-side**
+- [ ] **Step 6: Prove sign-out is server-side, and only for the session it names**
+
+Two mutations, one at a time, restoring between them. They fail different assertions of the same test.
 
 Temporarily drop the `deleteSession` call, leaving only the clearing header. Re-run.
-Expected: "invalidates the session server-side" FAILS — the second `/auth/session` is 200, because clearing the browser's copy did nothing to the record. Restore.
+Expected: "invalidates the session server-side, and only that one" FAILS on its first `/auth/session` assertion — the signed-out cookie still answers 200, because clearing the browser's copy did nothing to the record. Restore.
 
-This is the distinction that chose a stored session over a signed one; it gets an assertion rather than a paragraph.
+Then make a sign-out end every session: change `MemoryAuthStore.deleteSession` to `this.sessions.clear()`. Re-run.
+Expected: the same test FAILS on its last assertion — another browser's cookie now answers 401 — and so does `deleteSession ends only the session it names`, the store's own test of the same defect. The route test asserts the behaviour end to end, so it fails for a sign-out that ends every session whether the fault is in the route or beneath it. Restore.
+
+The first is the distinction that chose a stored session over a signed one. The second is the failure a user would see, signed out everywhere by one click, and a test with a single session cannot see it. Both get an assertion rather than a paragraph.
 
 - [ ] **Step 7: Verify and commit**
 
@@ -2710,7 +2721,11 @@ the session open.
 
 That the delete is server-side has its own test: dropping it leaves the
 next /auth/session answering 200. It is the whole reason the cookie is a
-stored id rather than a signed token."
+stored id rather than a signed token.
+
+The same test keeps a second session and asserts it is still signed in
+afterwards, because a sign-out that ended every session passes a test with
+only one to end."
 ```
 
 ---
@@ -3176,7 +3191,16 @@ One test that walks the whole thing in the order a human meets it. The unit test
 
 ```ts
 describe("the whole panel session, end to end", () => {
-  it("signs in, reads the account, signs out, and is then refused", async () => {
+  it("signs in, reads the account, signs out, is then refused, and signs nobody else out", async () => {
+    // Someone else is already signed in, in another browser. Established before
+    // the walk begins and checked at the end: the walk asserts that the right
+    // human was signed out and nobody else was, and a walk with a single session
+    // passes a sign-out that ends every session.
+    const bystander = await seedSession(cfg, "bystander", {
+      identity: { ...PANEL_IDENTITY, userId: "u_github_9999", label: "sam@example.dev" },
+      identity_keys: ["github:9999"],
+    });
+
     // 1. The panel boots with nothing. 401, no WWW-Authenticate, CORS present.
     const cold = await route(new Request(`${ISSUER}/auth/session`, {
       headers: { origin: PANEL },
@@ -3241,6 +3265,13 @@ describe("the whole panel session, end to end", () => {
     expect((await route(withCookie("/auth/session", sid, {
       headers: { origin: PANEL },
     }))).status).toBe(401);
+
+    // 8. Nobody else was signed out, and their session still answers as them.
+    const untouched = await route(withCookie("/auth/session", bystander, {
+      headers: { origin: PANEL },
+    }));
+    expect(untouched.status).toBe(200);
+    expect(((await untouched.json()) as { user_id: string }).user_id).toBe("u_github_9999");
   });
 });
 ```
@@ -3261,10 +3292,14 @@ npm run verify
 git add tests/panel-session.test.ts docs/superpowers/specs/2026-10-02-dash-browser-session-design.md
 git commit -m "test(oauth): the panel session end to end
 
-Seven steps in the order a human meets them: a cold boot refused, a
+Eight steps in the order a human meets them: a cold boot refused, a
 GitHub sign-in, the boot call answering, the account screen with CORS,
 /admin still refused, a forged write refused with the session intact,
-and a sign-out that is final.
+a sign-out that is final, and everyone else still signed in. Another
+person's session is seeded before the walk begins and checked at the end:
+that the right human was signed out and nobody else was is what an end to
+end sign-out test is for, and a walk with a single session passes a
+sign-out that ends every session.
 
 The unit tests prove each piece. This is the one that would notice if
 they stopped composing — a cookie whose attributes are right but which

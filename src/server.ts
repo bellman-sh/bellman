@@ -9,7 +9,7 @@ import {
   generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
-import { denyVerb, verbsOfRole } from "./roles.js";
+import { denyVerb, mustReport, verbsOfRole } from "./roles.js";
 import {
   FROZEN, activeMembers, announceReclaimed, audit, evictMember, findMember, issueInvite,
   leaveRoom, revokeInvite, seatedMembers, sessionStatus, touchMember,
@@ -173,9 +173,10 @@ function publicMember(m: Member) {
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
- * The spine (preset, mode, role keys, verbs) is server-validated — role keys
- * match a short snake_case regex and verbs come from a closed enum — so it
- * ships as fact, and all it can carry is identifiers and enum values. The skin
+ * The spine (preset, mode, role keys, verbs, cadence, whether this seat reports)
+ * is server-validated — role keys match a short snake_case regex, verbs come
+ * from a closed enum, and the cadence is a parsed number — so it ships as fact,
+ * and all it can carry is identifiers, enum values, a number and a boolean. The skin
  * (room, purpose, descriptions) is creator-authored prose and goes inside the
  * same untrusted envelope as a brief, because it reaches the joiner's model
  * before their human has approved anything.
@@ -218,6 +219,16 @@ function roomPreview(session: StoredSession, viewerRole: string) {
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: verbsOfRole(m, viewerRole),
+    /**
+     * The obligation, shown before a joiner's human accepts the seat. This is
+     * the consent point: a member that will be named silent in a tick has to be
+     * able to see that before joining, the same reason `your_verbs` is here.
+     *
+     * Through mustReport, which is what the tick itself calls, so what a joiner
+     * is SHOWN and what is ASKED are one computation and cannot drift apart.
+     */
+    heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
+    you_report: mustReport(m, viewerRole),
     creator_role: m.creatorRole,
     roles,
     text: untrusted(

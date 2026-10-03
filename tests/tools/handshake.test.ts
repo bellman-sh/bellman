@@ -707,7 +707,8 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "mode", "preset", "roles", "text", "your_role", "your_verbs"],
+      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "roles", "text",
+        "you_report", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
     for (const prose of ["reads-back", "Check what the server kept"]) {
@@ -754,6 +755,71 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     expect(room.creator_role).toBe("author");
     expect(room.preset).toBe("review");
     expect(room.mode).toBe("pair");
+  });
+
+  // The heartbeat obligation (#111), shown at the consent point. A member that will
+  // be named silent in a tick has to be able to see that before it takes the seat.
+  /** A pair room with a 5m cadence, where `reports` says which seats are asked to answer it. */
+  const tickingRoom = (reports: { driver: boolean; navigator: boolean }) => ({
+    room: "answers-the-tick",
+    mode: "pair",
+    heartbeat_on: "5m",
+    roles: {
+      driver: { can: ["send", "invite"], reports: reports.driver },
+      navigator: { can: ["send"], reports: reports.navigator },
+    },
+    default_role: "navigator",
+    creator_role: "driver",
+  });
+
+  it("shows the cadence and whether this seat must answer it", async () => {
+    // A room whose default_role reports, with a 5m cadence.
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: false, navigator: true }), brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+
+    expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: true });
+    // The creator's read-back is the same block through the same function, for the
+    // creator's own seat — which is not asked, so the answer differs.
+    expect(started.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: false });
+  });
+
+  it("asks about the viewer's seat, not the room's: a cadence alone is not an obligation", async () => {
+    // Only the creator's seat reports. The cadence is the room's, and the joiner sees it,
+    // but its own seat is not asked — a seat that does no work must not be named silent.
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: true, navigator: false }), brief: brief(),
+    });
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+
+    expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: false });
+    expect(started.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: true });
+  });
+
+  it("says so when the room expects no reports", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: { room: "quiet", preset: "pair" }, brief: brief(),
+    });
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+
+    expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: null, you_report: false });
   });
 
   it("shows EVERY role, so the joiner sees what others may do to them", async () => {
@@ -893,8 +959,11 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     expect(preview.isError, preview.text).toBe(false);
 
     const room = preview.data.room as Record<string, unknown>;
+    // The two heartbeat keys (#111) are spine: a number or null and a boolean, computed by
+    // the server, so there is no authored string in them to leak and the guard below holds.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "mode", "preset", "roles", "text", "your_role", "your_verbs"],
+      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "roles", "text",
+        "you_report", "your_role", "your_verbs"],
     );
 
     const { text, ...spine } = room;

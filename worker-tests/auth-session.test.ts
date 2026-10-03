@@ -309,8 +309,15 @@ describe("AuthDO: a method touches only the session it names", () => {
     expect(await o.replanSession("mine", REPLANNED, "grant", now)).toBe(true);
 
     expect(await storedSession(name, "yours")).toEqual(yours);
-    // And each id answers with its own record, not the last one served.
+    // And each id answers with its own record.
     expect((await o.touchSession("yours", now))?.identity.userId).toBe("u_github_9999");
+    // Alternating, with nothing due and nothing written between, which is what
+    // gives away an object that answers from the last record it served. The reads
+    // above are not enough: a cache like that is cleared by every write, and each
+    // of them follows one.
+    expect((await o.touchSession("mine", now + 1))?.identity.userId).toBe("u_github_4242");
+    expect((await o.touchSession("yours", now + 1))?.identity.userId).toBe("u_github_9999");
+    expect((await o.touchSession("mine", now + 1))?.identity.userId).toBe("u_github_4242");
   });
 
   // The branch every returning browser with an expired cookie runs, and the one

@@ -397,6 +397,13 @@ describe("a method touches only the session it names", () => {
 
     // Not due at T0, so this hands back what is stored.
     expect(await store.touchSession("yours", T0)).toEqual(yours());
+    // Alternating, with nothing due and nothing written between, which is what
+    // gives away a store that answers from the last record it served. The reads
+    // above are not enough: a cache like that is cleared by every write, and each
+    // of them follows one.
+    expect((await store.touchSession("mine", T0))?.identity.userId).toBe(IDENTITY.userId);
+    expect((await store.touchSession("yours", T0))?.identity.userId).toBe(OTHER.userId);
+    expect((await store.touchSession("mine", T0))?.identity.userId).toBe(IDENTITY.userId);
   });
 
   it("dropping a dead session removes that one and leaves the others", async () => {

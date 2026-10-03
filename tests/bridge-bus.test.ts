@@ -22,7 +22,7 @@ import { DEV_KEY } from "./helpers/harness.js";
  * The bridge with a local bus: what changes when `bus` is given, and what must not.
  *
  * Each "remote" is an in-process McpServer bound to a dev identity over one store, as in tests/bridge.test.ts, so a
- * bridge is a Claude Code session and two bridges are two sessions on one Bellman. What that file cannot give is a
+ * bridge is a Claude Code session and bridges are sessions on one Bellman. What that file cannot give is a
  * socket, so each room the tests use is mirrored from the store onto the fake /ws of tests/helpers/fake-bellman.ts:
  * real tool handlers on one side, a real WebSocket on the other, and the events the same on both.
  */
@@ -310,7 +310,7 @@ describe("through the bus", () => {
     expect(rooms.upgrades).toEqual([]);
   });
 
-  it("serves two sessions' rooms from the one coordinator, and each hears only its own room", async () => {
+  it("serves two bridges' rooms from the one coordinator, and each hears only its own room", async () => {
     const a = await open(DEV_KEY.jesse, { bus: true });
     const b = await open(DEV_KEY.jesse, { bus: true });
     const p1 = await open(DEV_KEY.peer);
@@ -719,7 +719,7 @@ describe("shutdown", () => {
     }
   });
 
-  it("hands over when the coordinator's session ends: the other session takes over and loses nothing", async () => {
+  it("hands over when the coordinator's bridge closes: the surviving bridge takes over and loses nothing", async () => {
     const a = await open(DEV_KEY.jesse, { bus: true });
     const b = await open(DEV_KEY.jesse, { bus: true });
     const p1 = await open(DEV_KEY.peer);

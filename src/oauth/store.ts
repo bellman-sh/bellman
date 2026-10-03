@@ -7,7 +7,9 @@ import {
   type RefreshToken, type RegisteredClient, type SweepStorage,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
+import { reconcilePurchase, type PurchaseGrantStore } from "../billing/grants.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
+import type { BellmanEnv } from "../store-do.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -31,22 +33,52 @@ const REG_CURSOR_KEY = "regs:cursor";
 /** How much stale data one registration is willing to clear. */
 const PURGE_BATCH = 200;
 
-export class AuthDO extends DurableObject {
+export class AuthDO extends DurableObject<BellmanEnv> {
   /**
    * What Stripe says each customer is paying for. The logic is BillingLedger,
    * shared with the in-memory store; this object only supplies the storage.
    *
    * The input gate is not enough on its own here: a sync awaits a fetch to
    * Stripe and other calls run meanwhile, so the ledger queues every write per
-   * customer and per user itself.
+   * customer and per user itself. A reconcile awaits the registry the same way,
+   * which is why it runs in the user's queue (see reconcile).
    */
   private ledger = new BillingLedger({
     get: <T>(key: string) => this.ctx.storage.get<T>(key),
     put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
   });
 
+  /**
+   * The grant store, reached from inside this object rather than the Worker.
+   *
+   * `#`, not `private`: every method and getter on a Durable Object answers
+   * over RPC, and TypeScript's `private` does nothing about that. This one would
+   * hand a caller a stub for the registry.
+   */
+  get #grants(): PurchaseGrantStore {
+    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+  }
+
   linkCustomer(customerId: string, userId: string): Promise<boolean> {
     return this.ledger.linkCustomer(customerId, userId);
+  }
+
+  /**
+   * Make the stored grant match what this user is currently paying for, with
+   * the whole decision inside the user's queue.
+   *
+   * It has to run here rather than in the Worker: the queue is in memory inside
+   * this object and the grant lives in RegistryDO, so holding it across two
+   * RPCs from outside is not something the Worker can do. The object that owns
+   * the serialisation performs the whole operation and calls the other itself.
+   *
+   * Lock ordering stays acyclic — linkCustomer takes customer then user, this
+   * takes user only, and nothing in RegistryDO calls back into this object.
+   */
+  reconcile(userId: string): ReturnType<typeof reconcilePurchase> {
+    return this.ledger.serializeUser(userId, () =>
+      reconcilePurchase(userId, this.ledger, this.#grants)
+    );
   }
 
   /**
@@ -70,7 +102,7 @@ export class AuthDO extends DurableObject {
     const key = `${CLIENT}${client.client_id}`;
     const existed = (await this.ctx.storage.get(key)) !== undefined;
     await this.ctx.storage.put(key, client);
-    if (!existed) await this.bumpCount(1);
+    if (!existed) await this.#bumpCount(1);
   }
 
   /**
@@ -103,7 +135,7 @@ export class AuthDO extends DurableObject {
     // something. A full registry is refused without writing per-IP state, so it
     // can be retried without limit — what has to stay bounded is the work each
     // retry costs, which was a scan per request.
-    if ((await this.clientCount()) >= CLIENT_CAP) {
+    if ((await this.#clientCount()) >= CLIENT_CAP) {
       const idleUntil = await this.ctx.storage.get<number>(PURGE_IDLE_KEY);
       if (purgeDue(idleUntil, now)) {
         const { clients, buckets, complete } = await this.purgeStale(now);
@@ -117,7 +149,7 @@ export class AuthDO extends DurableObject {
         // read taken before it is no longer what is stored.
         if (bucket) recent = await inWindow(bucket);
       }
-      if ((await this.clientCount()) >= CLIENT_CAP) return "full";
+      if ((await this.#clientCount()) >= CLIENT_CAP) return "full";
     }
 
     await this.registerClient(client);
@@ -160,13 +192,25 @@ export class AuthDO extends DurableObject {
    * count API and the alternative is list()ing up to CLIENT_CAP entries on
    * every registration. Every insert and delete goes through registerClient or
    * purgeStale, which are the only two places this moves.
+   *
+   * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
+   * Object answers RPC for every method on its class, and TypeScript's `private` is erased
+   * at compile time, so `private` would leave all three answering. Nothing outside this
+   * class calls them, so none of them has a reason to.
+   *
+   * That is the whole of it: less surface, not a protected counter. `registerClient`,
+   * `markClientUsed` and `purgeStale` are public because `AuthStorage` declares them, and
+   * over a stub `purgeStale(now + 48h)` sweeps a registration that has not lapsed while
+   * `registerClient` moves the counter. Anyone who could reach these three could already
+   * reach those. This one only seeds the counter from the keys that are there, and is
+   * private because it belongs to the same group, not because the seed needs guarding.
    */
-  private clientCount(): Promise<number> {
+  #clientCount(): Promise<number> {
     return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
   }
 
-  private async bumpCount(by: number): Promise<void> {
-    await this.ctx.storage.put(COUNT, Math.max(0, (await this.clientCount()) + by));
+  async #bumpCount(by: number): Promise<void> {
+    await this.ctx.storage.put(COUNT, Math.max(0, (await this.#clientCount()) + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
@@ -201,7 +245,7 @@ export class AuthDO extends DurableObject {
       this.sweepStorage, CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,
       (c) => (hasLapsed(c, now) ? { action: "delete" } : { action: "keep" })
     );
-    if (clients.reclaimed > 0) await this.bumpCount(-clients.reclaimed);
+    if (clients.reclaimed > 0) await this.#bumpCount(-clients.reclaimed);
 
     const buckets = await sweepPage<number[]>(
       this.sweepStorage, REG, REG_CURSOR_KEY, PURGE_BATCH,
@@ -228,7 +272,7 @@ export class AuthDO extends DurableObject {
   }
 
   async countClients(): Promise<number> {
-    return this.clientCount();
+    return this.#clientCount();
   }
 
   async countRegistrationBuckets(): Promise<number> {
@@ -242,7 +286,7 @@ export class AuthDO extends DurableObject {
 
   async putCode(code: string, value: AuthCode): Promise<void> {
     await this.ctx.storage.put(`${CODE}${code}`, value);
-    await this.purge(CODE);
+    await this.#purge(CODE);
   }
 
   /** Single use: a replayed authorization code finds nothing. */
@@ -267,7 +311,7 @@ export class AuthDO extends DurableObject {
     // exists to prevent. Promotion goes last: if it is what fails, the token
     // still works and the registration merely lapses, which is recoverable by
     // registering again. The reverse is not.
-    await this.purge(REFRESH);
+    await this.#purge(REFRESH);
     await this.ctx.storage.put(`${REFRESH}${token}`, value);
     await this.markClientUsed(value.client_id);
   }
@@ -288,8 +332,10 @@ export class AuthDO extends DurableObject {
    * cursor re-reads page one forever, and anything expired behind a full page
    * of live entries is never reached. Refresh tokens live 30 days, so that page
    * is not hypothetical.
+   *
+   * `#private`; see #clientCount.
    */
-  private async purge(prefix: string): Promise<void> {
+  async #purge(prefix: string): Promise<void> {
     const now = Date.now();
     await sweepPage<{ expires_at: number }>(
       // The cursor must live outside the prefix it tracks, or the sweep lists
@@ -318,6 +364,10 @@ export class AuthStore implements AuthStorage, BillingStorage {
 
   paidPlan(userId: string): Promise<PaidPlan | undefined> {
     return this.object.paidPlan(userId);
+  }
+
+  reconcile(userId: string): ReturnType<typeof reconcilePurchase> {
+    return this.object.reconcile(userId);
   }
 
   private get object() {

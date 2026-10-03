@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryBillingStore } from "../src/billing/ledger.js";
+import { reconcilePurchase } from "../src/billing/grants.js";
 import { MemoryStore } from "../src/store.js";
 import {
   MAX_WEBHOOK_BYTES, handleStripeWebhook, parsePaymentLinks, planForPrice, verifyStripeSignature,
@@ -43,9 +44,22 @@ const fakeStripe = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return sub ? Response.json(sub) : Response.json({ error: { code: "resource_missing" } }, { status: 404 });
 }) as typeof fetch;
 
+/** Every user the webhook asked to have reconciled, in order. */
+let reconciled: string[];
+
+/**
+ * What AuthDO supplies in production: the same decision, taken in the user's
+ * queue. Built from the same pieces, so the webhook is exercised against the
+ * ordering it will run under.
+ */
+const reconcile = (userId: string) => {
+  reconciled.push(userId);
+  return billing.serializeUser(userId, () => reconcilePurchase(userId, billing, plans));
+};
+
 /** Each read happens a millisecond after the last, near NOW so signatures stay fresh. */
 const webhookConfig = () => ({
-  secret: SECRET, billing, plans, apiKey: "rk_test", fetchImpl: fakeStripe, now: () => ++clock,
+  secret: SECRET, billing, reconcile, apiKey: "rk_test", fetchImpl: fakeStripe, now: () => ++clock,
 });
 
 /** The plan a signed-in human would get, read the way resolvePlan reads it. */
@@ -55,6 +69,7 @@ const grantedPlan = async (userId: string) =>
 beforeEach(() => {
   billing = new MemoryBillingStore();
   plans = new MemoryStore();
+  reconciled = [];
   stripeNow = new Map();
   stripeDown = false;
   stripeReads = [];
@@ -286,6 +301,75 @@ describe("a purchase lands in the grant store", () => {
     const res = await subscription("created");
 
     expect(((await res.json()) as { grant: string }).grant).toBe("unkeyable");
+  });
+});
+
+/**
+ * The webhook no longer reads the ledger and writes the grant itself; it asks
+ * one port to do both. What it owes that port is the right user, and only when
+ * there is one.
+ */
+describe("which user a delivery reconciles", () => {
+  it("reconciles the user a checkout names", async () => {
+    await checkout("cus_A", "u_github_1");
+
+    expect(reconciled).toEqual(["u_github_1"]);
+  });
+
+  it("reconciles the owner of the customer a subscription event names", async () => {
+    await checkout("cus_A", "u_github_1");
+    await checkout("cus_B", "u_github_2");
+    reconciled.length = 0;
+
+    await subscription("created", { id: "sub_1", customer: "cus_A" });
+    await subscription("created", { id: "sub_2", customer: "cus_B" });
+
+    expect(reconciled).toEqual(["u_github_1", "u_github_2"]);
+  });
+
+  it("reconciles nobody for a customer that is not linked yet", async () => {
+    const res = await subscription("created");
+
+    expect(((await res.json()) as { grant: string }).grant).toBe("unlinked");
+    expect(reconciled).toEqual([]);
+  });
+
+  it("reconciles nobody when a checkout names a customer that belongs to someone else", async () => {
+    await checkout("cus_A", "u_github_1");
+    reconciled.length = 0;
+
+    const res = await checkout("cus_A", "u_github_2");
+
+    expect(((await res.json()) as { grant: string }).grant).toBe("conflict");
+    expect(reconciled).toEqual([]);
+  });
+
+  it("logs a purchase it could not apply because a plan was granted by hand", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await plans.putGrant({
+        key: "github:1", plan: "team", role: "admin", orgId: "org_comped",
+        source: "operator", grantedAt: NOW, grantedBy: "u_admin", expiresAt: null,
+      });
+      await checkout("cus_A", "u_github_1");
+      await subscription("created");
+
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("u_github_1 has a plan granted by hand"));
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("logs a user id that names no upstream human", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await checkout("cus_A", "u_jesse");
+      await subscription("created");
+
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining("u_jesse is not a provider-derived user id"));
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 
@@ -661,6 +745,105 @@ describe("concurrent writes to one customer or one user", () => {
     await Promise.all([syncing, linking]);
 
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+  });
+});
+
+/**
+ * The queue a purchase reconcile runs in. Reading the ledger and writing the
+ * grant are one decision, so nothing else for that user may run between them.
+ */
+describe("serializeUser", () => {
+  /** Work that stays open until `finish()`, noting in `log` when it starts and ends. */
+  const held = (log: string[], name: string) => {
+    let finish!: () => void;
+    const open = new Promise<void>((resolve) => { finish = resolve; });
+    return {
+      finish,
+      work: async () => {
+        log.push(`${name} start`);
+        await open;
+        log.push(`${name} end`);
+        return name;
+      },
+    };
+  };
+  /** Long enough for anything that is not waiting on something to have started. */
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+  it("returns what the work returns", async () => {
+    expect(await billing.serializeUser("u_github_1", async () => 42)).toBe(42);
+  });
+
+  it("runs one user's work one piece at a time, in the order it was asked for", async () => {
+    const log: string[] = [];
+    const a = held(log, "a");
+    const b = held(log, "b");
+
+    const first = billing.serializeUser("u_github_1", a.work);
+    const second = billing.serializeUser("u_github_1", b.work);
+    await settle();
+    expect(log).toEqual(["a start"]); // b waits until a has finished
+
+    a.finish();
+    await first;
+    await settle();
+    expect(log).toEqual(["a start", "a end", "b start"]);
+
+    b.finish();
+    await second;
+    expect(log).toEqual(["a start", "a end", "b start", "b end"]);
+  });
+
+  it("does not make one user wait for another", async () => {
+    const log: string[] = [];
+    const a = held(log, "a");
+    const b = held(log, "b");
+
+    const first = billing.serializeUser("u_github_1", a.work);
+    const second = billing.serializeUser("u_github_2", b.work);
+    await settle();
+    expect(log).toEqual(["a start", "b start"]);
+
+    a.finish();
+    b.finish();
+    await Promise.all([first, second]);
+  });
+
+  /**
+   * "The user's queue" means the one linkCustomer already takes for the user's
+   * customer list. A reconcile reads that list, so a link must not rewrite it
+   * halfway through.
+   */
+  it("is the queue linkCustomer takes for the user's customer list", async () => {
+    const log: string[] = [];
+    const a = held(log, "a");
+    const holding = billing.serializeUser("u_github_1", a.work);
+
+    let linked: boolean | undefined;
+    const linking = billing.linkCustomer("cus_A", "u_github_1").then((ok) => { linked = ok; });
+    await settle();
+    expect(linked).toBeUndefined();
+
+    a.finish();
+    await Promise.all([holding, linking]);
+    expect(linked).toBe(true);
+  });
+
+  /**
+   * The successor is queued before the failure happens. Asking after it has
+   * settled would find an empty queue and prove nothing about a poisoned one.
+   */
+  it("passes a failure on to the caller and does not hand it to the work queued behind it", async () => {
+    let fail!: () => void;
+    const down = new Promise<string>((_, reject) => { fail = () => reject(new Error("registry down")); });
+    down.catch(() => undefined); // failing before the queue picks it up is not an unhandled rejection
+
+    const first = billing.serializeUser("u_github_1", () => down);
+    const second = billing.serializeUser("u_github_1", async () => "next");
+    fail();
+
+    await expect(first).rejects.toThrow("registry down");
+    expect(await second).toBe("next");
   });
 });
 

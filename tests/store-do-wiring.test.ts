@@ -96,7 +96,7 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
   let puts = 0;
   let lists = 0;
   const alarms: number[] = [];
-  return {
+  const storage = {
     get writes() { return writes; },
     /**
      * put() INVOCATIONS, where `writes` counts keys. The difference is the
@@ -153,7 +153,14 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
       if (opts.limit !== undefined) keys = keys.slice(0, opts.limit);
       return new Map(keys.map((k) => [k, structuredClone(rows.get(k))]));
     },
+    /**
+     * The closure runs against this same storage, with no rollback. The real one commits
+     * or aborts its writes as a unit, and that is proven in workerd, by
+     * worker-tests/join-code-outbox.test.ts. Nothing in this file throws mid-transaction.
+     */
+    transaction: async <T>(closure: (txn: unknown) => Promise<T>): Promise<T> => closure(storage),
   };
+  return storage;
 }
 
 /**
@@ -302,6 +309,9 @@ function currentRow(over: Partial<Session> = {}): Record<string, unknown> {
  * A DurableObjectStore over real SessionDO and RegistryDO instances on fake
  * storage, with the legacy session already stored and its join code already
  * registered, as a session created just before manifests shipped would be.
+ *
+ * Every SessionDO gets the same env as the facade, because a session registers its own
+ * join codes by calling the registry through its REGISTRY binding.
  */
 async function worldOn(
   { DurableObjectStore, RegistryDO, SessionDO }: StoreDo,
@@ -310,21 +320,20 @@ async function worldOn(
   const legacyStorage = fakeStorage({ session: row, cursor: 0 });
   const registryStorage = fakeStorage();
   const registry = new RegistryDO({ storage: registryStorage } as never, {} as never);
-  const sessions = new Map<string, InstanceType<typeof SessionDO>>([
-    [LEGACY_ID, new SessionDO(fakeCtx(legacyStorage) as never, {} as never)],
-  ]);
+  const sessions = new Map<string, InstanceType<typeof SessionDO>>();
   const env = {
     SESSION: {
       idFromName: (name: string) => name,
       get: (id: string) => {
         if (!sessions.has(id)) {
-          sessions.set(id, new SessionDO(fakeCtx(fakeStorage()) as never, {} as never));
+          sessions.set(id, new SessionDO(fakeCtx(fakeStorage()) as never, env as never));
         }
         return sessions.get(id)!;
       },
     },
     REGISTRY: { idFromName: (name: string) => name, get: () => registry },
   } as unknown as BellmanEnv;
+  sessions.set(LEGACY_ID, new SessionDO(fakeCtx(legacyStorage) as never, env as never));
 
   await registry.putJoinCode(LEGACY_CODE, LEGACY_ID);
   return {
@@ -377,9 +386,8 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     const before = legacyStorage.snapshot();
 
     await legacy.consumeJoinCode("peer_b");
-    // false, not null: #71 gave this a third outcome, where null means "set, and
-    // there was no previous code" and false means refused — here, because the row
-    // reads as gone.
+    await legacy.clearJoinCodes();
+    // False means refused — here, because the row reads as gone.
     expect(await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000)).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
@@ -448,7 +456,12 @@ describe("a current row is untouched by the guard", () => {
 
   it("still expires when its alarm fires", async () => {
     const storage = fakeStorage();
-    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    // Its join code is registered on the way in and dropped on the way out, so it needs
+    // a registry to deliver to: without one every delivery would fail and be retried,
+    // and the test would pass over a failing path.
+    const registry = new storeDo.RegistryDO({ storage: fakeStorage() } as never, {} as never);
+    const env = { REGISTRY: { idFromName: (name: string) => name, get: () => registry } };
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, env as never);
     await doi.createSession(session({ id: "qs_expired", expiresAt: Date.now() - 1 }));
 
     await doi.alarm();
@@ -465,8 +478,10 @@ describe("a current row is untouched by the guard", () => {
 
 describe("closing a session drops its registry rows", () => {
   /**
-   * Pins the wiring D7 added (commit 007eec1): DurableObjectStore.closeSession
-   * calling clearJoinCodes at the boundary where it holds the registry handle.
+   * Pins the wiring D7 added (commit 007eec1): closing a session retires every
+   * role's registry row. D7 had DurableObjectStore.closeSession call clearJoinCodes
+   * where it held the registry handle; since #62 the session queues those removals
+   * itself, and closeSession still has to call clearJoinCodes for them to happen.
    * The store-contract suite's "closing a session clears every code" test looks
    * like coverage of this but runs only against MemoryStore, a separate
    * closeSession implementation that cannot exercise this path at all.
@@ -583,16 +598,39 @@ describe("negative control: the same calls with the guard removed", () => {
       expect(s).toBeDefined();
       expect(() => s!.manifest.mode).toThrow(TypeError);
     }
+  });
 
-    // The third read path now crashes inside the lookup itself: resolving a code
-    // per role dereferences joinCodes, which a pre-manifest row has never had.
-    await expect(store.getSessionByJoinCode(LEGACY_CODE)).rejects.toThrow(TypeError);
+  /**
+   * The third read path, and why it does not assert a crash. Resolving a code reads
+   * `joinCodes` first, which a pre-manifest row has never had, so on the plain row the lookup
+   * throws a TypeError. A test that asserted that would be satisfied by a TypeError from
+   * anywhere, a registry that cannot answer included, with the lookup never having reached
+   * the row. So the row gets the one field the lookup reads, and the assertion is the effect
+   * the guard exists to stop: the lookup resolves the code and serves a pre-manifest room.
+   */
+  it("resolves a join code to it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+    const { store } = await worldOn(unguarded, {
+      ...legacyRow(), joinCodes: oneCode(LEGACY_CODE, "peer_b"),
+    });
+
+    expect(await store.getSessionByJoinCode(LEGACY_CODE)).toMatchObject({
+      role: "peer_b", session: { id: LEGACY_ID },
+    });
   });
 
   /**
    * The same again for the two "leaves it alone" tests above, which could otherwise pass
    * because the harness never gave the row to a mutator or to alarm(). Without the guard
    * the same calls do reach it and do change it.
+   *
+   * The alarm's row carries `joinCodes: {}`, which a real pre-manifest row never had. The
+   * expiry reads that field first, so on the plain row the alarm throws a TypeError before
+   * it writes anything. Asserting the throw would prove less than it seems: any TypeError
+   * from anywhere in the alarm satisfies it, one raised before the row was reached included,
+   * and it stops being true the day the expiry tolerates a row with no `joinCodes`, which is
+   * when the guard is the only thing keeping the alarm from rewriting it. With the field the
+   * alarm gets past that read and does the thing the guard exists to stop: it expires the row.
    */
   it("lets a mutator rewrite it and a due alarm expire it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
@@ -601,7 +639,9 @@ describe("negative control: the same calls with the guard removed", () => {
     await viaMutator.legacy.closeSession();
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
-    const viaAlarm = await worldOn(unguarded, legacyRow({ expiresAt: Date.now() - 1 }));
+    const viaAlarm = await worldOn(unguarded, {
+      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {},
+    });
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
     expect(rows.session).toMatchObject({ closed: true });
@@ -1214,20 +1254,39 @@ describe("wake: socket delivery", () => {
     expect(ctx.sockets[0].sent).toEqual([]);
   });
 
-  it("has delivered by the time wake() returns", async () => {
+  it("does not yield between reading a socket's cursor and sending", async () => {
     // wake() is synchronous: getWebSockets, deserializeAttachment, send and
     // serializeAttachment all are, and an await between reading a socket's
     // cursor and sending would reopen the gap that read-and-register exists to
-    // close. So nothing here awaits, and the frame is on the socket when the
-    // call returns. wake() is private, so this reaches it by name; the cases
-    // above reach it through its callers.
+    // close.
+    //
+    // wake() is #private, so it cannot be reached by name; this goes through
+    // appendEvent and watches the socket. A microtask is queued at the moment
+    // the socket's cursor is read, and if anything yielded before the send that
+    // microtask would have run by then. Looking at the socket after awaiting
+    // appendEvent could not tell: a continuation queued inside wake() still
+    // runs before appendEvent's caller resumes.
+    //
+    // What this does not see is a yield before the cursor is read. That is not
+    // the gap, and it cannot be seen from outside: nothing observable happens
+    // between appendEvent's last write and the first read.
     const { doi, ctx } = await world();
     await doi.fetch(open(ctx, 0));
-    (doi as unknown as { wake(e: unknown): void }).wake({
-      cursor: 1, at: 0, type: "message", fromMemberId: "m9", fromUserId: "u9",
+    const ws = ctx.sockets[0];
+    const read = ws.deserializeAttachment;
+    const send = ws.send;
+    let yielded = false;
+    let yieldedAtSend: boolean | undefined;
+    ws.deserializeAttachment = () => { queueMicrotask(() => { yielded = true; }); return read(); };
+    ws.send = (data: string) => { yieldedAtSend = yielded; send(data); };
+
+    await doi.appendEvent({
+      type: "message", fromMemberId: "m9", fromUserId: "u9",
       fromLabel: "peer", payload: { n: 1 }, refId: null,
     });
-    expect(ctx.sockets[0].sent).toHaveLength(1);
+
+    expect(ws.sent).toHaveLength(1);
+    expect(yieldedAtSend).toBe(false);
   });
 
   it("sends the public event, not the stored one", async () => {
@@ -1284,13 +1343,23 @@ describe("wake: socket delivery", () => {
 
   // An event whose time publicEvent cannot format. It is the detector for the
   // two cases below: wherever a frame is built for it, publicEvent throws.
-  const unformattable = {
-    cursor: 1, at: Number.NaN, type: "message", fromMemberId: "m9",
-    fromUserId: "u9", fromLabel: "peer", payload: {}, refId: null,
+  //
+  // wake() is #private, so these reach it through appendEvent, which is what calls
+  // it. appendEvent stamps the event with Date.now(), so the clock is what is made
+  // to read NaN, and only for the append: the event is stored with `at: NaN` and
+  // new Date(NaN) cannot be formatted. Called through appendEvent, the second case
+  // is also the thing it says: an append that must not fail.
+  const appendUnformattable = async (doi: InstanceType<typeof storeDo.SessionDO>) => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Number.NaN);
+    try {
+      return await doi.appendEvent({
+        type: "message", fromMemberId: "m9", fromUserId: "u9",
+        fromLabel: "peer", payload: {}, refId: null,
+      });
+    } finally {
+      clock.mockRestore();
+    }
   };
-  // wake() is private, so these reach it by name.
-  const wakeOf = (doi: unknown) =>
-    (doi as { wake(e: unknown): void }).wake.bind(doi);
 
   it("builds no frame for a socket that is not due the event", async () => {
     // The frame is built on the first socket that is due the event, not on
@@ -1301,13 +1370,12 @@ describe("wake: socket delivery", () => {
     // caught by the per-socket try and logged. Built lazily, nothing is built,
     // so nothing throws and nothing is logged.
     const { doi, ctx } = await world();
-    const wake = wakeOf(doi);
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      expect(() => wake(unformattable)).not.toThrow(); // no sockets at all
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull(); // no sockets at all
 
-      await doi.fetch(open(ctx, 5)); // a socket already past cursor 1
-      expect(() => wake(unformattable)).not.toThrow();
+      await doi.fetch(open(ctx, 5)); // a socket already past the next cursor, 2
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull();
       expect(log).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();
@@ -1322,10 +1390,9 @@ describe("wake: socket delivery", () => {
     // keeps its cursor.
     const { doi, ctx } = await world();
     await doi.fetch(open(ctx, 0));
-    const wake = wakeOf(doi);
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      expect(() => wake(unformattable)).not.toThrow();
+      await expect(appendUnformattable(doi)).resolves.not.toBeNull();
       expect(log).toHaveBeenCalledTimes(1);
       expect(String(log.mock.calls[0][1])).toMatch(/Invalid time value/);
     } finally {
@@ -1570,8 +1637,15 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     // room derives no TTL, so that firing arms nothing: an alarm set for a time
     // already behind the clock would be due the moment it was set, and would set
     // the next one the same way.
+    //
+    // A room with no join code. Expiring one that holds a code queues the registry's
+    // removal of it, and that is the outbox's alarm, not the TTL's: it is armed on
+    // purpose and would be counted here. This test is about the TTL, so the room has
+    // nothing for the outbox to do.
     const at = Date.now() + 10_000;
-    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const storage = fakeStorage({
+      session: { ...currentRow({ joinCodes: {} }), expiresAt: at }, cursor: 0,
+    });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
     try {
@@ -1703,17 +1777,33 @@ describe("a failed index write does not fail the operation it indexes", () => {
     );
   });
 
-  it("but a join code that cannot be registered still fails createSession", async () => {
-    // The contrast that keeps the rule about indexes. A join code is
-    // authoritative: one that does not resolve is a real failure, not a missing
-    // listing row, so it is neither swallowed nor logged here.
+  it("but a join code that cannot be registered leaves the session and queues the code", async () => {
+    // This was the contrast that kept the rule about indexes: a join code was
+    // authoritative, so a registry that refused it failed the whole createSession.
+    // #62 changed that premise. The code's registration is now enqueued in the same
+    // transaction as the session, so a refused write does not lose it and does not
+    // have to take the room down with it. The session stands and the intent waits.
+    //
+    // What that costs is a window, and it is asserted below: until delivery lands the
+    // code does not resolve. The old behaviour's cost was larger — a transient registry
+    // failure meant the room was never created at all.
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { store, registryStorage } = await worldOn(storeDo);
     refuse(registryStorage, ["jc:"]);
 
     await expect(
       store.createSession(session({ id: "qs_nocode", joinCodes: oneCode("BELL-NOPE-01", "peer_b") })),
-    ).rejects.toThrow("registry unavailable");
+    ).resolves.toBeUndefined();
+
+    // The room is real, which is the point of committing the intent rather than the row.
+    expect(await store.getSession("qs_nocode")).toBeDefined();
+    // And the code is not resolvable yet, which is the window the queue closes later.
+    expect(await store.getSessionByJoinCode("BELL-NOPE-01")).toBeUndefined();
+    // Not an index write, so nothing is logged and swallowed here either.
     expect(logged).not.toHaveBeenCalled();
+
+    // The retry itself needs a real alarm, so it is pinned in the Workers program:
+    // worker-tests/join-code-outbox.test.ts drives the queued row through delivery and
+    // asserts the code resolves afterwards.
   });
 });

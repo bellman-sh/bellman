@@ -161,10 +161,11 @@ export default {
       if (!webhookSecret || !apiKey || !env.AUTH) {
         return new Response("Billing is off", { status: 503 });
       }
+      const auth = new AuthStore(env.AUTH);
       return handleStripeWebhook(request, {
         secret: webhookSecret,
         apiKey,
-        billing: new AuthStore(env.AUTH),
+        billing: auth,
         // Grants are written in every mode, including shadow. What `shadow`
         // withholds is honouring them, which happens at resolution time via
         // honourPurchases above — so the store stays a true record of what
@@ -173,7 +174,7 @@ export default {
         // on again does not leave a stale grant behind. Withholding the write
         // instead meant a purchase seen during shadow stayed invisible until
         // Stripe happened to send another event about it, which it may never do.
-        plans: store,
+        reconcile: (userId) => auth.reconcile(userId),
       });
     }
 

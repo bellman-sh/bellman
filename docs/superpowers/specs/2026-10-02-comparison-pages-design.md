@@ -206,8 +206,18 @@ not from memory. Every row was checked on 2026-10-02.
 | Multiagent sessions: a roster where an agent delegates to copies of itself or to worker agents by ID | same |
 | Scheduled deployments fire sessions on a cron cadence | same |
 | Outcomes: a separate grader iterates the agent against your rubric | same |
+| Memory stores, under their own beta (`agent-memory-2026-07-22`) | same |
 | Vault credentials are substituted at egress and never enter the sandbox | same |
 | Everything sits inside one account and org, reached by API | same |
+
+**Reconciled 2026-10-03:** the page-content directive for this page listed
+memory stores while this table did not, so the copy rule ("if a claim is not in
+the table, check it and add it, or cut it") had nothing to check it against. The
+claim is sourced, so the table moved rather than the page. Two claims the table
+did *not* support were cut from the pages instead: LangGraph being "most often
+in production" (no market-share fact anywhere), and a multiagent roster handing
+reading-heavy work to a cheaper model (that is the *subagents* table's
+route-to-Haiku fact, not this one).
 
 ### OpenRig
 

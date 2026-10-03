@@ -1,4 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OAuthConfig } from "../src/oauth/routes.js";
+import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
+import {
+  BYSTANDER, COOKIE, IDENTITY as PANEL_IDENTITY, ISSUER, PANEL, RESOURCE,
+  panelConfig, routeWith, seedBystander, seedSession, withCookie,
+} from "./helpers/panel.js";
 import {
   MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
   replannedAt, sessionDead, type AuthStorage, type PanelSession,
@@ -428,5 +434,204 @@ describe("a method touches only the session it names", () => {
     expect(await store.touchSession("dead", T0)).toBeUndefined();
 
     expect(await store.touchSession("yours", T0)).toEqual(yours());
+  });
+});
+
+
+// --------------------------------------------------------------------------
+// Task 6: caller's cookie branch, through the real routes.
+// --------------------------------------------------------------------------
+
+let cfg: OAuthConfig;
+let route: (request: Request) => Promise<Response>;
+
+beforeEach(() => {
+  cfg = panelConfig();
+  route = routeWith(cfg);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("caller, over a cookie", () => {
+  it("resolves /account from a session cookie", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(withCookie("/account", sid, {
+      headers: { accept: "application/json", origin: PANEL },
+    }));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(200);
+    expect(body.user_id).toBe("u_github_4242");
+  });
+
+  it("refuses /account with an unknown cookie", async () => {
+    expect((await route(withCookie("/account", "no-such-session"))).status).toBe(401);
+  });
+
+  it("refuses /account with a dead cookie, and drops that one only", async () => {
+    const sid = await seedSession(cfg, "dead", {
+      last_used_at: Date.now() - SESSION_IDLE_MS - 1,
+    });
+    const yours = await seedBystander(cfg);
+
+    expect((await route(withCookie("/account", sid))).status).toBe(401);
+
+    // The drop is an error-path cleanup. Someone else, signed in, still answers
+    // as themselves after it.
+    const res = await route(withCookie("/account", yours, {
+      headers: { accept: "application/json" },
+    }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: BYSTANDER.plan });
+  });
+
+  // The touch writes when last_used_at is stale, and a cookie is a key. With
+  // someone else signed in, each cookie has to answer with its own record, read
+  // alternately with nothing written between the reads: a route that answers from
+  // the last record it served gives itself away on the second.
+  it("answers each cookie with its own record, after a touch that wrote", async () => {
+    const mine = await seedSession(cfg, "mine", {
+      last_used_at: Date.now() - 2 * 60 * 60 * 1000, // stale enough that the touch writes
+    });
+    const yours = await seedBystander(cfg);
+    const who = async (id: string) =>
+      (await route(withCookie("/account", id, { headers: { accept: "application/json" } }))).json();
+
+    expect(await who(mine)).toMatchObject({ user_id: PANEL_IDENTITY.userId, plan: "free" });
+    expect(await who(yours)).toMatchObject({ user_id: BYSTANDER.userId, plan: "pro" });
+    expect(await who(mine)).toMatchObject({ user_id: PANEL_IDENTITY.userId, plan: "free" });
+  });
+
+  it("refuses a cookie outright when no panel origin is configured", async () => {
+    cfg.panelOrigins = [];
+    const sid = await seedSession(cfg);
+
+    expect((await route(withCookie("/account", sid))).status).toBe(401);
+  });
+
+  it("prefers a bearer token when both are present", async () => {
+    const sid = await seedSession(cfg, "cookie-sid", {
+      identity: { ...PANEL_IDENTITY, userId: "u_from_cookie", label: "cookie" },
+    });
+    const token = await signJwt(
+      { iss: ISSUER, sub: "u_from_bearer", aud: RESOURCE,
+        bellman: { ...PANEL_IDENTITY, userId: "u_from_bearer", label: "bearer" },
+        plan_source: "default" },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS
+    );
+
+    const res = await route(withCookie("/account", sid, {
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+    }));
+
+    expect(((await res.json()) as { user_id: string }).user_id).toBe("u_from_bearer");
+  });
+});
+
+describe("the cookie's plan is re-resolved on the token's bound", () => {
+  it("keeps serving the stored plan while the window is open", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "fresh-plan", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+    // No grant in the store: a re-resolve would drop this to free.
+
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 - 1_000);
+    const res = await route(withCookie("/account", sid, {
+      headers: { accept: "application/json" },
+    }));
+
+    expect(((await res.json()) as { plan: string }).plan).toBe("pro");
+  });
+
+  it("drops a revoked grant once the window closes, for that session only", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "stale-plan", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+    // Someone else, whose plan is fresh at this instant, so nothing re-resolves
+    // it. Seeded after the clock moves for that reason.
+    const yours = await seedBystander(cfg);
+    const res = await route(withCookie("/account", sid, {
+      headers: { accept: "application/json" },
+    }));
+
+    expect(((await res.json()) as { plan: string }).plan).toBe("free");
+    // The write-back landed on the session that was re-resolved and on no other.
+    // The bystander's plan is "pro", not the "free" it was re-resolved to, so a
+    // write-back that reached them would show.
+    const other = await route(withCookie("/account", yours, {
+      headers: { accept: "application/json" },
+    }));
+    expect(await other.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: "pro" });
+  });
+
+  // The sign-out lands while the plan is being re-resolved. replanOnRefresh awaits
+  // the grant lookup, so deleting the session from inside that lookup puts the
+  // sign-out between the touch and the write-back, which is the gap replanSession
+  // exists for. The request is refused and the session stays gone.
+  it("refuses the request, and the session stays gone, when it ended during the re-resolve", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "ended-mid-resolve", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000); // stale: this request re-resolves
+    const realGetGrant = cfg.plans!.getGrant.bind(cfg.plans);
+    cfg.plans!.getGrant = async (key: string) => {
+      await cfg.store.deleteSession(sid); // the human signs out while the lookup is in flight
+      return realGetGrant(key);
+    };
+    const ask = () => route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
+
+    expect((await ask()).status).toBe(401);
+    // A write-back that recreated the session would answer the next request.
+    expect((await ask()).status).toBe(401);
+  });
+
+  // A write-back that FAILS says nothing about whether the session is still there:
+  // the request is served, with the plan it re-resolved. The route logs the
+  // failure, so a "could not store" line in the test output is expected.
+  it("still serves the request when the write-back itself fails", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "write-fails", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+    cfg.store.replanSession = () => Promise.reject(new Error("auth store unreachable"));
+
+    const res = await route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { plan: string }).plan).toBe("free");
+  });
+
+  // Review Focus 5 — a record whose replanned_at is absent or non-finite.
+  it("re-resolves immediately when replanned_at is absent", async () => {
+    const now = Date.now();
+    // Deliberately missing replanned_at, to stand in for a malformed record:
+    // nothing writes a session without it. `now - undefined` is NaN, and every
+    // comparison with NaN is false — so one plausible phrasing of the staleness
+    // test reads "fresh" forever and the plan never re-resolves, for the
+    // session's whole life.
+    await cfg.store.putSession("malformed", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant",
+      identity_keys: ["github:4242"], created_at: now, last_used_at: now,
+      expires_at: now + SESSION_TTL_MS,
+    } as unknown as PanelSession);
+
+    const res = await route(withCookie("/account", "malformed", {
+      headers: { accept: "application/json" },
+    }));
+
+    expect(((await res.json()) as { plan: string }).plan).toBe("free");
   });
 });

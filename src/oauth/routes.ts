@@ -9,7 +9,11 @@ import {
   isProviderName, isStableIdentityKey,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import { UNUSED_CLIENT_TTL_MS, type AuthStorage } from "./storage.js";
+import {
+  SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
+  type AuthStorage, type PanelSession,
+} from "./storage.js";
+import { readSessionCookie } from "./cookies.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
   canonicalResource, randomId, signJwt, verifyJwt, verifyPkce, type Claims,
@@ -954,22 +958,103 @@ export async function handleOAuth(
   return undefined;
 }
 
-/** Identify the caller from an access token. Bearer keys are for /mcp, not here. */
+/**
+ * Who is calling, and how.
+ *
+ * Bearer first, then a session cookie. `via` is the only thing a consumer
+ * learns beyond the identity, and only the CSRF check and /admin read it —
+ * everything else sees an Identity and cannot tell the two apart, which is what
+ * keeps the authorization rules in one place.
+ */
 async function caller(
   request: Request,
   config: OAuthConfig
-): Promise<{ identity: Identity; planSource: string } | null> {
+): Promise<{ identity: Identity; planSource: string; via: "bearer" | "cookie" } | null> {
   const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  if (!bearer) return null;
-  const claims = await verifyJwt(bearer, config.secret, {
-    issuer: config.issuer,
-    audience: config.resource,
-  });
-  if (!claims) return null;
-  return {
-    identity: claims.bellman,
-    planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
-  };
+  if (bearer) {
+    const claims = await verifyJwt(bearer, config.secret, {
+      issuer: config.issuer,
+      audience: config.resource,
+    });
+    if (!claims) return null;
+    return {
+      identity: claims.bellman,
+      planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
+      via: "bearer",
+    };
+  }
+  return sessionCaller(request, config);
+}
+
+/**
+ * The cookie half, including re-resolving the plan.
+ *
+ * The record holds the identity captured at sign-in, and a session lives seven
+ * days — so without re-resolution a grant revoked on day one would keep
+ * applying for six more. replanOnRefresh is the function for it: it is the one
+ * that already re-derives a plan from stored keys rather than a provider
+ * profile, and its rules carry over intact, including that it consults only
+ * immutableKeys so an address that has changed hands since sign-in cannot
+ * resolve a stranger's plan onto this session.
+ *
+ * The bound is ACCESS_TOKEN_TTL_SECONDS deliberately: the same staleness a
+ * bearer token already has on /mcp. One number for the system rather than two,
+ * and a revoked grant cannot outlive on the panel what it outlives on the tool
+ * surface.
+ */
+async function sessionCaller(
+  request: Request,
+  config: OAuthConfig
+): Promise<{ identity: Identity; planSource: string; via: "cookie" } | null> {
+  // The allowlist is what grants browser authentication at all. Without this a
+  // deploy that forgot BELLMAN_PANEL_ORIGINS would still accept cookies while
+  // serving no CORS — a session usable by anything that is not a browser.
+  if (!config.panelOrigins?.length) return null;
+
+  const secure = new URL(config.issuer).protocol === "https:";
+  const id = readSessionCookie(request, secure);
+  if (!id) return null;
+
+  const now = Date.now();
+  const stored = await config.store.touchSession(id, now);
+  if (!stored) return null;
+
+  if (now - replannedAt(stored) <= ACCESS_TOKEN_TTL_SECONDS * 1000) {
+    return { identity: stored.identity, planSource: stored.plan_source, via: "cookie" };
+  }
+
+  const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+  // Written back so the next request inside the window is served from the
+  // record rather than re-resolving again.
+  //
+  // replanSession, not putSession. Re-resolving can await the registry, so a
+  // sign-out can land between the touch above and this write, and putSession
+  // would write `stored` back whole and recreate the session the human just
+  // ended. replanSession merges the three fields into what is stored now and
+  // does nothing if the record is gone. Merging also leaves alone a
+  // last_used_at that another request bumped in the same gap, which a
+  // whole-record write would revert.
+  //
+  // Its answer is acted on. False means the record is gone, because the human
+  // signed out or the session was swept as dead, and either way there is no
+  // session, so this request is refused rather than finished. It began before
+  // the sign-out, and letting an in-flight request finish is ordinary
+  // elsewhere, but the reason to store a session at all is that sign-out takes
+  // effect now, and one more authenticated response after it gives that back.
+  // The window is small: this path runs about once per ACCESS_TOKEN_TTL_SECONDS
+  // per session.
+  //
+  // A write that fails is a different thing. It costs a repeated
+  // re-resolution, not a wrong answer, and says nothing about whether the
+  // session is still there, so it must not cost the human their session.
+  let merged = true;
+  try {
+    merged = await config.store.replanSession(id, current.identity, current.source, now);
+  } catch (err) {
+    console.error("could not store a re-resolved panel session:", err);
+  }
+  if (!merged) return null;
+  return { identity: current.identity, planSource: current.source, via: "cookie" };
 }
 
 async function issueTokens(

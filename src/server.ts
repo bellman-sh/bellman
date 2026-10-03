@@ -226,9 +226,19 @@ function roomPreview(session: StoredSession, viewerRole: string) {
      *
      * Through mustReport, which is what the tick itself calls, so what a joiner
      * is SHOWN and what is ASKED are one computation and cannot drift apart.
+     *
+     * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
+     * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
+     * to answer. `mustReport` alone said `true` there and promised a joiner's
+     * human an obligation that never fires — and this is the consent surface, the
+     * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
+     * the same null-cadence check for themselves; this was the surface that did
+     * not. resolveManifest refuses the other half of the pair, a reporting seat
+     * that cannot send, so the only `reports: true` that reaches here is one a
+     * cadence would make real.
      */
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
-    you_report: mustReport(m, viewerRole),
+    you_report: m.heartbeatOnMs !== null && mustReport(m, viewerRole),
     creator_role: m.creatorRole,
     roles,
     text: untrusted(

@@ -236,8 +236,9 @@ A room can also ask its members to report. A top-level `heartbeat_on` (a
 duration such as `"5m"`, from 30 seconds to an hour) is the cadence on which the
 server appends a `heartbeat` tick saying who has reported and who has gone
 quiet, and `reports: true` on a role says members in that seat must answer it,
-by sending `progress`. With no `heartbeat_on` there is no tick and `reports`
-asks for nothing; no preset sets either key. A joiner sees both before it
+by sending `progress` — so that role must hold `send`, and a manifest that
+asks a verbless seat for reports is refused. With no `heartbeat_on` there is
+no tick and `reports` asks for nothing; no preset sets either key. A joiner sees both before it
 accepts a seat: the connect preview carries `heartbeat_on_seconds` and
 `you_report`.
 

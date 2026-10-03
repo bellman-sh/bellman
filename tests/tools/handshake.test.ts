@@ -760,7 +760,10 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
   // The heartbeat obligation (#111), shown at the consent point. A member that will
   // be named silent in a tick has to be able to see that before it takes the seat.
   /** A pair room with a 5m cadence, where `reports` says which seats are asked to answer it. */
-  const tickingRoom = (reports: { driver: boolean; navigator: boolean }) => ({
+  const tickingRoom = (
+    reports: { driver: boolean; navigator: boolean },
+    over: Record<string, unknown> = {},
+  ) => ({
     room: "answers-the-tick",
     mode: "pair",
     heartbeat_on: "5m",
@@ -770,6 +773,7 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     },
     default_role: "navigator",
     creator_role: "driver",
+    ...over,
   });
 
   it("shows the cadence and whether this seat must answer it", async () => {
@@ -806,6 +810,30 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
 
     expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: false });
     expect(started.data.room).toMatchObject({ heartbeat_on_seconds: 300, you_report: true });
+  });
+
+  /**
+   * `reports` without a cadence asks for nothing (README), because a room with no
+   * `heartbeat_on` never ticks. The preview is what a joiner's HUMAN reads before
+   * accepting the seat, so it must not name an obligation that will never arrive:
+   * `you_report` is the cadence AND the seat, not the seat alone.
+   */
+  it("promises no obligation in a room that never ticks", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: true, navigator: true }, { heartbeat_on: null }),
+      brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const preview = await peer.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+
+    expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: null, you_report: false });
+    // The creator's seat reports too, and is equally unasked.
+    expect(started.data.room).toMatchObject({ heartbeat_on_seconds: null, you_report: false });
   });
 
   it("says so when the room expects no reports", async () => {

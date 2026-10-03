@@ -171,6 +171,37 @@ describe("cross-field validation", () => {
       .toThrow(/creator_role "ghost" is not defined in roles/);
   });
 
+  /**
+   * A seat that may not speak may not report either: `SEND_VERB.progress` is
+   * `send`, deliberately. A manifest that asks a verbless seat for reports shows
+   * that seat an obligation, lists it in every heartbeat snapshot, and then
+   * refuses the one reply that would answer it. Refused where it is authored,
+   * because there is no runtime state that makes it work.
+   */
+  it("rejects reports: true on a role that cannot send", () => {
+    expect(() => resolveManifest(authored({
+      roles: { lead: { can: ["send"] }, helper: { can: ["invite"], reports: true } },
+    }))).toThrow(
+      /role "helper" sets reports: true but does not hold the verb "send" \(it holds: invite\)/,
+    );
+  });
+
+  /**
+   * The cadence is the room's and `reports` is the seat's, and the contradiction
+   * is in the seat alone. A room with no `heartbeat_on` never ticks, so this
+   * manifest asks nothing of anybody — but it is still unanswerable the day a
+   * cadence is added, and the author is here now.
+   */
+  it("rejects it with no cadence too, since the seat is what cannot answer", () => {
+    expect(() => resolveManifest({
+      room: "r",
+      mode: "swarm",
+      roles: { lead: { can: ["send"] }, watcher: { can: [], reports: true } },
+      default_role: "watcher",
+      creator_role: "lead",
+    })).toThrow(/role "watcher" sets reports: true but does not hold the verb "send" \(it holds: none\)/);
+  });
+
   it("rejects duplicate verbs in one role", () => {
     expect(() => resolveManifest(authored({
       roles: { lead: { can: ["send", "send"] }, helper: { can: ["send"] } },

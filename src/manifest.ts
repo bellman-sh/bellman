@@ -344,6 +344,24 @@ export function resolveManifest(input: unknown): RoomManifest {
       }
       seen.add(verb);
     }
+    // A seat that may not speak may not report either: `SEND_VERB.progress` is
+    // `send`, so a `reports: true` role without it is shown an obligation, named
+    // in every heartbeat snapshot, and then refused the one reply that answers
+    // it. Refused here beside the other cross-field checks, because no runtime
+    // state makes it work.
+    //
+    // Refused whether or not the room declares a cadence, because the seat is
+    // what cannot answer. A room with no `heartbeat_on` never ticks, so such a
+    // manifest asks nothing of anybody today — but it is still unanswerable the
+    // day a cadence is added, and the author is here now. `you_report` in the
+    // connect preview is the other half of that split: it reads the cadence AND
+    // the seat, so a room that never ticks promises nothing.
+    if ((def.reports ?? false) && !def.can.includes("send")) {
+      const holds = def.can.length > 0 ? def.can.join(", ") : "none";
+      throw new ManifestError(
+        `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`,
+      );
+    }
     roles[key] = {
       can: [...def.can],
       description: def.description ?? null,

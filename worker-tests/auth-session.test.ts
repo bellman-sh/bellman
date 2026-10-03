@@ -163,19 +163,40 @@ describe("AuthDO sessions", () => {
 });
 
 describe("AuthDO session sweep", () => {
+  const HOUR = 60 * 60 * 1000;
+
   /**
-   * Store `dead`, then a live session. putSession sweeps before it writes, so
-   * the second put is the one that runs the sweep over the first. The result is
-   * read with storedIds: a session the sweep left behind still comes back
-   * undefined from touchSession, which drops it on read.
+   * Put a live session, then a dead one, then a third whose put runs the last
+   * sweep, and return the ids stored afterwards.
+   *
+   * putSession sweeps before it writes, so a session put last is never looked at
+   * by its own call. A live session put after the dead one would be stored
+   * because of the order it was written in, whatever the sweep did, and the
+   * assertion would hold for a sweep that deleted everything. So the live one
+   * goes first and is present for two sweeps, and what is asserted is the whole
+   * set that survives, not only that the dead one is gone.
+   *
+   * The live session is an hour short of both limits, idle for 23 of its 24
+   * hours and an hour from its ceiling. That is close enough that a sweep with a
+   * shorter idle bound, or a clock running ahead, would take it, and far enough
+   * that this test's own clock cannot.
+   *
+   * The result is read with storedIds: touchSession drops a dead session itself
+   * when it reads one, so it cannot show what the sweep left behind.
    */
-  async function putDeadThenLive(name: string, now: number, dead: Partial<PanelSession>) {
+  async function sweptIds(name: string, now: number, dead: Partial<PanelSession>) {
     const o = auth(name);
-    await o.putSession("dead", panelSession(dead));
-    await o.putSession("live", panelSession({
+    await o.putSession("a-live", panelSession({
+      created_at: now + HOUR - SESSION_TTL_MS,
+      last_used_at: now - 23 * HOUR,
+      expires_at: now + HOUR,
+    }));
+    await o.putSession("b-dead", panelSession(dead));
+    await o.putSession("c-trigger", panelSession({
       created_at: now, last_used_at: now, replanned_at: now,
       expires_at: now + SESSION_TTL_MS,
     }));
+    return storedIds(name);
   }
 
   /**
@@ -183,27 +204,27 @@ describe("AuthDO session sweep", () => {
    * test: a session can die of idleness with its ceiling a week away, and the
    * expires_at form would leave it stored for the full seven days.
    */
-  it("sweeps a session that died of idleness, not only one past its ceiling", async () => {
+  it("sweeps a session that died of idleness, not only one past its ceiling, and keeps the live ones", async () => {
     const now = Date.now();
-    await putDeadThenLive("s-sweep-idle", now, {
+    const ids = await sweptIds("s-sweep-idle", now, {
       created_at: now - 2 * SESSION_IDLE_MS,
       last_used_at: now - 2 * SESSION_IDLE_MS,
       expires_at: now + SESSION_TTL_MS,
     });
 
-    expect(await storedIds("s-sweep-idle")).toEqual(["sess:live"]);
+    expect(ids).toEqual(["sess:a-live", "sess:c-trigger"]);
   });
 
   // The other clause. Just used, so it is not idle; only the ceiling kills it.
-  it("sweeps a session past its ceiling, although it was just used", async () => {
+  it("sweeps a session past its ceiling, although it was just used, and keeps the live ones", async () => {
     const now = Date.now();
-    await putDeadThenLive("s-sweep-ceiling", now, {
+    const ids = await sweptIds("s-sweep-ceiling", now, {
       created_at: now - SESSION_TTL_MS - 1_000,
       last_used_at: now,
       expires_at: now - 1,
     });
 
-    expect(await storedIds("s-sweep-ceiling")).toEqual(["sess:live"]);
+    expect(ids).toEqual(["sess:a-live", "sess:c-trigger"]);
   });
 });
 

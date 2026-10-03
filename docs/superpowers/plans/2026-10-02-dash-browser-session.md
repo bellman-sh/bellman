@@ -221,7 +221,11 @@ Expected: PASS, 4 tests.
 - [ ] **Step 5: Prove the predicate's idle half can fail**
 
 Temporarily change `sessionDead` to `return now > s.expires_at;` and re-run.
-Expected: the two idle tests FAIL. Restore the full predicate and confirm PASS again.
+Expected: "is dead when idle past the window, with the ceiling still ahead" FAILS, and
+it is the only one that can. "is alive exactly at the idle boundary" expects `false`
+and still gets it with the idle clause removed, so it guards the direction of the
+comparison and not the clause. Restore the full predicate, then change the idle
+comparison from `>` to `>=` and re-run: that test FAILS. Restore and confirm PASS again.
 
 A predicate whose second clause has never been observed to matter has not been tested.
 
@@ -404,7 +408,9 @@ Temporarily change the skip in `touchSession` to never write:
     if (true) return stored;
 ```
 
-Re-run. Expected: "does not expire a session used continuously…" FAILS with `dead at +86400001ms`, and "writes last_used_at once it is staler…" FAILS. Restore.
+Re-run. Expected: "does not expire a session used continuously…" FAILS with `dead at +88200000ms`, and "writes last_used_at once it is staler…" FAILS. Restore.
+
+The loop steps in whole 30-minute increments, so `+86400000` is exactly the idle boundary and still alive; 24.5 hours is the first step past the window.
 
 - [ ] **Step 12: Verify and commit**
 

@@ -866,7 +866,7 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, orgId: "org_theirs" }));
 
-      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine"))
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine", { actorUserId: "u_test" }))
         .toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
     });
@@ -877,8 +877,8 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfOwned(base, "org_mine")).toBe("written");
-      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine")).toBe("written");
+      expect(await store.putGrantIfOwned(base, "org_mine", { actorUserId: "u_test" })).toBe("written");
+      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine", { actorUserId: "u_test" })).toBe("written");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
     });
 
@@ -892,11 +892,11 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine")).toBe("missing");
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", { actorUserId: "u_test" })).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("conflict");
       expect(await store.getGrant("github:4242")).toBeDefined();
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs")).toBe("deleted");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs", { actorUserId: "u_test" })).toBe("deleted");
       expect(await store.getGrant("github:4242")).toBeUndefined();
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
     });
@@ -917,7 +917,7 @@ export function describeStoreContract(
       expect(await store.putGrantIfOwned({
         key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
-      }, "org_mine")).toBe("written");
+      }, "org_mine", { actorUserId: "u_test" })).toBe("written");
 
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_mine" });
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
@@ -932,7 +932,7 @@ export function describeStoreContract(
         expiresAt: Date.now() - 1,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("missing");
     });
 
     /**
@@ -948,9 +948,9 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, source: "operator" }));
 
-      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase")).outcome)
+      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase", { actorUserId: "u_test" })).outcome)
         .toBe("conflict");
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", source: "operator" });
     });
 
@@ -960,20 +960,21 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfSource(purchase, "purchase"))
+      expect(await store.putGrantIfSource(purchase, "purchase", { actorUserId: "u_test" }))
         .toEqual({ outcome: "written", previous: undefined });
 
-      // The write reports what it replaced, so billing can tell a real change
-      // from a repeated delivery and see which org a plan moved out of.
-      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase");
+      // The write reports what it replaced. Nothing in production reads this
+      // (see GrantWrite), so this is the only thing keeping the two stores
+      // reporting the same thing.
+      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase", { actorUserId: "u_test" });
       expect(updated.outcome).toBe("written");
       expect(updated.previous).toMatchObject({ plan: "pro" });
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
 
-      const gone = await store.deleteGrantIfSource("github:4242", "purchase");
+      const gone = await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" });
       expect(gone.outcome).toBe("deleted");
       expect(gone.removed).toMatchObject({ plan: "team" });
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("missing");
       expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual([]);
     });
 
@@ -998,8 +999,8 @@ export function describeStoreContract(
       // it. In this order a store that reads before yielding will let the
       // delete run against the record the put already replaced.
       const [put] = await Promise.all([
-        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine"),
-        store.deleteGrantIfSource("github:4242", "purchase"),
+        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine", { actorUserId: "u_test" }),
+        store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" }),
       ]);
 
       // Either order of completion is fine. What must not happen is the delete
@@ -1007,6 +1008,212 @@ export function describeStoreContract(
       if (put === "written") {
         expect(await store.getGrant("github:4242")).toMatchObject({ source: "operator" });
       }
+    });
+
+    /**
+     * A grant change and the record of it are one operation. Every caller used
+     * to write the grant and then audit it, and losing the second write lost the
+     * record permanently — the retry returns "missing" and cannot tell that the
+     * change already happened.
+     */
+    it("records a guarded grant write in the affected org", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" }))
+        .toBe("written");
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => [e.action, e.actorUserId]))
+        .toEqual([["plan_granted", "u_admin"]]);
+    });
+
+    it("records nothing when a guarded write changes nothing a reader sees", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" });
+      await store.putGrantIfOwned(
+        { ...grant, grantedAt: Date.now() + 10 }, "org_mine", { actorUserId: "u_admin" }
+      );
+
+      // Exactly one, and it is the first: a length check alone would also pass
+      // against a store that recorded nothing at all.
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records a revocation against the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine",
+        { actorUserId: "u_admin", detail: { reason: "left the team" } })).toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "u_admin",
+        detail: { key: "github:4242", plan: "team", reason: "left the team" },
+      });
+    });
+
+    /**
+     * The grant is re-homed rather than deleted, so without this the org it left
+     * would never hear that it lost an admin. A team subscription ending while a
+     * pro one continues does exactly this.
+     */
+    it("records both halves when a grant moves between orgs", async () => {
+      const base = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrantIfSource({ ...base, orgId: "org_old" }, "purchase",
+        { actorUserId: "stripe" });
+      await store.putGrantIfSource({ ...base, orgId: "org_new" }, "purchase",
+        { actorUserId: "stripe" });
+
+      expect((await store.auditForOrg("org_old", 10)).map((e) => e.action))
+        .toEqual(["plan_granted", "plan_revoked"]);
+      expect((await store.auditForOrg("org_new", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records nothing for a refused guarded write, in either org", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrant({ ...base, orgId: "org_theirs" });
+
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine",
+        { actorUserId: "u_admin" })).toBe("conflict");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // The grant is untouched, so the emptiness above is about the audit
+      // rather than about the whole call having done nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    /** The deletes record too, through the source guard billing uses as well as the org one. */
+    it("records a revocation through the source guard, in the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      });
+
+      expect((await store.deleteGrantIfSource("github:4242", "purchase",
+        { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } })).outcome)
+        .toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "stripe",
+        detail: { key: "github:4242", plan: "team", reason: "subscription no longer paying" },
+      });
+    });
+
+    /** All four guarded writes, each refused: the first test of the kind covers one of them. */
+    it("records nothing for any refused guarded write, in either org", async () => {
+      const held = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_theirs",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrant(held);
+      const asAdmin = { actorUserId: "u_admin" };
+
+      expect(await store.putGrantIfOwned({ ...held, orgId: "org_mine" }, "org_mine", asAdmin))
+        .toBe("conflict");
+      expect((await store.putGrantIfSource({ ...held, orgId: "org_mine" }, "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", asAdmin)).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", asAdmin)).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:nobody", "purchase", asAdmin)).outcome)
+        .toBe("missing");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // Still there, so the emptiness above is the audit's and not a store that did nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    /**
+     * Who acted and why are part of the record, whichever guard the write went
+     * through. Billing's reason for a change and the admin's identity are what an
+     * auditor reads first, and a store that dropped either on one path would
+     * still pass every case above.
+     */
+    it("records the actor and detail it was given, through either guard", async () => {
+      const grant = {
+        plan: "team" as const, role: "admin" as const,
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(
+        { ...grant, key: "github:owned", orgId: "org_a", source: "operator" }, "org_a",
+        { actorUserId: "u_admin", detail: { via: "admin route" } }
+      );
+      await store.putGrantIfSource(
+        { ...grant, key: "github:billed", orgId: "org_b", source: "purchase" }, "purchase",
+        { actorUserId: "stripe", detail: { customer: "cus_1" } }
+      );
+
+      expect((await store.auditForOrg("org_a", 10))[0]).toMatchObject({
+        actorUserId: "u_admin", detail: { key: "github:owned", via: "admin route" },
+      });
+      expect((await store.auditForOrg("org_b", 10))[0]).toMatchObject({
+        actorUserId: "stripe", detail: { key: "github:billed", customer: "cus_1" },
+      });
+    });
+
+    /**
+     * The log is read in time order, so an entry carries the moment of the write
+     * that made it. The clock moves between the four writes: with it frozen, an
+     * entry stamped by a different call, or by none, would read the same.
+     */
+    it("stamps each entry with the time of the write that made it", async () => {
+      const base = {
+        plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      const asAdmin = { actorUserId: "u_admin" };
+      const times: number[] = [];
+      const tick = () => {
+        vi.advanceTimersByTime(1_000);
+        times.push(Date.now());
+      };
+
+      tick();
+      await store.putGrantIfOwned({ ...base, key: "github:1", source: "operator" }, "org_mine", asAdmin);
+      tick();
+      await store.putGrantIfSource({ ...base, key: "github:2", source: "purchase" }, "purchase", asAdmin);
+      tick();
+      await store.deleteGrantIfOwned("github:1", "org_mine", asAdmin);
+      tick();
+      await store.deleteGrantIfSource("github:2", "purchase", asAdmin);
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.at)).toEqual(times);
+    });
+
+    /** What the caller passed is theirs afterwards: changing it must not rewrite the record. */
+    it("keeps the detail it was given as it was when the write happened", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+      const detail = { reason: { why: "left the team" } };
+      await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_admin", detail });
+
+      detail.reason.why = "changed afterwards";
+
+      expect((await store.auditForOrg("org_mine", 10))[0]).toMatchObject({
+        detail: { reason: { why: "left the team" } },
+      });
     });
 
     /** null is a bucket, not "unscoped": org-less grants list as their own set. */

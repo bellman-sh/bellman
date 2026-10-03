@@ -190,8 +190,16 @@ interface AuditIntent {
 time, so the rule both callers implement separately today moves next to the
 mutation:
 
-- emit nothing when `plan`, `role` and `orgId` all match the previous grant —
-  the same three fields `samePlan` compares today (`grants.ts`);
+- emit nothing when `plan`, `role`, `orgId`, `source` and `expiresAt` all match
+  the previous grant. Billing's own `samePlan` compares only the first three
+  today, which is sufficient there because `purchaseGrant` fixes `source` and
+  `expiresAt`. It is not sufficient for the admin route: a `source` change can
+  take a grant out of billing's hands — after it, `putGrantIfSource(…,
+  "purchase")` returns `conflict` and the subscription can never update or
+  revoke that grant again — and an `expiresAt` change moves the day somebody
+  loses access. `grantedAt` and `grantedBy` stay out: the first is `Date.now()`
+  on every write, so comparing it would record every redelivered Stripe event,
+  and the second is already carried as the entry's actor;
 - emit `plan_revoked` to the old org when `orgId` moved;
 - emit `plan_granted` to the new org.
 

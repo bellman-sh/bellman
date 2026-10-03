@@ -27,7 +27,7 @@
 
 Five failure modes the spec implies that no task's happy path exercises. Each has a test assigned to the task that owns the code.
 
-1. **A grant with `orgId: null` must enqueue nothing.** `appendAudit` returns early for a null org (`store-do.ts:751`), so a row enqueued for one could never be delivered and would block the head of the queue forever. Pro purchases are the common case. → Task 7.
+1. **A grant with a falsy `orgId` must enqueue nothing.** The audit log is org-scoped, and `appendAudit` returns early for a null org (`store-do.ts:837`). A row queued for one is not a stall: a Durable Object namespace accepts `""`, `null` and `undefined` as names, so such a row is *delivered* — into a stream no org reads, and `idFromName(undefined)` names the same object as an org called `"undefined"`, which `isOrgId` allows. Pro purchases are the common org-less case. Two guards keep them out: `grantAuditEntries`' `hasOrg` (Task 6) and `deliver`'s own check (Task 7). → Task 7.
 2. **A guarded write returning `conflict` or `missing` must enqueue nothing.** A rejected write leaving an audit trace is the bug #44 fixed on the admin path, reintroduced through a different door. → Task 7.
 3. **An org move emits two rows; a delivery failure between them must lose neither and reorder neither.** FIFO plus head-of-line blocking is what guarantees it, and nothing else does. → Task 3.
 4. **`setJoinCode` on a frozen session returns `false` and must enqueue nothing.** Otherwise a frozen room's rotated code gets registered anyway. → Task 10.
@@ -921,7 +921,8 @@ redelivery safe. It lands in the same write as the entry and the sequence."
 
 ```ts
 // tests/grant-audit.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { purchaseGrant } from "../src/billing/grants.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "../src/grant-audit.js";
 import type { PlanGrant } from "../src/types.js";
 
@@ -940,7 +941,7 @@ describe("grantAuditEntries", () => {
       action: "plan_granted",
       detail: {
         plan: "team", role: "admin", org_id: "org_mine", source: "operator",
-        key: "github:4242",
+        expires_at: null, key: "github:4242",
       },
     }]);
   });
@@ -980,8 +981,7 @@ describe("grantAuditEntries", () => {
   /**
    * Review Focus 1. The audit log is org-scoped, so an org-less grant — every
    * pro purchase — has nowhere to be recorded. Emitting a row for one would
-   * queue something that can never be delivered, and it sits at the head of a
-   * FIFO queue blocking everything behind it.
+   * queue something with nowhere to go.
    */
   it("records nothing for an org-less grant", () => {
     expect(grantAuditEntries(
@@ -1019,6 +1019,293 @@ describe("revokeAuditEntries", () => {
     expect(revokeAuditEntries(grant({ orgId: null }), admin, NOW)).toEqual([]);
   });
 });
+
+/**
+ * Everything from here on was added after sweeping wrong implementations of the
+ * rule against the cases above. Each case pins something those leave open.
+ *
+ * Grants here keep grantedBy as u_admin even when the intent is Stripe's: an
+ * entry's actor is the intent's, never the grant's, and a fixture where the two
+ * agree could not tell.
+ */
+const billing: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: "cus_1" } };
+const DAY = 86_400_000;
+
+describe("grantAuditEntries, field by field", () => {
+  /**
+   * grantedBy is who performed the write, and the entry already names that as
+   * its actor, so a second admin re-asserting an identical grant has told the
+   * org nothing new. grantedAt is the brief's case above: every write sets it.
+   */
+  it("records nothing when only grantedBy differs", () => {
+    expect(grantAuditEntries(grant(), grant({ grantedBy: "u_other" }), admin, NOW)).toEqual([]);
+  });
+
+  /**
+   * Writing the same grant again must read as no change whatever the grant says.
+   * The fixture's own values (a team plan, an admin, no expiry) are the only ones
+   * the cases above compare, so a rule that recognised only those would still
+   * pass them. An admin saving the same expiring grant twice is the noise this
+   * check exists to remove, and it needs a case of its own.
+   */
+  it.each<[string, Partial<PlanGrant>]>([
+    ["a pro plan", { plan: "pro" }],
+    ["a member role", { role: "member" }],
+    ["another org", { orgId: "org_other" }],
+    ["a purchase source", { source: "purchase" }],
+    ["an expiry that is still the same date", { expiresAt: NOW + DAY }],
+  ])("records nothing when %s is written again", (_what, over) => {
+    expect(
+      grantAuditEntries(grant(over), grant({ ...over, grantedAt: NOW + 5 }), admin, NOW)
+    ).toEqual([]);
+  });
+
+  /**
+   * Source decides whether billing may still touch a grant. A team admin saving
+   * their own key over a purchase grant leaves plan, role and org as they were
+   * and takes it out of billing's hands for good: putGrantIfSource answers
+   * "conflict" from then on, so the subscription can no longer update or revoke
+   * it. That is what an org's stream is for, and a change of source either way
+   * is one.
+   */
+  it.each<[string, string, string]>([
+    ["a purchased grant being taken over", "purchase", "operator"],
+    ["a grant being handed to billing", "operator", "purchase"],
+  ])("records %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ source: before }), grant({ source: after }), admin, NOW
+    );
+    expect(entries).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
+      action: "plan_granted",
+      detail: {
+        plan: "team", role: "admin", org_id: "org_mine", source: after,
+        expires_at: null, replaced_plan: "team", key: "github:4242",
+      },
+    }]);
+  });
+
+  /** Expiry decides when somebody loses access: putting one on, taking it off or moving it is a change. */
+  it.each<[string, number | null, number | null]>([
+    ["none to a date", null, NOW + DAY],
+    ["a date to none", NOW + DAY, null],
+    ["one date to another", NOW + DAY, NOW + 2 * DAY],
+  ])("records an expiry changing from %s", (_what, before, after) => {
+    const entries = grantAuditEntries(
+      grant({ expiresAt: before }), grant({ expiresAt: after }), admin, NOW
+    );
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  /**
+   * A grant entry states every field the rule compares: plan, role, org_id and
+   * source, and expires_at too. Without it the line for an expiry change would
+   * be silent about the expiry, and an org reading its stream could not see when
+   * somebody loses access.
+   */
+  it.each<[string, PlanGrant | undefined, number | null]>([
+    ["a first grant with an expiry", undefined, NOW + DAY],
+    ["an expiry put on", grant({ expiresAt: null }), NOW + DAY],
+    ["an expiry taken off", grant({ expiresAt: NOW + DAY }), null],
+    ["an expiry moved", grant({ expiresAt: NOW + DAY }), NOW + 2 * DAY],
+  ])("states the new expiry when it records %s", (_what, previous, expiry) => {
+    const [entry] = grantAuditEntries(previous, grant({ expiresAt: expiry }), admin, NOW);
+    expect(entry.detail.expires_at).toBe(expiry);
+  });
+
+  /**
+   * Source and expiry count as changes, so the check that a redelivered Stripe
+   * event records nothing has to use billing's own grant, not a fixture that
+   * happens to agree. purchaseGrant stamps grantedAt from the clock and writes
+   * the same source and expiry every time; if that stops being true, every
+   * redelivery starts appearing in the org's stream and this fails. Team only:
+   * a pro purchase has no org, so nothing is recorded for it whatever it says.
+   */
+  it("records nothing for a redelivered team purchase", () => {
+    const clock = vi.spyOn(Date, "now");
+    try {
+      clock.mockReturnValueOnce(NOW);
+      const first = purchaseGrant("github:4242", "team", "u_github_4242");
+      clock.mockReturnValueOnce(NOW + 5_000);
+      const again = purchaseGrant("github:4242", "team", "u_github_4242");
+      // The clock did move and the grant has an org, or the check below would prove nothing.
+      expect([first.grantedAt, again.grantedAt]).toEqual([NOW, NOW + 5_000]);
+      expect(again.orgId).not.toBeNull();
+      expect(grantAuditEntries(first, again, { actorUserId: "stripe" }, NOW)).toEqual([]);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  /**
+   * A team subscription ending while a pro one continues re-homes the grant to
+   * no org. The org it left is told, and that is the only entry: nothing may be
+   * filed against the org-less side.
+   */
+  it("tells only the org a plan left when the grant becomes org-less", () => {
+    const entries = grantAuditEntries(
+      grant(), grant({ orgId: null, plan: "pro", role: "member", source: "purchase" }), billing, NOW
+    );
+    expect(entries).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "stripe",
+      action: "plan_revoked",
+      detail: {
+        plan: "team", reason: "moved to another plan", moved_to: null,
+        stripe_customer: "cus_1", key: "github:4242",
+      },
+    }]);
+  });
+
+  /**
+   * The same boundary from the other side: a pro subscriber buys team. The new
+   * org is told. The org-less side the grant came from is not written to.
+   */
+  it("tells only the org a plan arrives in when the grant was org-less", () => {
+    const entries = grantAuditEntries(
+      grant({ orgId: null, plan: "pro", role: "member", source: "purchase" }),
+      grant({ source: "purchase" }), billing, NOW
+    );
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+    expect(entries[0].detail).toMatchObject({ plan: "team", replaced_plan: "pro" });
+  });
+
+  /**
+   * Every field names the grant as it is now, except the ones that exist to say
+   * what it was. All four fields differ here, so a field read from the wrong
+   * side of the change cannot agree by accident.
+   */
+  it("describes the grant as it is now and names what it replaced", () => {
+    const previous = grant({ plan: "pro", role: "member", orgId: "org_old", source: "operator" });
+    const next = grant({ plan: "team", role: "admin", orgId: "org_new", source: "purchase" });
+    expect(grantAuditEntries(previous, next, billing, NOW)).toEqual([
+      {
+        at: NOW, orgId: "org_old", sessionId: "grant:github:4242", actorUserId: "stripe",
+        action: "plan_revoked",
+        detail: {
+          plan: "pro", reason: "moved to another plan", moved_to: "org_new",
+          stripe_customer: "cus_1", key: "github:4242",
+        },
+      },
+      {
+        at: NOW, orgId: "org_new", sessionId: "grant:github:4242", actorUserId: "stripe",
+        action: "plan_granted",
+        detail: {
+          plan: "team", role: "admin", org_id: "org_new", source: "purchase",
+          expires_at: null, replaced_plan: "pro", stripe_customer: "cus_1", key: "github:4242",
+        },
+      },
+    ]);
+  });
+
+  /** toEqual cannot see this: it treats a key holding undefined as absent. */
+  it("does not claim a first grant replaced anything", () => {
+    const [entry] = grantAuditEntries(undefined, grant(), admin, NOW);
+    expect(Object.keys(entry.detail)).not.toContain("replaced_plan");
+  });
+});
+
+describe("revokeAuditEntries, field by field", () => {
+  /** What the admin route passes: an actor, and nothing to add. */
+  it("says which plan was lost, and nothing more, when the caller adds nothing", () => {
+    expect(revokeAuditEntries(grant(), admin, NOW)).toEqual([{
+      at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
+      action: "plan_revoked", detail: { plan: "team", key: "github:4242" },
+    }]);
+  });
+});
+
+/**
+ * A falsy org id is no org, as null is. isOrgId rejects "" at the admin route
+ * and billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, and a stored record can lack the field altogether. A Durable
+ * Object namespace accepts "" and undefined as names, so an entry filed against
+ * one is delivered, to a stream no org reads; undefined names the same object as
+ * an org called "undefined", which isOrgId allows.
+ */
+describe.each<[string, string | null]>([
+  ["an empty string", ""],
+  ["no value", undefined as unknown as null],
+])("a grant whose org is %s", (_what, empty) => {
+  const homeless = (over: Partial<PlanGrant> = {}) => grant({ orgId: empty, ...over });
+
+  it("records nothing for a first grant", () => {
+    expect(grantAuditEntries(undefined, homeless(), admin, NOW)).toEqual([]);
+  });
+
+  it("tells only the org a plan arrives in when it had none", () => {
+    const entries = grantAuditEntries(homeless(), grant(), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_granted"]]);
+  });
+
+  it("tells only the org a plan left when it ends up with none", () => {
+    const entries = grantAuditEntries(grant(), homeless({ plan: "pro", role: "member" }), admin, NOW);
+    expect(entries.map((e) => [e.orgId, e.action])).toEqual([["org_mine", "plan_revoked"]]);
+  });
+
+  it("records nothing for a revocation", () => {
+    expect(revokeAuditEntries(homeless(), admin, NOW)).toEqual([]);
+  });
+});
+
+describe("every entry", () => {
+  /**
+   * `now` is when the store committed the change. A grant's grantedAt is when it
+   * was first made, which says nothing about when this entry was written.
+   */
+  it("is stamped with the time it was given, not the grant's", () => {
+    const later = NOW + 60_000;
+    const entries = [
+      ...grantAuditEntries(undefined, grant(), admin, later),
+      ...grantAuditEntries(grant({ orgId: "org_old" }), grant({ orgId: "org_new" }), admin, later),
+      ...revokeAuditEntries(grant(), admin, later),
+    ];
+    expect(entries.map((e) => e.at)).toEqual([later, later, later, later]);
+  });
+
+  /**
+   * The caller may replace anything the store filled in — billing gives its own
+   * reason for a move — and nothing but `key`, at each of the three places an
+   * entry is made. The caller supplies every field here, so whatever the store
+   * would have said shows up as a field that failed to be replaced.
+   */
+  it("lets the caller replace every field the store fills in, except key", () => {
+    const said = {
+      plan: "x", role: "x", org_id: "x", source: "x", expires_at: "x",
+      reason: "x", moved_to: "x", replaced_plan: "x",
+    };
+    const intent: AuditIntent = {
+      actorUserId: "stripe", detail: { ...said, stripe_customer: "cus_1", key: "github:evil" },
+    };
+    const entries = [
+      ...grantAuditEntries(undefined, grant(), intent, NOW),
+      ...grantAuditEntries(grant({ orgId: "org_old" }), grant({ orgId: "org_new" }), intent, NOW),
+      ...revokeAuditEntries(grant(), intent, NOW),
+    ];
+    expect(entries).toHaveLength(4);
+    for (const e of entries) {
+      expect(e.detail).toEqual({ ...said, stripe_customer: "cus_1", key: "github:4242" });
+      expect(e.sessionId).toBe("grant:github:4242");
+    }
+  });
+
+  /**
+   * One intent serves both entries of an org move, and the store keeps hold of
+   * the grants it passes in. Writing into any of them would change what the
+   * next call sees.
+   */
+  it("leaves what it is given untouched", () => {
+    const intent: AuditIntent = { actorUserId: "stripe", detail: { stripe_customer: "cus_1" } };
+    const previous = grant({ orgId: "org_old" });
+    const next = grant({ orgId: "org_new" });
+
+    grantAuditEntries(previous, next, intent, NOW);
+    revokeAuditEntries(previous, intent, NOW);
+
+    expect(intent).toEqual({ actorUserId: "stripe", detail: { stripe_customer: "cus_1" } });
+    expect(previous).toEqual(grant({ orgId: "org_old" }));
+    expect(next).toEqual(grant({ orgId: "org_new" }));
+  });
+});
 ```
 
 - [ ] **Step 2: Run to verify they fail**
@@ -1035,13 +1322,15 @@ import type { AuditEntry, PlanGrant } from "./types.js";
 /**
  * What a grant change becomes in the audit log.
  *
- * This rule used to exist twice — once in the admin route and once in billing —
- * and the two diverged: #68 found a redelivered Stripe event appending a
- * plan_granted line for a change that had not happened. RegistryDO is the only
- * thing that knows the previous grant at commit time, so the rule lives beside
- * the mutation now and both callers stopped auditing.
+ * The admin route and billing each built these entries for themselves, and the
+ * two diverged: #68 found a redelivered Stripe event appending a plan_granted
+ * line for a change that had not happened. RegistryDO is the only thing that
+ * knows the previous grant at commit time, so the rule belongs beside the
+ * mutation, not in either caller.
  *
- * Runtime-free for the reason CLAUDE.md gives, same as grant-index.ts.
+ * Runtime-free, as grant-index.ts is: store-do.ts imports `cloudflare:workers`,
+ * which no vitest test can import, so a rule written inside it could not be
+ * tested at all.
  */
 
 /** What a caller contributes: who is acting, and anything extra to record. */
@@ -1050,9 +1339,44 @@ export interface AuditIntent {
   detail?: Record<string, unknown>;
 }
 
-/** Whether a write changed anything a reader would notice. */
+/**
+ * Whether an org has an audit stream to write to. The log is org-scoped, so a
+ * grant with no org has nowhere to be recorded.
+ *
+ * Null is no org, and so is anything else falsy. A Durable Object namespace
+ * accepts "" and undefined as names, so an entry filed against one is delivered,
+ * to a stream no org reads (undefined names the same object as an org called
+ * "undefined", which isOrgId allows). isOrgId rejects "" at the admin route and
+ * billing derives its own org id, but putGrant is part of the store API and
+ * checks nothing, so this does not lean on those having run. grant-index.ts
+ * keeps two defences for the org id for the same reason.
+ */
+function hasOrg(orgId: string | null): orgId is string {
+  return Boolean(orgId);
+}
+
+/**
+ * Whether a write left the grant as an org's audit stream would describe it:
+ * plan, role, org, source and expiry. A change of source can take a grant out of
+ * billing's hands, and a change of expiry moves the day somebody loses access,
+ * so neither passes as a repeat.
+ *
+ * Two fields are left out on purpose. grantedAt is Date.now() on every write, so
+ * comparing it would record every redelivered Stripe event, which is the noise
+ * this check exists to remove. grantedBy is who performed the write, and the
+ * entry already carries that as its actor; comparing it would record the same
+ * fact twice, and add a line whenever a second admin re-asserts an identical
+ * grant. (key is not compared either, because previous was read under it.)
+ */
 function samePlan(a: PlanGrant | undefined, b: PlanGrant): boolean {
-  return a !== undefined && a.plan === b.plan && a.role === b.role && a.orgId === b.orgId;
+  return (
+    a !== undefined &&
+    a.plan === b.plan &&
+    a.role === b.role &&
+    a.orgId === b.orgId &&
+    a.source === b.source &&
+    a.expiresAt === b.expiresAt
+  );
 }
 
 /**
@@ -1082,15 +1406,19 @@ function entry(
 }
 
 /**
- * What a guarded grant WRITE should record.
+ * What a guarded grant WRITE should record. `previous` is the grant this write
+ * replaced under the same key, or undefined for a first grant.
  *
- * Nothing when no field a reader sees has moved. When the org moved, the old
+ * Nothing when samePlan finds the grant as it was. When the org moved, the old
  * org gets a revocation — that is the only place it will ever be recorded,
  * since the grant is re-homed rather than deleted.
  *
- * An org-less grant records nothing at all: the audit log is org-scoped and a
- * pro purchase has no stream to be written to. Queuing one would park a row
- * that can never be delivered at the head of a FIFO queue.
+ * An org-less grant records nothing at all (see hasOrg): the audit log is
+ * org-scoped and a pro purchase has no stream to be written to. Queuing one
+ * would put a row in the outbox that has nowhere to go.
+ *
+ * The grant entry states every field samePlan compares, as the grant now has
+ * it, so no change files a line that omits the field it changed.
  */
 export function grantAuditEntries(
   previous: PlanGrant | undefined,
@@ -1100,14 +1428,15 @@ export function grantAuditEntries(
 ): AuditEntry[] {
   if (samePlan(previous, next)) return [];
   const entries: AuditEntry[] = [];
-  if (previous && previous.orgId !== null && previous.orgId !== next.orgId) {
+  if (previous && hasOrg(previous.orgId) && previous.orgId !== next.orgId) {
     entries.push(entry(previous.orgId, next.key, "plan_revoked", intent, {
       plan: previous.plan, reason: "moved to another plan", moved_to: next.orgId,
     }, now));
   }
-  if (next.orgId !== null) {
+  if (hasOrg(next.orgId)) {
     entries.push(entry(next.orgId, next.key, "plan_granted", intent, {
       plan: next.plan, role: next.role, org_id: next.orgId, source: next.source,
+      expires_at: next.expiresAt,
       ...(previous ? { replaced_plan: previous.plan } : {}),
     }, now));
   }
@@ -1120,7 +1449,7 @@ export function revokeAuditEntries(
   intent: AuditIntent,
   now: number
 ): AuditEntry[] {
-  if (removed.orgId === null) return [];
+  if (!hasOrg(removed.orgId)) return [];
   return [entry(removed.orgId, removed.key, "plan_revoked", intent, { plan: removed.plan }, now)];
 }
 ```
@@ -1160,7 +1489,7 @@ already diverged. Runtime-free so the rule is testable without workerd."
 
 **Interfaces:**
 - Consumes: `AuditIntent`, `grantAuditEntries`, `revokeAuditEntries` from `src/grant-audit.js`; `drain`, `dueKey`, `enqueueRows`, `OUTBOX_SEQ`, `OutboxIntent`, `OutboxRow` from `src/outbox.js`
-- Produces: the four guarded writes taking a third `audit: AuditIntent` argument, return types unchanged; `RegistryDO.enqueueOnly(grant, audit)` as a test seam
+- Produces: the four guarded writes taking a third `audit: AuditIntent` argument, return types unchanged. **`enqueueOnly` below was removed in a fix round — do not write it.** Every method on a Durable Object is reachable over RPC by anything holding the binding, and TypeScript's `private` is compile-time only (probed: a plain stub's `putGrantIfOwnedTxn` returned `"written"`), so a method that commits a change while skipping its delivery is exposed however it is marked. Mark internal helpers `#private`, and switch `driver.deliverNow` off from inside the object when a test needs the un-delivered state.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1254,9 +1583,16 @@ it("queues and records nothing when a guarded write is refused", async () => {
 });
 
 /**
- * Review Focus 1. Every pro purchase is org-less. A row queued for one could
- * never be delivered, and it would sit at the head of a FIFO queue blocking
- * every audit entry behind it.
+ * Review Focus 1. Every pro purchase is org-less, so the audit log has no stream
+ * for it. A queued row for one would not stall: a namespace accepts "", null and
+ * undefined as names, so it is DELIVERED, into a stream no org reads — and
+ * `idFromName(undefined)` names the same object as an org called "undefined",
+ * which isOrgId allows.
+ *
+ * Two guards keep such a row out: `hasOrg` in grantAuditEntries, and `deliver`'s
+ * own `!entry.orgId`. So an empty queue after the call cannot tell which one did
+ * the work — `deliver` returning normally makes `drain` delete the row either
+ * way. Step 6's control 3 removes BOTH, which is the only way to see either fail.
  */
 it("queues nothing for an org-less grant", async () => {
   const store = new DurableObjectStore(env as never);
@@ -1270,6 +1606,29 @@ it("queues nothing for an org-less grant", async () => {
 
   expect(await queued()).toEqual([]);
   expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", orgId: null });
+});
+
+/**
+ * The same, for an org id a namespace WOULD accept as a name. `putGrant` validates
+ * nothing, so a grant like this can reach the store even though the admin route's
+ * isOrgId and billing's derived org id both refuse it. If both guards were gone the
+ * entry would land in the stream of org "" and in one named "null" — read back here,
+ * so the test fails on a misfile rather than only on a queue that is not empty.
+ */
+it("queues nothing, and misfiles nothing, for an org id that is not a real org", async () => {
+  const store = new DurableObjectStore(env as never);
+
+  await store.putGrant(grant({ key: "github:9", orgId: "" as never, plan: "pro", role: "member", source: "purchase" }));
+  const written = await store.putGrantIfSource(
+    grant({ key: "github:9", orgId: "" as never, plan: "team", role: "admin", source: "purchase" }),
+    "purchase",
+    { actorUserId: "stripe" }
+  );
+  expect(written.outcome).toBe("written");
+
+  expect(await queued()).toEqual([]);
+  expect(await store.auditForOrg("", 10)).toEqual([]);
+  expect(await store.auditForOrg("null", 10)).toEqual([]);
 });
 ```
 
@@ -1363,8 +1722,8 @@ Add these members to `RegistryDO`:
    *
    * Returned rather than written, because the point is that the grant change and
    * the record of it commit together. Empty for an org-less grant: the audit log
-   * is org-scoped, and a row that could never be delivered would sit at the head
-   * of a FIFO queue blocking everything behind it.
+   * is org-scoped, so queuing one would put a row in the outbox that has nowhere
+   * to go. `grantAuditEntries` is what keeps them out; see its `hasOrg`.
    */
   private async auditRows(
     txn: { get<T>(key: string): Promise<T | undefined> },
@@ -1394,7 +1753,11 @@ Add these members to `RegistryDO`:
   private async deliver(row: OutboxRow): Promise<void> {
     if (row.kind !== "audit") throw new Error(`outbox: unknown kind ${row.kind}`);
     const entry = row.payload as AuditEntry;
-    if (entry.orgId === null) return; // no stream to deliver it to; drop the row
+    // Falsy, not `=== null`: a namespace accepts "" and undefined as names, so a
+    // malformed entry would be delivered into a stream no org reads rather than
+    // failing. grantAuditEntries already refuses to build one; this is the second
+    // defence, for the same reason grant-index.ts keeps two for the org id.
+    if (!entry.orgId) return; // no stream to deliver it to; drop the row
     await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
   }
 
@@ -1419,6 +1782,8 @@ Add these members to `RegistryDO`:
    * delivery, so a test can reproduce an isolate dying in that gap. Nothing in
    * production calls this.
    */
+  // REMOVED in a fix round; see this task's Interfaces block. Kept here only so
+  // the diff that removed it reads in context. Do not write this method.
   async enqueueOnly(grant: PlanGrant, audit: AuditIntent): Promise<void> {
     await this.putGrantIfOwnedTxn(grant, grant.orgId, audit);
   }
@@ -1591,7 +1956,11 @@ Three of these assert emptiness and would go green against a store that never au
 
 1. Make `auditRows` `return {}` unconditionally. The first test must fail with `expected [] to deeply equal [ [ 'plan_granted', 'u_admin', 'github:4242' ] ]`, and the second on its `toHaveLength(1)`.
 2. Move the `auditRows` call *above* the `conflict` return in `putGrantIfOwnedTxn`. The refused-write test must fail with a queued row.
-3. Drop the `next.orgId !== null` guard in `grantAuditEntries` (Task 6). The org-less test must fail with a queued row.
+3. Remove **both** org guards together: `hasOrg(next.orgId)` in `grantAuditEntries` (Task 6) and `deliver`'s own `!entry.orgId` (this task). The second needs a cast to compile, which is fine — vitest does not typecheck. Only with both gone can either test fail: `deliver` returning normally makes `drain` delete the row, so with one guard left the queue is empty again by the time the call returns and nothing is observable.
+
+   With both removed, the null row reaches `idFromName(null)` — the stream of an org called `"null"` — and the empty one reaches `idFromName("")`. Both tests must fail, and the misfile assertions (`auditForOrg("")`, `auditForOrg("null")`) are what catch it rather than the queue check.
+
+   **Removing `hasOrg` alone is expected to stay green**, and that is not a defect in the test — it is what having two defences means. Task 6's own unit tests are what pin `hasOrg`: removing it at the grant site dies to 6 of them. Do not weaken `deliver`'s guard to make a control go red.
 
 Restore after each. Quote all three.
 
@@ -1718,7 +2087,9 @@ Then update the existing guarded-write calls in this file (around lines 869, 880
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run tests/store.test.ts`
-Expected: FAIL — `putGrantIfOwned` takes two arguments in `MemoryStore`.
+Expected: **PASS.** Two earlier drafts of this step were wrong about that, in opposite directions. The first predicted `putGrantIfOwned` takes two arguments in `MemoryStore`; it takes three, because Task 7 absorbed this task's Step 3 so no task boundary ended with `typecheck` red for a missing implementor. The second then kept "Expected: FAIL" and only changed the reason; that was also wrong. Task 7 made BOTH stores audit, so cases written against that behaviour pass the moment they are added.
+
+A green run here is therefore correct and is NOT evidence the cases are vacuous. What distinguishes the two is Step 5: a case earns its place by failing against a broken implementation, not by failing before the implementation exists. Go to Step 5 and let the mutants answer it.
 
 - [ ] **Step 3: Implement in `MemoryStore`**
 
@@ -1928,9 +2299,15 @@ Add `import type { AuditIntent } from "../grant-audit.js";` and drop the now-unu
 - [ ] **Step 3: Run the suites to see what moved**
 
 Run: `npx vitest run tests/billing-grants.test.ts tests/oauth-flow.test.ts`
-Expected: several FAIL — the cases asserting audit entry shape now assert behaviour owned by `grant-audit.ts` and the contract suite.
 
-Read each failure before editing it. A test that fails after a change knows something the source does not say, and on this repo that has twice turned out to be the test being right.
+**Expect GREEN, not failures.** Task 7's implementer applied Steps 1 and 2 temporarily and measured it: with both in place, `typecheck`, `typecheck:worker`, `build` and all 1022 root tests pass, and no assertion rewrite was needed. An earlier draft of this step predicted several failures; that prediction was wrong.
+
+So the work here is the opposite of what it looks like. **Do not hunt for failures that are not there.** Instead check whether any test now passes for a NEW reason:
+
+- `tests/billing-grants.test.ts` asserted audit entries while `reconcilePurchase` wrote them itself. After Step 2 it writes none, yet those assertions still pass — because `MemoryStore` audits internally now. Confirm each one still observes what its name claims, rather than observing the store doing the store's job.
+- For each such test, break the thing it names — make `grantAuditEntries` return `[]` — and confirm it goes red. A test that survives that is asserting nothing about billing.
+
+Read each failure, if any appears, before editing it. A test that fails after a change knows something the source does not say, and on this repo that has twice turned out to be the test being right.
 
 - [ ] **Step 4: Update the moved assertions**
 
@@ -1984,7 +2361,7 @@ Both adopt a mechanism already merged and reviewed, and they touch disjoint file
 
 **Interfaces:**
 - Consumes: `drain`, `dueKey`, `enqueueRows`, `OUTBOX_SEQ`, `OutboxRow` from `src/outbox.js`
-- Produces: `SessionDO extends DurableObject<BellmanEnv>`; `SessionDO.setJoinCode` returning `Promise<boolean>`; `SessionDO.enqueueOnly(s)` as a test seam
+- Produces: `SessionDO extends DurableObject<BellmanEnv>`; `SessionDO.setJoinCode` returning `Promise<boolean>`. **No public test seam** — see Step 3.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2039,9 +2416,15 @@ it("recovers a registration whose inline attempt never ran", async () => {
   const store = new DurableObjectStore(env as never);
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_lost"));
 
-  await runInDurableObject(stub, async (instance: SessionDO) => {
-    await instance.enqueueOnly(session("qs_lost", "BELL-BBB-02") as never);
+  // No public seam for this. Switch the inline delivery off from inside the
+  // object, the way Task 7's worker test does: TypeScript's `private` is a
+  // compile-time check, so a test can reach the field while nothing in the
+  // production class exists for the purpose.
+  type Driver = { deliverNow?: () => Promise<void> };
+  await runInDurableObject(stub, (instance: SessionDO) => {
+    (instance as unknown as { driver: Driver }).driver.deliverNow = async () => {};
   });
+  await store.createSession(session("qs_lost", "BELL-BBB-02") as never);
   await abortAllDurableObjects();
 
   // Unjoinable, and the intent is still queued.
@@ -2081,7 +2464,7 @@ it("queues nothing when setJoinCode is refused", async () => {
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `npm run test:worker -- join-code-outbox`
-Expected: FAIL — `enqueueOnly` does not exist on `SessionDO`.
+Expected: FAIL, because `SessionDO` has no `driver` field yet — the delivery-off helper cannot find it. An earlier draft predicted `enqueueOnly` does not exist; there is no `enqueueOnly`, by the ruling in Step 3.
 
 - [ ] **Step 3: Implement**
 
@@ -2136,13 +2519,21 @@ Split `createSession` so the commit and the delivery are separate methods — th
 ```ts
   /**
    * Commit the session, its seed events, its cursor and the intent to register
-   * its join codes. One write, for the reason the seed already gave: separately
+   * its join codes, then try to deliver.
+   *
+   * One write for the commit, for the reason the seed already gave: separately
    * committed, an interruption leaves a session whose code nothing can resolve.
    *
-   * Public only so a test can reproduce an isolate dying between this and the
-   * delivery below. Production goes through createSession.
+   * There is deliberately NO public method that commits without delivering.
+   * Task 7 added one to `RegistryDO` and it was removed: every method on a
+   * Durable Object is reachable over RPC by anything holding the binding, and
+   * TypeScript's `private` is compile-time only, so a method that commits a
+   * change while skipping its delivery is reachable however it is marked. A test
+   * that needs that state switches `driver.deliverNow` off from inside the
+   * object instead. Use `#private` for any helper here that must not be callable
+   * over RPC.
    */
-  async enqueueOnly(s: Session): Promise<void> {
+  async createSession(s: Session): Promise<void> {
     const { events, ...rest } = s;
     const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
     for (const e of events) seeded[eventKey(e.cursor)] = e;
@@ -2154,10 +2545,6 @@ Split `createSession` so the commit and the delivery are separate methods — th
     ));
     await this.ctx.storage.put<unknown>(seeded);
     await this.reArm();
-  }
-
-  async createSession(s: Session): Promise<void> {
-    await this.enqueueOnly(s);
     await this.deliverNow();
   }
 ```

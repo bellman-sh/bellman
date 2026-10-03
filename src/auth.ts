@@ -1,8 +1,8 @@
 import type { Entitlements, Identity, Plan } from "./types.js";
 
 /**
- * Plan entitlements. The asymmetry: these gate session CREATION only.
- * Joining is free on every plan — that keeps the viral loop open.
+ * Plan entitlements. These gate session CREATION only — joining is free on
+ * every plan, so being invited into a room never depends on what you pay.
  */
 export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   free: {

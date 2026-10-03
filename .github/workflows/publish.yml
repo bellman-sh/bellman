@@ -7,13 +7,15 @@ on:
     types: [published]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  id-token: write # mints the OIDC token that authenticates the publish
-
 jobs:
   publish:
     runs-on: ubuntu-latest # provenance requires a GitHub-hosted runner
+    # Scoped to this job rather than the workflow: the bundle job below needs
+    # contents: write to upload an asset, and nothing that handles the npm
+    # credential should hold it.
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token that authenticates the publish
     steps:
       - uses: actions/checkout@v4
 
@@ -54,3 +56,39 @@ jobs:
       # credential. Provenance is generated automatically under trusted
       # publishing, so --provenance is not passed either.
       - run: npm publish --access public
+
+  # The Claude Desktop bundle, packed from the release that just went out and
+  # attached to it. Building it here is what stops the bundle drifting from the
+  # server: the manifest and the code it wraps leave in the same commit, and the
+  # asset a person downloads was packed from that commit.
+  bundle:
+    needs: publish
+    # A manual dispatch has no release to attach an asset to.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # uploads the .mcpb as a release asset
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # --from . rather than --version $TAG. The checkout *is* the tag, so the
+      # bundle holds exactly the bits just published, with no wait on registry
+      # propagation and no window in which npm could serve a different tarball.
+      - run: ./extension/build.sh --from .
+
+      # The asset keeps the plain name the build produces: a release scopes it
+      # already, and a stable name means a download link does not change shape
+      # every version. --clobber so re-running a failed job replaces the asset
+      # rather than failing on a name that already exists.
+      - name: Attach the bundle to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" extension/dist/bellman.mcpb --clobber

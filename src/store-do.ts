@@ -46,33 +46,49 @@ const deliveredKey = (intentId: string) => `d:${intentId}`;
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
+/**
+ * What a join-code change owes the registry's index, as outbox intents.
+ *
+ * Nothing downstream recognises the id, and nothing needs to: a put and a delete of
+ * one key are each idempotent, so a row handed over twice leaves the index as one
+ * delivery would. That is why these have no dedupe marker, where an audit entry,
+ * which appends, does.
+ */
+const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "join_code_put", payload: { code, sessionId },
+});
+const dropCodeIntent = (code: string): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
+});
+
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
 
-export class SessionDO extends DurableObject {
+export class SessionDO extends DurableObject<BellmanEnv> {
   /** Live long-polls. In-memory is correct: one instance serves this session. */
   private waiters: Waiter[] = [];
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
-   * are due and points the alarm at the soonest.
+   * are due and points the alarm at the soonest. Two handlers use it.
    *
-   * The session TTL is the only handler so far, and it is DERIVED from the session
-   * record rather than stored as a `due:` row, because sessions written before named
-   * alarms have no row and an alarm re-armed from stored rows alone would leave every
-   * one of them with no expiry. See derivedDue().
+   * "outbox" delivers what a join-code change owes the registry. A code lives in two
+   * objects, here and in the registry's index, so the two writes cannot share a
+   * transaction. The index write is queued in the session's own transaction instead,
+   * and delivered after it: inline when the call returns, by the alarm if the isolate
+   * went away first. Without that, an interruption between the two left a session
+   * holding a code that nothing could resolve, and no scan could find it, because a
+   * Durable Object namespace cannot be enumerated.
    *
-   * The delivery throws because this object has no queue yet, so nothing can be due
-   * under a name that would call it. Task 10 of
-   * docs/superpowers/plans/2026-09-29-cross-object-atomicity.md supplies the real
-   * one. A row that somehow reached this would stay queued and be retried, not dropped.
+   * "ttl" expires the session. It is DERIVED from the session record rather than
+   * stored as a `due:` row, because sessions written before named alarms have no row
+   * and an alarm re-armed from stored rows alone would leave every one of them with
+   * no expiry. See derivedDue().
    */
   private driver = new OutboxDriver(
     this.ctx.storage,
-    async () => {
-      throw new Error("SessionDO has no outbox delivery yet");
-    },
+    (row) => this.#deliver(row),
     () => this.derivedDue()
   );
 
@@ -82,9 +98,14 @@ export class SessionDO extends DurableObject {
    * (and the facade's getSession and getSessionByJoinCode with it), every
    * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
    * one predating frozenAt reads as not frozen. Nothing rewrites either.
+   *
+   * A mutator reads through its own transaction, so the check and the write it
+   * guards are one unit rather than two that rely on nothing getting between them.
    */
-  private async stored(): Promise<StoredSession | undefined> {
-    return hydrateStoredSession(await this.ctx.storage.get("session"));
+  private async stored(
+    from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
+  ): Promise<StoredSession | undefined> {
+    return hydrateStoredSession(await from.get("session"));
   }
 
   private async events(after = 0): Promise<SessionEvent[]> {
@@ -106,8 +127,12 @@ export class SessionDO extends DurableObject {
    * cursor and overwrites the event that is already there. A dropped message in
    * a log whose whole job is not to drop messages, and silent: the cursors stay
    * contiguous, so nothing downstream can tell.
+   *
+   * `#private`, because it writes the event and any extra rows its caller supplies, and a
+   * Durable Object answers RPC for every method on its class: TypeScript's `private` is
+   * erased at compile time.
    */
-  private async writeEvent(
+  async #writeEvent(
     e: SessionEvent,
     extra: Record<string, unknown> = {}
   ): Promise<void> {
@@ -118,60 +143,110 @@ export class SessionDO extends DurableObject {
 
   async createSession(s: Session): Promise<void> {
     const { events, ...rest } = s;
-    // Session, seed events and cursor land together. Separately committed, an
-    // interruption could leave a session with no events, or events with a
-    // cursor of zero — and the alarm below is what expires it, so a session
-    // that half-exists would also never be cleaned up.
+    // Session, seed events, cursor and the registrations its join codes owe land
+    // together. Separately committed, an interruption could leave a session with no
+    // events, or events with a cursor of zero, or a session whose code nothing can
+    // resolve — and the alarm is what expires it, so a session that half-exists
+    // would also never be cleaned up.
     const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
     for (const e of events) seeded[eventKey(e.cursor)] = e;
     if (events.length > 0) seeded.cursor = events[events.length - 1].cursor;
-    await this.ctx.storage.put<unknown>(seeded);
-    // TTL is enforced by an alarm rather than a global sweep. It is DERIVED
-    // from the session record rather than stored as a due row: sessions written
-    // before named alarms have no due row, and re-arming from stored rows alone
-    // would leave every one of them with no alarm and no expiry.
-    await this.driver.reArm();
+    const intents = Object.values(rest.joinCodes).map((rec) => putCodeIntent(rec.code, s.id));
+    await this.ctx.storage.transaction(async (txn) => {
+      const rows = await this.driver.enqueue(txn, intents);
+      await txn.put<unknown>({ ...seeded, ...rows });
+    });
+    if (intents.length > 0) {
+      // enqueue armed the alarm for the queue, inside the transaction. The TTL is
+      // armed when that alarm fires, because alarm() ends by pointing the alarm at
+      // whatever is due next. A reArm() here would point it at the queue's marker
+      // instead, which is dated now, and bring the alarm in a few milliseconds
+      // behind the commit to race the delivery below.
+      await this.driver.deliverNow();
+    } else {
+      // Nothing was queued, so nothing armed an alarm, and the session still needs
+      // its TTL. It is DERIVED from the session record rather than stored as a due
+      // row: sessions written before named alarms have no due row, and re-arming
+      // from stored rows alone would leave every one of them with no alarm and no
+      // expiry.
+      await this.driver.reArm();
+    }
   }
 
   async getSession(): Promise<Session | undefined> {
     const s = await this.stored();
     if (!s) return undefined;
-    await this.expireIfDue(s, Date.now());
+    await this.#expireIfDue(s, Date.now());
     const fresh = await this.stored();
     if (!fresh) return undefined;
     return { ...fresh, events: await this.events(0) };
   }
 
-  /** Returns the retired code, so the caller can drop it from the registry. */
-  async consumeJoinCode(role: string): Promise<string | null> {
-    const s = await this.stored();
-    const rec = s?.joinCodes[role];
-    if (!s || !rec) return null;
-    const { [role]: _retired, ...rest } = s.joinCodes;
-    await this.ctx.storage.put("session", { ...s, joinCodes: rest });
-    return rec.code;
-  }
-
-  /** Returns every retired code, for the same reason. */
-  async clearJoinCodes(): Promise<string[]> {
-    const s = await this.stored();
-    if (!s) return [];
-    const codes = Object.values(s.joinCodes).map((rec) => rec.code);
-    if (codes.length > 0) await this.ctx.storage.put("session", { ...s, joinCodes: {} });
-    return codes;
-  }
-
-  /** `false` means frozen; a string (or null) means set, and names this role's old code. */
-  async setJoinCode(role: string, code: string, expiresAt: number): Promise<string | null | false> {
-    const s = await this.stored();
-    if (!s) return false;
-    if (s.frozenAt !== null) return false;
-    const previous = s.joinCodes[role]?.code ?? null;
-    await this.ctx.storage.put("session", {
-      ...s,
-      joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } },
+  /**
+   * Retire one role's code, and drop it from the registry's index.
+   *
+   * This and the two mutators below share a shape. The check, the session write and
+   * the queued registry writes are one transaction, and the delivery waits until it has
+   * committed: nothing that awaits another object runs inside a transaction closure,
+   * because every other call to this object waits for the closure to commit. A call
+   * that is refused or has nothing to do never reaches the queue, so it queues nothing
+   * and arms nothing.
+   */
+  async consumeJoinCode(role: string): Promise<void> {
+    const consumed = await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      const rec = s?.joinCodes[role];
+      if (!s || !rec) return false;
+      const { [role]: _retired, ...rest } = s.joinCodes;
+      const rows = await this.driver.enqueue(txn, [dropCodeIntent(rec.code)]);
+      await txn.put<unknown>({ session: { ...s, joinCodes: rest }, ...rows });
+      return true;
     });
-    return previous;
+    if (consumed) await this.driver.deliverNow();
+  }
+
+  /** Retire every code, and drop each from the registry's index. */
+  async clearJoinCodes(): Promise<void> {
+    const cleared = await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return false;
+      const codes = Object.values(s.joinCodes).map((rec) => rec.code);
+      if (codes.length === 0) return false;
+      const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
+      await txn.put<unknown>({ session: { ...s, joinCodes: {} }, ...rows });
+      return true;
+    });
+    if (cleared) await this.driver.deliverNow();
+  }
+
+  /**
+   * Issue a code for one role, replacing that role's previous one in the registry's
+   * index. `false` means frozen or missing, and queues nothing.
+   *
+   * The previous code's drop is queued ahead of the new code's put, and the queue is
+   * delivered in order, so the rotated-out code stops resolving before its
+   * replacement starts and never the reverse. Reversed, re-issuing a code a role
+   * already holds would end with it dropped from the index while the session still
+   * lists it.
+   */
+  async setJoinCode(role: string, code: string, expiresAt: number): Promise<boolean> {
+    const set = await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return false;
+      if (s.frozenAt !== null) return false;
+      const previous = s.joinCodes[role]?.code;
+      const rows = await this.driver.enqueue(txn, [
+        ...(previous ? [dropCodeIntent(previous)] : []),
+        putCodeIntent(code, s.id),
+      ]);
+      await txn.put<unknown>({
+        session: { ...s, joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } } },
+        ...rows,
+      });
+      return true;
+    });
+    if (set) await this.driver.deliverNow();
+    return set;
   }
 
   async addMember(member: Member): Promise<boolean> {
@@ -243,15 +318,24 @@ export class SessionDO extends DurableObject {
     if (!s) throw new Error("Unknown session");
     if (s.frozenAt !== null) return null;
     const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
-    await this.writeEvent(event);
-    this.wake(event);
+    await this.#writeEvent(event);
+    this.#wake(event);
     return event;
   }
 
   /**
-   * Atomic without a transaction: the input gate holds every other request to
-   * this object for the duration of one invocation, which is the property #71
-   * relied on for the frozen guard. The awaits below are inside that gate.
+   * Append the event unless this key has been used: the same key and content replays the
+   * first event, and the same key with different content is a conflict.
+   *
+   * Everything it decides on is read before anything is written, and the event, the
+   * cursor and the key's record go in one put, so an interruption leaves all three or
+   * none. That is not a claim that two concurrent calls cannot interleave. The input gate
+   * does not hold every other request to this object for the length of a call. On
+   * workerd's local pool, concurrent calls have been seen to
+   * read the same cursor: both then report `appended`, and when their events differ one
+   * overwrites the other. It is rare (1 to 5 pairs in 400, for one key on a freshly
+   * created room) and the mechanism is not established. So nothing here is a guarantee
+   * against a concurrent call.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -282,8 +366,8 @@ export class SessionDO extends DurableObject {
     // interruption leaves the event stored with no key naming it, and the
     // retry that follows appends the duplicate this method exists to prevent.
     const stored: IdempotencyRecord = { cursor: event.cursor, print };
-    await this.writeEvent(event, { [storageKey]: stored });
-    this.wake(event);
+    await this.#writeEvent(event, { [storageKey]: stored });
+    this.#wake(event);
     return { outcome: "appended", event };
   }
 
@@ -314,8 +398,14 @@ export class SessionDO extends DurableObject {
     });
   }
 
-  /** Resolve every waiter this event is past, each from its own cursor. */
-  private wake(event: SessionEvent): void {
+  /**
+   * Resolve every waiter this event is past, each from its own cursor.
+   *
+   * `#private`, because it resolves the waiting polls with whatever event it is handed,
+   * stored or not, and a Durable Object answers RPC for every method on its class:
+   * TypeScript's `private` is erased at compile time.
+   */
+  #wake(event: SessionEvent): void {
     if (this.waiters.length === 0) return;
     const woken = this.waiters.filter((w) => event.cursor > w.after);
     this.waiters = this.waiters.filter((w) => event.cursor <= w.after);
@@ -323,15 +413,47 @@ export class SessionDO extends DurableObject {
   }
 
   /**
+   * One queued registry write, delivered to the registry's index.
+   *
+   * `#private` rather than `private`, because TypeScript's is erased at compile time
+   * and a Durable Object answers RPC for every method on its class. A `private` one
+   * could be called by anything holding the SESSION binding, which would register any
+   * code against any session. RegistryDO's delivery is hidden for the same reason.
+   *
+   * Throwing leaves the row queued, with the rows behind it, and the driver retries
+   * it later. An unknown kind throws rather than returning, so a row this build
+   * cannot deliver waits for one that can instead of being dropped.
+   */
+  async #deliver(row: OutboxRow): Promise<void> {
+    const registry = () => this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+    if (row.kind === "join_code_put") {
+      const { code, sessionId } = row.payload as { code: string; sessionId: string };
+      await registry().putJoinCode(code, sessionId);
+    } else if (row.kind === "join_code_drop") {
+      await registry().dropJoinCode((row.payload as { code: string }).code);
+    } else {
+      throw new Error(`outbox: unknown kind ${row.kind}`);
+    }
+  }
+
+  /**
    * The object's single alarm, shared by name: the driver reports which handlers
-   * are due and this dispatches on them. Only the session TTL exists so far, and
-   * it fires here rather than in a global sweep.
+   * are due and this dispatches on them. The outbox drains here when the inline
+   * attempt never ran or could not finish, and the session TTL fires here rather
+   * than in a global sweep.
    *
    * Nothing here clears a handler's due time. Each decides its next one from state
    * it has already changed, so a handler that throws keeps its due time and the
-   * alarm is retried instead of forgotten. That makes every handler idempotent by
-   * necessity, and the TTL's is: expireIfDue does nothing to a session that is
+   * alarm is retried instead of forgotten. The outbox's drain moves its own marker,
+   * deleting it when the queue is empty and dating it ahead after a failure. The
+   * TTL's handler is idempotent: expireIfDue does nothing to a session that is
    * closed or not yet past its expiry.
+   *
+   * Every name the driver can report needs a branch below. A name with none is never
+   * consumed, and the closing reArm() points the alarm straight back at its due time,
+   * so the alarm fires back to back for good. A build with no "outbox" branch does
+   * exactly that to an object holding a `due:outbox` row, so roll back past this one
+   * only after clearing them.
    *
    * The closing reArm() is what keeps the TTL alive when this ran for another
    * reason. A fired alarm is consumed, so without it a live session would be left
@@ -340,9 +462,10 @@ export class SessionDO extends DurableObject {
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const name of await this.driver.dueNow(now)) {
+      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
       if (name === "ttl") {
         const s = await this.stored();
-        if (s) await this.expireIfDue(s, now);
+        if (s) await this.#expireIfDue(s, now);
       }
     }
     await this.driver.reArm();
@@ -358,9 +481,23 @@ export class SessionDO extends DurableObject {
     return s && !s.closed ? new Map([["ttl", s.expiresAt]]) : new Map();
   }
 
-  private async expireIfDue(s: StoredSession, now: number): Promise<void> {
+  /**
+   * `#private`, because it overwrites the session with the record it is handed and queues
+   * the registry's removal of every code in it. A Durable Object answers RPC for every
+   * method on its class, so a TypeScript `private` one would let anything holding the
+   * SESSION binding rewrite a room and reach into the registry's index.
+   */
+  async #expireIfDue(s: StoredSession, now: number): Promise<void> {
     if (s.closed || now <= s.expiresAt) return;
-    await this.ctx.storage.put("session", { ...s, closed: true, joinCodes: {} });
+    // The write below clears the session's codes, so their rows leave the registry's
+    // index with it, in the same transaction. Otherwise an expired room's codes stay
+    // there for good. They are already inert, because getSessionByJoinCode refuses a
+    // closed session; this is about not leaking rows.
+    const intents = Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code));
+    await this.ctx.storage.transaction(async (txn) => {
+      const rows = await this.driver.enqueue(txn, intents);
+      await txn.put<unknown>({ session: { ...s, closed: true, joinCodes: {} }, ...rows });
+    });
     const event: SessionEvent = {
       cursor: await this.nextCursor(),
       type: "session_expired" as EventType,
@@ -371,8 +508,12 @@ export class SessionDO extends DurableObject {
       refId: null,
       at: now,
     };
-    await this.writeEvent(event);
-    this.wake(event);
+    await this.#writeEvent(event);
+    this.#wake(event);
+    // Last, so a poll woken above does not wait on the registry. Reached from the
+    // alarm and from any read that finds the session lapsed, and both drain here
+    // rather than leave the rows for the next alarm.
+    if (intents.length > 0) await this.driver.deliverNow();
   }
 }
 
@@ -454,7 +595,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     if (!grant) return undefined;
     // A lapsed grant is not a grant. Deleting here keeps reads self-healing.
     if (lapsed(grant)) {
-      await this.dropGrant(grant);
+      await this.#dropGrant(grant);
       return undefined;
     }
     return grant;
@@ -463,7 +604,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async deleteGrant(key: string): Promise<void> {
     const existing = await this.ctx.storage.get<PlanGrant>(grantKey(key));
     if (!existing) return;
-    await this.dropGrant(existing);
+    await this.#dropGrant(existing);
   }
 
   /**
@@ -702,7 +843,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       for (const [storageKey, grant] of page) {
         last = storageKey;
         if (grant.expiresAt !== null && now > grant.expiresAt) {
-          await this.dropGrant(grant);
+          await this.#dropGrant(grant);
           continue;
         }
         live.push(grant);
@@ -718,8 +859,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * Remove both copies of a grant. Every delete path goes through here, and in
    * one transaction: half a delete leaves the grant listed but unresolvable,
    * or resolvable but unlisted.
+   *
+   * `#private`, because it deletes whatever grant it is handed, and a Durable Object
+   * answers RPC for every method on its class: TypeScript's `private` is erased at
+   * compile time.
    */
-  private async dropGrant(grant: PlanGrant): Promise<void> {
+  async #dropGrant(grant: PlanGrant): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       for (const storageKey of allKeysFor(grant)) {
         await txn.delete(storageKey);
@@ -932,26 +1077,28 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async createSession(s: Session): Promise<void> {
+    // Join codes register themselves from inside SessionDO, in the same
+    // transaction as the session write. See #62.
     await this.session(s.id).createSession(s);
-    // Authoritative, so fatal: a join code that does not resolve is a real
-    // failure, not a missing listing row.
-    for (const rec of Object.values(s.joinCodes)) {
-      await this.registry.putJoinCode(rec.code, s.id);
-    }
-    // From here on every write is an index, derived from what is committed above
-    // and attempted after it, so a failure is logged rather than thrown (see
-    // writeIndex). Each is a write into a second object with no transaction
-    // spanning it — the same gap as the join code, tracked on #62 — and a lost
-    // one costs a row in one listing, never the room.
+    // The join codes are already done: SessionDO enqueued a putJoinCode for each in
+    // the same transaction as the session write, and delivered them. That is what #62
+    // closed, so there is no putJoinCode call here any more — one would register every
+    // code a second time.
     //
-    // `us:` is how a lapsed plan finds this person's rooms, which bare create
-    // counts cannot say. A missed entry means a room that is not frozen.
+    // Every write below is an index, derived from what is committed above and attempted
+    // after it, so a failure is logged rather than thrown (see writeIndex). Each is a
+    // write into a second object with no transaction spanning it — the same gap #62
+    // closed for the codes, still open here — and a lost one costs a row in one
+    // listing, never the room.
+    //
+    // `us:` is how a lapsed plan finds this person's rooms, which bare create counts
+    // cannot say. A missed entry means a room that is not frozen.
     await this.writeIndex("us", s.createdBy, s.id, () =>
       this.registry.indexSession(s.createdBy, s.id));
-    // The members a session is created with are seated directly — bellman_start
-    // hands over the creator in `members` and never calls addMember — so the
-    // joined index is written here as well as in addMember. A missed entry
-    // leaves the room out of that person's joined listing.
+    // The members a session is created with are seated directly — bellman_start hands
+    // over the creator in `members` and never calls addMember — so the joined index is
+    // written here as well as in addMember. A missed entry leaves the room out of that
+    // person's joined listing.
     for (const m of s.members) {
       await this.writeIndex("um", m.userId, s.id, () =>
         this.registry.indexMembership(m.userId, s.id));
@@ -975,24 +1122,17 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async consumeJoinCode(sessionId: string, role: string): Promise<void> {
-    const retired = await this.session(sessionId).consumeJoinCode(role);
-    if (retired) await this.registry.dropJoinCode(retired);
+    await this.session(sessionId).consumeJoinCode(role);
   }
 
   async clearJoinCodes(sessionId: string): Promise<void> {
-    for (const code of await this.session(sessionId).clearJoinCodes()) {
-      await this.registry.dropJoinCode(code);
-    }
+    await this.session(sessionId).clearJoinCodes();
   }
 
   async setJoinCode(
     sessionId: string, role: string, code: string, expiresAt: number
   ): Promise<boolean> {
-    const previous = await this.session(sessionId).setJoinCode(role, code, expiresAt);
-    if (previous === false) return false;
-    if (previous) await this.registry.dropJoinCode(previous);
-    await this.registry.putJoinCode(code, sessionId);
-    return true;
+    return this.session(sessionId).setJoinCode(role, code, expiresAt);
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
@@ -1020,8 +1160,9 @@ export class DurableObjectStore implements BellmanStore {
 
   async closeSession(sessionId: string): Promise<void> {
     await this.session(sessionId).closeSession();
-    // SessionDO holds no registry reference, so it cannot drop registry rows.
-    // We clear them here at the boundary where we have access to the registry.
+    // The codes are retired in a call of their own: closeSession sets the flag, and
+    // clearJoinCodes empties the map and queues each code's removal from the
+    // registry, in one transaction.
     await this.clearJoinCodes(sessionId);
   }
 

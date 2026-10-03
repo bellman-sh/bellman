@@ -1,8 +1,14 @@
 # Cross-Object Atomicity — Design
 
-Status: approved design, pending implementation plan
+Status: implemented, in three pull requests: #104 (the mechanism, `src/outbox.ts`
+and named alarms), #110 (the audit path, #59), and a third for the join-code and
+purchase changes (#62, #69). Plan:
+`docs/superpowers/plans/2026-09-29-cross-object-atomicity.md`.
 Closes: #59 (the audit outbox, its remaining half), #62, #69
 Related: ARCHITECTURE.md §9, which names the pattern this implements
+Citations: by symbol rather than line, and of the code as it stood when this was
+written. This work has since changed `/admin/grants`, `reconcilePurchase`, the
+join-code methods of `DurableObjectStore`, and `SessionDO.alarm()`.
 
 ## Problem
 
@@ -45,14 +51,14 @@ lands in another. Lose the second and nothing anywhere records that it was owed.
 
 **#59 — `RegistryDO` → `AuditDO`.** Two instances:
 
-- `/admin/grants` (`routes.ts:898`, `routes.ts:915`) commits the grant change,
-  then calls `appendAudit`. If that fails the caller gets a 500 with the grant
-  already changed. Retrying `DELETE` returns `missing` → 403, and the
-  `plan_revoked` record is gone permanently.
-- `reconcilePurchase` (`grants.ts:151`) deletes, then audits. Stripe retries the
-  webhook; `deleteGrantIfSource` returns `missing` because the delete already
-  succeeded, so the audit is skipped. Permanently, and silently — the org's
-  audit trail is missing a billing revocation with nothing to indicate it.
+- `/admin/grants` (its `POST` and `DELETE` branches in `src/oauth/routes.ts`)
+  commits the grant change, then calls `appendAudit`. If that fails the caller
+  gets a 500 with the grant already changed. Retrying `DELETE` returns `missing`
+  → 403, and the `plan_revoked` record is gone permanently.
+- `reconcilePurchase` (`src/billing/grants.ts`) deletes, then audits. Stripe
+  retries the webhook; `deleteGrantIfSource` returns `missing` because the delete
+  already succeeded, so the audit is skipped. Permanently, and silently — the
+  org's audit trail is missing a billing revocation with nothing to indicate it.
 
 Reordering does not help. Auditing first produces a `plan_revoked` line for a
 revocation that may never happen, which is the bug #44 already fixed on the
@@ -60,16 +66,16 @@ admin path.
 
 **#62 — `SessionDO` → `RegistryDO`.** Narrower than the issue states, and the
 issue's own cheapest option turns out to be most of the answer. `lookupJoinCode`
-has exactly one caller (`store-do.ts:610`), and `getSessionByJoinCode` re-reads
-the session and requires the code to still match a live `joinCodes` entry
-(`store-do.ts:614`). A **stale** `jc:` row is therefore already inert, so the
-consume and rotate windows in #62's table are closed today.
+has exactly one caller, `DurableObjectStore.getSessionByJoinCode` in
+`src/store-do.ts`, and that re-reads the session and requires the code to still
+match a live `joinCodes` entry. A **stale** `jc:` row is therefore already
+inert, so the consume and rotate windows in #62's table are closed today.
 
-What remains is the opposite direction. `createSession` (`store-do.ts:595`) and
-`setJoinCode` (`store-do.ts:638`) commit the session first, then call
-`putJoinCode`. Lose that second call and the session holds a code nothing can
-resolve — nobody can join the room — with no scan that could find it, because a
-DO namespace cannot be enumerated.
+What remains is the opposite direction. `DurableObjectStore.createSession` and
+`DurableObjectStore.setJoinCode` (`src/store-do.ts`) commit the session first,
+then call `putJoinCode`. Lose that second call and the session holds a code
+nothing can resolve — nobody can join the room — with no scan that could find
+it, because a DO namespace cannot be enumerated.
 
 ### Why one piece of work
 
@@ -96,8 +102,9 @@ routes, `src/billing/grants.ts`, `src/billing/stripe.ts`, the contract suite and
 2. **A general distributed transaction.** The outbox gives at-least-once
    delivery with idempotent application. It does not give rollback, and nothing
    here needs it.
-3. **`createSession`'s second cross-object write.** `store-do.ts:598` notes
-   another registry write on the same path. It is the same class and the outbox
+3. **`createSession`'s second cross-object write.** The comment in
+   `DurableObjectStore.createSession` (`src/store-do.ts`) notes another registry
+   write on the same path, `indexSession`. It is the same class and the outbox
    will serve it, but it is not one of the three filed bugs and is left for a
    follow-up so this diff stays reviewable.
 
@@ -105,7 +112,7 @@ routes, `src/billing/grants.ts`, `src/billing/stripe.ts`, the contract suite and
 
 ### 1. Named alarms
 
-A Durable Object has exactly one alarm. `SessionDO.alarm()` (`store-do.ts:263`)
+A Durable Object has exactly one alarm. `SessionDO.alarm()` (`src/store-do.ts`)
 is already the session TTL, armed to `s.expiresAt` in `createSession`. An outbox
 drain calling `setAlarm(now + backoff)` would overwrite a TTL armed for tomorrow
 and sessions would stop expiring — silently, because nothing reads an alarm back.
@@ -142,7 +149,7 @@ ob_seq         → counter
 
 `ob_seq` sits outside the `ob:` prefix deliberately. A counter inside the prefix
 it tracks is listed by its own drain and can be set to itself — the trap already
-commented for the OAuth purge cursor at `src/oauth/store.ts:295`.
+commented for the OAuth purge cursor, in `AuthDO.#purge` (`src/oauth/store.ts`).
 
 **Delivery is enqueue-in-transaction, attempt inline, alarm as backstop.**
 
@@ -227,8 +234,8 @@ enqueues nothing, while the first row is still durable. The id exists to make th
 
 **Dedupe lands in `AuditDO`.** `append(entry, intentId)` writes a `d:<intentId>`
 row in the *same* `ctx.storage.put({...})` as the entry and `seq` — the one-write
-idiom `AuditDO` already uses at `store-do.ts:554`, and for the same reason. If
-the row exists, the append is a no-op.
+idiom `AuditDO.append` already uses (`src/store-do.ts`), and for the same reason.
+If the row exists, the append is a no-op.
 
 **`MemoryStore` delivers inline.** It is one process and there is no gap to
 protect. The contract suite asserts the end state both implementations owe —
@@ -248,8 +255,9 @@ already cover.
 path. Those are already inert if lost, so this is about not leaking `jc:` rows in
 the singleton registry rather than about correctness.
 
-The facade's join-code branches in `DurableObjectStore` (`store-do.ts:595`,
-`622`, `627`, `637`) go away.
+The facade's join-code branches in `DurableObjectStore` (`createSession`,
+`consumeJoinCode`, `clearJoinCodes` and `setJoinCode`, in `src/store-do.ts`) go
+away.
 
 ### 5. #69 — `AuthDO.reconcile`
 
@@ -282,8 +290,9 @@ cancellation cannot be overtaken by an older `active` read.
 Lock ordering stays acyclic: `linkCustomer` takes customer-then-user, `reconcile`
 takes user only, and nothing in `RegistryDO` calls back into `AuthDO`. The
 ledger's queue is in-memory and only serializes because there is exactly one
-`AuthDO` — already true and already documented at `oauth/store.ts:38`.
-`reconcile` inherits that property rather than changing it.
+`AuthDO` — already true and already documented on `BillingLedger`'s `queues`
+field (`src/billing/ledger.ts`). `reconcile` inherits that property rather than
+changing it.
 
 ## Error handling
 
@@ -338,6 +347,9 @@ This is not assumed. The plan opens with a throwaway probe in `worker-tests/`
 that arms an alarm inside a transaction, aborts the object, and asserts
 `getAlarm()`. If it fails, the fallback is to re-arm opportunistically on the
 next RPC into the object.
+
+The probe passed, and the alarm is also discarded when the closure throws.
+`worker-tests/alarm-in-transaction.test.ts` keeps both as a standing test.
 
 ## Testing
 

@@ -27,7 +27,7 @@
 
 Five failure modes the spec implies that no task's happy path exercises. Each has a test assigned to the task that owns the code.
 
-1. **A grant with a falsy `orgId` must enqueue nothing.** The audit log is org-scoped, and `appendAudit` returns early for a null org (`store-do.ts:837`). A row queued for one is not a stall: a Durable Object namespace accepts `""`, `null` and `undefined` as names, so such a row is *delivered* — into a stream no org reads, and `idFromName(undefined)` names the same object as an org called `"undefined"`, which `isOrgId` allows. Pro purchases are the common org-less case. Two guards keep them out: `grantAuditEntries`' `hasOrg` (Task 6) and `deliver`'s own check (Task 7). → Task 7.
+1. **A grant with a falsy `orgId` must enqueue nothing.** The audit log is org-scoped, and `DurableObjectStore.appendAudit` returns early for a null org (`src/store-do.ts`). A row queued for one is not a stall: a Durable Object namespace accepts `""`, `null` and `undefined` as names, so such a row is *delivered* — into a stream no org reads, and `idFromName(undefined)` names the same object as an org called `"undefined"`, which `isOrgId` allows. Pro purchases are the common org-less case. Two guards keep them out: `grantAuditEntries`' `hasOrg` (Task 6) and `deliver`'s own check (Task 7). → Task 7.
 2. **A guarded write returning `conflict` or `missing` must enqueue nothing.** A rejected write leaving an audit trace is the bug #44 fixed on the admin path, reintroduced through a different door. → Task 7.
 3. **An org move emits two rows; a delivery failure between them must lose neither and reorder neither.** FIFO plus head-of-line blocking is what guarantees it, and nothing else does. → Task 3.
 4. **`setJoinCode` on a frozen session returns `false` and must enqueue nothing.** Otherwise a frozen room's rotated code gets registered anyway. → Task 10.
@@ -111,7 +111,7 @@ git -c commit.gpgsign=true commit -S -m "docs: record whether setAlarm commits w
 
 ### Task 2: Named alarm arithmetic
 
-Pure functions, no storage. A Durable Object has exactly one alarm, and `SessionDO` already spends it on the session TTL (`store-do.ts:263`). Everything that wants an alarm from here on goes through a name.
+Pure functions, no storage. A Durable Object has exactly one alarm, and `SessionDO` already spends it on the session TTL (`SessionDO.alarm()` in `src/store-do.ts`). Everything that wants an alarm from here on goes through a name.
 
 **Files:**
 - Create: `src/outbox.ts`
@@ -2459,7 +2459,7 @@ it("queues nothing when setJoinCode is refused", async () => {
 });
 ```
 
-`freezeSession(sessionId, frozenAt)` is the facade method at `store-do.ts:657`.
+`freezeSession(sessionId, frozenAt)` is the facade method on `DurableObjectStore` in `src/store-do.ts`.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -2630,7 +2630,7 @@ Then simplify the facade in `DurableObjectStore` — the registry calls live ins
   }
 ```
 
-Leave the second cross-object write at `store-do.ts:598` alone — the spec puts it out of scope.
+Leave the second cross-object write alone, the `registry.indexSession` call in `DurableObjectStore.createSession` (`src/store-do.ts`) — the spec puts it out of scope.
 
 - [ ] **Step 4: Run to verify they pass**
 

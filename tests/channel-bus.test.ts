@@ -117,9 +117,11 @@ interface Options {
   userId?: string;
   /** What BELLMAN_BUS_ROOT is, when it is not a directory of the test's own. */
   busRoot?: string;
+  /** Anything else the process is started with: BELLMAN_BUS, in the tests of the switch. */
+  env?: Record<string, string>;
 }
 
-function startBridge(server: Bellman, { key, userId = "u_process", busRoot }: Options): Bridge {
+function startBridge(server: Bellman, { key, userId = "u_process", busRoot, env: extra = {} }: Options): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bc-"));
   dirs.push(configHome);
   const bus = busRoot ?? join(configHome, "bus");
@@ -150,6 +152,8 @@ function startBridge(server: Bellman, { key, userId = "u_process", busRoot }: Op
   env.XDG_CONFIG_HOME = configHome;
   env.BELLMAN_BUS_ROOT = bus;
   env.BELLMAN_NO_BROWSER = "1";
+  delete env.BELLMAN_BUS; // a developer's own switch must not decide what these tests start
+  Object.assign(env, extra);
 
   const proc = spawn(TSX, [ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
   spawned.push(proc);
@@ -237,6 +241,71 @@ describe("the bridge as a process, with the local bus", () => {
       "the bridge to say why it polls"
     );
     expect(existsSync("not/an/absolute/path")).toBe(false);
+
+    bridge.proc.kill("SIGTERM");
+    expect(await bridge.exit).toEqual({ code: 0, signal: null });
+  }, 60_000);
+});
+
+/**
+ * BELLMAN_BUS is the way back to what every bridge did before the bus: a long poll of its own for each member, no
+ * socket on the machine. Nothing else turns the bus off once channel.ts has given it to the bridge, and a delivery
+ * path that cannot be turned off is a bad trade, so these are run as processes: the switch is read at the entry point.
+ */
+describe("the bridge as a process, with BELLMAN_BUS", () => {
+  /** A bridge started with BELLMAN_BUS=`value` in a room, for as long as it takes to see whether it made a bus. */
+  async function inARoom(value: string) {
+    const server = await bellman();
+    const bridge = startBridge(server, { key: "qk_process_key", env: { BELLMAN_BUS: value } });
+    await until(() => bridge.log().some((l) => l.startsWith("ready:")), `the bridge with BELLMAN_BUS=${value} to be ready`);
+    await startRoom(bridge);
+    await until(
+      () => server.calls.some((c) => c.name === "bellman_sync" && Number(c.args.wait_seconds) > 0),
+      `the bridge with BELLMAN_BUS=${value} to poll`
+    );
+    // A bridge with a bus has made it by the time it first polls, or is about to: it is the first thing arming a
+    // member does. This is how long it would have needed.
+    await sleep(300);
+    return { server, bridge, path: busPath({ url: server.url, credential: "qk_process_key", root: bridge.busRoot }) };
+  }
+
+  const busLines = (bridge: Bridge): string[] =>
+    bridge.log().filter((l) => l.startsWith("bus:") || l.includes("instead of using the local bus"));
+
+  it.each(["off", "OFF", "0", "false", "no"])("polls for the member and makes no bus when BELLMAN_BUS=%s", async (value) => {
+    const { bridge } = await inARoom(value);
+
+    expect(existsSync(bridge.busRoot)).toBe(false); // not even the directory
+    expect(busLines(bridge)).toEqual([]);
+    // Said once, where a person looking for why the bus is not there will look.
+    expect(bridge.log().find((l) => l.startsWith("ready:"))).toContain(`local bus off (BELLMAN_BUS=${value})`);
+
+    bridge.proc.kill("SIGTERM");
+    expect(await bridge.exit).toEqual({ code: 0, signal: null });
+  }, 60_000);
+
+  it("reads a value it does not recognise as off, and says so, rather than keeping a bus the person tried to turn off", async () => {
+    const { bridge } = await inARoom("banana");
+
+    expect(existsSync(bridge.busRoot)).toBe(false);
+    expect(busLines(bridge)).toEqual([]);
+    expect(bridge.log()).toContain('BELLMAN_BUS="banana" is not on or off, so it is read as off');
+
+    bridge.proc.kill("SIGTERM");
+    expect(await bridge.exit).toEqual({ code: 0, signal: null });
+  }, 60_000);
+
+  it.each(["on", "ON", "1", "true", "yes"])("keeps the bus, and says nothing of it, when BELLMAN_BUS=%s", async (value) => {
+    const server = await bellman();
+    const bridge = startBridge(server, { key: "qk_process_key", env: { BELLMAN_BUS: value } });
+    await until(() => bridge.log().some((l) => l.startsWith("ready:")), "the bridge to be ready");
+    await startRoom(bridge);
+    const path = busPath({ url: server.url, credential: "qk_process_key", root: bridge.busRoot });
+    await until(() => existsSync(path), "the bus socket to appear");
+
+    // The line is the one every bridge writes: the bus being on is not news.
+    expect(bridge.log().find((l) => l.startsWith("ready:"))).toBe(`ready: channel delivery via ${server.url} (BELLMAN_KEY)`);
+    expect(bridge.log().some((l) => l.includes("BELLMAN_BUS"))).toBe(false);
 
     bridge.proc.kill("SIGTERM");
     expect(await bridge.exit).toEqual({ code: 0, signal: null });

@@ -142,6 +142,26 @@ export interface Coordinator extends BusBase {
    * The window keeps the object it is handed, so do not change it after this call.
    */
   ingest(event: RoomEvent): void;
+  /**
+   * The members subscribed to a room right now, here and over the socket, each once and in the order
+   * they subscribed. Empty for a room nobody is watching.
+   *
+   * `onRoomOpen` names no member, and the process holding a room's upstream sometimes has to act as
+   * one of them: a long poll of the room needs a member the identity owns, and a room opened by
+   * another bridge's subscriber may have none of this process's. Every subscriber on a bus is the
+   * same identity (D8), so any member named here is one the coordinator may sync as (D10).
+   */
+  members(sessionId: string): string[];
+  /**
+   * End every subscription to a room, here and over the socket, telling each why through its
+   * `onEnd`: the room's upstream cannot go on, and nothing more will arrive for any of them. Does
+   * nothing for a room nobody is watching.
+   *
+   * The room is closed (`onRoomClose`) before anyone is told, and is out of the registry by then.
+   * A subscriber that subscribes again from inside its `onEnd` therefore starts a room of its own,
+   * with an upstream of its own, and does not join the one that just ended.
+   */
+  endRoom(sessionId: string, reason: Error): void;
   stats(): CoordinatorStats;
 }
 
@@ -1062,6 +1082,22 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
       if (!room) return; // nobody here is watching it: there is nothing to keep it for
       room.window.push(event);
       for (const sub of room.subs) kick(sub);
+    },
+
+    members(sessionId) {
+      const room = rooms.get(sessionId);
+      return room ? [...new Set([...room.subs].map((sub) => sub.memberId))] : [];
+    },
+
+    endRoom(sessionId, reason) {
+      const room = rooms.get(sessionId);
+      if (!room) return;
+      // Out of the registry and closed before anyone hears: see the interface. dropSub's own "last
+      // one out closes the room" cannot fire a second time, because it asks whether this room is
+      // still the registered one, and by then it is not, nor is whatever a handler subscribes next.
+      rooms.delete(sessionId);
+      hook("onRoomClose", () => opts.onRoomClose?.(sessionId));
+      for (const sub of [...room.subs]) endSub(sub, reason);
     },
 
     stats: () => ({

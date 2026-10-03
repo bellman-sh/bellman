@@ -1583,3 +1583,168 @@ describe("a subscriber and its coordinator", () => {
     expect(c.events.map((e) => e.member_id)).toEqual(Array(7).fill("m_c"));
   });
 });
+
+describe("who a room is kept for", () => {
+  it("is nobody, for a room that has no subscribers", async () => {
+    const { coord } = await rig("coordinator");
+    expect(coord.members(ROOM)).toEqual([]);
+  });
+
+  it("names every member subscribed to the room, here and over the socket, in the order they subscribed", async () => {
+    const { coord, via } = await rig("subscriber");
+    await attach(coord, coord, "m_local", 0, recorder().handlers, 1);
+    await attach(coord, via, "m_remote", 0, recorder().handlers, 2);
+    expect(coord.members(ROOM)).toEqual(["m_local", "m_remote"]);
+  });
+
+  it("stops naming a member once it unsubscribes, on whichever side it is", async () => {
+    const { coord, via } = await rig("subscriber");
+    const local = coord.subscribe(ROOM, "m_local", 0, recorder().handlers);
+    const remote = via.subscribe(ROOM, "m_remote", 0, recorder().handlers);
+    await vi.waitFor(() => expect(coord.members(ROOM)).toEqual(["m_local", "m_remote"]));
+
+    remote.unsubscribe();
+    await vi.waitFor(() => expect(coord.members(ROOM)).toEqual(["m_local"]));
+    local.unsubscribe();
+    expect(coord.members(ROOM)).toEqual([]);
+  });
+
+  it("stops naming the members of a connection that drops", async () => {
+    const { coord, via } = await rig("subscriber");
+    await attach(coord, via, "m_a", 0, recorder().handlers, 1);
+    await attach(coord, via, "m_b", 0, recorder().handlers, 2);
+    await via.close();
+    await vi.waitFor(() => expect(coord.members(ROOM)).toEqual([]));
+  });
+
+  it("names a member once when two connections have it subscribed", async () => {
+    // A bridge that re-opens its bus subscribes again before the coordinator has noticed the
+    // old connection is gone, so for a moment one member is two subscriptions.
+    const { coord, via } = await rig("subscriber");
+    await attach(coord, coord, "m_a", 0, recorder().handlers, 1);
+    await attach(coord, via, "m_a", 0, recorder().handlers, 2);
+    expect(coord.members(ROOM)).toEqual(["m_a"]);
+  });
+
+  it("names only the members of the room it is asked about", async () => {
+    const { coord } = await rig("coordinator");
+    await attach(coord, coord, "m_a", 0, recorder().handlers, 1);
+    coord.subscribe("bs_elsewhere", "m_b", 0, recorder().handlers);
+    expect(coord.members(ROOM)).toEqual(["m_a"]);
+    expect(coord.members("bs_elsewhere")).toEqual(["m_b"]);
+  });
+
+  it("hands back a list of its own: changing it changes nothing", async () => {
+    const { coord } = await rig("coordinator");
+    await attach(coord, coord, "m_a", 0, recorder().handlers, 1);
+    coord.members(ROOM).push("m_forged");
+    expect(coord.members(ROOM)).toEqual(["m_a"]);
+  });
+});
+
+describe("ending a room", () => {
+  it("ends every subscription to it, here and over the socket, and each is told why", async () => {
+    const { coord, via } = await rig("subscriber");
+    const local = recorder();
+    const remote = recorder();
+    await attach(coord, coord, "m_local", 0, local.handlers, 1);
+    await attach(coord, via, "m_remote", 0, remote.handlers, 2);
+
+    coord.endRoom(ROOM, new Error("the room is over upstream"));
+
+    await vi.waitFor(() => expect(local.ended.map((e) => e.message)).toEqual(["the room is over upstream"]));
+    await vi.waitFor(() => expect(remote.ended.map((e) => e.message)).toEqual(["the room is over upstream"]));
+    expect(coord.members(ROOM)).toEqual([]);
+    expect(coord.stats().rooms).toEqual({});
+  });
+
+  it("closes the room once, and before anyone is told, so the upstream is gone when they hear", async () => {
+    const order: string[] = [];
+    const { coord } = await rig("coordinator", { onRoomClose: (s) => order.push(`close ${s}`) });
+    await attach(coord, coord, "m_a", 0, { onEvent: () => undefined, onEnd: () => { order.push("end a"); } }, 1);
+    coord.subscribe(ROOM, "m_b", 0, { onEvent: () => undefined, onEnd: () => { order.push("end b"); } });
+
+    coord.endRoom(ROOM, new Error("over"));
+
+    await vi.waitFor(() => expect(order).toHaveLength(3));
+    expect(order).toEqual([`close ${ROOM}`, "end a", "end b"]);
+  });
+
+  it("stops delivering to the members it ended", async () => {
+    const { coord } = await rig("coordinator");
+    const a = recorder();
+    await attach(coord, coord, "m_a", 0, a.handlers, 1);
+    coord.ingest(peerEvent(1));
+    await vi.waitFor(() => expect(a.cursors()).toEqual([1]));
+
+    coord.endRoom(ROOM, new Error("over"));
+    coord.ingest(peerEvent(2));
+    await pause(40);
+    expect(a.cursors()).toEqual([1]);
+  });
+
+  it("leaves every other room as it was", async () => {
+    const { coord } = await rig("coordinator");
+    const here = recorder();
+    const elsewhere = recorder();
+    await attach(coord, coord, "m_a", 0, here.handlers, 1);
+    coord.subscribe("bs_elsewhere", "m_b", 0, elsewhere.handlers);
+
+    coord.endRoom(ROOM, new Error("over"));
+    coord.ingest(peerEvent(1, { session_id: "bs_elsewhere" }));
+
+    await vi.waitFor(() => expect(elsewhere.cursors()).toEqual([1]));
+    expect(elsewhere.ended).toEqual([]);
+    expect(Object.keys(coord.stats().rooms)).toEqual(["bs_elsewhere"]);
+  });
+
+  it("does nothing, and says nothing, for a room nobody is watching", async () => {
+    const closes: string[] = [];
+    const { coord } = await rig("coordinator", { onRoomClose: (s) => closes.push(s) });
+    expect(() => coord.endRoom("bs_nobody", new Error("over"))).not.toThrow();
+    expect(closes).toEqual([]);
+  });
+
+  it("lets a member come straight back: it gets a room of its own, with an upstream of its own", async () => {
+    // The first handler to hear subscribes again from inside its onEnd. If the dying room were still
+    // registered it would join that, and never cause an upstream to be opened for the one that replaces it.
+    const opens: string[] = [];
+    const closes: string[] = [];
+    const { coord } = await rig("coordinator", {
+      onRoomOpen: (s, c) => opens.push(`${s}@${c}`),
+      onRoomClose: (s) => closes.push(s),
+    });
+    const again = recorder();
+    coord.subscribe(ROOM, "m_a", 0, {
+      onEvent: () => undefined,
+      onEnd: () => { coord.subscribe(ROOM, "m_a", 0, again.handlers); },
+    });
+    coord.subscribe(ROOM, "m_b", 0, recorder().handlers);
+    expect(opens).toEqual([`${ROOM}@0`]);
+
+    coord.endRoom(ROOM, new Error("over"));
+
+    expect(opens).toEqual([`${ROOM}@0`, `${ROOM}@0`]);
+    expect(closes).toEqual([ROOM]);
+    expect(coord.members(ROOM)).toEqual(["m_a"]); // m_b was ended too: only the one that came back is in
+    coord.ingest(peerEvent(1));
+    await vi.waitFor(() => expect(again.cursors()).toEqual([1]));
+  });
+
+  it("is not undone by a catch-up that was still waiting on the server: nobody is told twice", async () => {
+    const { room, coord } = await rig("coordinator");
+    for (let c = 1; c <= 5; c++) room.append();
+    await attach(coord, coord, "m_keeper", 5, recorder().handlers, 1);
+    const release = room.hold();
+    const slow = recorder();
+    await attach(coord, coord, "m_slow", 2, slow.handlers, 2);
+    await vi.waitFor(() => expect(room.syncs).toHaveLength(1)); // m_slow is waiting on upstream
+
+    coord.endRoom(ROOM, new Error("over"));
+    release();
+    await pause(60);
+
+    expect(slow.ended.map((e) => e.message)).toEqual(["over"]);
+    expect(slow.events).toEqual([]); // what the server answered arrived after it was ended
+  });
+});

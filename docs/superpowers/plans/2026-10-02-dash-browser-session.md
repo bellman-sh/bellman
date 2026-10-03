@@ -1041,11 +1041,15 @@ one would pass every other test in the file."
 
 ### Task 4: Cookie serialization and parsing
 
-> The committed implementation diverges from the blocks below. The **code** commits are authoritative: `e537701`, `e7cb6c0` and `99de2aa`. The blocks show the tree after all three. `e537701` is Steps 1 to 4 as originally asked for, with one example in its message corrected; `e7cb6c0` is what Step 5's run showed was missing; `99de2aa` rewrites the comment on `trimOws` and adds a paragraph to the refusal comment. Where a block and a commit differ, the commit wins. Commits that edit this plan itself are not listed.
+> The committed implementation diverges from the blocks below. The **code** commits are authoritative: `e537701`, `e7cb6c0`, `99de2aa` and `90aa249`. The blocks show the tree after all four. `e537701` is Steps 1 to 4 as originally asked for, with one example in its message corrected; `e7cb6c0` is what Step 5's run showed was missing; `99de2aa` rewrites the comment on `trimOws` and adds a paragraph to the refusal comment; `90aa249` is the first fix round after review: `trimOws` becomes a loop, the comment's hedge becomes a measurement, and the tests grow from 24 to 56. Where a block and a commit differ, the commit wins. Commits that edit this plan itself are not listed.
 >
 > Step 5 as first written said that `split(";").find((p) => p.trim().startsWith(name))` fails three tests. It fails one, `refuses outright when the name appears twice`. `startsWith` cannot match `evil-__Host-bellman_session`, which begins with `evil-`, and the form's `?.` and `|| undefined` already turn a bare name into `undefined`, so the bare-name test cannot fail against it. Run against the original sixteen tests, eight single-edit mutants of this module passed every one: the name check as `startsWith`, the check for a missing `=` deleted, a bare name counted as a match, `Path=/auth` on the setting header, and a clearing header without `Secure`, with another `Path`, with a `Domain`, or with `secure` hardcoded on. The `Path` ones passed because `toContain("Path=/")` is a substring check and `Path=/` is a substring of `Path=/auth`. The lone bare-name test passes with or without the `equals <= 0` guard: without it `slice(0, -1)` drops the last character, and what is left fails the name check anyway. A shared attribute array that leaked `Secure` was caught only because a secure test happened to run first. Each now has a test that fails for it, and Step 5 lists them.
 >
-> `readSessionCookie` also trimmed with `String.prototype.trim`, which strips Unicode spaces and the byte-order mark as well as space and tab. A browser applies `__Host-` only to a name that starts with it, so a name padded with one is outside the prefix's rules, and the Workers runtime decodes the `Cookie` header as UTF-8, so the padding reaches the parser as one character and `trim()` reads the name as ours. That half is measured: a scratch Worker under `wrangler dev` 4.132.0 (`workerd 2026-09-15`) got `evil` back from the original `readSessionCookie` for U+2000, U+00A0 and U+FEFF before the name, and for U+2000 between the name and the `=`. The other half is not: whether a browser will set a non-ASCII cookie name with a `Domain`. RFC 6265 gives a cookie name as a `token`, which is ASCII, so a conforming browser may refuse it, and none was tried. `trimOws` stays regardless, because trimming anything beyond space and tab is wrong whatever a browser does. `e7cb6c0`'s message states the browser's half as fact; it is not demonstrated.
+> `readSessionCookie` also trimmed with `String.prototype.trim`, which strips Unicode spaces and the byte-order mark as well as space and tab. A browser applies `__Host-` only to a name that starts with it, so a name padded with one is outside the prefix's rules, and the Workers runtime decodes the `Cookie` header as UTF-8, so the padding reaches the parser as one character and `trim()` reads the name as ours. The Worker half was measured first, on a scratch Worker under `wrangler dev` 4.132.0 (`workerd 2026-09-15`), for U+2000, U+00A0 and U+FEFF before the name and U+2000 between the name and the `=`. The browser half was first written as fact (`e7cb6c0`) and then corrected to unproven (`99de2aa`), because RFC 6265 gives a cookie name as an ASCII `token`; the review then measured it. Chrome for Testing 153.0.8010.12 stores a name padded with U+2000, U+00A0, U+FEFF, U+3000, U+2028 or U+1680 together with a `Domain` and sends it, through `document.cookie` and through `Set-Cookie` alike, and it refuses a name padded with space, tab, VT or FF and a nameless cookie. End to end, Chrome to workerd, the `trim()` reader returned the attacker's id when the victim had no session, which is session fixation, and null when they had one, which is a lockout; `trimOws` returns null and the real session. Not tried: Firefox, Safari, other Chrome versions, and Cloudflare's edge.
+>
+> `trimOws` as first committed, `text.replace(/^[ \t]+|[ \t]+$/g, "")`, was quadratic in a run of spaces: about 217 ms on workerd for `a`, 32,000 spaces and `b=1`, and 843 ms for 64,000, on the name side and the value side alike, from one unauthenticated request. Closing the Unicode-space bypass had opened a cheaper denial of service. `90aa249` replaces it with a two-index loop, which agrees with the regular expression on 1,500,000 random strings, on every string up to length 7 over five symbols, and through the whole reader on 3,000,000 random (header, mode) pairs. A test with 100,000 spaces fails on the regular expression, at 8.7 seconds against a 500 ms bound, and passes on the loop.
+>
+> The review also found that nothing pinned that secure mode ignores the unprefixed name, the direction a browser actually delivers (Chrome 153 stores a sibling's `bellman_session` with a `Domain` and sends it); that `trimOws`'s contract was pinned at U+00A0 alone; that the insecure attribute list was unpinned; that the test holding the clearing header against the setting one drops every `Max-Age` before it compares, so a clearing header ending `Max-Age=0; Max-Age=604800`, which a browser takes the last of, passed; and that a blank first value was refused with no test saying so. Each has a test now. Of 67 single-edit mutants, 26 survived the previous 24 tests; 4 survive the 56, and they are an equivalent one, `lastIndexOf("=")` (ids contain no `=`), NFKC normalisation and percent-decoding.
 >
 > Two claims in the original text were false. "Refusing costs one sign-in" is wrong: a duplicate that differs in `Domain` or `Path` survives the sign-out and the next sign-in, so the user is locked out until it expires or they clear it. With the prefix and `trimOws`, nothing can plant that duplicate under the secure name, so over https the refusal is a backstop; over http the name is unprefixed and the lockout is real, in development only. And the first commit message's example of what the naive form matches, `evil-__Host-bellman_session`, is a name `startsWith` does not match.
 
@@ -1184,6 +1188,9 @@ describe("reading the session cookie", () => {
     expect(readSessionCookie(cookied(`${HOST}=`), true)).toBeUndefined();
   });
 
+  // Documents shape rather than guards behaviour: a segment with no "=" is skipped
+  // before its name is looked at, so no edit to how names are compared can change
+  // this result.
   it("survives a header that is only separators", () => {
     expect(readSessionCookie(cookied(";;  ;"), true)).toBeUndefined();
   });
@@ -1233,16 +1240,102 @@ describe("reading the session cookie", () => {
     expect(readSessionCookie(cookied(`${HOST}x`), true)).toBeUndefined();
   });
 
-  // See trimOws. U+00A0 is the Unicode space that fits in a header value a test
-  // can build; U+2000 and U+FEFF reach the Worker the same way, and trim() strips
-  // them too. With no real cookie the padded name would be read as ours, and with
-  // one it would double it and the pair would be refused.
+  // See trimOws. U+00A0 is the only space beyond ASCII that fits in a header value
+  // `new Request` accepts; "trims nothing but space and tab", below, covers the rest
+  // through a bare stand-in. With no real cookie the padded name would be read as
+  // ours, and with one it would double it and the pair would be refused.
   it("does not take a name padded with a Unicode space for ours", () => {
     const padded = `\u00a0${HOST}=tossed`;
 
     expect(readSessionCookie(cookied(padded), true)).toBeUndefined();
     expect(readSessionCookie(cookied(`${padded}; ${HOST}=abc123`), true)).toBe("abc123");
   });
+});
+
+// `new Request` rejects header values above U+00FF, so the characters that need
+// more, such as U+2000 and U+FEFF, which workerd delivers as single code points,
+// go through a bare stand-in: readSessionCookie only calls headers.get("cookie").
+const bareRequest = (header: string) =>
+  ({ headers: new Map([["cookie", header]]) }) as unknown as Request;
+
+// Every character String.prototype.trim strips beyond space and tab, found by
+// asking it, so the list cannot fall behind the engine.
+const BEYOND_OWS = Array.from({ length: 0x10000 }, (_, code) => String.fromCharCode(code))
+  .filter((ch) => ch.trim() === "" && ch !== " " && ch !== "\t")
+  .map((ch) => [ch.charCodeAt(0).toString(16).padStart(4, "0"), ch]);
+
+describe("the serializer over http", () => {
+  it("carries each attribute exactly over http too", () => {
+    const [pair, ...attrs] = serializeSessionCookie("abc123", false, 604_800).split("; ");
+
+    expect(pair).toBe("bellman_session=abc123");
+    expect([...attrs].sort()).toEqual(["HttpOnly", "Max-Age=604800", "Path=/", "SameSite=Lax"]);
+  });
+
+  // Browsers take the last Max-Age they are sent, so a clearing header ending
+  // "Max-Age=0; Max-Age=604800" clears nothing. The test that holds the clearing
+  // header against the setting one drops every Max-Age before it compares, so it
+  // cannot see a second.
+  it.each([true, false])("clears with exactly one Max-Age, and it is 0 (secure: %s)", (secure) => {
+    const maxAges = clearedSessionCookie(secure)
+      .split("; ")
+      .filter((a) => a.startsWith("Max-Age="));
+
+    expect(maxAges).toEqual(["Max-Age=0"]);
+  });
+});
+
+describe("reading, further", () => {
+  // Chrome stores this from a sibling subdomain with Domain=.bellman.sh and sends
+  // it to the victim, so in production the name check is all that stands between it
+  // and a session. The opposite direction, the prefixed name in insecure mode, is
+  // held above, and no browser sends it over http, because the prefix needs Secure.
+  it("in secure mode ignores the unprefixed name, which a sibling subdomain can set", () => {
+    expect(readSessionCookie(cookied("bellman_session=tossed"), true)).toBeUndefined();
+    const beside = cookied(`bellman_session=tossed; ${HOST}=abc123`);
+    expect(readSessionCookie(beside, true)).toBe("abc123");
+  });
+
+  // Exact, not folded: the comparison is the whole defence against a near-miss.
+  it("matches the name by case", () => {
+    expect(readSessionCookie(cookied("__host-bellman_session=tossed"), true)).toBeUndefined();
+  });
+
+  it.each([" ", "\t"])("trims %j around the name and the value", (ws) => {
+    const header = `a=b;${ws}${HOST}${ws}=${ws}abc123${ws};c=d`;
+
+    expect(readSessionCookie(cookied(header), true)).toBe("abc123");
+  });
+
+  // See trimOws. Before the name, after it and around the value: a reader that
+  // trimmed one of these anywhere would be reading a different cookie from the one
+  // the browser holds.
+  it.each(BEYOND_OWS)("trims nothing but space and tab: U+%s", (_hex, ch) => {
+    expect(readSessionCookie(bareRequest(`${ch}${HOST}=tossed`), true)).toBeUndefined();
+    expect(readSessionCookie(bareRequest(`${HOST}${ch}=tossed`), true)).toBeUndefined();
+    const padded = bareRequest(`${HOST}=${ch}abc123${ch}`);
+    expect(readSessionCookie(padded, true)).toBe(`${ch}abc123${ch}`);
+  });
+
+  // The blank counts as the first sighting, so the pair is a duplicate like any
+  // other, whatever the first one holds.
+  it("refuses a blank value followed by a real one, as it does any duplicate", () => {
+    expect(readSessionCookie(cookied(`${HOST}=; ${HOST}=abc123`), true)).toBeUndefined();
+  });
+
+  // A regular expression for the trim, /^[ \t]+|[ \t]+$/g, fails its second branch at
+  // every start position inside a run of spaces and rescans the run each time, so
+  // `a`, 100,000 spaces and `b=1` take it seconds, from one unauthenticated request.
+  // The loop is linear. The bound is generous: the regular expression misses it by
+  // an order of magnitude or more.
+  it("is linear in the length of a run of spaces", () => {
+    const run = " ".repeat(100_000);
+    const started = performance.now();
+    readSessionCookie(cookied(`a${run}b=1`), true);
+    readSessionCookie(cookied(`${HOST}=a${run}b`), true);
+
+    expect(performance.now() - started).toBeLessThan(500);
+  }, 60_000);
 });
 ```
 
@@ -1320,21 +1413,40 @@ export function clearedSessionCookie(secure: boolean): string {
  * and RFC 6265's WSP allow, rather than String.prototype.trim, which also
  * strips non-breaking and Unicode spaces and the byte-order mark.
  *
- * The difference matters because a browser applies `__Host-` only to a name
- * that starts with it, so `\u2000__Host-bellman_session` is outside the
- * prefix's rules. The Workers runtime decodes header bytes as UTF-8, so that
- * space reaches readSessionCookie as one character (measured on workerd with
- * U+2000, U+00A0 and U+FEFF), and trim() would hand the name back as exactly
- * ours. If a browser will set such a name with Domain=.bellman.sh, that is the
- * cookie the prefix exists to keep out, selected by whoever set it.
+ * The difference is a way round `__Host-`. A browser applies that prefix only
+ * to a name that starts with it, so `\u2000__Host-bellman_session` is outside
+ * its rules, and a sibling subdomain can set it with Domain=.bellman.sh. The
+ * Workers runtime decodes header bytes as UTF-8, so the space reaches
+ * readSessionCookie as one character, and trim() would hand the name back as
+ * exactly ours: the cookie the prefix exists to keep out, selected by whoever
+ * set it.
  *
- * Whether a browser will is not demonstrated. RFC 6265 gives a cookie name as a
- * token, which is ASCII, so a conforming browser may refuse the name outright,
- * and no browser has been tried. The trimming does not wait on the answer: a
- * name that is not ours once space and tab are set aside is not ours.
+ * Measured in October 2026. Chrome for Testing 153.0.8010.12 stores a name
+ * padded with U+2000, U+00A0, U+FEFF, U+3000, U+2028 or U+1680 together with a
+ * Domain and sends it, whether it was set through document.cookie or
+ * Set-Cookie. Through workerd under wrangler dev, the reader that used trim()
+ * returned the attacker's id for such a cookie: session fixation when the
+ * victim had no session, and a duplicate, so a lockout, when they had one. This
+ * reader returns null in the first case and the real session in the second.
+ * Chrome refuses a name padded with space, tab, VT or FF, and refuses a
+ * nameless cookie, so the Unicode spaces are the route.
+ *
+ * Not tried: Firefox, Safari, other versions of Chrome, and Cloudflare's edge,
+ * which may differ in whether it passes UTF-8 header bytes through. The
+ * trimming does not wait on them: a name that is not ours once space and tab
+ * are set aside is not ours.
+ *
+ * A loop and not a regular expression, because `/^[ \t]+|[ \t]+$/g` rescans a
+ * run of spaces from every start position and is quadratic in its length:
+ * 32,000 spaces cost workerd about 212 ms and 64,000 about 845 ms, from one
+ * unauthenticated request. A test holds the bound.
  */
 function trimOws(text: string): string {
-  return text.replace(/^[ \t]+|[ \t]+$/g, "");
+  let start = 0;
+  let end = text.length;
+  while (start < end && (text[start] === " " || text[start] === "\t")) start++;
+  while (end > start && (text[end - 1] === " " || text[end - 1] === "\t")) end--;
+  return text.slice(start, end);
 }
 
 /**
@@ -1365,6 +1477,8 @@ function trimOws(text: string): string {
 export function readSessionCookie(request: Request, secure: boolean): string | undefined {
   const header = request.headers.get("cookie");
   if (!header) return undefined;
+  // This mode's name and no other. In secure mode the unprefixed name is ignored,
+  // because a sibling subdomain can set it with a Domain and a browser will send it.
   const name = sessionCookieName(secure);
 
   let found: string | undefined;
@@ -1384,22 +1498,28 @@ export function readSessionCookie(request: Request, secure: boolean): string | u
 - [ ] **Step 4: Run them and confirm they pass**
 
 Run: `npx vitest run tests/browser-safety.test.ts`
-Expected: PASS, 24 tests.
+Expected: PASS, 56 tests.
 
 - [ ] **Step 5: Prove each defect has a test of its own**
 
-One edit to `src/oauth/cookies.ts` at a time. After each, run `npx vitest run tests/browser-safety.test.ts`, check that exactly the tests named here fail, and restore the file. A test that fails alone for its edit is the one that watches that edit; one that fails only alongside others may be seeing it by accident.
+One edit to `src/oauth/cookies.ts` at a time. After each, run `npx vitest run tests/browser-safety.test.ts`, check that the test named here fails, and restore the file. "In all" is how many tests fail. A test that fails alone for its edit is the one that watches that edit; the rest of a larger count is other tests that happen to see it, and the 23 `trims nothing but space and tab` cases see any edit to how a name is compared, because each puts a character next to the name.
 
 In `readSessionCookie`:
 
-| Edit | Fails |
-|---|---|
-| the name check becomes `if (!trimOws(part.slice(0, equals)).startsWith(name)) continue;` | `reads the real cookie past one whose name merely begins with ours` |
-| the name check becomes `if (!trimOws(part.slice(0, equals)).endsWith(name)) continue;` | `does not match a name that merely ends with the cookie name`, `reads the unprefixed name in insecure mode and ignores the prefixed one`, `does not take a name padded with a Unicode space for ours` |
-| delete `if (equals <= 0) continue;` | `does not read a bare segment as the cookie when it is the name plus one character` |
-| a bare name counts as a match (below) | `does not let a bare name hide or double the real cookie` |
-| delete `if (found !== undefined) return undefined;` | `refuses outright when the name appears twice` |
-| both `trimOws(x)` become `x.trim()` | `does not take a name padded with a Unicode space for ours` |
+| Edit | Fails | In all |
+|---|---|---|
+| the name check becomes `if (!trimOws(part.slice(0, equals)).startsWith(name)) continue;` | `reads the real cookie past one whose name merely begins with ours` | 24: that and the 23 |
+| the name check becomes `if (!trimOws(part.slice(0, equals)).endsWith(name)) continue;` | `does not match a name that merely ends with the cookie name` | 26: that, `reads the unprefixed name in insecure mode and ignores the prefixed one`, `does not take a name padded with a Unicode space for ours` and the 23 |
+| delete `if (equals <= 0) continue;` | `does not read a bare segment as the cookie when it is the name plus one character` | 1 |
+| a bare name counts as a match (below) | `does not let a bare name hide or double the real cookie` | 1 |
+| delete `if (found !== undefined) return undefined;` | `refuses outright when the name appears twice` | 2: that and `refuses a blank value followed by a real one, as it does any duplicate` |
+| `if (found !== undefined)` becomes `if (found)` | `refuses a blank value followed by a real one, as it does any duplicate` | 1 |
+| the name check also accepts `bellman_session` when `secure` | `in secure mode ignores the unprefixed name, which a sibling subdomain can set` | 1 |
+| the name is compared with `.toLowerCase()` on both sides | `matches the name by case` | 1 |
+| both `trimOws(x)` calls become `x.trim()` | `does not take a name padded with a Unicode space for ours` | 24: that and the 23 |
+| `trimOws` also strips U+FEFF | `trims nothing but space and tab: U+feff` | 1 |
+| `trimOws`'s two tab checks are deleted | `trims "\t" around the name and the value` | 1 |
+| `trimOws` becomes `return text.replace(/^[ \t]+|[ \t]+$/g, "");` | `is linear in the length of a run of spaces` | 1 |
 
 The bare-name edit replaces the `equals` guard, the name check and the assignment:
 
@@ -1413,18 +1533,20 @@ The bare-name edit replaces the `equals` guard, the name check and the assignmen
 
 In the header builders:
 
-| Edit | Fails |
-|---|---|
-| `BASE_ATTRIBUTES` holds `Path=/auth` | `carries each attribute exactly, not merely as a substring` |
-| `clearedSessionCookie` builds its header without `Secure` | `clears with the attributes that set it (secure: true)` |
-| `clearedSessionCookie` calls `serializeSessionCookie("", true, 0)` | `clears with the attributes that set it (secure: false)` |
-| `attributes` pushes `Secure` onto `BASE_ATTRIBUTES` and returns it, instead of copying | `omits Secure over http so wrangler dev works`, `carries each attribute exactly, not merely as a substring`, `clears with the attributes that set it (secure: true)`, `does not let one call's attributes leak into the next` |
+| Edit | Fails | In all |
+|---|---|---|
+| `BASE_ATTRIBUTES` holds `Path=/auth` | `carries each attribute exactly, not merely as a substring` | 2: that and `carries each attribute exactly over http too` |
+| the insecure branch of `attributes` drops `HttpOnly`, or drops `SameSite`, or holds `Path=/auth`, or adds `domain=.bellman.sh` | `carries each attribute exactly over http too` | 1 each |
+| `clearedSessionCookie` builds its header without `Secure` | `clears with the attributes that set it (secure: true)` | 1 |
+| `clearedSessionCookie` calls `serializeSessionCookie("", true, 0)` | `clears with the attributes that set it (secure: false)` | 1 |
+| `clearedSessionCookie` appends `; Max-Age=604800` | `clears with exactly one Max-Age, and it is 0` | 2, one per mode |
+| `attributes` pushes `Secure` onto `BASE_ATTRIBUTES` and returns it, instead of copying | `does not let one call's attributes leak into the next` | 5: that, `omits Secure over http so wrangler dev works`, `carries each attribute exactly, not merely as a substring`, `carries each attribute exactly over http too` and `clears with the attributes that set it (secure: true)` |
 
 The last edit is the one a run order can hide. `omits Secure over http so wrangler dev works` passes on its own with that edit (run it alone with `-t`) and fails in the full file only because a secure test ran first; `does not let one call's attributes leak into the next` fails on its own.
 
-Two edits survive, and should. `equals <= 0` to `equals < 0` changes nothing, because a part that starts with `=` has an empty name, which never equals the cookie's. And cutting a value at a second `=` cannot be observed, because `randomId` strips base64url padding and no id contains one.
+Four edits survive, and should. `equals <= 0` to `equals < 0` changes nothing, because a part that starts with `=` has an empty name, which never equals the cookie's. Splitting at `lastIndexOf("=")` cannot be observed, because `randomId` strips base64url padding and no id contains an `=`. NFKC normalisation and percent-decoding of the name are edits nothing here does, so no test names them.
 
-The form this step first prescribed, `const hit = header.split(";").find((p) => p.trim().startsWith(name)); return hit?.split("=")[1]?.trim() || undefined;` in place of the loop, fails one of the original sixteen tests, `refuses outright when the name appears twice`, and four of the twenty-four: that one, `reads the real cookie past one whose name merely begins with ours`, `does not let a bare name hide or double the real cookie` and `does not take a name padded with a Unicode space for ours`.
+The form this step first prescribed, `const hit = header.split(";").find((p) => p.trim().startsWith(name)); return hit?.split("=")[1]?.trim() || undefined;` in place of the loop, fails one of the original sixteen tests, `refuses outright when the name appears twice`, four of the twenty-four at `e7cb6c0`, and twenty-seven of the fifty-six.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -1449,12 +1571,13 @@ a bare name with no '=' for a match, and it quietly picks one of two
 cookies with the same name. A duplicate is refused rather than resolved
 — choosing either hands the choice to whoever set the second.
 
-Names and values are trimmed of space and tab only.
+Names and values are trimmed of space and tab only, by a loop.
 String.prototype.trim also strips Unicode spaces, and the Workers
 runtime decodes the Cookie header as UTF-8, so a name padded with one
-would read as ours although the prefix does not bind it. Whether a
-browser will set such a name is not demonstrated, and trimming only
-what HTTP allows is correct whether it will or not."
+would read as ours although the prefix does not bind it. Chrome for
+Testing 153 stores such a name with a Domain and sends it; Firefox and
+Safari were not tried. A loop and not a regular expression, because a
+regular expression for the trim is quadratic in a run of spaces."
 ```
 
 ---
@@ -3682,13 +3805,16 @@ Add to `docs/ARCHITECTURE.md`, in the trust-boundaries material alongside the ex
   is the reader's. `readSessionCookie` compares names after trimming space and
   tab and nothing else (`trimOws`, in `src/oauth/cookies.ts`), because a name
   padded with a Unicode space is outside the prefix's rules and
-  `String.prototype.trim` would read it as ours. Whether a browser will set such
-  a name is not established, and the parser does not rely on the answer.
-  Loosening that comparison, to `trim()` or to a prefix or suffix match, removes
-  the reader's half of the protection. The cookie resolves through the same
-  `caller` seam a bearer token does, and the stored plan is re-resolved on the
-  access token's own staleness bound, so a revoked grant cannot outlive on the
-  panel what it outlives on `/mcp`.
+  `String.prototype.trim` would read it as ours. Chrome 153 stores such a name
+  with a `Domain` and sends it, so a sibling subdomain can plant one; Firefox
+  and Safari were not tried, and the parser does not depend on them. It likewise
+  ignores the unprefixed name in secure mode, which a sibling subdomain can set
+  with a `Domain` and Chrome will send. Loosening either comparison, to
+  `trim()`, to a prefix or suffix match or to accepting both names, removes the
+  reader's half of the protection. The cookie resolves through the same `caller`
+  seam a bearer token does, and the stored plan is re-resolved on the access
+  token's own staleness bound, so a revoked grant cannot outlive on the panel
+  what it outlives on `/mcp`.
 
   **The cookie carries tenant-scoped identity only.** `Identity` has no operator
   field, and `role: "admin"` is admin of an org. `/admin/*` refuses a cookie
@@ -3908,10 +4034,12 @@ the one we read is attacker-selectable. The prefix binds only the exact
 name, so the rest is the reader's: `readSessionCookie` trims space and
 tab and nothing else (`trimOws`), because a name padded with a Unicode
 space is outside the prefix's rules and `String.prototype.trim` would
-read it as ours. Whether a browser will set such a name is not
-established; the parser does not rely on it. The prefix requires
-`Secure`, so `http://localhost` gets the unprefixed name and is the one
-place the protection is absent.
+read it as ours. Chrome 153 stores such a name with a `Domain` and sends
+it, so a sibling subdomain can plant one; Firefox and Safari were not
+tried, and the parser does not depend on them. It likewise ignores the
+unprefixed name in secure mode, which a sibling subdomain can set too.
+The prefix requires `Secure`, so `http://localhost` gets the unprefixed
+name and is the one place the protection is absent.
 
 **`/admin/*` refuses a cookie outright** rather than checking a role. Its
 writes gate on `planSource === "operator"`, so a cookie carrying that

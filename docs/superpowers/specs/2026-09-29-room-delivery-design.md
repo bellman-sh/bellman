@@ -380,10 +380,18 @@ about 1 in 160 real-process races (8 racers, macOS). No event is lost — a
 subscriber that loses its bus races again and catches up from its own cursor —
 and only a lock would close it, which this decision rejects. What *was* fixed is
 the harm: a replaced coordinator's shutdown used to unlink its successor's
-socket, turning a rare race into an outage caused by cleanup. A coordinator now
-records its socket's inode at `listen()` and unlinks only if the inode still
-matches, so it cannot delete a file it no longer owns. That is an identity check
-on its own file, not a liveness heuristic about processes.
+socket, turning a rare race into an outage caused by cleanup. The obvious mitigation — stat
+the path and unlink only on an inode match — **cannot work**, and finding out
+why is worth recording: libuv unlinks by *name*, inside `server.close()`,
+synchronously. There is no point at which a guard could run between the check
+and the removal.
+
+So a coordinator records the file it bound at `listen()`, and on close, if the
+name now refers to someone else's socket, it renames that file aside, closes
+(letting libuv unlink the name it no longer owns), and renames it back — all in
+one turn. It is strange-looking code and it is the only shape that works where
+the unlink actually happens. Do not simplify it back to a plain `close()`.
+Residual: the name is absent for microseconds between the two renames.
 
 Linux is unmeasured.
 

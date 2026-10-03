@@ -354,28 +354,43 @@ have been quiet. The reap retires no join code, because freeing the seat is the
 point, and never closes the room, because a joiner is waiting directly behind
 the call.
 
-Removing a member is authority, so the reap is confined accordingly:
+Removing a member is authority, so the reclaim is confined accordingly:
 
-- **One call site: `bellman_confirm`.** It is the only path where somebody is
-  actually taking a seat, and it is reached only with a valid connect token,
-  behind the closed and frozen guards it already had. `bellman_connect` and
-  `issueInvite` want seats too, so they *count* with `seatedMembers` and write
-  nothing. That matters because `bellman_connect` is reachable by anyone holding
-  a join code without joining, and never consumes the code — a reap there would
-  have let one caller empty a quiet 25-seat hub room of every member, creator
-  included, repeatedly for the code's 15 minutes. `evictMember` is creator-only
-  and deliberately outside the verb set; a second removal path must not be
-  looser than the first.
-- **One seat, longest-quiet first.** The blast radius is the size of the
-  request. The next joiner reaps the next one.
-- **Never in a frozen room.** `updateMember` has no frozen guard and
-  `appendEvent` returns null, so reaping a frozen room would remove members
-  permanently *and* silently, and their watchers would never see the event that
-  stops them. A freeze must cost nobody their place.
+- **It happens inside `BellmanStore.seatMember`**, in the same operation that
+  seats the joiner, for the atomicity reasons in
+  [section 9](#9-nothing-spans-two-objects). `seatVictims` is the shared rule
+  both stores run, so it cannot drift between them, and it is pure and takes a
+  cutoff rather than a window — the store holds no presence policy.
+- **One tool reaches it: `bellman_confirm`.** The only path where somebody is
+  actually taking a seat, reached only with a valid connect token.
+  `bellman_connect` and `issueInvite` want seats too, so they *count* with
+  `seatedMembers` and write nothing. That matters because `bellman_connect` is
+  reachable by anyone holding a join code without joining, and never consumes
+  the code — a reclaim there would have let one caller empty a quiet 25-seat hub
+  room of every member, creator included, repeatedly for the code's 15 minutes.
+  `evictMember` is creator-only and deliberately outside the verb set; a second
+  removal path must not be looser than the first.
+- **One seat, longest-quiet first**, so the blast radius is the size of the
+  request; the next joiner reclaims the next seat. It refuses rather than
+  freeing some of the seats a joiner needs, because a partial reclaim removes a
+  member for somebody who never got in.
+- **Never in a frozen or closed room.** `updateMember` has no frozen guard and
+  `appendEvent` returns null, so reclaiming in a frozen room would remove
+  members permanently *and* silently, and their watchers would never see the
+  event that stops them. A freeze must cost nobody their place.
+- **Announced from what the store did**, never from what the handler predicted:
+  `announceReclaimed` is given the seats `seatMember` reports it took, so nobody
+  is told a member timed out unless that member's seat really went.
 - **Audited to the removed member's org**, which may be neither the room's nor
   the joiner's, with the action named `member_timed_out` rather than
   `member_evicted` so the row says the seat timed out, not that a person
   removed anybody.
+
+Every authenticated call a member makes counts as a sign of life, not only
+`bellman_sync`: `gateSeat` touches the caller before running any verb-gated room
+operation. Without that, a member quiet for eleven minutes could issue a join
+code — proof it is there — and be chosen as the longest-quiet victim by the very
+joiner it had just let in.
 
 The liveness write is throttled to once per half-window. In the Durable Objects
 store an `updateMember` is a read-modify-write of the whole session blob, so a
@@ -575,9 +590,21 @@ which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes and
-`moveGrant` are single transactions, and the frozen-write guards are single
-invocations that await only storage. Across objects there is no transaction to
-widen.
+`moveGrant` are single transactions, `closeSessionIfEmpty` and `seatMember` are
+single invocations that await only storage, and the frozen-write guards are the
+same shape. Across objects there is no transaction to widen.
+
+`seatMember` is the newest of those, and it is worth reading as the pattern.
+Seating a joiner means reclaiming a stale seat if that is what it takes,
+deciding capacity, and appending the member — and as three store calls from a
+tool handler, two concurrent confirms could agree on the same free slot, both
+announce the same reclaimed member, both pass the check, and leave the room with
+more members than seats. A `bellman_sync` landing in the window makes a member
+live again *after* it was chosen as the victim, and a freeze landing there
+removes somebody from a room that is meant to cost nobody their place. One
+invocation closes all three. The handler keeps only what the store cannot know:
+which sentence the joiner reads, and the events and audit rows for the seats the
+store reports it actually took.
 
 **A lost write: durable delivery.** `src/outbox.ts`:
 
@@ -769,10 +796,12 @@ pull request.
    and `seatedMembers` decides who holds a seat, and those two readings must not
    be merged.
 8. **A member is removed only by an authorized caller.** `bellman_leave` for
-   oneself, `evictMember` for the creator, `reclaimStaleSeats` from
-   `bellman_confirm` alone. A path that merely wants to know whether a seat is
-   free must count, not write. See
-   [presence](#presence-is-derived-membership-is-stored).
+   oneself, `evictMember` for the creator, `seatMember` from `bellman_confirm`
+   alone. A path that merely wants to know whether a seat is free must count,
+   not write. See [presence](#presence-is-derived-membership-is-stored).
+9. **A seat is claimed in one store operation.** Reclaiming, counting and
+   appending cannot be separate calls: that is the window two confirms overfill
+   a room through, and the window a sync revives a condemned member in.
 
 ## 11. What connecting costs
 

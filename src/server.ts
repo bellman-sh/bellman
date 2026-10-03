@@ -11,10 +11,10 @@ import {
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
 import {
-  FROZEN, activeMembers, audit, evictMember, findMember, issueInvite, leaveRoom,
-  reclaimStaleSeats, revokeInvite, seatedMembers, sessionStatus, touchMember,
+  FROZEN, activeMembers, announceReclaimed, audit, evictMember, findMember, issueInvite,
+  leaveRoom, revokeInvite, seatedMembers, sessionStatus, touchMember,
 } from "./rooms.js";
-import { presenceOf } from "./presence.js";
+import { STALE_AFTER_MS, presenceOf } from "./presence.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
@@ -460,19 +460,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       const session = await s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
       if (session.frozenAt !== null) return fail(FROZEN);
-      // The one place a stale seat is reclaimed. Below the closed and frozen
-      // guards above, and reached only by a caller holding a valid connect
-      // token who is about to take the seat — the authority the preview and the
-      // `invite` verb do not carry. It frees one seat, longest-quiet first.
-      await reclaimStaleSeats(s, session, identity);
-      // Re-read: the reap wrote to the store, so `session` is stale. The count
-      // would come out the same from either copy, since `seatedMembers` already
-      // excluded the member the reap departed; the re-read is so the roster this
-      // response is built from is the one in storage.
-      const afterReap = (await s.getSession(session.id)) ?? session;
-      if (afterReap.closed) return fail("session no longer exists.");
-      if (afterReap.frozenAt !== null) return fail(FROZEN);
-      if (seatedMembers(afterReap).length >= afterReap.maxMembers) return fail("session filled while you were confirming.");
+      // No capacity check here. It used to be one, and a read-then-write
+      // capacity check is the bug: `seatMember` below decides and writes inside
+      // the object, so there is no gap for a second confirm to agree on the same
+      // seat in, for a sync to make a member live again after it was chosen as a
+      // victim, or for a freeze to land on a room that is meant to cost nobody
+      // their place.
 
       // ?? handles a pending row written before roomRole existed (predates
       // commit 62608a9): default to the room's default seat rather than
@@ -497,18 +490,30 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         lastSeenAt: Date.now(),
         leftAt: null,
       };
-      // The guard above read the session; this is the one that counts. A freeze
-      // or a close landing in between would otherwise seat a member in a frozen
-      // room or one that is over, and the store refuses inside the object where
-      // there is no gap to land in.
-      if (!(await s.addMember(session.id, member))) {
-        // Both guards above had passed, so the room changed since: it froze, or it
-        // closed, and the joiner is owed which. Closed wins, as it does for a
-        // leaver in rooms.ts: calling a room that is over frozen points them at
-        // paying to fix something payment will not.
-        const now = await s.getSession(session.id);
-        return fail(!now || now.closed ? "session no longer exists." : FROZEN);
+      // The one operation that seats anybody, and the only place a stale seat is
+      // reclaimed. Reached only by a caller holding a valid connect token who is
+      // about to take the seat — the authority the preview and the `invite` verb
+      // do not carry — and every guard that matters is inside it, where there is
+      // no gap to land in. It frees one seat, longest-quiet first, or refuses
+      // and frees none.
+      const seated = await s.seatMember(
+        session.id, member, member.joinedAt - STALE_AFTER_MS, member.joinedAt
+      );
+      if (seated.refused !== null) {
+        // Closed wins over frozen, as it does for a leaver in rooms.ts: telling
+        // someone their room is frozen when it is over points them at paying to
+        // fix something payment will not.
+        if (seated.refused === "not_found" || seated.refused === "closed") {
+          return fail("session no longer exists.");
+        }
+        if (seated.refused === "frozen") return fail(FROZEN);
+        return fail("session filled while you were confirming.");
       }
+
+      // Announced from what the store actually did, not from what this handler
+      // predicted. Nobody is told a member timed out unless that member's seat
+      // really was taken, by this joiner, in the write above.
+      await announceReclaimed(s, session, identity, seated.reclaimed);
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;

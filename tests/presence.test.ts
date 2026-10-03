@@ -10,8 +10,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   STALE_AFTER_MS, lastSeen, presenceOf, presentMembers, staleMembers,
 } from "../src/presence.js";
-import { activeMembers, reclaimStaleSeats, seatedMembers, touchMember } from "../src/rooms.js";
-import { MemoryStore } from "../src/store.js";
+import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
+import { MemoryStore, seatVictims } from "../src/store.js";
 import type { Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY } from "./helpers/harness.js";
@@ -74,7 +74,67 @@ describe("presence is derived from lastSeenAt, not stored", () => {
   });
 });
 
-describe("reclaimStaleSeats", () => {
+describe("seatVictims — the seat rule both stores share", () => {
+  const at = (ms: number, id: string) => member({ memberId: id, lastSeenAt: ms });
+  const CUTOFF = NOW - STALE_AFTER_MS;
+
+  it("reclaims nobody while the room has a seat going spare", () => {
+    // Held for them, not taken: the joiner can have the free seat, so there is
+    // no question to force, however long a member has been quiet.
+    expect(seatVictims([at(1, "m_quiet")], 5, CUTOFF)).toEqual([]);
+  });
+
+  it("frees one seat when the room is full, longest-quiet first", () => {
+    const victims = seatVictims(
+      [at(NOW, "m_here"), at(3000, "m_b"), at(1000, "m_a")], 3, CUTOFF
+    );
+    expect(victims?.map((m) => m.memberId)).toEqual(["m_a"]);
+  });
+
+  it("frees as many as an over-full room needs, and no more", () => {
+    const victims = seatVictims(
+      [at(3000, "m_c"), at(1000, "m_a"), at(2000, "m_b")], 2, CUTOFF
+    );
+    // Three undeparted members in a two-seat room: two must go to seat one
+    // more, and the one heard from most recently keeps its seat.
+    expect(victims?.map((m) => m.memberId)).toEqual(["m_a", "m_b"]);
+  });
+
+  it("frees one seat from a quiet 25-seat room, not twenty-five", () => {
+    // The blast radius is the size of the request. Reaping all of them is what
+    // turned a quiet hub room into a wipe.
+    const roster = Array.from({ length: 25 }, (_, i) => at(1000 + i, `m_${i}`));
+    expect(seatVictims(roster, 25, CUTOFF)?.map((m) => m.memberId)).toEqual(["m_0"]);
+  });
+
+  it("refuses rather than reclaiming a member that is present", () => {
+    expect(seatVictims([at(NOW, "m_a"), at(NOW, "m_b")], 2, CUTOFF)).toBeNull();
+  });
+
+  it("refuses rather than freeing some of the seats a joiner needs", () => {
+    // One stale seat, two needed. A partial reap would remove a member for
+    // somebody who never got in.
+    expect(seatVictims([at(NOW, "m_a"), at(NOW, "m_b"), at(1, "m_c")], 2, CUTOFF))
+      .toBeNull();
+  });
+
+  it("ignores members that already departed", () => {
+    const roster = [at(NOW, "m_here"), member({ memberId: "m_gone", leftAt: 5 })];
+    // Two rows, one occupant: the departed one frees nothing because it holds
+    // nothing.
+    expect(seatVictims(roster, 2, CUTOFF)).toEqual([]);
+  });
+
+  it("lifts a row stored before lastSeenAt existed to its joinedAt", () => {
+    const legacy = member({ memberId: "m_legacy", joinedAt: NOW });
+    delete (legacy as { lastSeenAt?: number }).lastSeenAt;
+    // Without the lift, undefined reads as the epoch and every member stored
+    // before this change loses its seat to the next joiner.
+    expect(seatVictims([legacy], 1, CUTOFF)).toBeNull();
+  });
+});
+
+describe("announceReclaimed", () => {
   let store: MemoryStore;
   const joiner: Identity = {
     userId: "u_late", orgId: "org_codenerd", plan: "team", role: "member",
@@ -83,31 +143,15 @@ describe("reclaimStaleSeats", () => {
 
   beforeEach(() => { store = new MemoryStore(); });
 
-  const read = async () => (await store.getSession("qs_test"))!;
-
-  /** A two-seat room, one present member and one whose session died. */
-  const fullWithStalePeer = async () =>
-    store.createSession(session({
-      members: [
-        member({ memberId: "m_creator", lastSeenAt: Date.now() }),
-        member({ memberId: "m_peer", userId: "u_peer", orgId: "org_peer", roomRole: "peer_b", lastSeenAt: 1 }),
-      ],
-    }));
-
-  it("turns the contested stale seat into a departed one", async () => {
-    await fullWithStalePeer();
-
-    const reaped = await reclaimStaleSeats(store, await read(), joiner);
-
-    expect(reaped.map((m) => m.memberId)).toEqual(["m_peer"]);
-    const after = await read();
-    expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
-    expect(after.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
+  const reaped = member({
+    memberId: "m_peer", userId: "u_peer", orgId: "org_peer",
+    roomRole: "peer_b", lastSeenAt: 1, leftAt: NOW,
   });
 
   it("announces it as member_timed_out, naming the seat and when it was last heard", async () => {
-    await fullWithStalePeer();
-    await reclaimStaleSeats(store, await read(), joiner);
+    await store.createSession(session());
+
+    await announceReclaimed(store, (await store.getSession("qs_test"))!, joiner, [reaped]);
 
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type)).toEqual(["member_timed_out"]);
@@ -119,9 +163,10 @@ describe("reclaimStaleSeats", () => {
     });
   });
 
-  it("audits it to the removed member's org as well as the room's", async () => {
-    await fullWithStalePeer();
-    await reclaimStaleSeats(store, await read(), joiner);
+  it("audits it to the reclaimed member's org as well as the room's", async () => {
+    await store.createSession(session());
+
+    await announceReclaimed(store, (await store.getSession("qs_test"))!, joiner, [reaped]);
 
     // The member losing access may be in neither the room's org nor the
     // joiner's, and that org's admins are the ones who need to see it.
@@ -133,55 +178,73 @@ describe("reclaimStaleSeats", () => {
       .filter((a) => a.action === "member_timed_out")).toHaveLength(1);
   });
 
-  it("frees one seat, not every stale seat", async () => {
-    // The whole blast-radius question. A quiet room must not be emptied just
-    // because one agent wants in: a 25-seat hub room whose members have all
-    // been quiet ten minutes loses exactly the one seat the joiner needs.
-    await store.createSession(session({
-      maxMembers: 25,
-      members: Array.from({ length: 25 }, (_, i) =>
-        member({ memberId: `m_${i}`, userId: `u_${i}`, lastSeenAt: 1000 + i })),
-    }));
+  it("says nothing when the store reclaimed nothing", async () => {
+    await store.createSession(session());
 
-    const reaped = await reclaimStaleSeats(store, await read(), joiner);
+    await announceReclaimed(store, (await store.getSession("qs_test"))!, joiner, []);
 
-    expect(reaped.map((m) => m.memberId)).toEqual(["m_0"]); // the longest quiet
-    expect((await read()).members.filter((m) => m.leftAt !== null)).toHaveLength(1);
+    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
+});
 
-  it("frees as many seats as an over-full room needs, longest-quiet first", async () => {
-    await store.createSession(session({
-      maxMembers: 2,
-      members: [
-        member({ memberId: "m_a", lastSeenAt: 3000 }),
-        member({ memberId: "m_b", userId: "u_b", lastSeenAt: 1000 }),
-        member({ memberId: "m_c", userId: "u_c", lastSeenAt: 2000 }),
-      ],
-    }));
+describe("seatMember claims the seat and frees it in one operation", () => {
+  let store: MemoryStore;
+  beforeEach(() => { store = new MemoryStore(); });
 
-    // Three undeparted members in a two-seat room, so two must go to seat one
-    // more. The one heard from most recently keeps its seat.
-    expect((await reclaimStaleSeats(store, await read(), joiner)).map((m) => m.memberId))
-      .toEqual(["m_b", "m_c"]);
-  });
+  const read = async () => (await store.getSession("qs_test"))!;
+  const joiner = (over = {}) =>
+    member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b", ...over });
+  const seat = (staleBefore = Date.now() - STALE_AFTER_MS) =>
+    store.seatMember("qs_test", joiner(), staleBefore, Date.now());
 
-  it("reaps nobody while the room has a seat going spare", async () => {
-    await store.createSession(session({
-      maxMembers: 5,
+  const fullWithStalePeer = async () =>
+    store.createSession(session({
       members: [
         member({ memberId: "m_creator", lastSeenAt: Date.now() }),
-        member({ memberId: "m_quiet", userId: "u_quiet", lastSeenAt: 1 }),
+        member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
       ],
     }));
 
-    expect(await reclaimStaleSeats(store, await read(), joiner)).toEqual([]);
-    // Held for them, not taken: the joiner can have the free seat, so there is
-    // no question to force.
-    expect((await read()).members.find((m) => m.memberId === "m_quiet")?.leftAt).toBeNull();
-    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+  it("seats the joiner and reports the seat it took", async () => {
+    await fullWithStalePeer();
+
+    const outcome = await seat();
+
+    expect(outcome.refused).toBeNull();
+    expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
+    // Reported with leftAt already set, so the caller announces a removal that
+    // happened rather than one it predicted.
+    expect(outcome.reclaimed[0].leftAt).toEqual(expect.any(Number));
+
+    const after = await read();
+    expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
+    expect(after.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
+    expect(seatedMembers(after).map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
   });
 
-  it("does nothing, and says nothing, when everyone is present", async () => {
+  it("never overfills the room, however many confirms race", async () => {
+    await fullWithStalePeer();
+
+    // Two joiners, one reclaimable seat. Serialised by the store rather than by
+    // the handler, which is the whole point: the old shape reclaimed, re-read,
+    // checked capacity and appended as three calls, and two confirms could
+    // agree on the same free slot.
+    const first = await store.seatMember("qs_test", joiner(), Date.now() - STALE_AFTER_MS, Date.now());
+    const second = await store.seatMember(
+      "qs_test", joiner({ memberId: "m_later", userId: "u_later" }),
+      Date.now() - STALE_AFTER_MS, Date.now()
+    );
+
+    expect(first.refused).toBeNull();
+    expect(second.refused).toBe("full");
+    expect(second.reclaimed).toEqual([]);
+    const room = await read();
+    expect(seatedMembers(room)).toHaveLength(room.maxMembers);
+    expect(room.members.filter((m) => m.leftAt !== null)).toHaveLength(1);
+  });
+
+  it("refuses a full room of present members, and reclaims nobody", async () => {
     await store.createSession(session({
       members: [
         member({ memberId: "m_creator", lastSeenAt: Date.now() }),
@@ -189,18 +252,19 @@ describe("reclaimStaleSeats", () => {
       ],
     }));
 
-    expect(await reclaimStaleSeats(store, await read(), joiner)).toEqual([]);
-    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    expect(await seat()).toEqual({ refused: "full", reclaimed: [] });
+    expect((await read()).members).toHaveLength(2);
   });
 
   it("refuses a frozen room, so a lapsed plan costs nobody their place", async () => {
     await fullWithStalePeer();
     await store.freezeSession("qs_test", Date.now());
 
-    expect(await reclaimStaleSeats(store, await read(), joiner)).toEqual([]);
-    // Without the guard the removal would land and the announcement would not:
-    // updateMember has no frozen guard, appendEvent returns null. Members gone
-    // permanently and silently, from a state that is meant to be reversible.
+    expect(await seat()).toEqual({ refused: "frozen", reclaimed: [] });
+    // The guard is inside the operation because the removal and the
+    // announcement are separate writes: updateMember has no frozen guard and
+    // appendEvent returns null, so a reap here would remove members
+    // permanently AND silently, from a state meant to be reversible.
     expect((await read()).members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
   });
@@ -209,52 +273,37 @@ describe("reclaimStaleSeats", () => {
     await fullWithStalePeer();
     await store.closeSession("qs_test");
 
-    expect(await reclaimStaleSeats(store, await read(), joiner)).toEqual([]);
+    expect(await seat()).toEqual({ refused: "closed", reclaimed: [] });
   });
 
-  it("does not reap the same member twice, however stale the caller's copy", async () => {
-    await fullWithStalePeer();
-    const copy = await read();
-
-    await reclaimStaleSeats(store, copy, joiner);
-    // The same pre-reap snapshot, replayed: a second joiner racing the first.
-    await reclaimStaleSeats(store, copy, joiner);
-
-    // One removal, one event. Two would show peers the same member timing out
-    // twice and overwrite its recorded departure time.
-    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type))
-      .toEqual(["member_timed_out"]);
+  it("refuses a session that does not exist", async () => {
+    expect(await store.seatMember("qs_nope", joiner(), 0, Date.now()))
+      .toEqual({ refused: "not_found", reclaimed: [] });
   });
 
-  it("leaves the join code alone — freeing the seat is the whole point", async () => {
-    await fullWithStalePeer();
-    await reclaimStaleSeats(store, await read(), joiner);
-
-    expect(await read()).toHaveProperty("joinCodes");
-    expect(Object.keys((await read()).joinCodes)).not.toEqual([]);
-  });
-
-  it("does not close the room, even when it reaps its last member", async () => {
-    // One stale member in a ONE-seat room, so the seat really is contested and
-    // the reap really does run — the earlier version of this test used the
-    // two-seat fixture, reaped nothing, and asserted against a no-op.
+  it("does not close the room when it reclaims its last member", async () => {
     await store.createSession(session({
       maxMembers: 1, members: [member({ memberId: "m_only", lastSeenAt: 1 })],
     }));
 
-    expect((await reclaimStaleSeats(store, await read(), joiner)).map((m) => m.memberId))
-      .toEqual(["m_only"]);
+    expect((await seat()).reclaimed.map((m) => m.memberId)).toEqual(["m_only"]);
 
-    // A joiner is waiting directly behind every call to this; closing the room
-    // over them is the gap closeSessionIfEmpty exists to avoid.
+    // The joiner is seated in the same operation, so the room is never empty.
     expect((await read()).closed).toBe(false);
+    expect(seatedMembers(await read()).map((m) => m.memberId)).toEqual(["m_late"]);
   });
 
-  it("stops counting a stale member against the room's capacity", async () => {
+  it("leaves the join code alone — freeing the seat is the whole point", async () => {
+    await fullWithStalePeer();
+    await seat();
+
+    expect(Object.keys((await read()).joinCodes)).not.toEqual([]);
+  });
+
+  it("keeps a stale member out of the seat count while leaving it active", async () => {
     await fullWithStalePeer();
     const room = await read();
 
-    expect(room.maxMembers).toBe(2);
     expect(seatedMembers(room)).toHaveLength(1);
     // activeMembers still counts it: that is the reading the stores use to
     // decide a room has emptied, and it must not learn about staleness.
@@ -461,6 +510,38 @@ describe("the seat comes back", () => {
     const room = (await h.store.getSession(sessionId))!;
     expect(room.members.filter((m) => m.leftAt !== null)).toEqual([]);
     expect(joinCode).toBeTruthy();
+  });
+
+  it("does not reclaim the seat of the member that just issued the code", async () => {
+    // The sharp version of "a verb-gated call is a sign of life". Both members
+    // have been quiet past the window; the creator then calls bellman_invite,
+    // which is proof it is there. Without a touch in gateSeat it stays the
+    // longest-quiet member on the roster, and the joiner it just let in reclaims
+    // its seat.
+    const { creator, sessionId, creatorMemberId, joinerMemberId } = await pairUp(h);
+    await h.store.updateMember(sessionId, creatorMemberId, { lastSeenAt: 1 });
+    await goQuiet(sessionId, joinerMemberId);
+
+    const invited = await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId,
+    });
+    expect(invited.isError, invited.text).toBe(false);
+
+    const third = await h.connect(DEV_KEY.outsider);
+    const preview = await third.call("bellman_connect", {
+      join_code: String(invited.data.join_code),
+    });
+    const confirmed = await third.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief({ goal: "Join on the code the creator just minted" }),
+      capabilities: ["read_context", "receive_messages"],
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+
+    const room = (await h.store.getSession(sessionId))!;
+    expect(room.members.find((m) => m.memberId === creatorMemberId)?.leftAt).toBeNull();
+    expect(room.members.find((m) => m.memberId === joinerMemberId)?.leftAt)
+      .toEqual(expect.any(Number));
   });
 
   it("does not let bellman_invite remove anybody either", async () => {

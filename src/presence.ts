@@ -32,7 +32,10 @@
  * directly or transitively (see src/oauth/storage.ts for the same rule).
  */
 import type { Member } from "./types.js";
-import { isActiveMember } from "./store.js";
+// `lastSeen` lives in store.ts beside `isActiveMember`, because `seatMember`
+// reads it inside the store and this module imports that one.
+import { isActiveMember, lastSeen } from "./store.js";
+export { lastSeen };
 
 /**
  * How long a member may go unheard from before its seat is reclaimable.
@@ -62,17 +65,6 @@ import { isActiveMember } from "./store.js";
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 
 export type Presence = "present" | "stale" | "departed";
-
-/**
- * When this member was last heard from, falling back to when it joined.
- *
- * The fallback is the legacy lift: members stored before `lastSeenAt` existed
- * have none, and reading `undefined` as "never seen" would reap every one of
- * them on the next capacity check. Joining is a call the member made, so
- * `joinedAt` is the honest answer for a row that predates the field — the same
- * read-time `??` lift commit 7d19453 applies to `joinCode`.
- */
-export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
 
 export function presenceOf(m: Member, now: number = Date.now()): Presence {
   if (!isActiveMember(m)) return "departed";

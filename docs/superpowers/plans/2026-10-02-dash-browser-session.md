@@ -29,7 +29,7 @@ Five input classes the spec implies and no happy-path task exercises, most likel
 2. **`return_to` that is not an absolute http(s) URL.** `javascript:alert(1)` parses fine and has origin `"null"`; a relative `/rooms` throws from `new URL`. Both must land on the configured fallback — not throw, not redirect. → **Task 7**
 3. **`panelOrigins` unset or empty.** A deploy that forgot `BELLMAN_PANEL_ORIGINS`. It must fail **closed** — no browser auth at all — rather than treating an absent allowlist as "allow anything". → **Task 5**
 4. **`Origin: null`.** Browsers send the literal string `"null"` from sandboxed iframes and some redirect chains. It must never match an allowlist entry, and must not be mistaken for an absent header on the CSRF path. → **Task 5**
-5. **A session record written before `replanned_at` existed.** `now - undefined` is `NaN`, and every comparison against `NaN` is `false`, so the plan would never re-resolve — silently, for the session's whole life. Absent must read as `0`, forcing a re-resolve on the next request. This is the hazard `storedIdentityKeys` already exists to catch. → **Task 6**
+5. **A session record whose `replanned_at` is absent or non-finite.** `now - undefined` is `NaN`, and every comparison against `NaN` is `false`, so one phrasing of the staleness test reads "not stale" and the plan never re-resolves — silently, for the session's whole life, holding a revoked grant. `now - Infinity` reads fresh under both phrasings. Anything not a finite number must read as `0`, forcing a re-resolve on the next request. Note this is NOT a legacy-schema hazard: `replanned_at` ships with the shape, so no record predates it — the guard is against a malformed record and against either phrasing of the comparison. → **Task 6**
 
 ## File Structure
 
@@ -199,17 +199,26 @@ export function sessionDead(
 }
 
 /**
- * When this session's plan was last re-resolved, treating absent as never.
+ * When this session's plan was last re-resolved, treating anything that is not
+ * a finite number as never.
  *
- * A record written before this field existed has none, and `now - undefined` is
- * NaN — which fails every comparison, so a staleness check can read as "not
- * stale" and the plan would never be re-resolved again for the life of the
- * session. A revoked grant would hold, silently. Zero forces a re-resolve on
- * the next request, which is the safe direction. Same hazard
- * storedIdentityKeys exists for on the refresh path.
+ * Zero makes the plan as stale as it can be, so the next request re-resolves
+ * it. The test is finiteness and not type, because `typeof` admits NaN and the
+ * infinities, which are the values that break a subtraction followed by a
+ * comparison. `now - NaN` is NaN, and NaN fails every comparison, so "stale
+ * when now - replanned_at > bound" reads false and serves an old plan for the
+ * life of the session, a revoked grant held silently, while "fresh when
+ * now - replanned_at <= bound" happens to re-resolve. `now - Infinity` is
+ * negative infinity, which reads fresh under both. With zero, both phrasings
+ * re-resolve.
+ *
+ * The lesson is the class, not this field: a number read off a stored record
+ * has to be checked for finiteness, or tested by a predicate that fails closed
+ * on non-finite input, as sessionDead is. Anyone adding a timestamp to
+ * PanelSession takes on one more of these.
  */
 export function replannedAt(s: PanelSession): number {
-  return typeof s.replanned_at === "number" ? s.replanned_at : 0;
+  return Number.isFinite(s.replanned_at) ? s.replanned_at : 0;
 }
 ```
 
@@ -1796,7 +1805,7 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     expect(((await res.json()) as { plan: string }).plan).toBe("free");
   });
 
-  // Review Focus 5 — a record written before replanned_at existed.
+  // Review Focus 5 — a record whose replanned_at is absent or non-finite.
   it("re-resolves immediately when replanned_at is absent", async () => {
     const now = Date.now();
     // Deliberately missing replanned_at, the way a record from before the field

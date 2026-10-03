@@ -271,6 +271,151 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    // ------------------------------------------------- closing an empty room
+    /**
+     * A room closes when nobody is left in it, and that has to be one operation.
+     * A caller that read the roster and then called closeSession would leave a
+     * window for a member to join in, and the room would close over them with
+     * its codes retired.
+     *
+     * The answer is whether the room is closed, not whether this call closed it:
+     * a room that was already closed answers true. That is what lets a retry of
+     * a close that died partway finish the work, instead of reading as a no-op.
+     */
+    it("closeSessionIfEmpty closes a room nobody is in, and reports that it did", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty retires every code when it closes, not just the default role's", async () => {
+      const s = session({
+        members: [member({ leftAt: Date.now() })],
+        joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+      });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.closeSessionIfEmpty(s.id));
+
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
+    });
+
+    it("closeSessionIfEmpty leaves a room alone while a member is in it, and says so", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.closed).toBe(false);
+      // A refusal must not retire the door: the codes are how the room's next
+      // member gets in.
+      expect(after.joinCodes).toEqual(s.joinCodes);
+      expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.session.id).toBe(s.id);
+    });
+
+    it("closeSessionIfEmpty counts a member as out only once they have left", async () => {
+      // One gone and one still in is not an empty room, and the one who stays
+      // leaving is what empties it.
+      const s = session({
+        maxMembers: 3,
+        members: [
+          member({ leftAt: Date.now() }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
+        ],
+      });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+
+      (await store.updateMember(s.id, "m_peer", { leftAt: Date.now() }));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * Closed wins over frozen. Freezing refuses writes into a room someone is
+     * in; it is no reason to keep a room open that has nobody left to thaw it
+     * for. A guard copied from addMember's would get this wrong.
+     */
+    it("closeSessionIfEmpty closes an empty room even while it is frozen", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })], frozenAt: Date.now() });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty is idempotent on a room that is already closed", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      (await store.closeSession(s.id));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * The idempotence above holds for an already-closed room that is also empty,
+     * and would hold with no check for `closed` at all. This is the room that
+     * check exists for: closed with a member still listed, which is what the
+     * read-then-close race left behind in rooms written before it was fixed.
+     * "Someone is in it" is a reason to refuse closing an open room. A room that
+     * is closed has nothing left to refuse, and has to say so.
+     */
+    it("closeSessionIfEmpty reports a closed room closed even with a member listed in it", async () => {
+      const s = session({ closed: true });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+    });
+
+    it("closeSessionIfEmpty ignores a session that does not exist", async () => {
+      await expect(store.closeSessionIfEmpty("qs_nope")).resolves.toBe(false);
+    });
+
+    /**
+     * The two halves of one guarantee, and the case that says there is no gap
+     * between them: closeSessionIfEmpty will not close an occupied room, and
+     * addMember will not seat anyone in a closed one. Neither is enough alone.
+     * With only the first, a join landing after the close seats a member in a
+     * room that is over. With only the second, a close that decided on an old
+     * roster closes over a member who joined meanwhile.
+     *
+     * Started together, each way round, so whichever lands first wins and the
+     * other has to give way. Exactly one may succeed: both is a closed room with
+     * a member in it, and neither is a join refused by a room that never closed.
+     */
+    it.each([
+      { first: "close", second: "join" },
+      { first: "join", second: "close" },
+    ])("lets exactly one of a close and a join win when started together, $first first", async ({ first }) => {
+      const s = session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
+      const close = () => store.closeSessionIfEmpty(s.id);
+      const join = () => store.addMember(s.id, joiner);
+
+      const [a, b] = await Promise.all(first === "close" ? [close(), join()] : [join(), close()]);
+      const closed = first === "close" ? a : b;
+      const joined = first === "close" ? b : a;
+
+      const after = (await store.getSession(s.id))!;
+      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(joined);
+      expect(after.closed).toBe(closed);
+      expect(after.members.some((m) => m.memberId === "m_late")).toBe(joined);
+    });
+
     // --------------------------------------------------------------- freezing
     /**
      * Frozen is not closed. A lapsed plan must be undoable without costing
@@ -356,6 +501,141 @@ export function describeStoreContract(
       }
 
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    /**
+     * The panel's main screen splits rooms a person created from rooms they
+     * joined, and only the first had an index. `um:` is the second.
+     *
+     * The store returns ids for every room the user has ever held a handle in
+     * — created, joined, left and closed alike. Filtering is the caller's, so
+     * that one index can serve a panel screen and a freeze sweep that disagree
+     * about what counts as current (D1, D4).
+     */
+    it("lists the rooms a person joined, and nobody else's", async () => {
+      await store.createSession(session({ id: "qs_hers", createdBy: "u_peer", members: [] }));
+      await store.createSession(session({ id: "qs_his", createdBy: "u_peer", members: [] }));
+      await store.addMember("qs_hers", member({ memberId: "m_1", userId: "u_jesse" }));
+      await store.addMember("qs_his", member({ memberId: "m_2", userId: "u_other" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_hers"]);
+      expect(await store.sessionsJoinedBy("u_other", 10)).toEqual(["qs_his"]);
+      expect(await store.sessionsJoinedBy("u_nobody", 10)).toEqual([]);
+    });
+
+    it("keeps two users whose ids share a prefix apart", async () => {
+      // A user id that is a prefix of another's must not pull the other's rooms
+      // into its listing, or the reverse. Whatever a store keys its index on,
+      // u_a lists only u_a's rooms and u_ab only u_ab's.
+      await store.createSession(session({ id: "qs_of_a", createdBy: "u_a", members: [] }));
+      await store.createSession(session({ id: "qs_of_ab", createdBy: "u_ab", members: [] }));
+      await store.addMember("qs_of_a", member({ memberId: "m_a", userId: "u_a" }));
+      await store.addMember("qs_of_ab", member({ memberId: "m_ab", userId: "u_ab" }));
+
+      expect(await store.sessionsJoinedBy("u_a", 10)).toEqual(["qs_of_a"]);
+      expect(await store.sessionsJoinedBy("u_ab", 10)).toEqual(["qs_of_ab"]);
+    });
+
+    it("lists a room once for a person who joined it from two machines", async () => {
+      await store.createSession(session({ id: "qs_twice", members: [] }));
+      await store.addMember("qs_twice", member({ memberId: "m_laptop", userId: "u_jesse" }));
+      await store.addMember("qs_twice", member({ memberId: "m_desktop", userId: "u_jesse" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_twice"]);
+    });
+
+    it("lists the creator's own room, because the creator holds a handle too", async () => {
+      // The production path. bellman_start passes the creator in `members` and
+      // never calls addMember, so createSession seats them directly and the
+      // index has to be written there. addMember is the join path; the cases
+      // around this one cover it.
+      await store.createSession(
+        session({ id: "qs_mine", createdBy: "u_jesse", members: [member({ userId: "u_jesse" })] }),
+      );
+
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+    });
+
+    it("indexes every member a session is created with, once each", async () => {
+      // The field is an array, and the index reflects all of it, not just the
+      // first seat. Two handles for one person are still one entry, as they are
+      // on the addMember path.
+      await store.createSession(session({
+        id: "qs_seated",
+        createdBy: "u_first",
+        members: [
+          member({ memberId: "m_a", userId: "u_first" }),
+          member({ memberId: "m_b", userId: "u_second" }),
+          member({ memberId: "m_c", userId: "u_second" }),
+        ],
+      }));
+
+      expect(await store.sessionsJoinedBy("u_first", 10)).toEqual(["qs_seated"]);
+      expect(await store.sessionsJoinedBy("u_second", 10)).toEqual(["qs_seated"]);
+    });
+
+    it("keeps listing a room after the member left it", async () => {
+      await store.createSession(session({ id: "qs_past", members: [] }));
+      await store.addMember("qs_past", member({ memberId: "m_gone", userId: "u_jesse" }));
+      await store.updateMember("qs_past", "m_gone", { leftAt: Date.now() });
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_past"]);
+    });
+
+    /** REVIEW FOCUS 5 — status is the caller's filter, not the store's. */
+    it("keeps listing a room after it closed", async () => {
+      await store.createSession(session({ id: "qs_over", members: [] }));
+      await store.addMember("qs_over", member({ memberId: "m_was", userId: "u_jesse" }));
+      await store.closeSession("qs_over");
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_over"]);
+    });
+
+    it("honours the limit on the joined listing", async () => {
+      for (const id of ["qs_j1", "qs_j2", "qs_j3"]) {
+        await store.createSession(session({ id, members: [] }));
+        await store.addMember(id, member({ memberId: `m_${id}`, userId: "u_jesse" }));
+      }
+
+      expect(await store.sessionsJoinedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    it("indexes nothing when addMember refuses a frozen session", async () => {
+      await store.createSession(session({ id: "qs_cold", members: [] }));
+      await store.freezeSession("qs_cold", Date.now());
+
+      expect(await store.addMember("qs_cold", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    it("indexes nothing when addMember refuses an unknown session", async () => {
+      expect(await store.addMember("qs_ghost", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    /**
+     * The other half of closeSessionIfEmpty. A join that read the room while it
+     * was open and writes after it closed would seat a member in a room that is
+     * over: the join reports success, and the roster lists someone in a closed
+     * room, which is the state the close was written to rule out. So the refusal
+     * is the write's own and not only the reader's.
+     *
+     * There are two ways to refuse in name only, and the assertions below are one
+     * each: a seat written and then refused leaves a ghost in the roster, and an
+     * index row written before the guard lists the room for a person who was
+     * turned away.
+     */
+    it("indexes nothing when addMember refuses a closed session", async () => {
+      await store.createSession(session({ id: "qs_shut", members: [] }));
+      await store.closeSession("qs_shut");
+
+      expect(await store.addMember("qs_shut", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect((await store.getSession("qs_shut"))?.members).toEqual([]);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
     });
 
     // ---------------------------------------------------------------- events
@@ -937,7 +1217,7 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, orgId: "org_theirs" }));
 
-      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine"))
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine", { actorUserId: "u_test" }))
         .toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
     });
@@ -948,8 +1228,8 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfOwned(base, "org_mine")).toBe("written");
-      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine")).toBe("written");
+      expect(await store.putGrantIfOwned(base, "org_mine", { actorUserId: "u_test" })).toBe("written");
+      expect(await store.putGrantIfOwned({ ...base, plan: "team" }, "org_mine", { actorUserId: "u_test" })).toBe("written");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
     });
 
@@ -963,11 +1243,11 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine")).toBe("missing");
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", { actorUserId: "u_test" })).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("conflict");
       expect(await store.getGrant("github:4242")).toBeDefined();
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs")).toBe("deleted");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_theirs", { actorUserId: "u_test" })).toBe("deleted");
       expect(await store.getGrant("github:4242")).toBeUndefined();
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
     });
@@ -988,7 +1268,7 @@ export function describeStoreContract(
       expect(await store.putGrantIfOwned({
         key: "github:4242", plan: "pro" as const, role: "member" as const, orgId: "org_mine",
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
-      }, "org_mine")).toBe("written");
+      }, "org_mine", { actorUserId: "u_test" })).toBe("written");
 
       expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_mine" });
       expect((await store.listGrants(50, "org_theirs")).map((g) => g.key)).toEqual([]);
@@ -1003,7 +1283,7 @@ export function describeStoreContract(
         expiresAt: Date.now() - 1,
       }));
 
-      expect(await store.deleteGrantIfOwned("github:4242", "org_mine")).toBe("missing");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_test" })).toBe("missing");
     });
 
     /**
@@ -1019,9 +1299,9 @@ export function describeStoreContract(
       };
       (await store.putGrant({ ...base, source: "operator" }));
 
-      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase")).outcome)
+      expect((await store.putGrantIfSource({ ...base, plan: "team", source: "purchase" }, "purchase", { actorUserId: "u_test" })).outcome)
         .toBe("conflict");
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("conflict");
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "pro", source: "operator" });
     });
 
@@ -1031,20 +1311,21 @@ export function describeStoreContract(
         source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
       };
 
-      expect(await store.putGrantIfSource(purchase, "purchase"))
+      expect(await store.putGrantIfSource(purchase, "purchase", { actorUserId: "u_test" }))
         .toEqual({ outcome: "written", previous: undefined });
 
-      // The write reports what it replaced, so billing can tell a real change
-      // from a repeated delivery and see which org a plan moved out of.
-      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase");
+      // The write reports what it replaced. Nothing in production reads this
+      // (see GrantWrite), so this is the only thing keeping the two stores
+      // reporting the same thing.
+      const updated = await store.putGrantIfSource({ ...purchase, plan: "team" }, "purchase", { actorUserId: "u_test" });
       expect(updated.outcome).toBe("written");
       expect(updated.previous).toMatchObject({ plan: "pro" });
       expect(await store.getGrant("github:4242")).toMatchObject({ plan: "team" });
 
-      const gone = await store.deleteGrantIfSource("github:4242", "purchase");
+      const gone = await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" });
       expect(gone.outcome).toBe("deleted");
       expect(gone.removed).toMatchObject({ plan: "team" });
-      expect((await store.deleteGrantIfSource("github:4242", "purchase")).outcome).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" })).outcome).toBe("missing");
       expect((await store.listGrants(50, null)).map((g) => g.key)).toEqual([]);
     });
 
@@ -1069,8 +1350,8 @@ export function describeStoreContract(
       // it. In this order a store that reads before yielding will let the
       // delete run against the record the put already replaced.
       const [put] = await Promise.all([
-        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine"),
-        store.deleteGrantIfSource("github:4242", "purchase"),
+        store.putGrantIfOwned({ ...base, plan: "team", source: "operator" }, "org_mine", { actorUserId: "u_test" }),
+        store.deleteGrantIfSource("github:4242", "purchase", { actorUserId: "u_test" }),
       ]);
 
       // Either order of completion is fine. What must not happen is the delete
@@ -1078,6 +1359,212 @@ export function describeStoreContract(
       if (put === "written") {
         expect(await store.getGrant("github:4242")).toMatchObject({ source: "operator" });
       }
+    });
+
+    /**
+     * A grant change and the record of it are one operation. Every caller used
+     * to write the grant and then audit it, and losing the second write lost the
+     * record permanently — the retry returns "missing" and cannot tell that the
+     * change already happened.
+     */
+    it("records a guarded grant write in the affected org", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+
+      expect(await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" }))
+        .toBe("written");
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => [e.action, e.actorUserId]))
+        .toEqual([["plan_granted", "u_admin"]]);
+    });
+
+    it("records nothing when a guarded write changes nothing a reader sees", async () => {
+      const grant = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(grant, "org_mine", { actorUserId: "u_admin" });
+      await store.putGrantIfOwned(
+        { ...grant, grantedAt: Date.now() + 10 }, "org_mine", { actorUserId: "u_admin" }
+      );
+
+      // Exactly one, and it is the first: a length check alone would also pass
+      // against a store that recorded nothing at all.
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records a revocation against the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine",
+        { actorUserId: "u_admin", detail: { reason: "left the team" } })).toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "u_admin",
+        detail: { key: "github:4242", plan: "team", reason: "left the team" },
+      });
+    });
+
+    /**
+     * The grant is re-homed rather than deleted, so without this the org it left
+     * would never hear that it lost an admin. A team subscription ending while a
+     * pro one continues does exactly this.
+     */
+    it("records both halves when a grant moves between orgs", async () => {
+      const base = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrantIfSource({ ...base, orgId: "org_old" }, "purchase",
+        { actorUserId: "stripe" });
+      await store.putGrantIfSource({ ...base, orgId: "org_new" }, "purchase",
+        { actorUserId: "stripe" });
+
+      expect((await store.auditForOrg("org_old", 10)).map((e) => e.action))
+        .toEqual(["plan_granted", "plan_revoked"]);
+      expect((await store.auditForOrg("org_new", 10)).map((e) => e.action))
+        .toEqual(["plan_granted"]);
+    });
+
+    it("records nothing for a refused guarded write, in either org", async () => {
+      const base = {
+        key: "github:4242", plan: "pro" as const, role: "member" as const,
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      };
+      await store.putGrant({ ...base, orgId: "org_theirs" });
+
+      expect(await store.putGrantIfOwned({ ...base, orgId: "org_mine" }, "org_mine",
+        { actorUserId: "u_admin" })).toBe("conflict");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // The grant is untouched, so the emptiness above is about the audit
+      // rather than about the whole call having done nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    /** The deletes record too, through the source guard billing uses as well as the org one. */
+    it("records a revocation through the source guard, in the org the grant was in", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "purchase", grantedAt: Date.now(), grantedBy: "stripe", expiresAt: null,
+      });
+
+      expect((await store.deleteGrantIfSource("github:4242", "purchase",
+        { actorUserId: "stripe", detail: { reason: "subscription no longer paying" } })).outcome)
+        .toBe("deleted");
+
+      const [entry] = await store.auditForOrg("org_mine", 10);
+      expect(entry).toMatchObject({
+        action: "plan_revoked", actorUserId: "stripe",
+        detail: { key: "github:4242", plan: "team", reason: "subscription no longer paying" },
+      });
+    });
+
+    /** All four guarded writes, each refused: the first test of the kind covers one of them. */
+    it("records nothing for any refused guarded write, in either org", async () => {
+      const held = {
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_theirs",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrant(held);
+      const asAdmin = { actorUserId: "u_admin" };
+
+      expect(await store.putGrantIfOwned({ ...held, orgId: "org_mine" }, "org_mine", asAdmin))
+        .toBe("conflict");
+      expect((await store.putGrantIfSource({ ...held, orgId: "org_mine" }, "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:4242", "org_mine", asAdmin)).toBe("conflict");
+      expect((await store.deleteGrantIfSource("github:4242", "purchase", asAdmin)).outcome)
+        .toBe("conflict");
+      expect(await store.deleteGrantIfOwned("github:nobody", "org_mine", asAdmin)).toBe("missing");
+      expect((await store.deleteGrantIfSource("github:nobody", "purchase", asAdmin)).outcome)
+        .toBe("missing");
+
+      expect(await store.auditForOrg("org_mine", 10)).toEqual([]);
+      expect(await store.auditForOrg("org_theirs", 10)).toEqual([]);
+      // Still there, so the emptiness above is the audit's and not a store that did nothing.
+      expect(await store.getGrant("github:4242")).toMatchObject({ orgId: "org_theirs" });
+    });
+
+    /**
+     * Who acted and why are part of the record, whichever guard the write went
+     * through. Billing's reason for a change and the admin's identity are what an
+     * auditor reads first, and a store that dropped either on one path would
+     * still pass every case above.
+     */
+    it("records the actor and detail it was given, through either guard", async () => {
+      const grant = {
+        plan: "team" as const, role: "admin" as const,
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      await store.putGrantIfOwned(
+        { ...grant, key: "github:owned", orgId: "org_a", source: "operator" }, "org_a",
+        { actorUserId: "u_admin", detail: { via: "admin route" } }
+      );
+      await store.putGrantIfSource(
+        { ...grant, key: "github:billed", orgId: "org_b", source: "purchase" }, "purchase",
+        { actorUserId: "stripe", detail: { customer: "cus_1" } }
+      );
+
+      expect((await store.auditForOrg("org_a", 10))[0]).toMatchObject({
+        actorUserId: "u_admin", detail: { key: "github:owned", via: "admin route" },
+      });
+      expect((await store.auditForOrg("org_b", 10))[0]).toMatchObject({
+        actorUserId: "stripe", detail: { key: "github:billed", customer: "cus_1" },
+      });
+    });
+
+    /**
+     * The log is read in time order, so an entry carries the moment of the write
+     * that made it. The clock moves between the four writes: with it frozen, an
+     * entry stamped by a different call, or by none, would read the same.
+     */
+    it("stamps each entry with the time of the write that made it", async () => {
+      const base = {
+        plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      };
+      const asAdmin = { actorUserId: "u_admin" };
+      const times: number[] = [];
+      const tick = () => {
+        vi.advanceTimersByTime(1_000);
+        times.push(Date.now());
+      };
+
+      tick();
+      await store.putGrantIfOwned({ ...base, key: "github:1", source: "operator" }, "org_mine", asAdmin);
+      tick();
+      await store.putGrantIfSource({ ...base, key: "github:2", source: "purchase" }, "purchase", asAdmin);
+      tick();
+      await store.deleteGrantIfOwned("github:1", "org_mine", asAdmin);
+      tick();
+      await store.deleteGrantIfSource("github:2", "purchase", asAdmin);
+
+      expect((await store.auditForOrg("org_mine", 10)).map((e) => e.at)).toEqual(times);
+    });
+
+    /** What the caller passed is theirs afterwards: changing it must not rewrite the record. */
+    it("keeps the detail it was given as it was when the write happened", async () => {
+      await store.putGrant({
+        key: "github:4242", plan: "team" as const, role: "admin" as const, orgId: "org_mine",
+        source: "operator", grantedAt: Date.now(), grantedBy: "u_admin", expiresAt: null,
+      });
+      const detail = { reason: { why: "left the team" } };
+      await store.deleteGrantIfOwned("github:4242", "org_mine", { actorUserId: "u_admin", detail });
+
+      detail.reason.why = "changed afterwards";
+
+      expect((await store.auditForOrg("org_mine", 10))[0]).toMatchObject({
+        detail: { reason: { why: "left the team" } },
+      });
     });
 
     /** null is a bucket, not "unscoped": org-less grants list as their own set. */

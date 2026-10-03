@@ -20,7 +20,7 @@
  * #12's Worker-side tsconfig project should absorb this file and drop the
  * exclusion.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { serialize } from "node:v8";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
@@ -414,6 +414,22 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     expect(legacyStorage.alarms).toEqual([]);
     expect(legacyStorage.snapshot()).toEqual(before);
   });
+
+  it("closeSessionIfEmpty reads it as gone, so it closes nothing and writes nothing", async () => {
+    // An EMPTY room, on purpose. With someone still in it the method declines to
+    // close whether or not it read through the guard, and a bypass of the guard
+    // would leave this test green.
+    const { legacy, legacyStorage } = await worldOn(
+      storeDo,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    const before = legacyStorage.snapshot();
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(false);
+
+    expect(legacyStorage.writes).toBe(0);
+    expect(legacyStorage.snapshot()).toEqual(before);
+  });
 });
 
 describe("a current row is untouched by the guard", () => {
@@ -483,6 +499,70 @@ describe("closing a session drops its registry rows", () => {
   });
 });
 
+describe("closing an empty room drops its registry rows, and only when it closes", () => {
+  /**
+   * The registry half of closeSessionIfEmpty, which only this store has. The
+   * decision is made inside SessionDO and the rows are dropped at the facade,
+   * the one place holding the registry handle. As above, only the raw registry
+   * can tell "the codes stopped working" from "the rows were dropped": a closed
+   * room's codes stop resolving whether or not anything cleared them.
+   */
+  it("drops every role's registry row when it closes the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({
+      id: "qs_emptied",
+      members: [member({ leftAt: Date.now() })],
+      joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+    });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the rows are there to drop")
+      .toEqual(expect.arrayContaining(["jc:BELL-AAAA-01", "jc:BELL-CCCC-03"]));
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).not.toContain("jc:BELL-AAAA-01");
+    expect(keys).not.toContain("jc:BELL-CCCC-03");
+  });
+
+  // The other direction, and the one that costs most when it is wrong: a room
+  // that stays open has to keep its door. The creator is still in this one.
+  it("leaves every registry row alone when someone is still in the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({ id: "qs_occupied", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).toContain("jc:BELL-AAAA-01");
+    expect(keys).toContain("jc:BELL-CCCC-03");
+    expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
+  });
+
+  // What a close leaves behind if it dies between SessionDO and the registry:
+  // the room closed, its rows standing. The retry has to read the room as
+  // closed AND still drop the rows. A call that answered "nothing to do" for an
+  // already-closed room would leave them for good, since no later call has any
+  // reason to look.
+  it("finishes a close whose registry rows were never dropped", async () => {
+    const { store, legacy, registryStorage } = await worldOn(
+      storeDo,
+      currentRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    await store.setJoinCode(LEGACY_ID, "peer_b", "BELL-AAAA-01", Date.now() + 60_000);
+    expect(await legacy.closeSessionIfEmpty(), "setup: closed inside the object only").toBe(true);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the row outlived the close")
+      .toContain("jc:BELL-AAAA-01");
+
+    expect(await store.closeSessionIfEmpty(LEGACY_ID)).toBe(true);
+
+    expect(Object.keys(registryStorage.snapshot())).not.toContain("jc:BELL-AAAA-01");
+  });
+});
+
 describe("negative control: the same calls with the guard removed", () => {
   /**
    * Without this, every "reads as gone" above could be a broken harness returning
@@ -528,6 +608,23 @@ describe("negative control: the same calls with the guard removed", () => {
     // Same subset-match pitfall as the test above: assert the clear itself, exactly.
     expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+
+  /**
+   * The same again for closeSessionIfEmpty's own guard test above, which could
+   * otherwise pass because the harness never gave the row to the method. The room
+   * is empty, so that with the guard gone the method has something to close.
+   */
+  it("lets closeSessionIfEmpty close it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+    const { legacy, legacyStorage } = await worldOn(
+      unguarded,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(true);
+
+    expect(legacyStorage.snapshot().session).toMatchObject({ closed: true });
   });
 });
 
@@ -1425,23 +1522,29 @@ describe("receive-only", () => {
 });
 
 /**
- * The TTL alarm's re-arm. createSession arms the alarm once, and expireIfDue's
- * guard is `now <= expiresAt`, so a firing that lands exactly on the boundary
- * expires nothing. That would have gone unnoticed while bellman_sync called
- * getSession on every poll, which expires the room lazily. A member watching
- * over a socket does not poll, so on a quiet room nothing calls it, and the
- * alarm has to finish the job itself.
+ * The TTL alarm at its boundary. createSession arms the alarm once, and
+ * expireIfDue's guard is `now <= expiresAt`, so a firing that lands exactly on
+ * the boundary expires nothing. That would have gone unnoticed while
+ * bellman_sync called getSession on every poll, which expires the room lazily.
+ * A member watching over a socket does not poll, so on a quiet room nothing
+ * calls it, and the alarm has to finish the job itself.
+ *
+ * It does, through the named-alarm driver and with no re-arm of its own:
+ * alarm() ends in reArm(), which points the alarm back at the TTL for as long
+ * as the room is open. These tests pin that, and the two ends of it: the loop
+ * stops once the room is closed, and a firing that lands early does not make an
+ * alarm that is already due.
  *
  * The clock is pinned with vi.setSystemTime and put back in a finally, as in
  * membersOf's boundary case: a test cannot make a real clock read exactly
  * expiresAt.
  */
 describe("SessionDO.alarm: the TTL re-arm", () => {
-  it("re-arms the TTL alarm when it fires exactly on the boundary", async () => {
+  it("points the alarm back at the TTL when it fires exactly on the boundary", async () => {
     // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
-    // landing exactly on expiresAt expires nothing. Without a re-arm the room
-    // is then immortal until something calls getSession, and a room watched
-    // over sockets is not polled.
+    // landing exactly on expiresAt expires nothing. Without the driver's
+    // closing reArm() the room is then immortal until something calls
+    // getSession, and a room watched over sockets is not polled.
     const at = Date.now() + 10_000;
     const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
     const ctx = fakeCtx(storage);
@@ -1455,31 +1558,34 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     }
 
     expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
-    expect(storage.alarms.at(-1)).toBeGreaterThan(at);
+    // At the TTL, which is no later than this firing's own clock: due at once.
+    expect(storage.alarms).toEqual([at]);
   });
 
-  it("closes the room on the re-armed firing, and arms nothing after it", async () => {
-    // Why the re-arm terminates, run rather than argued. It is set for
-    // expiresAt + 1, strictly after the boundary, so the firing it buys has
-    // now > expiresAt and expireIfDue closes the room. Once the room is
-    // closed the re-arm must stop: expiresAt + 1 is at or behind the clock by
-    // then, so an alarm set there would be due the moment it was set, and
-    // would set the next one the same way.
+  it("closes the room on the first firing past the boundary, and arms nothing after it", async () => {
+    // Why the loop terminates, run rather than argued. The re-arm is set for
+    // expiresAt, not after it, so the firing it buys can land in the same
+    // millisecond and find the boundary again; that one re-arms the same way.
+    // The first firing to read now > expiresAt closes the room, and a closed
+    // room derives no TTL, so that firing arms nothing: an alarm set for a time
+    // already behind the clock would be due the moment it was set, and would set
+    // the next one the same way.
     const at = Date.now() + 10_000;
     const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
     try {
       vi.setSystemTime(at);
-      await doi.alarm(); // the boundary firing: nothing due, re-armed
-      const rearmed = storage.alarms.at(-1)!;
-      expect(rearmed).toBeGreaterThan(at);
+      await doi.alarm(); // the boundary firing: nothing to expire, TTL kept
+      await doi.alarm(); // the firing it buys, in the same millisecond: the same again
+      expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+      expect(storage.alarms).toEqual([at, at]);
 
-      vi.setSystemTime(rearmed); // the runtime fires it when it comes due
+      vi.setSystemTime(at + 1); // the clock moves on
       await doi.alarm();
 
       expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: true });
-      expect(storage.alarms).toEqual([rearmed]); // the one re-arm, and no second
+      expect(storage.alarms).toEqual([at, at]); // no third
     } finally {
       vi.useRealTimers();
     }
@@ -1499,27 +1605,115 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     expect(storage.alarms).toEqual([]);
   });
 
-  it("does not re-arm a firing that lands before the room is due", async () => {
-    // The re-arm is for the boundary, now === expiresAt, and only for it. An
-    // alarm set for expiresAt is expected to run at or after it, so a firing
+  it("points a firing that lands before the room is due at the TTL, still ahead of the clock", async () => {
+    // An alarm set for expiresAt is expected to run at or after it, so a firing
     // before it points to a handler clock that disagrees with the one that
-    // scheduled the alarm, and a re-arm would set an alarm for expiresAt + 1
-    // that is already in the past: due at once, and re-armed again, until the
-    // object is torn down. The contract suite's frozen fake clock is such a
-    // disagreement, and before this gate it printed "failed to invoke drain()"
-    // lines in npm run test:worker.
+    // scheduled the alarm. The contract suite's frozen fake clock is such a
+    // disagreement. Nothing is due, so nothing expires, and the closing reArm()
+    // sets the TTL: at expiresAt, which this clock still reads as ahead. An
+    // alarm set at or behind the clock would be due at once and re-armed again,
+    // until the object is torn down.
     const at = Date.now() + 10_000;
+    const early = at - 5_000;
     const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
     try {
-      vi.setSystemTime(at - 5_000); // early: not due, and not on the boundary
+      vi.setSystemTime(early); // early: not due, and not on the boundary
       await doi.alarm();
     } finally {
       vi.useRealTimers();
     }
 
     expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
-    expect(storage.alarms).toEqual([]);
+    expect(storage.alarms).toEqual([at]);
+    expect(storage.alarms[0]).toBeGreaterThan(early);
+  });
+});
+
+describe("a failed index write does not fail the operation it indexes", () => {
+  /**
+   * By the time DurableObjectStore writes an index, SessionDO has committed the
+   * room or the seat. An index write that threw would abort the caller after the
+   * effect had landed: a seat with no member_joined event and no audit row, for
+   * a joiner who is told it failed. The index is derived and SessionDO is
+   * authoritative, so the write is logged and swallowed, and the cost is a room
+   * missing from one listing.
+   *
+   * The failure is injected by making the registry refuse the index prefixes.
+   * Every other registry write, the join code above all, still goes through.
+   */
+  const refuse = (registryStorage: ReturnType<typeof fakeStorage>, prefixes: string[]) => {
+    const realPut = registryStorage.put;
+    registryStorage.put = async (keyOrEntries: unknown, value?: unknown) => {
+      if (typeof keyOrEntries === "string" && prefixes.some((p) => keyOrEntries.startsWith(p))) {
+        throw new Error("registry unavailable");
+      }
+      return realPut(keyOrEntries, value);
+    };
+  };
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("createSession still creates the room, and its join code still resolves", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["us:", "um:"]);
+
+    // Distinct creator and seated ids, so the log can be checked for naming the
+    // right person on each index rather than the same one twice.
+    await store.createSession(session({
+      id: "qs_idx",
+      createdBy: "u_creator",
+      members: [member({ userId: "u_seated" })],
+      joinCodes: oneCode("BELL-IDX-01", "peer_b"),
+    }));
+
+    expect((await store.getSession("qs_idx"))?.members).toHaveLength(1);
+    expect((await store.getSessionByJoinCode("BELL-IDX-01"))?.session.id).toBe("qs_idx");
+    // Neither index took its write, and each failure was said out loud. A lost
+    // row is identified by the pair (user, room), so the log names both: it is
+    // the only record of what to restore.
+    expect(Object.keys(registryStorage.snapshot()).filter((k) => /^(us|um):/.test(k))).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(2);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("us index write failed for u_creator in qs_idx"), expect.any(Error),
+    );
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write failed for u_seated in qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("addMember still seats the member, and still says it did", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    await store.createSession(session({ id: "qs_idx", members: [] }));
+    refuse(registryStorage, ["um:"]);
+
+    expect(await store.addMember("qs_idx", member({ memberId: "m_joiner", userId: "u_peer" })))
+      .toBe(true);
+
+    expect((await store.getSession("qs_idx"))?.members.map((m) => m.memberId))
+      .toEqual(["m_joiner"]);
+    // The whole cost: one row missing from one listing.
+    expect(await store.sessionsJoinedBy("u_peer", 10)).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write failed for u_peer in qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("but a join code that cannot be registered still fails createSession", async () => {
+    // The contrast that keeps the rule about indexes. A join code is
+    // authoritative: one that does not resolve is a real failure, not a missing
+    // listing row, so it is neither swallowed nor logged here.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["jc:"]);
+
+    await expect(
+      store.createSession(session({ id: "qs_nocode", joinCodes: oneCode("BELL-NOPE-01", "peer_b") })),
+    ).rejects.toThrow("registry unavailable");
+    expect(logged).not.toHaveBeenCalled();
   });
 });

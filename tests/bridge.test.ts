@@ -64,6 +64,32 @@ async function remoteFor(store: BellmanStore, key: string): Promise<Remote> {
   };
 }
 
+/**
+ * A remote whose watcher polls are parked until `release()`. The polls are the calls that wait,
+ * and the only ones the bridge makes on its own; everything an agent calls passes straight
+ * through. So a test can act through the agent's own tools while the watcher is known to be
+ * unable to react, and anything that changes is the tools' doing.
+ */
+function parkedPolls(key: string): { remote: () => Promise<Remote>; release: () => void } {
+  let release!: () => void;
+  const parked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    release,
+    remote: async () => {
+      const real = await remoteFor(store, key);
+      return {
+        ...real,
+        callTool: async (params) => {
+          if (params.name === "bellman_sync" && Number(params.arguments?.wait_seconds) > 0) await parked;
+          return real.callTool(params);
+        },
+      };
+    },
+  };
+}
+
 async function until(check: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await check())) {
@@ -203,8 +229,9 @@ describe("channel delivery", () => {
 
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
-      "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_invite",
-      "bellman_leave", "bellman_send", "bellman_start", "bellman_sync", "bellman_whoami",
+      "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
+      "bellman_invite", "bellman_leave", "bellman_send", "bellman_start",
+      "bellman_sync", "bellman_whoami",
     ]);
   });
 
@@ -279,6 +306,190 @@ describe("channel delivery", () => {
     await a.call("bellman_leave", { session_id: sessionId, member_id: creatorMember });
 
     expect(a.bridge.watching()).toHaveLength(0);
+  });
+
+  it("stops watching a room this member was evicted from", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    expect(b.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+
+    // The event reaches the human first. Nothing else would: bellman_sync
+    // keeps answering a member who is out, because reads stay open to them,
+    // and the room is not closed.
+    await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
+    await until(() => b.bridge.watching().length === 0);
+  });
+
+  it("keeps watching when the member evicted is somebody else", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    await until(() => channelEvents(a).some((e) => e.meta.type === "member_evicted"));
+
+    // The creator is still in the room, so the event is news, not an exit.
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
+
+  it("is not disarmed by a peer message that names this member", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    // The payload is peer content, and an ordinary one: bellman_send takes any object, and a
+    // joiner reads every member's id off the roster bellman_confirm returns. A member id inside
+    // a message is not an eviction. Only the event the server writes for one is, and a peer
+    // cannot send that kind.
+    await b.call("bellman_send", {
+      session_id: sessionId, member_id: joinerMember, type: "message",
+      payload: { member_id: creatorMember },
+    });
+    await until(() => channelEvents(a).some((e) => e.meta.type === "message"));
+
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
+
+  it("stops watching when the agent's own sync shows this member was evicted", async () => {
+    // The watcher's polls are parked, so it cannot be what reacts: only the sync below can tell
+    // the bridge. That sync also moves the watcher's cursor past the eviction, so a watcher left
+    // armed would never see the event it disarms on, and would poll the room for the life of the
+    // process.
+    const polls = parkedPolls(DEV_KEY.peer);
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    try {
+      const { sessionId, joinerMember } = await pair(a, b);
+      expect(b.bridge.watching()).toHaveLength(1);
+
+      await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+      const synced = await b.call("bellman_sync", {
+        session_id: sessionId, member_id: joinerMember, since_cursor: 0, wait_seconds: 0,
+      });
+      const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+      expect(types).toContain("member_evicted");
+
+      expect(b.bridge.watching()).toHaveLength(0);
+    } finally {
+      polls.release();
+    }
+  });
+
+  it("keeps watching when the agent's own sync shows somebody else's eviction", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+    expect(a.bridge.watching()).toHaveLength(1);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    const synced = await a.call("bellman_sync", {
+      session_id: sessionId, member_id: creatorMember, since_cursor: 0, wait_seconds: 0,
+    });
+    const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+    expect(types).toContain("member_evicted");
+
+    // The creator is still in the room, so the sync showed them news, not their own exit.
+    expect(a.bridge.watching()).toHaveLength(1);
+  });
+
+  // A member who is out can still read, so a later sync of theirs answers. The first three cases
+  // below are the three places the bridge learns a membership ended, and each has to leave that
+  // answer unable to start a watcher. The fourth is the opposite kind of stop: it does not end the
+  // membership, so it has to re-arm, like the rejected connection in "a watcher whose poll is
+  // rejected gives up ..., and a tool call recovers it".
+
+  it("does not start watching again for a member evicted from the room", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
+    await until(() => b.bridge.watching().length === 0);
+
+    // From past the eviction, so there is no event in the answer for the bridge to act on.
+    const latest = Math.max(...channelEvents(b).map((e) => Number(e.meta.cursor)));
+    const synced = await b.call("bellman_sync", {
+      session_id: sessionId, member_id: joinerMember, since_cursor: latest, wait_seconds: 0,
+    });
+    expect(synced.isError, synced.text).toBe(false);
+
+    expect(b.bridge.watching()).toHaveLength(0);
+  });
+
+  it("does not start watching again after the agent's own sync showed the eviction", async () => {
+    // Parked, as above: only the agent's own syncs reach the bridge, so the first one is what
+    // records the departure.
+    const polls = parkedPolls(DEV_KEY.peer);
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    try {
+      const { sessionId, joinerMember } = await pair(a, b);
+      await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+      const first = await b.call("bellman_sync", {
+        session_id: sessionId, member_id: joinerMember, since_cursor: 0, wait_seconds: 0,
+      });
+      expect(b.bridge.watching()).toHaveLength(0);
+
+      const second = await b.call("bellman_sync", {
+        session_id: sessionId, member_id: joinerMember, since_cursor: Number(first.data.cursor), wait_seconds: 0,
+      });
+      expect(second.isError, second.text).toBe(false);
+
+      expect(b.bridge.watching()).toHaveLength(0);
+    } finally {
+      polls.release();
+    }
+  });
+
+  it("does not start watching again for a member that left", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember } = await pair(a, b);
+
+    await a.call("bellman_leave", { session_id: sessionId, member_id: creatorMember });
+    expect(a.bridge.watching()).toHaveLength(0);
+
+    const synced = await a.call("bellman_sync", {
+      session_id: sessionId, member_id: creatorMember, since_cursor: 0, wait_seconds: 0,
+    });
+    expect(synced.isError, synced.text).toBe(false);
+
+    expect(a.bridge.watching()).toHaveLength(0);
+  });
+
+  it("a watcher whose sync is refused as not its own stops, and a later tool call starts it again", async () => {
+    // "Not yours" is about who is asking, as when a different sign-in holds the connection, and not
+    // about whether the member is still in. Signing back in has to be able to start the watch again,
+    // so this stop does not end the membership.
+    let refusing = true;
+    const remote = async (): Promise<Remote> => {
+      const real = await remoteFor(store, DEV_KEY.jesse);
+      return {
+        ...real,
+        callTool: async (params): Promise<CallToolResult> =>
+          refusing && params.name === "bellman_sync" && Number(params.arguments?.wait_seconds) > 0
+            ? { isError: true, content: [{ type: "text", text: "member_id is not yours." }] }
+            : real.callTool(params),
+      };
+    };
+    const a = await open(DEV_KEY.jesse, "channel", { remote });
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember } = await pair(a, b);
+    await until(() => a.bridge.watching().length === 0);
+
+    refusing = false;
+    const synced = await a.call("bellman_sync", {
+      session_id: sessionId, member_id: creatorMember, since_cursor: 0, wait_seconds: 0,
+    });
+    expect(synced.isError, synced.text).toBe(false);
+
+    expect(a.bridge.watching()).toHaveLength(1);
   });
 });
 
@@ -369,8 +580,9 @@ describe("bellman_whoami", () => {
   }
 
   const remoteToolNames = [
-    "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_invite",
-    "bellman_leave", "bellman_send", "bellman_start", "bellman_sync",
+    "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
+    "bellman_invite", "bellman_leave", "bellman_send", "bellman_start",
+    "bellman_sync",
   ];
 
   it("reports the signed-in identity", async () => {

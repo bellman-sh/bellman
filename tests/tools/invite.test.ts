@@ -25,6 +25,19 @@ async function eventCount(sessionId: string): Promise<number> {
 }
 
 describe("bellman_invite", () => {
+  // The description once said reopening the door is "never silent". A room that
+  // freezes between the code being set and the event being appended keeps the
+  // code and loses the event, so the promise was stronger than the code. The
+  // behaviour is pinned in rooms.test.ts; this keeps the sentence from drifting
+  // back.
+  it("does not promise an event that a freeze can drop", async () => {
+    const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+    const doc = tools.find((t) => t.name === "bellman_invite")!.description!.replace(/\s+/g, " ");
+
+    expect(doc).not.toContain("never silent");
+    expect(doc).toContain("unless the room freezes at that instant");
+  });
+
   it("issues a working code long after the original was consumed", async () => {
     const s = await pairUp(h);
     const stale = await h.connect(DEV_KEY.outsider);

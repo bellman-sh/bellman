@@ -44,6 +44,30 @@ describe("a frozen session refuses writes", () => {
     expect(invited.text).toMatch(FROZEN);
   });
 
+  it("refuses to evict, so a frozen room's roster cannot change", async () => {
+    const { creator, sessionId, joinerMemberId } = await pairUp(h);
+    await h.store.freezeSession(sessionId, Date.now());
+
+    const evicted = await creator.call("bellman_evict", {
+      session_id: sessionId, member_id: joinerMemberId,
+    });
+
+    expect(evicted.isError).toBe(true);
+    expect(evicted.text).toMatch(FROZEN);
+    expect(evicted.text).toMatch(/plan/);
+    // Refused means untouched: the member is still in.
+    const room = await h.store.getSession(sessionId);
+    expect(room?.members.find((m) => m.memberId === joinerMemberId)?.leftAt).toBeNull();
+
+    // The control: the same call goes through once the plan is restored, so the
+    // refusal above was the freeze and nothing about this caller or this member.
+    await h.store.freezeSession(sessionId, null);
+    const restored = await creator.call("bellman_evict", {
+      session_id: sessionId, member_id: joinerMemberId,
+    });
+    expect(restored.isError, restored.text).toBe(false);
+  });
+
   it("refuses to confirm a join that was already in flight", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);

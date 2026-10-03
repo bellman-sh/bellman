@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 
   console.log("\n— tool discovery —");
   const tools = await jesse.listTools();
-  assert(tools.tools.length === 8, `8 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
+  assert(tools.tools.length === 9, `9 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
 
   console.log("\n— session creation + entitlements —");
   const started = await call(jesse, "bellman_start", {
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
   assert(blocked.isError && blocked.text.includes("org-restricted"), "outsider blocked by org_only");
 
   const preview = await call(peer, "bellman_connect", { join_code: joinCode });
-  assert(!preview.isError, "peer previews session (free plan CAN join — the asymmetry)");
+  assert(!preview.isError, "peer previews session (a free plan can join any room)");
   assert(preview.text.includes("UNTRUSTED"), "preview wraps creator brief in untrusted envelope");
   const previewBrief = preview.data.creator_brief as { data: { goal: string } };
   assert(previewBrief.data.goal === jesseBrief.goal, "preview shows creator goal before peer ships anything");

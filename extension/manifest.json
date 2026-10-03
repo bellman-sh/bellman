@@ -1,0 +1,107 @@
+{
+  "manifest_version": "0.3",
+  "name": "bellman",
+  "display_name": "Bellman",
+  "version": "0.2.0",
+  "description": "Cross-session, cross-provider agent collaboration over MCP.",
+  "long_description": "Bellman lets agent sessions work together on the same problem.\n\nOne session opens a room and gets a short code you can read aloud, paste into chat, or text to a coworker. Any other MCP-connected session \u2014 Claude Code, Cursor, Gemini CLI, a different machine, a different person, a different model provider \u2014 joins with that code, previews your context brief, and confirms with its own.\n\nThis bundle runs a small local bridge that proxies the Bellman tools to https://mcp.bellman.sh/mcp. It signs you in through your browser the first time Claude Desktop starts it, and caches the result on this machine. There is no key to paste.\n\nClaude Desktop can also reach Bellman as a remote custom connector, with nothing to install. The difference is where the bridge runs: a local one holds a queue of peer events and lets the agent block on it, which a connector dialled from Anthropic's cloud can never do.\n\n**Peer events do not arrive on their own here.** Nothing interrupts a turn. Incoming events queue, and the agent drains them by calling `bellman_wait` (blocks up to 25s) or `bellman_sync`. Ask for a check and you get one; walk away and nothing happens.",
+  "author": {
+    "name": "Bellman",
+    "url": "https://bellman.sh"
+  },
+  "homepage": "https://bellman.sh",
+  "documentation": "https://bellman.sh#claude-desktop",
+  "support": "https://github.com/bellman-sh/bellman/issues",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bellman-sh/bellman.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "collaboration",
+    "agents",
+    "pairing",
+    "multiplayer"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "server/channel.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/channel.js"
+      ],
+      "env": {
+        "BELLMAN_URL": "${user_config.bellman_url}",
+        "BELLMAN_DELIVERY": "hook"
+      }
+    }
+  },
+  "user_config": {
+    "bellman_url": {
+      "type": "string",
+      "title": "Server",
+      "description": "The Bellman endpoint. Change this only if you run your own.",
+      "required": false,
+      "default": "https://mcp.bellman.sh/mcp"
+    }
+  },
+  "tools": [
+    {
+      "name": "bellman_start",
+      "description": "Open a room and get a join code to relay."
+    },
+    {
+      "name": "bellman_connect",
+      "description": "Preview a room's brief. Nothing of yours ships yet."
+    },
+    {
+      "name": "bellman_confirm",
+      "description": "Ship your brief and become a member."
+    },
+    {
+      "name": "bellman_send",
+      "description": "Send a message, artifact, action request, or brief update."
+    },
+    {
+      "name": "bellman_sync",
+      "description": "Fetch peer events. Long-polls up to 25 seconds."
+    },
+    {
+      "name": "bellman_wait",
+      "description": "Block until a queued peer event arrives."
+    },
+    {
+      "name": "bellman_whoami",
+      "description": "Check which identity peers see. Answered locally, no round trip."
+    },
+    {
+      "name": "bellman_invite",
+      "description": "Issue a fresh join code, or revoke the current one."
+    },
+    {
+      "name": "bellman_leave",
+      "description": "Leave the room and tell the others."
+    },
+    {
+      "name": "bellman_evict",
+      "description": "Creator-only: remove a member and retire their seat's code."
+    },
+    {
+      "name": "bellman_audit",
+      "description": "Read every crossing that touched your org's boundary."
+    }
+  ],
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

@@ -61,7 +61,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>eight MCP tools"]
+        MCP["/mcp<br/>nine MCP tools"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
     end
@@ -95,12 +95,12 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the eight tools work over plain remote MCP. The bridge exists
+use Bellman** — the nine tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
 
-This is the decision everything else rests on, and cloud agents are why.
+Every other decision here rests on this one, and cloud agents are why.
 
 A Claude Code cloud session runs in Anthropic's infrastructure. You did not
 launch it, you cannot pass it flags, and there is no machine of yours for it to
@@ -294,7 +294,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>TTL alarm, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
     end
@@ -481,7 +481,7 @@ produced three separately filed bugs:
 | Issue | The two objects | What can go wrong |
 |---|---|---|
 | [#59](../../../issues/59) | RegistryDO + AuditDO | a durable grant change whose audit entry is lost permanently, because the retry cannot tell the mutation already happened |
-| [#62](../../../issues/62) | SessionDO + RegistryDO | a consumed single-use join code that stays redeemable |
+| [#62](../../../issues/62) | SessionDO + RegistryDO | a consumed single-use join code that stays redeemable; a joined-rooms index entry (`um:`) lost after the member was added or seated at creation, leaving a room out of one listing |
 | [#69](../../../issues/69) | AuthDO + RegistryDO | an older subscription state landing after a newer cancellation, leaving paid access nobody is paying for |
 
 Within one object the problem is tractable and has been solved in place:
@@ -530,12 +530,15 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~3,730** | every request, whether or not you are in a room |
+| Tool definitions | **~4,820** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-`bellman_start` alone is 1,352 tokens, 36% of the tool budget, paid even by
+Tool definitions were re-measured on 2026-10-01. The three rows below that one
+are from the original measurement and have not been re-measured since.
+
+`bellman_start` alone is 1,462 tokens, 30% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

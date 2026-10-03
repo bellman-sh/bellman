@@ -406,15 +406,16 @@ quiet close itself, destroying the history the returning session came back for.
 Departure is permanent and may close a room. Staleness is reversible and must
 never.
 
-**A gap this leaves open.** #99's hibernating WebSocket has already landed:
-`SessionDO` accepts sockets, handles `webSocketClose`, and `SocketAttachment`
-carries the member ids — so the object holds a hard fact about who is connected,
-which beats any timeout because it is being told rather than inferring.
-Presence consults none of it. That is latent only while every client still
-long-polls `bellman_sync`; the first one that prefers the socket stops touching
-`lastSeenAt` and looks stale with a live connection. Closing it means touching
-the attached member ids on accept and consulting the open sockets in
-`presenceOf`, which changes a `SessionDO` path the seat bug does not.
+**A gap this leaves open: #140.** #99's hibernating WebSocket has already
+landed, and `SocketAttachment` carries the member ids — so the object holds a
+hard fact about who is connected, which beats any timeout because it is being
+told rather than inferring. Presence consults none of it. That is latent only
+while every client still long-polls `bellman_sync`; the first one that prefers
+the socket stops touching `lastSeenAt`, looks stale with a live connection, and
+is then the quietest member in the room by construction, so the next joiner
+takes its seat. Closing it means stamping `lastSeenAt` when the socket is
+accepted and excluding connected members from `seatVictims` inside the object,
+which changes a `SessionDO` path the seat bug does not.
 
 ## 6. Identity, plans and entitlements
 

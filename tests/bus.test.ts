@@ -8,7 +8,7 @@ import net from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
-  BusUnavailableError, RoomWindow, SUN_PATH_MAX_BYTES, WINDOW_MAX_BYTES, WINDOW_MAX_EVENTS,
+  BusUnavailableError, DEFAULT_ACK_TIMEOUT_MS, RoomWindow, SUN_PATH_MAX_BYTES, WINDOW_MAX_BYTES, WINDOW_MAX_EVENTS,
   busPath, busRoot, openBus,
   type Bus, type BusOptions, type Coordinator, type Handlers, type RoomEvent, type Subscription, type SyncFrom,
 } from "../src/bus.js";
@@ -23,6 +23,8 @@ let tmp: string;
 let root: string;
 /** Closed in afterEach, so a listener never outlives the test that opened it. */
 let opened: Bus[];
+/** Whatever else a test started by hand, undone in afterEach. */
+let cleanups: Array<() => Promise<void>>;
 let logs: string[];
 
 const noSync: SyncFrom = async (_session, _member, cursor) => ({ events: [], cursor });
@@ -81,6 +83,7 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), "bellman-bus-"));
   root = join(tmp, "bus");
   opened = [];
+  cleanups = [];
   logs = [];
   // A test that forgets to pass `root` must land in the scratch directory and not in
   // the real ~/.claude/bellman/bus, where it would leave a socket behind.
@@ -90,6 +93,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await Promise.all(opened.map((b) => b.close()));
+  for (const cleanup of cleanups) await cleanup();
   if (savedBusRoot === undefined) delete process.env.BELLMAN_BUS_ROOT;
   else process.env.BELLMAN_BUS_ROOT = savedBusRoot;
   rmSync(tmp, { recursive: true, force: true });
@@ -527,10 +531,10 @@ function recorder() {
 }
 
 /** A coordinator wired to a fake room, plus the bus a test subscribes through. */
-async function rig(role: "coordinator" | "subscriber", over: Partial<BusOptions> = {}) {
+async function rig(role: "coordinator" | "subscriber", over: Partial<BusOptions> = {}, viaOver: Partial<BusOptions> = {}) {
   const room = fakeRoom();
   const coord = asCoordinator(await open({ syncFrom: room.syncFrom, ...over }));
-  const via: Bus = role === "coordinator" ? coord : await open();
+  const via: Bus = role === "coordinator" ? coord : await open(viaOver);
   return { room, coord, via };
 }
 
@@ -572,12 +576,26 @@ describe("the wire", () => {
 
     const e = peerEvent(1, { payload: { text: "hello" } });
     coord.ingest(e);
-    await vi.waitFor(() => expect(raw.received()).toContain("\n"));
+    // the acknowledgement, the event, and the empty string after the last newline
+    await vi.waitFor(() => expect(raw.received().split("\n")).toHaveLength(3));
 
     const lines = raw.received().split("\n");
-    expect(lines).toHaveLength(2); // one line and the empty string after its newline
-    expect(lines[1]).toBe("");
-    expect(JSON.parse(lines[0])).toStrictEqual(toMember(e, "m_a"));
+    expect(lines[2]).toBe("");
+    expect(JSON.parse(lines[0])).toEqual({ op: "subscribed", session_id: ROOM, member_id: "m_a" });
+    expect(JSON.parse(lines[1])).toStrictEqual(toMember(e, "m_a"));
+  });
+
+  it("acknowledges a subscribe before it sends anything else for it, even when the window already holds events", async () => {
+    const { coord } = await rig("coordinator");
+    await attach(coord, coord, "m_keeper", 0, recorder().handlers, 1);
+    for (const c of [1, 2, 3]) coord.ingest(peerEvent(c));
+
+    const raw = await rawClient(socketPath());
+    raw.write(request({ member_id: "m_a", cursor: 0 }));
+    await vi.waitFor(() => expect(raw.received().split("\n")).toHaveLength(5)); // ack, three events, and the empty string
+    const lines = raw.received().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    expect(lines[0]).toEqual({ op: "subscribed", session_id: ROOM, member_id: "m_a" });
+    expect(lines.slice(1).map((l) => l.cursor)).toEqual([1, 2, 3]);
   });
 
   it("reassembles a request split across chunks, and takes several glued into one", async () => {
@@ -640,6 +658,88 @@ describe("the wire", () => {
       expect(coord.stats().rooms).toEqual({});
     }
   );
+});
+
+/** What a stopped coordinator looks like to a new subscriber: it accepts the connection and never says a word. */
+async function silentCoordinator() {
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const sockets: net.Socket[] = [];
+  let received = "";
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    socket.setEncoding("utf8");
+    socket.on("data", (d: string) => { received += d; });
+    socket.on("error", () => undefined);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath(), resolve));
+  cleanups.push(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+  return { received: () => received };
+}
+
+describe("a subscriber gives up on a coordinator that does not answer", () => {
+  it("treats a coordinator that never acknowledges a subscribe as unavailable, and tells every subscription why", async () => {
+    const silent = await silentCoordinator();
+    const via = await open({ ackTimeoutMs: 150 });
+    expect(via.role).toBe("subscriber"); // it connected, which is all the election can tell
+    const a = recorder();
+    const b = recorder();
+    const asked = Date.now();
+    via.subscribe(ROOM, "m_a", 0, a.handlers);
+    via.subscribe(ROOM, "m_b", 0, b.handlers);
+
+    await vi.waitFor(() => expect([a.ended.length, b.ended.length]).toEqual([1, 1]));
+    for (const r of [a, b]) {
+      expect(r.ended[0]).toBeInstanceOf(BusUnavailableError);
+      expect(r.ended[0]).toMatchObject({ reason: "unresponsive" });
+    }
+    await expect(via.closed).resolves.toBeUndefined();
+    expect(silent.received()).toContain('"op":"subscribe"'); // it did ask
+    expect(Date.now() - asked).toBeGreaterThanOrEqual(100); // and it waited for the bound
+  });
+
+  it("tells a subscribe made afterwards, on the bus it gave up on, why at once", async () => {
+    await silentCoordinator();
+    const via = await open({ ackTimeoutMs: 100 });
+    const a = recorder();
+    via.subscribe(ROOM, "m_a", 0, a.handlers);
+    await vi.waitFor(() => expect(a.ended).toHaveLength(1));
+
+    const later = recorder();
+    via.subscribe(ROOM, "m_b", 0, later.handlers);
+    await vi.waitFor(() => expect(later.ended).toHaveLength(1));
+    expect(later.ended[0]).toMatchObject({ reason: "unresponsive" });
+  });
+
+  it("does not give up on a coordinator that answers, however long the subscription then lasts", async () => {
+    const { coord, via } = await rig("subscriber", {}, { ackTimeoutMs: 500 });
+    const a = recorder();
+    await attach(coord, via, "m_a", 0, a.handlers, 1);
+    await pause(1100); // well past the bound: the answer arrived, so nothing is waiting any more
+    expect(a.ended).toEqual([]);
+    coord.ingest(peerEvent(1));
+    await vi.waitFor(() => expect(a.cursors()).toEqual([1]));
+  });
+
+  it("stops waiting when the subscription is withdrawn before the answer", async () => {
+    await silentCoordinator();
+    const via = await open({ ackTimeoutMs: 120 });
+    const a = recorder();
+    via.subscribe(ROOM, "m_a", 0, a.handlers).unsubscribe();
+    await pause(400);
+    expect(a.ended).toEqual([]);
+    const state = await Promise.race([via.closed.then(() => "closed"), pause(30).then(() => "open")]);
+    expect(state).toBe("open");
+  });
+
+  it("keeps the bound generous: a loaded machine must not trip it", () => {
+    // A healthy coordinator answers in well under a millisecond. The bound exists only to
+    // turn "silent for ever" into "fall back to polling", and a false alarm costs one bridge
+    // its share of the collapse, so it errs long.
+    expect(DEFAULT_ACK_TIMEOUT_MS).toBeGreaterThanOrEqual(5_000);
+  });
 });
 
 describe("RoomWindow (D10)", () => {

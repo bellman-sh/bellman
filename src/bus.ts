@@ -63,6 +63,11 @@ export interface Handlers {
    * The subscription ended without being asked to: the coordinator went away, or
    * a catch-up it needed failed. Nothing more will arrive for it. Subscribe again
    * from your own cursor; that is the whole recovery, and it is gapless.
+   *
+   * One reason is different: a `BusUnavailableError` with reason `"unresponsive"` means
+   * the coordinator is there and is not answering (a stopped process still accepts
+   * connections). Subscribing again through the same bus would only wait again, so fall
+   * back to polling for that member (D11) and try the bus later.
    */
   onEnd?(reason: Error): void;
 }
@@ -89,6 +94,14 @@ export interface BusOptions {
   onRoomOpen?(sessionId: string, cursor: number): void;
   /** Coordinator only. A room lost its last subscriber: close its upstream. */
   onRoomClose?(sessionId: string): void;
+  /**
+   * Subscriber only. How long to wait for the coordinator to acknowledge a subscribe
+   * before treating the bus as unavailable. Defaults to `DEFAULT_ACK_TIMEOUT_MS`.
+   *
+   * A handler on this connection that holds the line for longer than this delays the
+   * acknowledgement too, because lines are read one at a time, and trips it.
+   */
+  ackTimeoutMs?: number;
   /** Where the sockets live. Defaults to `busRoot()`. */
   root?: string;
   /** Overridable so the Windows fallback is testable on the platform running the tests. */
@@ -143,7 +156,8 @@ export type BusUnavailableReason =
   | "path-too-long"
   | "relative-root"
   | "filesystem"
-  | "contended";
+  | "contended"
+  | "unresponsive";
 
 /**
  * The bus cannot be created here, and the caller should poll as it does today
@@ -160,6 +174,27 @@ export class BusUnavailableError extends Error {
 // ---------------------------------------------------------------------------
 // Where the bus lives
 // ---------------------------------------------------------------------------
+
+/**
+ * How long a subscriber waits for the coordinator to acknowledge a subscribe: 10 seconds.
+ *
+ * A coordinator that is working answers in well under a millisecond (it registers the
+ * subscription and writes one line). The bound exists for the one that is not: a process
+ * that is stopped, or wedged, still has its socket and still accepts the connection (measured
+ * with SIGSTOP), so connecting cannot tell it from a live one, and a subscriber would wait for
+ * ever, silently, while D11's fallback never fired. The election cannot find that out; a
+ * timeout on a request the subscriber is making anyway can, and says nothing about who owns
+ * the socket.
+ *
+ * It errs long on purpose. A machine that is loaded, swapping or paused by a debugger can stall
+ * a healthy process for seconds, and a false alarm costs only that bridge its share of the
+ * collapse, since polling is what it did before the bus. 10 seconds is also well under the
+ * 25 second poll wait, so a bridge that gives up is back to being served soon after.
+ *
+ * What it covers: a coordinator that does not answer a subscribe. A coordinator that stops
+ * after answering, while its subscribers sit idle, is not noticed until the next subscribe.
+ */
+export const DEFAULT_ACK_TIMEOUT_MS = 10_000;
 
 /**
  * The longest socket path, in bytes, that is safe to hand to Node.
@@ -482,7 +517,10 @@ async function elect(opts: BusOptions): Promise<Bus> {
 
     if (found.kind === "connected") {
       log(`bus: subscribing through ${path}`);
-      return subscriberOver(found.socket, log);
+      const bound = Number.isFinite(opts.ackTimeoutMs) && (opts.ackTimeoutMs as number) > 0
+        ? (opts.ackTimeoutMs as number)
+        : DEFAULT_ACK_TIMEOUT_MS;
+      return subscriberOver(found.socket, log, bound);
     }
     if (found.kind === "blocked") {
       throw unavailable("filesystem", `cannot use ${path}: ${found.error.message}`, found.error);
@@ -598,6 +636,14 @@ export class RoomWindow {
 // ---------------------------------------------------------------------------
 // The wire: NDJSON, one object per line
 // ---------------------------------------------------------------------------
+//
+// Subscriber to coordinator:
+//   {"op":"subscribe",   "session_id", "member_id", "cursor"}
+//   {"op":"unsubscribe", "session_id", "member_id"}
+// Coordinator to subscriber, for one subscription:
+//   {"op":"subscribed", "session_id", "member_id"}   once, and first, for each subscribe
+//   a raw PeerEvent, addressed to the subscribing member, for each event
+//   {"op":"end", "session_id", "member_id", "reason"} when that subscription cannot go on
 
 /**
  * A request is a few hundred bytes. An event line is its payload, which the server
@@ -931,6 +977,9 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
           return;
         }
         const { sessionId, memberId } = request;
+        // The pump is deferred, so this goes out before the first event for the subscription.
+        void writeLine(socket, { op: "subscribed", session_id: sessionId, member_id: memberId })
+          .catch(() => undefined);
         addSub(
           conn,
           sessionId,
@@ -1034,20 +1083,46 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
 // The subscriber
 // ---------------------------------------------------------------------------
 
-function subscriberOver(socket: net.Socket, log: (message: string) => void): Subscriber {
+function subscriberOver(socket: net.Socket, log: (message: string) => void, ackTimeoutMs: number): Subscriber {
   const handlers = new Map<string, Handlers>();
+  /** Subscribes the coordinator has not acknowledged yet, each with the timer that will give up on it. */
+  const waiting = new Map<string, NodeJS.Timeout>();
   let dead = false;
   let closedByUs = false;
+  /** Why the bus was abandoned, when it was this side that abandoned it: handed to every later subscribe too. */
+  let abandoned: Error | undefined;
+
+  const stopWaiting = (key: string): void => {
+    const timer = waiting.get(key);
+    if (timer) clearTimeout(timer);
+    waiting.delete(key);
+  };
+
+  /**
+   * No answer in time. The coordinator accepted the connection and is not serving it, and
+   * everything on this connection depends on it, so the connection is dropped and every
+   * subscription on it ends with the same reason (the close handler below).
+   */
+  const unresponsive = (memberId: string): void => {
+    abandoned = new BusUnavailableError(
+      "unresponsive",
+      `the bus coordinator did not acknowledge the subscription for ${memberId} within ${ackTimeoutMs} ms`
+    );
+    log(`bus: ${abandoned.message}`);
+    socket.destroy();
+  };
 
   const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
   socket.on("error", () => undefined); // a close always follows; that is where it is handled
   socket.once("close", () => {
     dead = true;
+    for (const timer of waiting.values()) clearTimeout(timer);
+    waiting.clear();
     const orphaned = [...handlers.values()];
     handlers.clear();
     // A close the owner asked for is not news to it.
     if (!closedByUs) {
-      const reason = new Error("the connection to the bus coordinator closed");
+      const reason = abandoned ?? new Error("the connection to the bus coordinator closed");
       for (const h of orphaned) callEnd(log, h, reason);
     }
   });
@@ -1057,8 +1132,13 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void): Sub
     async (line) => {
       const message: unknown = JSON.parse(line);
       const m = message as Record<string, unknown> | null;
+      if (m && typeof m === "object" && m.op === "subscribed" && typeof m.session_id === "string" && typeof m.member_id === "string") {
+        stopWaiting(subKey(m.session_id, m.member_id));
+        return;
+      }
       if (m && typeof m === "object" && m.op === "end" && typeof m.session_id === "string" && typeof m.member_id === "string") {
         const key = subKey(m.session_id, m.member_id);
+        stopWaiting(key);
         const h = handlers.get(key);
         if (h) {
           handlers.delete(key);
@@ -1090,17 +1170,22 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void): Sub
     subscribe(sessionId, memberId, cursor, h) {
       checkSubscription(sessionId, memberId, cursor);
       if (dead || closedByUs) {
-        queueMicrotask(() => callEnd(log, h, new Error("the bus is closed")));
+        queueMicrotask(() => callEnd(log, h, abandoned ?? new Error("the bus is closed")));
         return { unsubscribe() {} };
       }
       const key = subKey(sessionId, memberId);
       handlers.set(key, h); // the coordinator replaces an earlier one for this member in the same way
+      stopWaiting(key); // a replacement starts its own wait
+      const timer = setTimeout(() => unresponsive(memberId), ackTimeoutMs);
+      timer.unref(); // waiting for an answer is never a reason to keep a process alive
+      waiting.set(key, timer);
       void writeLine(socket, { op: "subscribe", session_id: sessionId, member_id: memberId, cursor })
         .catch(() => undefined); // a dead socket's close event is what tells the handler
       return {
         unsubscribe() {
           if (handlers.get(key) !== h) return;
           handlers.delete(key);
+          stopWaiting(key);
           void writeLine(socket, { op: "unsubscribe", session_id: sessionId, member_id: memberId })
             .catch(() => undefined);
         },

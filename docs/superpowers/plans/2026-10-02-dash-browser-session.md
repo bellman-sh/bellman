@@ -869,6 +869,8 @@ which is why the sweep has one of its own."
 
 ### Task 3: `verifyState` — one helper for three audiences
 
+> The committed implementation diverges from the blocks below in text, not in code. The **code** commit is authoritative: `807b422`. The blocks are what was originally asked for, with false rationale corrected in place. The Step 2 test comment and the Step 9 message claimed that a helper checking only `audiences[0]` passes every other test in the file. It does not: the callback shares the helper, so that mutation also fails the six `signing in to pay` tests that walk an upgrade through `/callback/:provider`, seven failures in all. What the Step 2 test catches alone is the hand-off's list losing an audience, which nothing else in the file can see because `upgradeThrough` goes from the chooser straight to the callback. Dropping `UPGRADE_AUDIENCE` from the hand-off's list fails exactly that test and no other, measured on the original `??` chain and on `verifyState` alike; Step 8 now runs both mutations. `verifyState`'s doc comment said three audiences reach the hand-off, and there are two until Task 7. The test sits in `the full flow`, because no `describe` is named for the hand-off and that is the one which asserts the `/authorize/:provider` response. Where a block and the commit differ, the commit wins.
+
 **Files:**
 - Modify: `src/oauth/routes.ts` (`/authorize/:provider` and `/callback/:provider` branches)
 - Test: `tests/oauth-flow.test.ts` (extend; it is also the regression net)
@@ -892,12 +894,17 @@ In `tests/oauth-flow.test.ts`, add `paymentLinks` to the `beforeEach` config:
     paymentLinks: { pro_monthly: "https://buy.stripe.com/test_link" },
 ```
 
-And add this test to the `describe` covering the provider hand-off:
+The hand-off and the callback each take their own list of audiences, and today nothing sends an upgrade state through the hand-off: `upgradeThrough` goes from the chooser straight to `/callback/:provider`. A hand-off that stopped accepting one would pass every other test in the file, and this test is what sends it one.
+
+Add it to `describe("the full flow")`, after `will not take a forged or expired state on the way back`. That is the one `describe` that asserts the `/authorize/:provider` response:
 
 ```ts
   it("accepts an upgrade state at the provider hand-off, not only an authorize state", async () => {
-    // Both audiences reach /authorize/:provider. A helper that checks only
-    // audiences[0] passes every other test in this file while losing this.
+    // Both audiences reach /authorize/:provider, but upgradeThrough (in "signing
+    // in to pay") goes from the chooser straight to /callback/:provider, so
+    // nothing else in this file sends an upgrade state through the hand-off. If
+    // it stopped accepting one, every other test would pass while a buyer was
+    // told their sign-in link had expired.
     const chooser = await call("/upgrade/pro_monthly");
     const req = decodeURIComponent(
       /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
@@ -924,11 +931,12 @@ Add to `src/oauth/routes.ts`, above `handleOAuth`:
  * Verify a signed state blob against any of several audiences, and say which
  * one matched.
  *
- * Three audiences now reach /authorize/:provider — connecting a client, signing
- * in to pay, and signing in to the panel — and the callback dispatches on which
- * one it was. Written as a chain of `??` over verifyJwt this was two calls deep
- * and readable; at three it is not, and the callback was re-verifying to find
- * out which audience it had.
+ * Connecting a client and signing in to pay share one provider round trip, so
+ * the hand-off and the callback must both accept either state, and only the
+ * callback has to know which it was: one ends at an authorization code, the
+ * other at Stripe. Returning the audience with the claims lets it dispatch on
+ * the answer rather than verify a second time to find out. A further audience
+ * is one more entry in each list.
  */
 async function verifyState(
   token: string,
@@ -987,7 +995,7 @@ In the `/callback/:provider` branch, replace the nested verify with a single dis
 Run: `npm test`
 Expected: PASS, with the Step 1 count plus one.
 
-- [ ] **Step 8: Prove the audience list is really iterated**
+- [ ] **Step 8: Prove the audience list is really iterated, and see what the Step 2 test catches alone**
 
 Temporarily change `verifyState` to check only the first audience:
 
@@ -997,7 +1005,15 @@ Temporarily change `verifyState` to check only the first audience:
   return claims ? { claims, audience } : null;
 ```
 
-Re-run `npx vitest run tests/oauth-flow.test.ts`. Expected: the Step 2 test FAILS. Restore the loop.
+Re-run `npx vitest run tests/oauth-flow.test.ts`. Expected: the Step 2 test FAILS, and so do the six `signing in to pay` tests that walk an upgrade through `/callback/:provider`, because the callback uses the same helper: seven failures in all. This shows the loop is iterated. It does not isolate the Step 2 test. Restore the loop.
+
+Then drop `UPGRADE_AUDIENCE` from the hand-off's list only, leaving the callback's alone:
+
+```ts
+    const state = await verifyState(req, config, [STATE_AUDIENCE]);
+```
+
+Re-run. Expected: exactly one failure, the Step 2 test. That is what it is for: nothing else in the file sends an upgrade state through the hand-off. Restore the list.
 
 - [ ] **Step 9: Verify and commit**
 
@@ -1015,9 +1031,10 @@ verifyState takes a list and returns the audience that matched, so the
 callback dispatches on the answer rather than asking twice.
 
 No behaviour change. The existing flow suite is the net, plus one test
-pinning the thing a list makes easy to break: that an upgrade state is
-still accepted at the hand-off, which a helper checking only
-audiences[0] would pass every other test in the file while losing."
+for the gap in it: no other test sends an upgrade state through
+/authorize/:provider, because the upgrade tests walk from the chooser
+straight to the callback. Without it, a hand-off that stopped accepting
+one would pass every other test in the file."
 ```
 
 ---

@@ -660,6 +660,44 @@ describe("when the bus cannot be had", () => {
   });
 });
 
+describe("when a room's socket ends for good", () => {
+  it("sends every member of that room back to watch(), whose own poll decides whether the room is over", async () => {
+    // The coordinator holds both rooms' sockets and has no member in the second. The fake says the second room is
+    // closed and the real store does not: the socket stops for good on that, every member of it is handed back to its
+    // own bridge's poll, and that poll finds the room open and carries on. One place decides what closed means, and it
+    // is not the bus.
+    const a = await open(DEV_KEY.jesse, { bus: true });
+    const b = await open(DEV_KEY.jesse, { bus: true });
+    const p0 = await open(DEV_KEY.peer);
+    const p1 = await open(DEV_KEY.peer);
+    const zero = await pair(a, p0);
+    await until(() => a.bridge.busRole() === "coordinator", "the first bridge to coordinate");
+    const one = await pair(b, p1);
+    await until(() => b.bridge.busRole() === "subscriber", "the second bridge to subscribe");
+    await until(() => rooms.sockets.length === 2, "a socket for each room");
+    expect(longPolls(b)).toEqual([]);
+
+    one.room.close();
+    one.room.drop(); // the reconnect is what learns it: the upgrade is refused 409
+
+    await until(() => longPolls(b).length > 0, "the second bridge's member to poll for itself");
+    // Said once by the process that found it, and once more by the bridge that was told: one cause and its confirmation.
+    expect(logs.filter((l) => /room .* is over upstream \(the room is closed\)/.test(l))).toHaveLength(1);
+    expect(logs.some((l) => /polling for .* instead of using the local bus: .*found that the room is closed, so each member checks for itself/.test(l))).toBe(true);
+
+    // The real room is open, and that member's own poll goes on serving it.
+    await send(p1, one.sessionId, one.joinerMember, "after the socket gave up");
+    await until(() => heardText(b, "after the socket gave up"), "the message, by the member's own poll");
+    expect(b.bridge.watching()).toHaveLength(1);
+
+    // And the room that was fine is as it was: still the bus, still no poll.
+    await send(p0, zero.sessionId, zero.joinerMember, "in the room that was fine");
+    await until(() => heardText(a, "in the room that was fine"), "the other room's message");
+    expect(longPolls(a)).toEqual([]);
+    expect(a.bridge.busRole()).toBe("coordinator");
+  });
+});
+
 describe("shutdown", () => {
   it("removes the coordinator's socket when its bridge closes, and a subscriber's close leaves it", async () => {
     const a = await open(DEV_KEY.jesse, { bus: true });

@@ -12,7 +12,7 @@ import {
 import { UNUSED_CLIENT_TTL_MS, type AuthStorage } from "./storage.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
-  canonicalResource, randomId, signJwt, verifyJwt, verifyPkce,
+  canonicalResource, randomId, signJwt, verifyJwt, verifyPkce, type Claims,
 } from "./tokens.js";
 
 /**
@@ -378,6 +378,29 @@ async function finishUpgrade(
   return Response.redirect(checkout.toString(), 302);
 }
 
+/**
+ * Verify a signed state blob against any of several audiences, and say which
+ * one matched.
+ *
+ * Connecting a client and signing in to pay share one provider round trip, so
+ * the hand-off and the callback must both accept either state, and only the
+ * callback has to know which it was: one ends at an authorization code, the
+ * other at Stripe. Returning the audience with the claims lets it dispatch on
+ * the answer rather than verify a second time to find out. A further audience
+ * is one more entry in each list.
+ */
+async function verifyState(
+  token: string,
+  config: Pick<OAuthConfig, "issuer" | "secret">,
+  audiences: readonly string[]
+): Promise<{ claims: Claims; audience: string } | null> {
+  for (const audience of audiences) {
+    const claims = await verifyJwt(token, config.secret, { issuer: config.issuer, audience });
+    if (claims) return { claims, audience };
+  }
+  return null;
+}
+
 export async function handleOAuth(
   request: Request,
   config: OAuthConfig
@@ -568,12 +591,10 @@ export async function handleOAuth(
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
     const req = url.searchParams.get("req") ?? "";
-    // Either audience: the same provider hand-off serves connecting a client
-    // and signing in to pay, and only the callback needs to tell them apart.
-    const claims =
-      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE })) ??
-      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE }));
-    if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    // Every audience reaches the same hand-off; only the callback needs to tell
+    // them apart.
+    const state = await verifyState(req, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE]);
+    if (!state) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
 
     return Response.redirect(
       PROVIDERS[name].authorizeUrl(creds, `${config.issuer}/callback/${name}`, req),
@@ -589,16 +610,17 @@ export async function handleOAuth(
     const creds = config.credentials[name];
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
-    const state = url.searchParams.get("state") ?? "";
-    const claims = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
-    if (!claims) {
-      // An upgrade came back through the same callback; it ends at Stripe
-      // rather than at an authorization code.
-      const upgrade = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE });
-      if (upgrade) return finishUpgrade(url, name, creds, upgrade.bellman as unknown as UpgradeRequest, config);
+    const stateToken = url.searchParams.get("state") ?? "";
+    const state = await verifyState(stateToken, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE]);
+    if (!state) {
       return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
     }
-    const pending = claims.bellman as unknown as AuthorizeRequest;
+    if (state.audience === UPGRADE_AUDIENCE) {
+      // An upgrade came back through the same callback; it ends at Stripe
+      // rather than at an authorization code.
+      return finishUpgrade(url, name, creds, state.claims.bellman as unknown as UpgradeRequest, config);
+    }
+    const pending = state.claims.bellman as unknown as AuthorizeRequest;
 
     const upstreamError = url.searchParams.get("error");
     const code = url.searchParams.get("code");

@@ -648,7 +648,9 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       let pongTimer: NodeJS.Timeout | undefined;
       // Not a safety net, and not what ends a refusal: that is the first `error`, handled below. This
       // ends an attempt at a server that takes the connection and never answers the handshake, which
-      // Node would otherwise hold for 300 s (measured on both Nodes) with the room unserved all of it.
+      // Node would hold for 300 s (measured on both Nodes). The poll starts only once `degradeAfter`
+      // attempts have failed, so until then this module delivers nothing, and without this timer each
+      // of those attempts would cost the room 300 s of it.
       const connectTimer = setTimeout(() => finish({ kind: "failed", timedOut: true }), connectTimeoutMs);
       connectTimer.unref();
 

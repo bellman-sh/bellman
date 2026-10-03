@@ -295,8 +295,12 @@ export class OutboxDriver {
           // commit a row, and set this marker, while the drain is in flight, so a delete
           // that did not look would take the marker with the rest and leave the row with
           // nothing to wake for it. Deleting first and putting the marker back after a
-          // look would be just as correct in normal operation: consecutive storage
-          // awaits do not open the input gate, so no other request runs between them.
+          // look would be just as correct in normal operation. What this order needs is
+          // narrower than a rule about storage awaits, and was measured: on workerd no
+          // other request ran between this list and this delete in 0 of 6,000 probes,
+          // where a control that opens the input gate on purpose let one in on 2,184 of
+          // 6,000. A write's await does open the gate, so a write, an RPC or a timer
+          // between the two would let another request in.
           // The two differ in what a crash leaves behind. Delete first, and it leaves no
           // marker and a queued row, which nothing recovers. Look first, and it leaves
           // the marker and a queued row, which the alarm recovers. When two shapes are

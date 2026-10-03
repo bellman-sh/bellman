@@ -257,10 +257,11 @@ type Probe =
   | { kind: "blocked"; error: NodeJS.ErrnoException };
 
 /**
- * Is anyone there? Connectability is the whole liveness test: no pid in a file, no
- * `kill(pid, 0)`, no clock, no pid reuse. It tells a dead coordinator from a live one
- * and nothing more: a coordinator that is stopped and not dead still accepts the
- * connection and then serves nothing (measured with SIGSTOP), and nothing here notices.
+ * Is anyone there? Connectability is the whole test of who owns the socket: no pid in a
+ * file, no `kill(pid, 0)`, no clock, no pid reuse. It tells a dead coordinator from a live
+ * one and nothing more: a coordinator that is stopped and not dead still accepts the
+ * connection and then serves nothing (measured with SIGSTOP). The election cannot see
+ * that; the subscriber's timeout on its own subscribe can (DEFAULT_ACK_TIMEOUT_MS).
  */
 function probe(path: string): Promise<Probe> {
   return new Promise((resolve) => {
@@ -408,6 +409,11 @@ function listen(server: net.Server, path: string): Promise<Listen> {
     let file: FileId | undefined;
     const failed = (error: NodeJS.ErrnoException): void => {
       server.off("listening", bound);
+      // D8 names EADDRINUSE. macOS reports EEXIST instead to the loser of two simultaneous
+      // binds: handling only the spec's code failed 31 of 40 real races at an empty path, with
+      // the loser going off to poll instead of connecting to the winner. Linux is documented
+      // to report EADDRINUSE for it and that was not measured here. Either code means the same
+      // thing: someone else bound first.
       resolve(
         error.code === "EADDRINUSE" || error.code === "EEXIST"
           ? { kind: "taken", code: error.code }
@@ -495,6 +501,11 @@ async function elect(opts: BusOptions): Promise<Bus> {
     throw unavailable("relative-root", `bus root ${JSON.stringify(root)} is not absolute`);
   }
   const path = busPath({ url: opts.url, credential: opts.credential, root });
+  // A correctness boundary, not tidiness. Node 22.16 silently truncates a socket path past the
+  // OS limit, and the hash is the END of ours, so two identities whose hashes differ only past
+  // the cut would share one bus: exactly what hashing the credential is there to prevent. Node
+  // 25.8 refuses such a path (EINVAL) instead. Both were measured on macOS. Linux is unmeasured
+  // and its limit here is the documented one: see SUN_PATH_MAX_BYTES.
   if (Buffer.byteLength(path) > SUN_PATH_MAX_BYTES) {
     throw unavailable(
       "path-too-long",

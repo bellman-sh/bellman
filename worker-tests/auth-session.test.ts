@@ -5,10 +5,13 @@
  *
  * AuthStorage has no conformance suite the way BellmanStore does, and two
  * hand-written implementations of one interface are exactly where behaviour
- * drifts. So most of this file repeats, against the real object, what
- * tests/panel-session.test.ts asserts of MemoryAuthStore, and a change to one is
- * a change to the other. The sweep has no in-memory counterpart and is covered
- * only here.
+ * drifts. So each store-level test in tests/panel-session.test.ts has a twin
+ * here, against the real object, and a change to one is a change to the other.
+ * Its tests of the pure functions (sessionDead, replannedAt) have none: the
+ * object calls the first rather than copying it, which the boundary twins below
+ * hold it to, and never sees the second. The sweep exists only in the object and
+ * is covered only here, and some tests here read storage, which the in-memory
+ * store does not expose.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
@@ -53,6 +56,11 @@ const storedIds = (name: string) =>
     ...(await ctx.storage.list({ prefix: "sess:" })).keys(),
   ]);
 
+/** The record an object holds under an id, read from inside it. */
+const storedSession = (name: string, id: string) =>
+  runInDurableObject(auth(name), async (_i: AuthDO, ctx) =>
+    ctx.storage.get<PanelSession>(`sess:${id}`));
+
 describe("AuthDO sessions", () => {
   it("stores and returns a session", async () => {
     const o = auth("s-store");
@@ -78,6 +86,38 @@ describe("AuthDO sessions", () => {
     await o.putSession("sid", panelSession());
 
     expect(await o.touchSession("sid", T0 + SESSION_IDLE_MS + 1)).toBeUndefined();
+  });
+
+  // The limits of sessionDead, asked of the object. The Node suite pins them on
+  // the function itself; these pin that the object asks it, and does not carry a
+  // copy that disagrees with it at exactly the limit.
+  it("is alive exactly at the idle boundary", async () => {
+    const o = auth("s-idle-boundary");
+    await o.putSession("sid", panelSession());
+
+    expect(await o.touchSession("sid", T0 + SESSION_IDLE_MS)).toBeDefined();
+  });
+
+  // Pins the ceiling as inclusive: dead strictly past expires_at, not at it.
+  // last_used_at is moved up to the ceiling so the idle clause is false and the
+  // ceiling comparison is the only thing deciding; left at T0 the session would
+  // already be idle by then.
+  it("is alive exactly at the ceiling", async () => {
+    const o = auth("s-ceiling-boundary");
+    await o.putSession("sid", panelSession({ last_used_at: T0 + SESSION_TTL_MS }));
+
+    expect(await o.touchSession("sid", T0 + SESSION_TTL_MS)).toBeDefined();
+  });
+
+  // The order touchSession keeps: the dead check ahead of the touch check. A NaN
+  // last_used_at fails the touch comparison, so a record holding one would read
+  // as not due and be served unless it is refused first. It also holds the object
+  // to sessionDead's refusal of a time that is not a finite number.
+  it("refuses a record whose last_used_at is NaN", async () => {
+    const o = auth("s-nan");
+    await o.putSession("sid", panelSession({ last_used_at: NaN }));
+
+    expect(await o.touchSession("sid", T0)).toBeUndefined();
   });
 
   it("drops a dead session, so a clock moving back cannot revive it", async () => {
@@ -114,6 +154,19 @@ describe("AuthDO sessions", () => {
     expect((await o.touchSession("sid", T0 + SESSION_TOUCH_MS))?.last_used_at).toBe(T0);
   });
 
+  // The skip is a decision not to write, which the record a touch returns cannot
+  // show: a touch that stored the new time and handed back the stale record would
+  // pass every assertion made through its return value. This reads what is
+  // stored.
+  it("does not write last_used_at while it is fresh", async () => {
+    const o = auth("s-skip-storage");
+    await o.putSession("sid", panelSession());
+
+    await o.touchSession("sid", T0 + SESSION_TOUCH_MS); // exactly the threshold: a skip
+
+    expect((await storedSession("s-skip-storage", "sid"))?.last_used_at).toBe(T0);
+  });
+
   it("writes last_used_at once it is stale", async () => {
     const o = auth("s-write");
     await o.putSession("sid", panelSession());
@@ -144,6 +197,33 @@ describe("AuthDO sessions", () => {
     for (let now = T0; now < T0 + 3 * SESSION_IDLE_MS; now += step) {
       expect(await o.touchSession("sid", now), `dead at +${now - T0}ms`).toBeDefined();
     }
+  });
+
+  // The bound SESSION_TOUCH_MS's comment states, written out as 23 hours rather
+  // than as SESSION_IDLE_MS minus SESSION_TOUCH_MS, so that changing either
+  // constant fails the two tests below and the comment is rewritten with it. It
+  // is measured from the worst case: the last request skipped the write, so
+  // last_used_at lags it by exactly the threshold. A request that had written
+  // would buy up to an hour more.
+  const GUARANTEED_GAP = 23 * 60 * 60 * 1000;
+
+  it("survives a gap of SESSION_IDLE_MS minus SESSION_TOUCH_MS after a skipped write", async () => {
+    const o = auth("s-bound-survives");
+    await o.putSession("sid", panelSession());
+    // Stale by exactly the threshold, which is the most a skipped write leaves.
+    const skipped = T0 + SESSION_TOUCH_MS;
+    await o.touchSession("sid", skipped);
+
+    expect(await o.touchSession("sid", skipped + GUARANTEED_GAP)).toBeDefined();
+  });
+
+  it("dies one millisecond past SESSION_IDLE_MS minus SESSION_TOUCH_MS after a skipped write", async () => {
+    const o = auth("s-bound-dies");
+    await o.putSession("sid", panelSession());
+    const skipped = T0 + SESSION_TOUCH_MS;
+    await o.touchSession("sid", skipped);
+
+    expect(await o.touchSession("sid", skipped + GUARANTEED_GAP + 1)).toBeUndefined();
   });
 
   // The window touchSession is one call to close. Sent together, a sign-out is

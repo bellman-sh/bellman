@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
-  sessionDead, type PanelSession,
+  replannedAt, sessionDead, type PanelSession,
 } from "../src/oauth/storage.js";
 import type { Identity } from "../src/types.js";
 
@@ -73,6 +73,26 @@ describe("sessionDead", () => {
   });
 });
 
+describe("replannedAt", () => {
+  it("returns the timestamp when it is a finite number", () => {
+    expect(replannedAt(panelSession({ replanned_at: T0 + 5 }))).toBe(T0 + 5);
+  });
+
+  // Zero is the answer that fails closed: it makes the plan as stale as it can
+  // be, so the next request re-resolves it. The test is finiteness and not type,
+  // because typeof admits NaN and the infinities, which break a subtraction
+  // followed by a comparison whichever way the comparison is phrased.
+  it.each([
+    ["missing", undefined],
+    ["a string", "123"],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["-Infinity", -Infinity],
+  ])("reads %s as never", (_label, value) => {
+    expect(replannedAt(panelSession({ replanned_at: value as unknown as number }))).toBe(0);
+  });
+});
+
 describe("MemoryAuthStore sessions", () => {
   it("stores and returns a session", async () => {
     const store = new MemoryAuthStore();
@@ -98,6 +118,16 @@ describe("MemoryAuthStore sessions", () => {
     await store.putSession("sid", panelSession());
 
     expect(await store.touchSession("sid", T0 + SESSION_IDLE_MS + 1)).toBeUndefined();
+  });
+
+  // The order touchSession keeps: the dead check ahead of the touch check. A NaN
+  // last_used_at fails the touch comparison, so a corrupt record would read as
+  // not due and be served unless it is refused first.
+  it("refuses a record whose last_used_at is NaN", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession({ last_used_at: NaN }));
+
+    expect(await store.touchSession("sid", T0)).toBeUndefined();
   });
 
   it("drops a dead session rather than leaving it to a sweep", async () => {

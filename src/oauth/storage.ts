@@ -150,27 +150,36 @@ export function sessionDead(
  * Shared for the same reason sessionDead is shared: AuthDO implements the same
  * method, and two copies of this comparison can drift apart at exactly
  * SESSION_TOUCH_MS. One predicate means one boundary, pinned once.
+ *
+ * Ask it only of a session sessionDead has already passed. It is a comparison,
+ * so a NaN last_used_at reads as not due, and a record that is already dead
+ * would be served and never written.
  */
 export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): boolean {
   return now - s.last_used_at > SESSION_TOUCH_MS;
 }
 
 /**
- * When this session's plan was last re-resolved, treating a missing or
- * non-numeric value as never.
+ * When this session's plan was last re-resolved, treating anything that is not
+ * a finite number as never.
  *
- * The guard is for a record whose replanned_at is missing or not a number, and
- * it fails closed there, the same discipline sessionDead follows: zero makes
- * the plan as stale as it can be, so the next request re-resolves it. It also
- * makes the staleness comparison safe however a later author phrases it.
- * `now - undefined` is NaN and NaN fails every comparison, so "stale when
- * now - replanned_at > bound" reads false and serves an old plan for the life
- * of the session, a revoked grant held silently, while "fresh when
- * now - replanned_at <= bound" happens to re-resolve. With zero, both phrasings
+ * Zero makes the plan as stale as it can be, so the next request re-resolves
+ * it. The test is finiteness and not type, because `typeof` admits NaN and the
+ * infinities, which are the values that break a subtraction followed by a
+ * comparison. `now - NaN` is NaN, and NaN fails every comparison, so "stale
+ * when now - replanned_at > bound" reads false and serves an old plan for the
+ * life of the session, a revoked grant held silently, while "fresh when
+ * now - replanned_at <= bound" happens to re-resolve. `now - Infinity` is
+ * negative infinity, which reads fresh under both. With zero, both phrasings
  * re-resolve.
+ *
+ * The lesson is the class, not this field: a number read off a stored record
+ * has to be checked for finiteness, or tested by a predicate that fails closed
+ * on non-finite input, as sessionDead is. Anyone adding a timestamp to
+ * PanelSession takes on one more of these.
  */
 export function replannedAt(s: PanelSession): number {
-  return typeof s.replanned_at === "number" ? s.replanned_at : 0;
+  return Number.isFinite(s.replanned_at) ? s.replanned_at : 0;
 }
 
 /** Why a registration was refused, or that it was taken. */
@@ -557,6 +566,11 @@ export class MemoryAuthStore implements AuthStorage {
     // Dropped here rather than left to a sweep, so dead is terminal from the
     // first read that sees it: a clock that moves backwards cannot revive the
     // session. The sweep reclaims space; it does not decide liveness.
+    //
+    // This check has to stay ahead of the touchDue test below. That is a
+    // comparison, and a NaN last_used_at fails it, so a record already dead
+    // would read as not due and be served, never written and never dropped.
+    // Tests hold the order.
     if (sessionDead(stored, now)) {
       this.sessions.delete(id);
       return undefined;

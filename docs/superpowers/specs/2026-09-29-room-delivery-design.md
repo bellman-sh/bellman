@@ -187,8 +187,9 @@ emits `error` and then no `close` at all, and `readyState` stays 0: the failure
 is reported, but a client that waits for `close` waits for ever (a first
 measurement waited two minutes for one). Node 25 follows the `error` with a
 `close`. And a server that accepts TCP and never answers the handshake leaves
-the client with no event at all and no timeout of any kind, so a connect timeout
-of the client's own is the only thing that ends that attempt.
+the client with no event for five minutes: both Nodes fire `error` at 301 s
+(Node 25 then closes 1006, Node 22 says nothing more). A room cannot go unserved
+that long, so a connect timeout of the client's own is what ends that attempt.
 
 **Three more, from building the client.** `fetch` cannot be the second request:
 it refuses an `Upgrade` header (a TypeError whose cause is "invalid upgrade

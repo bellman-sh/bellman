@@ -120,7 +120,7 @@ export interface RoomSocketTuning {
   degradedCapMs: number;
   /** How many attempts in a row fail before the room is polled instead. 3. */
   degradeAfter: number;
-  /** How long a handshake may go unanswered. Node's own client has no such bound. 10 s. */
+  /** How long a handshake may go unanswered before it is abandoned. Node's own client waits 300 s. 10 s. */
   connectTimeoutMs: number;
   /**
    * How long a connection must have lasted for the wait after it ends to start again from the base.
@@ -616,9 +616,10 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
   /**
    * One WebSocket, from the request until it ends. Resolves when it is over, whichever way.
    *
-   * Three things in here are about Node's client and not about Bellman. It has no connect timeout: a
-   * server that takes the connection and never answers the handshake leaves it with no event at all
-   * (nothing after 3 s, measured on both Nodes), so this has its own timer. A refused handshake ends
+   * Three things in here are about Node's client and not about Bellman. Its wait on a handshake nobody
+   * answers is five minutes: a server that takes the connection and says nothing leaves it with no event
+   * for 300 s and then an `error` (measured on both Nodes, 301.1 s each), and a room cannot go unserved
+   * that long, so this has its own timer. A refused handshake ends
    * with `error` alone on Node 22: readyState stays CONNECTING and no `close` arrives (a first
    * measurement waited two minutes for one). Node 25 follows the `error` with a `close`. So the attempt
    * ends on the first `error` and never waits for a `close` that may not come.

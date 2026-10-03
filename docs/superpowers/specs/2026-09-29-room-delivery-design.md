@@ -183,11 +183,22 @@ of the interesting checks run — which means the probe can itself be answered
 101, so whatever socket that hands back must be destroyed rather than leaked.
 
 **Two more behaviours worth not rediscovering.** On Node 22 a refused handshake
-emits no `close` at all and `readyState` stays 0 indefinitely, so there is no
-event that ever reports the failure; a connect timeout of the client's own is
-the entire failure path on that runtime, not a safety net. And a server that
-accepts TCP and never answers the handshake leaves the client waiting with no
-timeout of any kind.
+emits `error` and then no `close` at all, and `readyState` stays 0: the failure
+is reported, but a client that waits for `close` waits for ever (a first
+measurement waited two minutes for one). Node 25 follows the `error` with a
+`close`. And a server that accepts TCP and never answers the handshake leaves
+the client with no event at all and no timeout of any kind, so a connect timeout
+of the client's own is the only thing that ends that attempt.
+
+**Three more, from building the client.** `fetch` cannot be the second request:
+it refuses an `Upgrade` header (a TypeError whose cause is "invalid upgrade
+header", on both Nodes), which is why the probe uses `node:http`. Node 25's
+WebSocket sends a refused upgrade a second time by itself when the status is 401
+(two identical requests; a 409 or a 503 gets one, and Node 22.16 sends one every
+time), so a refused credential is presented three times per attempt there. And
+closing a connection whose peer never answers frees nothing from the client's
+side: the socket was still CLOSING 30 s later on both Nodes, so an abandoned
+connection holds its file descriptor until the operating system gives up on it.
 
 ### D3 — The Worker never forwards the client's `Request` to the object.
 
@@ -465,6 +476,24 @@ unchanged; subscribers cannot tell. So #99 failing never costs #43's collapse,
 and #43 failing never costs anyone their messages.
 
 This is an optimisation, never a dependency.
+
+**In code (client half).** `openRoomSocket` takes the long poll as a required
+`poll`, because a fallback that is mandatory is a parameter and not something a
+caller is trusted to remember. After `degradeAfter` (3) failed attempts in a row
+the room is polled through it, and what it returns reaches the same `ingest`
+through the same one cursor guard as the socket's frames, so the bus cannot tell
+which path an event came by. When a socket opens again the poll is cancelled and
+the socket replays from the cursor reached.
+
+Two statuses are not waited out. A 409 stops it, after one poll with no wait for
+what the room said before it closed: the 409 comes instead of the replay that
+reconnect was about to be sent. A 401 stops attempts with that credential, which
+is read again for every attempt because an access token lasts ten minutes
+(`ACCESS_TOKEN_TTL_SECONDS`), and leaves the room to the poll until the
+credential changes. Everything else is full-jitter backoff. A keepalive, the text
+the object answers itself (D5), is what tells a connection gone half-dead from a
+room that is quiet in seconds, rather than whenever the operating system gives up
+on it.
 
 ### D12 — `getSession` returns `StoredSession`; the one history caller gets `eventAt`.
 

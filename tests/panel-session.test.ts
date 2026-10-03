@@ -190,7 +190,7 @@ describe("MemoryAuthStore sessions", () => {
    * It does not pin the margin. Its 30-minute gaps sit far inside the real
    * bound, SESSION_IDLE_MS minus SESSION_TOUCH_MS (23 hours), so it passes for
    * every touch interval below the idle window and fails only once the interval
-   * reaches it.
+   * reaches it. The two tests after this one pin the bound itself.
    */
   it("does not expire a session used continuously for longer than the idle window", async () => {
     const store = new MemoryAuthStore();
@@ -201,5 +201,32 @@ describe("MemoryAuthStore sessions", () => {
     for (let now = T0; now < T0 + 3 * SESSION_IDLE_MS; now += step) {
       expect(await store.touchSession("sid", now), `dead at +${now - T0}ms`).toBeDefined();
     }
+  });
+
+  // The bound SESSION_TOUCH_MS's comment states, written out as 23 hours rather
+  // than as SESSION_IDLE_MS minus SESSION_TOUCH_MS, so that changing either
+  // constant fails the two tests below and the comment is rewritten with it. It
+  // is measured from the worst case: the last request skipped the write, so
+  // last_used_at lags it by exactly the threshold. A request that had written
+  // would buy up to an hour more.
+  const GUARANTEED_GAP = 23 * 60 * 60 * 1000;
+
+  it("survives a gap of SESSION_IDLE_MS minus SESSION_TOUCH_MS after a skipped write", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    // Stale by exactly the threshold, which is the most a skipped write leaves.
+    const skipped = T0 + SESSION_TOUCH_MS;
+    await store.touchSession("sid", skipped);
+
+    expect(await store.touchSession("sid", skipped + GUARANTEED_GAP)).toBeDefined();
+  });
+
+  it("dies one millisecond past SESSION_IDLE_MS minus SESSION_TOUCH_MS after a skipped write", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    const skipped = T0 + SESSION_TOUCH_MS;
+    await store.touchSession("sid", skipped);
+
+    expect(await store.touchSession("sid", skipped + GUARANTEED_GAP + 1)).toBeUndefined();
   });
 });

@@ -108,7 +108,9 @@ export const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
  * gap between its requests exceeds SESSION_IDLE_MS minus SESSION_TOUCH_MS, it
  * cannot die of idleness, and every hour added here comes straight off that
  * guarantee. A ratio is the wrong way to judge a new value: twelve hours is
- * still "half the window" and would leave a guarantee of only twelve.
+ * still "half the window" and would leave a guarantee of only twelve. A test
+ * pins the 23 hours, so changing either constant fails there instead of moving
+ * the guarantee unnoticed.
  */
 export const SESSION_TOUCH_MS = 60 * 60 * 1000;
 
@@ -127,7 +129,10 @@ export const SESSION_TOUCH_MS = 60 * 60 * 1000;
  * never expire; "is it still inside?" reads false for the same record, and
  * false there means dead. Ending sessions reliably is the reason this is a
  * stored record rather than a signed cookie, so on a malformed record the
- * answer has to be dead.
+ * answer has to be dead. `now` is inside the same test on purpose: a NaN clock
+ * drops the one session it touches, which costs a re-sign-in and can only
+ * follow from a bug, where the alternative waves every session through for as
+ * long as the clock is broken.
  * hasLapsed goes the other way on an absent expires_at because older client
  * records must keep working; no session record predates this one, so there is
  * nothing to grandfather.

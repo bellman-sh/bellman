@@ -169,10 +169,18 @@ export const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 /**
  * How stale last_used_at gets before touchSession writes it back.
  *
- * Far below SESSION_IDLE_MS on purpose, and the margin is the correctness
- * argument: a session in continuous use carries a last_used_at at most this
- * stale, which the idle test then compares against a window 24 times larger.
- * Skipping the write cannot bring a live session inside the window.
+ * The skip has a cost, and this constant bounds it. Idle time is measured from
+ * last_used_at, which lags the last real request by up to this much, so a
+ * session that goes quiet dies between SESSION_IDLE_MS minus this (23 hours)
+ * and SESSION_IDLE_MS after its last request, depending on whether that request
+ * happened to write. Skipping is never more permissive than writing on every
+ * request: it can only end a quiet session early, never keep one alive longer.
+ *
+ * What a session can rely on is the difference, not the ratio. As long as no
+ * gap between its requests exceeds SESSION_IDLE_MS minus SESSION_TOUCH_MS, it
+ * cannot die of idleness, and every hour added here comes straight off that
+ * guarantee. A ratio is the wrong way to judge a new value: twelve hours is
+ * still "half the window" and would leave a guarantee of only twelve.
  */
 export const SESSION_TOUCH_MS = 60 * 60 * 1000;
 
@@ -291,9 +299,15 @@ describe("MemoryAuthStore sessions", () => {
   });
 
   /**
-   * The assertion the SESSION_TOUCH_MS optimisation exists to be checked by.
-   * Writing only hourly looks as though it could let an active session fall
-   * outside a 24-hour idle window; it cannot, and this is the proof.
+   * Pins that skipping the write does not accumulate. Written only hourly,
+   * last_used_at could in principle fall further and further behind a session
+   * in constant use; it does not, because any request more than
+   * SESSION_TOUCH_MS after the stored value writes it back.
+   *
+   * It does not pin the margin. Its 30-minute gaps sit far inside the real
+   * bound, SESSION_IDLE_MS minus SESSION_TOUCH_MS (23 hours), so it passes for
+   * every touch interval below the idle window and fails only once the interval
+   * reaches it.
    */
   it("does not expire a session used continuously for longer than the idle window", async () => {
     const store = new MemoryAuthStore();
@@ -412,9 +426,10 @@ because no purge has run.
 
 touchSession skips the write while last_used_at is fresher than
 SESSION_TOUCH_MS, so a polling panel does not write on every request.
-The margin is the correctness argument — an hour of staleness against a
-24-hour window — and it gets a test that drives three days of continuous
-use rather than only a comment.
+The skip costs a quiet session up to that long of its idle window, so what
+a session can rely on is SESSION_IDLE_MS minus SESSION_TOUCH_MS, not the
+ratio of the two. A test that drives three days of continuous use pins that
+the skip does not accumulate.
 
 replannedAt reads an absent field as 0. now - undefined is NaN, every
 comparison against NaN is false, and a staleness check can therefore

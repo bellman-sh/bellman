@@ -16,7 +16,10 @@
 - **Nothing importing `cloudflare:workers` can be imported by a vitest test.** `src/oauth/store.ts`, `src/worker.ts` and `src/store-do.ts` are excluded from the Node build. Shapes and pure logic go in `src/oauth/storage.ts`, which stays importable from plain Node.
 - **`npm run verify` before every commit.** It is `typecheck && typecheck:worker && build && test && test:worker`.
 - **Read and register in the same turn** — no `await` between a read and the write that depends on it, in any method that must be atomic.
-- **A test for an operation on one record must have another record present that the operation must not touch, and assert it survives untouched.** A single-record test cannot distinguish "operates on the record I named" from "operates on everything": the claim that the named record changed has a second producer, that every record changed. This plan has met that gap in the sweep tests, in `deleteSession`'s, in the writes of `touchSession` and `replanSession`, and in `touchSession`'s drop of a dead session. A drop written as `deleteAll()` on the singleton `AuthDO` passed every test, and would have taken every session, every refresh token, every client registration and the billing ledger with it. The rule binds route tests as well: a sign-out test needs a second session that stays signed in.
+- **Every operation that writes, deletes or drops a record by the key it was given, error-path cleanups included, has at least one test with another record present that the operation must not touch.** A single-record test cannot distinguish "operates on the record I named" from "operates on everything": the claim that the named record changed has a second producer, that every record changed. The rule is per operation and not per test, so a boundary test of a pure predicate needs no bystander. This plan has met the gap in the sweep tests, in `deleteSession`'s, in the writes of `touchSession` and `replanSession`, and in `touchSession`'s drop of a dead session, which is an error-path cleanup: a drop written as `deleteAll()` on the singleton `AuthDO` passed every test, and would have taken every session, every refresh token, every client registration and the billing ledger with it. The bystander assertion has three parts, and the rule binds route tests as well:
+  - **Untouched.** Compare it with a value built for the comparison. Where the store keeps the objects it is given, freeze the shared fixtures or copy every nested object, because rebuilding the top level is not enough when what leaks is nested.
+  - **Answers with its own record.** Read the keys alternately, with nothing written between the reads, and give the bystander values different from everything the operation writes. A cache that ignores the key is cleared by every write, so a read that follows a write cannot catch it, and a bleed that writes the same value is invisible.
+  - **At route level, still signed in as themselves.** Reading a session touches it, so "untouched" there means a status and an identity, never a timestamp; an assertion that the bystander's record is unchanged to the byte cannot hold. A sign-out test needs a second session that stays signed in.
 - **A room holds many members, not two.** Never write "the other session" or "two sessions" in code, comments, commits or docs. Say *members*, *the room*, or *peers*.
 - **`main` moves only through merges.** Work stays on `mcfearsome/a-browser-session-for-dash-the-panel-signs-in-wi` and lands by PR.
 - **No new MCP tool, so `extension/manifest.json` is untouched.** If a task finds itself editing it, that task has gone out of scope.
@@ -461,7 +464,7 @@ revoked grant would hold for the session's whole life."
 
 ### Task 2: The same session methods on `AuthDO`, with a sweep
 
-> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `feafe33`, `f386e69`, `08b9800`, `66d857d`, `9bc7b30`, `5df1e78`, `113edd2`, `e3e6c24`, `b53007c` and `c4b17e2`. They add what the blocks do not have: `AuthStorage` declares the session methods (Task 1 could not, because widening the interface without an implementation reds `typecheck:worker`); a fourth method, `replanSession`, which Task 6's write-back calls so that a sign-out landing between the touch and the write-back is not undone, and which resolves true when it merged and false when the session was gone; tests for it in both programs; three tests for the no-yield constraint, each a sign-out in flight against `touchSession` or `replanSession`; the workerd twins of the Node suite's boundary, NaN, skip and 23-hour tests, with the skip pinned by counting `storage.put` calls; and, in both programs, tests that each mutating method leaves a second session alone. The sweep tests and Step 7 are corrected in place, twice over: the test as first asked for could not fail, and its replacement never had a live session in front of a sweep. Where a block and a commit differ, the commit wins.
+> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `feafe33`, `f386e69`, `08b9800`, `66d857d`, `9bc7b30`, `5df1e78`, `113edd2`, `e3e6c24`, `b53007c`, `c4b17e2`, `d72e814`, `eda146c` and `47ef292`. They add what the blocks do not have: `AuthStorage` declares the session methods (Task 1 could not, because widening the interface without an implementation reds `typecheck:worker`); a fourth method, `replanSession`, which Task 6's write-back calls so that a sign-out landing between the touch and the write-back is not undone, and which resolves true when it merged and false when the session was gone; tests for it in both programs; three tests for the no-yield constraint, each a sign-out in flight against `touchSession` or `replanSession`; the workerd twins of the Node suite's boundary, NaN, skip and 23-hour tests, with the skip pinned by counting `storage.put` calls; and, in both programs, tests that each mutating method leaves a second session alone and that each id answers with its own record. The sweep tests and Step 7 are corrected in place, twice over: the test as first asked for could not fail, and its replacement never had a live session in front of a sweep. Where a block and a commit differ, the commit wins.
 
 **Files:**
 - Modify: `src/oauth/store.ts` (`AuthDO`, `AuthStore`)
@@ -2552,14 +2555,19 @@ describe("/auth/signout", () => {
 
   it("invalidates the session server-side, and only that one", async () => {
     const mine = await seedSession(cfg, "mine");
-    const yours = await seedSession(cfg, "yours");
+    const yours = await seedSession(cfg, "yours", {
+      identity: { ...PANEL_IDENTITY, userId: "u_github_9999", label: "sam@example.dev" },
+      identity_keys: ["github:9999"],
+    });
 
     expect((await signout(mine)).status).toBe(204);
 
     expect((await route(withCookie("/auth/session", mine))).status).toBe(401);
-    // Another browser stays signed in. A test with a single session to end
-    // passes a sign-out that ends every session.
-    expect((await route(withCookie("/auth/session", yours))).status).toBe(200);
+    // Another browser, signed in as someone else, stays signed in as them. A test
+    // with a single session to end passes a sign-out that ends every session.
+    const still = await route(withCookie("/auth/session", yours));
+    expect(still.status).toBe(200);
+    expect(((await still.json()) as { user_id: string }).user_id).toBe("u_github_9999");
   });
 
   it("clears the cookie with every attribute that set it", async () => {
@@ -2723,9 +2731,9 @@ That the delete is server-side has its own test: dropping it leaves the
 next /auth/session answering 200. It is the whole reason the cookie is a
 stored id rather than a signed token.
 
-The same test keeps a second session and asserts it is still signed in
-afterwards, because a sign-out that ended every session passes a test with
-only one to end."
+The same test keeps a second session, for someone else, and asserts it is
+still signed in as them afterwards, because a sign-out that ended every
+session passes a test with only one to end."
 ```
 
 ---

@@ -4,7 +4,7 @@
  * including the unknown-role case that no tool path can produce (design D5).
  */
 import { describe, it, expect } from "vitest";
-import { denyVerb, verbsOfRole } from "../src/roles.js";
+import { denyVerb, mustReport, verbsOfRole } from "../src/roles.js";
 import { resolveManifest } from "../src/manifest.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
@@ -106,5 +106,47 @@ describe("denyVerb", () => {
   it("is callable with only a session and a member", () => {
     const fn: (s: ReturnType<typeof session>, m: ReturnType<typeof member>, v: "send") => string | null = denyVerb;
     expect(fn(session({ manifest: roomManifest() }), member(), "send")).toBeNull();
+  });
+});
+
+describe("mustReport", () => {
+  const m = roomManifest({
+    roles: {
+      lead: { can: ["send"], description: null, reports: true },
+      observer: { can: [], description: null, reports: false },
+    },
+    defaultRole: "observer",
+    creatorRole: "lead",
+  });
+
+  it("answers from the role definition", () => {
+    expect(mustReport(m, "lead")).toBe(true);
+    expect(mustReport(m, "observer")).toBe(false);
+  });
+
+  /**
+   * Fails closed, like verbsOfRole. Sessions round-trip through JSON in Durable
+   * Objects, so an unrecognised seat must be asked for nothing rather than throw.
+   */
+  it("expects nothing of a role the manifest does not define", () => {
+    expect(mustReport(m, "ghost")).toBe(false);
+  });
+
+  it("expects nothing of a name reachable on Object.prototype", () => {
+    expect(mustReport(m, "constructor")).toBe(false);
+    expect(mustReport(m, "__proto__")).toBe(false);
+  });
+
+  // Object.hasOwn is what makes this an OWN-property lookup, and the cases above
+  // cannot pin it: nothing on Object.prototype has a `reports`, so a
+  // `roles[r]?.reports ?? false` rewrite answers false for all of them too. An
+  // inherited role that DOES report separates the two — hasOwn says false, the
+  // optional chain says true. Same reasoning as verbsOfRole's inherited-role test.
+  it("ignores a role inherited from the prototype chain", () => {
+    const inherited = {
+      ...m,
+      roles: Object.create({ inherited: { can: [], description: null, reports: true } }),
+    };
+    expect(mustReport(inherited, "inherited")).toBe(false);
   });
 });

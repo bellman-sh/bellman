@@ -36,6 +36,42 @@ export class ManifestError extends Error {
   }
 }
 
+/**
+ * The cadence bounds. Below the floor it is a liveness timer, which is #103's
+ * job and what #111 explicitly is not. Above the ceiling the cadence says
+ * nothing a peer could act on inside a working session.
+ */
+export const MIN_HEARTBEAT_MS = 30_000;
+export const MAX_HEARTBEAT_MS = 3_600_000;
+
+const DURATION = /^(\d{1,4})(s|m|h)$/;
+const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
+
+/**
+ * `"30s"`, `"5m"`, `"1h"` to milliseconds.
+ *
+ * The raw value is echoed by both errors, and those reach tool errors and the
+ * audit log, so HeartbeatOnShape bounds it to 8 characters before it can get
+ * here. The regex caps the digits too, so neither message can be grown by its
+ * input.
+ */
+function parseHeartbeatOn(raw: string): number {
+  const m = DURATION.exec(raw);
+  if (!m) {
+    throw new ManifestError(
+      `heartbeat_on must be a duration like "30s", "5m" or "1h" (got "${raw}")`,
+    );
+  }
+  const ms = Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS];
+  if (ms < MIN_HEARTBEAT_MS || ms > MAX_HEARTBEAT_MS) {
+    throw new ManifestError(`heartbeat_on must be between 30s and 1h (got "${raw}")`);
+  }
+  return ms;
+}
+
+/** Bounded before interpolation. See parseHeartbeatOn. */
+const HeartbeatOnShape = z.string().max(8);
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
@@ -71,6 +107,10 @@ export const RoleKeyShape = z.string()
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),
   description: z.string().max(300).nullish(),
+  // Absent means not asked. A role has to opt in to being expected to report,
+  // for the same reason no preset does (D3): a tick that names members silent
+  // who were never asked for anything is how the signal gets ignored.
+  reports: z.boolean().nullish(),
 });
 
 /**
@@ -115,6 +155,7 @@ const AuthorShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   mode: z.enum(["pair", "swarm"]),
+  heartbeat_on: HeartbeatOnShape.nullish(),
   roles: RolesShape,
   // Both are echoed verbatim by the cross-field errors, which reach tool errors and
   // the audit log, so they are bounded like every other string in the shape.
@@ -150,10 +191,16 @@ export type ManifestInput = z.input<typeof ManifestShape>;
 // Preset catalog
 // ---------------------------------------------------------------------------
 
-type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset">;
+// A preset carries no cadence (D3), so the catalog's shape leaves it out and
+// resolveManifest supplies null. Making it unrepresentable here is stronger than
+// a catalog entry that happens to say null.
+type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs">;
 
 function role(can: Verb[], description: string): RoleDef {
-  return { can, description };
+  // No preset expects a report (D3). Turning this on for shipped presets would
+  // tick every room anyone already runs and name members silent who were never
+  // asked for anything.
+  return { can, description, reports: false };
 }
 
 /**
@@ -255,6 +302,7 @@ export function resolveManifest(input: unknown): RoomManifest {
       roles: structuredClone(body.roles),
       defaultRole: body.defaultRole,
       creatorRole: body.creatorRole,
+      heartbeatOnMs: null,
     };
   }
 
@@ -279,7 +327,11 @@ export function resolveManifest(input: unknown): RoomManifest {
       }
       seen.add(verb);
     }
-    roles[key] = { can: [...def.can], description: def.description ?? null };
+    roles[key] = {
+      can: [...def.can],
+      description: def.description ?? null,
+      reports: def.reports ?? false,
+    };
   }
 
   return {
@@ -290,5 +342,8 @@ export function resolveManifest(input: unknown): RoomManifest {
     roles,
     defaultRole: v.default_role,
     creatorRole: v.creator_role,
+    // `!= null`, not truthiness: an authored "" is a mistake to refuse, not an
+    // absent key. A valueless `heartbeat_on:` in YAML is null and means no cadence.
+    heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : null,
   };
 }

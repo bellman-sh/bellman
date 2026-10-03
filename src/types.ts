@@ -179,6 +179,16 @@ export type PresetName = "pair" | "swarm" | "review";
 export interface RoleDef {
   can: Verb[];
   description: string | null;
+  /**
+   * Whether a member in this seat must answer the room's heartbeat tick (#111).
+   *
+   * Separate from the cadence, which is one number for the whole room: the tick
+   * is a single event, so per-role intervals would mean several schedules and a
+   * partial snapshot. This is the per-role half, and it is what keeps the signal
+   * clean — a seat that does no work, like `swarm`'s observer, must not be named
+   * silent for behaving exactly as its role describes.
+   */
+  reports: boolean;
 }
 
 export interface RoomManifest {
@@ -189,4 +199,10 @@ export interface RoomManifest {
   defaultRole: string;
   creatorRole: string;
   preset: PresetName | null;
+  /**
+   * How often the server appends a `heartbeat` tick, or null for a room that
+   * expects no reports. Immutable with the rest of the manifest, so a peer
+   * reading silence reads it against the same number every member was given.
+   */
+  heartbeatOnMs: number | null;
 }

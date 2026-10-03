@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
+  MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -75,7 +76,7 @@ describe("presets", () => {
       def.can.push("revoke");
       def.description = "poisoned";
     }
-    first.roles.intruder = { can: ["revoke"], description: null };
+    first.roles.intruder = { can: ["revoke"], description: null, reports: false };
 
     expect(resolveManifest({ room: "second", preset: name }).roles).toEqual(expected);
   });
@@ -440,5 +441,74 @@ describe("legal edge cases", () => {
       default_role: "proto",
     }));
     expect(Object.keys(m.roles)).toEqual(["lead", "constructors", "prototype_a", "proto"]);
+  });
+});
+
+describe("heartbeat_on", () => {
+  const authored = (over: Record<string, unknown> = {}) => ({
+    room: "migration-swarm",
+    mode: "swarm",
+    roles: {
+      lead: { can: ["send", "invite"], reports: true },
+      observer: { can: [] },
+    },
+    default_role: "observer",
+    creator_role: "lead",
+    ...over,
+  });
+
+  it("parses s, m and h to milliseconds", () => {
+    expect(resolveManifest(authored({ heartbeat_on: "30s" })).heartbeatOnMs).toBe(30_000);
+    expect(resolveManifest(authored({ heartbeat_on: "5m" })).heartbeatOnMs).toBe(300_000);
+    expect(resolveManifest(authored({ heartbeat_on: "1h" })).heartbeatOnMs).toBe(3_600_000);
+  });
+
+  it("defaults to no cadence, and to a role that is not asked", () => {
+    const m = resolveManifest(authored());
+    expect(m.heartbeatOnMs).toBe(null);
+    expect(m.roles.observer.reports).toBe(false);
+    expect(m.roles.lead.reports).toBe(true);
+  });
+
+  it("expects nothing of any preset role", () => {
+    for (const preset of ["pair", "swarm", "review"] as const) {
+      const m = resolveManifest({ room: "r", preset });
+      expect(m.heartbeatOnMs).toBe(null);
+      for (const def of Object.values(m.roles)) expect(def.reports).toBe(false);
+    }
+  });
+
+  // Review Focus 5 — the raw value reaches a tool error and the audit log.
+  it.each(["5 minutes", "0m", "99h", "-5m", "", "5", "m", "5M", "1d"])(
+    "refuses %o with a message naming the shape",
+    (bad) => {
+      const attempt = () => resolveManifest(authored({ heartbeat_on: bad }));
+      expect(attempt).toThrow(ManifestError);
+      // Pin the field, so a refusal for some other reason cannot satisfy this.
+      expect(attempt).toThrow(/^heartbeat_on/);
+    },
+  );
+
+  it("refuses a duration outside the bounds, naming them", () => {
+    expect(() => resolveManifest(authored({ heartbeat_on: "10s" })))
+      .toThrow(/between 30s and 1h/);
+    expect(() => resolveManifest(authored({ heartbeat_on: "2h" })))
+      .toThrow(/between 30s and 1h/);
+    expect(MIN_HEARTBEAT_MS).toBe(30_000);
+    expect(MAX_HEARTBEAT_MS).toBe(3_600_000);
+  });
+
+  it("bounds the echoed value so a long string cannot reach the audit log", () => {
+    let message = "";
+    try {
+      resolveManifest(authored({ heartbeat_on: "9".repeat(500) + "m" }));
+    } catch (e) {
+      expect(e).toBeInstanceOf(ManifestError);
+      message = (e as Error).message;
+    }
+    // Without the shape's bound, parseHeartbeatOn refuses this too — and echoes all
+    // 501 characters. Throwing is not enough; what the message carries is the claim.
+    expect(message).toMatch(/^heartbeat_on: /);
+    expect(message).not.toContain("9999");
   });
 });

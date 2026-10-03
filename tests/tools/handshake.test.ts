@@ -654,11 +654,12 @@ describe("INVARIANT 10 — every room is declared", () => {
       preset: null,
       mode: "pair",
       roles: {
-        driver: { can: ["send", "invite"], description: "Drives." },
-        navigator: { can: ["send"], description: null },
+        driver: { can: ["send", "invite"], description: "Drives.", reports: false },
+        navigator: { can: ["send"], description: null, reports: false },
       },
       defaultRole: "navigator",
       creatorRole: "driver",
+      heartbeatOnMs: null,
     });
     expect(session?.maxMembers).toBe(2);
     const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;

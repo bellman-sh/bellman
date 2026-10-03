@@ -156,11 +156,14 @@ than two call sites that each decide, for the reason `hasLapsed` is one
 predicate: a read and a sweep that disagree about expiry mean a session usable
 only because no purge has run yet.
 
-### Three methods on `AuthStorage`
+### Four methods on `AuthStorage`
 
 - **`putSession(id, value)`** — create.
 - **`touchSession(id, now)` → `PanelSession | undefined`** — get, test
   `sessionDead`, and bump `last_used_at`, as **one** operation.
+- **`replanSession(id, identity, planSource, now)` → `boolean`** — merge a
+  re-resolved plan into a session that still exists, as **one** operation. True
+  when it merged, false when the session was gone.
 - **`deleteSession(id)`** — sign-out.
 
 `touchSession` is one method rather than a get and a put from the Worker because
@@ -168,6 +171,19 @@ of the pattern this repo keeps rediscovering: a check in one call and an act in
 another has a window between them. `admitRegistration` is one method for exactly
 this reason, and its comment says so. Inside the object, the input gate covers
 the whole of it.
+
+`replanSession` is one method for the same reason, and it exists because of one
+particular window. The cookie branch touches the session, spends a while
+re-resolving a stale plan, and writes the result back, and a sign-out can land
+in between. Writing the whole record back with `putSession`, an unconditional
+upsert, would recreate the session the human just ended, so they would sign out
+and stay signed in. It would also overwrite a `last_used_at` that another request
+bumped in the same gap. `replanSession` merges the three fields it owns into
+what is stored now, and does nothing if the record is gone. It makes no liveness
+decision, because those fields are not the ones `sessionDead` reads. It answers
+whether it merged, so the caller learns that its session ended while it worked
+and decides whether to still answer a request that began before the sign-out.
+`putSession` stays an upsert, for creating a session and for nothing else.
 
 #### Why `touchSession` skips most writes
 
@@ -233,7 +249,7 @@ counting on: authorization logic stays in one place.
 
 The cookie branch runs `replanOnRefresh(stored.identity, stored.identity_keys,
 config)` when `now - replanned_at > ACCESS_TOKEN_TTL_SECONDS * 1000`, and writes
-the result back.
+the result back with `replanSession`, not `putSession`.
 
 The bound is deliberately the same 10 minutes the access token already bounds
 plan staleness to. A grant revoked mid-session cannot outlive on the panel what
@@ -500,7 +516,7 @@ has not been shown to test anything.
 a comment. `AuthStorage` has no equivalent: `MemoryAuthStore` and `AuthDO`
 implement it independently, with nothing asserting they agree.
 
-Adding three methods to two classes with no conformance suite is precisely where
+Adding four methods to two classes with no conformance suite is precisely where
 they drift — and the halves that would drift here are `touchSession`'s skip
 threshold and the sweep predicate, both of which fail silently in opposite
 directions.
@@ -508,7 +524,10 @@ directions.
 `worker-tests/` runs the real `workerd` against a separate dependency tree and
 already reaches `AuthDO` (`reconcile-race.test.ts`). The session methods are
 covered there, against the real object, rather than by inventing a third test
-program or by trusting that two hand-written implementations match.
+program or by trusting that two hand-written implementations match. Each
+store-level test in `tests/panel-session.test.ts` has a twin there, so a
+behaviour pinned on one side is pinned on both. The sweep exists only in the
+object, and is covered only there.
 
 ## Out of scope
 

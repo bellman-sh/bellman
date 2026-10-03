@@ -1,6 +1,7 @@
 # A Browser Session for Dash — Design
 
-Status: designed, not implemented.
+Status: designed, not implemented. Plan:
+`docs/superpowers/plans/2026-10-02-dash-browser-session.md`
 Closes: #48
 Related: #7 (the authorization server this builds on), #61 (where operator
 authority lives — three of its constraints are acceptance criteria here), #49

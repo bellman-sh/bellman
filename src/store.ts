@@ -4,17 +4,7 @@ import type {
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
-// heartbeat.ts imports `isActiveMember` from this module, so this import closes a
-// cycle — the first one in src/ involving store.ts, and deliberate. Both sides are
-// functions called at runtime and neither module reads the other during its own
-// evaluation, which is what makes an ESM cycle safe; checked under both tsc
-// programs, the Node suite and workerd.
-//
-// The alternative is to duplicate a predicate, and there is no third option: the
-// rule needs `isActiveMember`, which lives here, and this store needs the rule. A
-// copy of either would be a second place for the two to drift, and `freezeSession`
-// is answered by two implementations that the contract suite requires to agree.
-import { clearSilence } from "./heartbeat.js";
+import { mustReport } from "./roles.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -50,6 +40,47 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  * applies to `joinCode`.
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * Whether the room asks this member for reports.
+ *
+ * Here beside `isActiveMember`, and not in heartbeat.ts, because `freezeSession`
+ * applies `clearSilence` inside the store and that reads this — heartbeat.ts
+ * imports this module, so the other direction would be a cycle. One that works
+ * only while every use sits inside a function body: the first at module
+ * evaluation fails at import under the Worker's load order, and neither tsc
+ * program reports it.
+ */
+export const asked = (s: StoredSession, m: Member): boolean =>
+  isActiveMember(m) && mustReport(s.manifest, m.roomRole);
+
+/**
+ * The roster a thaw writes back: every seat the room asks is credited with a
+ * report at `now`.
+ *
+ * Spec D10. "A member cannot report its way out of a frozen room, so none may be
+ * named silent in one. A freeze must cost nobody their standing." `#tickIfDue`
+ * honours the letter by writing no tick while frozen, but that is not enough on
+ * its own: `silent_for_seconds` is measured from `lastReport`, which the freeze
+ * stopped anybody from moving. A room frozen for an hour on a 5m cadence would
+ * otherwise produce, on its first tick after the thaw, `silent: true` for every
+ * member — a measurement of the freeze, not of anyone's behaviour, and exactly
+ * the false silent D10 is written to avoid.
+ *
+ * What this loses is the pre-freeze report age, which after an outage long enough
+ * to freeze a room is not something a peer can act on anyway. The faithful
+ * alternative — carrying the frozen interval on the session and subtracting it in
+ * `snapshotOf` — buys that back for a stored field and a second clock to keep
+ * consistent with the first.
+ *
+ * Pure: it takes `now` rather than reading the clock, so the store contributes the
+ * moment of the thaw and nothing else. Here for the reason `asked` gives. Who the
+ * room asks is `asked`'s rule, and a store that filtered the roster itself would
+ * be a second copy of it.
+ */
+export function clearSilence(s: StoredSession, now: number): Member[] {
+  return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
+}
 
 /**
  * What `seatMember` did. `refused` is null exactly when the member is seated.

@@ -234,9 +234,11 @@ describe("tool surface", () => {
     expect(kinds).not.toContain("heartbeat");
 
     // And the description is the only documentation a caller has, so every kind
-    // the schema accepts has to appear in it. Its opening line listed five after
-    // `progress` was added: the `type:` block named the sixth, the Returns and
-    // Errors lines were updated, and the summary a client shows first was not.
+    // the schema accepts has to be named somewhere in it. That is all this loop
+    // asserts: `toContain` matches a substring of the whole text, so it fails only
+    // for a kind named nowhere in it. It does not read the opening line, which
+    // once listed five after `progress` was added — `progress` is named elsewhere
+    // in the text, so that slip passes here.
     for (const kind of kinds!) {
       expect(send.description, `${kind} missing from the description`).toContain(kind);
     }

@@ -64,21 +64,40 @@ export function clearedSessionCookie(secure: boolean): string {
  * and RFC 6265's WSP allow, rather than String.prototype.trim, which also
  * strips non-breaking and Unicode spaces and the byte-order mark.
  *
- * The difference matters because a browser applies `__Host-` only to a name
- * that starts with it, so `\u2000__Host-bellman_session` is outside the
- * prefix's rules. The Workers runtime decodes header bytes as UTF-8, so that
- * space reaches readSessionCookie as one character (measured on workerd with
- * U+2000, U+00A0 and U+FEFF), and trim() would hand the name back as exactly
- * ours. If a browser will set such a name with Domain=.bellman.sh, that is the
- * cookie the prefix exists to keep out, selected by whoever set it.
+ * The difference is a way round `__Host-`. A browser applies that prefix only
+ * to a name that starts with it, so `\u2000__Host-bellman_session` is outside
+ * its rules, and a sibling subdomain can set it with Domain=.bellman.sh. The
+ * Workers runtime decodes header bytes as UTF-8, so the space reaches
+ * readSessionCookie as one character, and trim() would hand the name back as
+ * exactly ours: the cookie the prefix exists to keep out, selected by whoever
+ * set it.
  *
- * Whether a browser will is not demonstrated. RFC 6265 gives a cookie name as a
- * token, which is ASCII, so a conforming browser may refuse the name outright,
- * and no browser has been tried. The trimming does not wait on the answer: a
- * name that is not ours once space and tab are set aside is not ours.
+ * Measured in October 2026. Chrome for Testing 153.0.8010.12 stores a name
+ * padded with U+2000, U+00A0, U+FEFF, U+3000, U+2028 or U+1680 together with a
+ * Domain and sends it, whether it was set through document.cookie or
+ * Set-Cookie. Through workerd under wrangler dev, the reader that used trim()
+ * returned the attacker's id for such a cookie: session fixation when the
+ * victim had no session, and a duplicate, so a lockout, when they had one. This
+ * reader returns null in the first case and the real session in the second.
+ * Chrome refuses a name padded with space, tab, VT or FF, and refuses a
+ * nameless cookie, so the Unicode spaces are the route.
+ *
+ * Not tried: Firefox, Safari, other versions of Chrome, and Cloudflare's edge,
+ * which may differ in whether it passes UTF-8 header bytes through. The
+ * trimming does not wait on them: a name that is not ours once space and tab
+ * are set aside is not ours.
+ *
+ * A loop and not a regular expression, because `/^[ \t]+|[ \t]+$/g` rescans a
+ * run of spaces from every start position and is quadratic in its length:
+ * 32,000 spaces cost workerd about 212 ms and 64,000 about 845 ms, from one
+ * unauthenticated request. A test holds the bound.
  */
 function trimOws(text: string): string {
-  return text.replace(/^[ \t]+|[ \t]+$/g, "");
+  let start = 0;
+  let end = text.length;
+  while (start < end && (text[start] === " " || text[start] === "\t")) start++;
+  while (end > start && (text[end - 1] === " " || text[end - 1] === "\t")) end--;
+  return text.slice(start, end);
 }
 
 /**
@@ -109,6 +128,8 @@ function trimOws(text: string): string {
 export function readSessionCookie(request: Request, secure: boolean): string | undefined {
   const header = request.headers.get("cookie");
   if (!header) return undefined;
+  // This mode's name and no other. In secure mode the unprefixed name is ignored,
+  // because a sibling subdomain can set it with a Domain and a browser will send it.
   const name = sessionCookieName(secure);
 
   let found: string | undefined;

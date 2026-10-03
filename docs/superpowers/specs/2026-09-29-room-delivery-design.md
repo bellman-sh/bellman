@@ -3,7 +3,10 @@
 Issues: [#99 Room delivery over a hibernating WebSocket](https://github.com/bellman-sh/bellman/issues/99),
 [#43 Bridge: one long-poll per member, shared by every local session](https://github.com/bellman-sh/bellman/issues/43),
 [#25 SessionDO.getSession loads every event on every call](https://github.com/bellman-sh/bellman/issues/25)
-Status: approved design, pending implementation plan
+Status: implemented, in two parts. The server half merged in #127; the client
+half is on `mcfearsome/room-delivery-client-half`. Plans:
+`docs/superpowers/plans/2026-09-29-room-delivery-server.md` and
+`docs/superpowers/plans/2026-10-03-room-delivery-client.md`.
 Supersedes: [Pricing Re-tier](2026-09-29-pricing-re-tier-design.md), superseded before implementation
 Related: #12 (the store contract against the DO store), #18 (room inactivity),
 #26, #27 (surfaces that exercise delivery), #48 (a browser-authenticated dash)

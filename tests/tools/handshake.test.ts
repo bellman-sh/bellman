@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
-import { JOIN_CODE_TTL } from "../../src/store.js";
+import { JOIN_CODE_TTL, MemoryStore } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import type { Identity } from "../../src/types.js";
 
@@ -355,6 +355,71 @@ describe("INVARIANT 2 — two-phase connect", () => {
 
     expect(tooLate.isError).toBe(true);
     expect(tooLate.text).toContain("filled while you were confirming");
+  });
+
+  /**
+   * A joiner confirms, and `change` happens to the room after confirm has read
+   * it and before the seat is written. The handler's own guards have already
+   * passed by then, so only the store's refusal can answer, which is what the
+   * tests below are about. (Freezing the room before confirm, as freeze.test.ts
+   * does, is stopped by the handler's guard and never reaches the store.)
+   */
+  async function confirmWhileRoomChanges(
+    change: (store: MemoryStore, sessionId: string) => Promise<void>,
+  ) {
+    const store = new MemoryStore();
+    const seat = store.addMember.bind(store);
+    store.addMember = async (sessionId, m) => {
+      await change(store, sessionId);
+      return seat(sessionId, m);
+    };
+    const raced = new Harness(store);
+    try {
+      const jesse = await raced.connect(DEV_KEY.jesse);
+      const peer = await raced.connect(DEV_KEY.peer);
+      const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+      const preview = await peer.call("bellman_connect", {
+        join_code: String(started.data.join_code),
+      });
+
+      const confirmed = await peer.call("bellman_confirm", {
+        connect_token: String(preview.data.connect_token), brief: brief(),
+      });
+
+      const room = await store.getSession(String(started.data.session_id));
+      return { confirmed, members: room?.members.map((x) => x.userId) };
+    } finally {
+      await raced.close();
+    }
+  }
+
+  // A frozen room is fixable by paying and a closed one is over, and the joiner
+  // has to be told which: "frozen" for a room that closed would point them at
+  // paying for something payment will not bring back. The same ordering rooms.ts
+  // gives the leaver, for the same reason.
+  it("tells a joiner whose room closed under them that it is gone, not that the plan lapsed", async () => {
+    const { confirmed, members } = await confirmWhileRoomChanges(
+      (store, id) => store.closeSession(id),
+    );
+
+    expect(confirmed.isError).toBe(true);
+    expect(confirmed.text).toContain("no longer exists");
+    expect(confirmed.text).not.toMatch(/frozen/i);
+    // Refused means nobody was seated: the creator is the only one in the room.
+    expect(members).toEqual(["u_jesse"]);
+  });
+
+  // The other answer, which the one above would not notice losing: a room that
+  // froze in the gap is the lapsed plan, and the sentence says so.
+  it("tells a joiner whose room froze under them that the plan lapsed", async () => {
+    const { confirmed, members } = await confirmWhileRoomChanges(
+      (store, id) => store.freezeSession(id, Date.now()),
+    );
+
+    expect(confirmed.isError).toBe(true);
+    expect(confirmed.text).toMatch(/frozen/i);
+    expect(confirmed.text).not.toContain("no longer exists");
+    expect(members).toEqual(["u_jesse"]);
   });
 });
 
@@ -937,5 +1002,34 @@ describe("bellman_connect accepts every join code bellman_start can mint", () =>
     });
     expect(preview.isError, preview.text).toBe(false);
     expect((preview.data.room as { your_role: string }).your_role).toBe(longRole);
+  });
+});
+
+describe("bellman_start lists the room for its creator", () => {
+  // The store contract proves createSession indexes the members it is handed.
+  // This proves the tool hands it the creator, which a store test can only
+  // imitate: a contract case that seats the creator by hand stays green while
+  // the tool seats them some other way (#49, D4).
+  it("puts the room it just created in both of the creator's listings", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+
+    const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+
+    const sessionId = String(started.data.session_id);
+    expect(await h.store.sessionsCreatedBy(jesse.identity.userId, 10)).toContain(sessionId);
+    expect(await h.store.sessionsJoinedBy(jesse.identity.userId, 10)).toContain(sessionId);
+  });
+});
+
+describe("bellman_confirm lists the room for the member it seats", () => {
+  // The join half of the case above. bellman_confirm is the only production
+  // caller of store.addMember, and the contract proves addMember indexes the
+  // member it is handed — not that the tool hands it the joiner. Nothing else
+  // drives a real join and then reads the listing (#49, D4).
+  it("puts the room it just joined in the joiner's listing", async () => {
+    const { joiner, sessionId } = await pairUp(h);
+
+    expect(await h.store.sessionsJoinedBy(joiner.identity.userId, 10)).toContain(sessionId);
   });
 });

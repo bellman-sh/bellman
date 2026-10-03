@@ -6,6 +6,7 @@ import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
+import { isActiveMember } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
@@ -176,8 +177,12 @@ export class SessionDO extends DurableObject {
   async addMember(member: Member): Promise<boolean> {
     const s = await this.stored();
     if (!s) return false;
-    // Inside the object, so nothing can freeze between this read and the write.
+    // Inside the object, so nothing can freeze or close between this read and the
+    // write. Closed is the other half of closeSessionIfEmpty: that keeps a close
+    // from landing on an occupied room, and this keeps a join from landing on a
+    // closed one.
     if (s.frozenAt !== null) return false;
+    if (s.closed) return false;
     await this.ctx.storage.put("session", { ...s, members: [...s.members, member] });
     return true;
   }
@@ -200,6 +205,31 @@ export class SessionDO extends DurableObject {
     const s = await this.stored();
     if (!s) return;
     await this.ctx.storage.put("session", { ...s, closed: true });
+  }
+
+  /**
+   * Close the room unless somebody is still in it, and say whether it is closed
+   * when this returns: true when this call closed it or it already was.
+   *
+   * One invocation, and that is the point. Every await below is a storage
+   * operation, and workerd's input gate delivers no other request to this object
+   * while one is outstanding, so nothing can join between the check and the
+   * write. A caller that read the roster itself and then called closeSession
+   * would have handed the object exactly that gap. addMember's refusal of a
+   * closed room is the other half of the same guarantee.
+   *
+   * Marks the room closed and nothing else. The join codes stay in the record
+   * for the facade to retire, because it is the one holding the registry handle:
+   * it clears them once this returns true, and the retry of a close that died in
+   * between finds them still listed and finishes the job.
+   */
+  async closeSessionIfEmpty(): Promise<boolean> {
+    const s = await this.stored();
+    if (!s) return false;
+    if (s.closed) return true;
+    if (s.members.some(isActiveMember)) return false;
+    await this.ctx.storage.put("session", { ...s, closed: true });
+    return true;
   }
 
   async freezeSession(frozenAt: number | null): Promise<void> {
@@ -720,7 +750,18 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * no list to backfill from, so the gap cannot be closed by a migration; it
    * closes by itself as those sessions reach their TTL and expire. Until then
    * a lapse will not freeze them, which means a room outliving its plan rather
-   * than a room lost, and only for rooms that already existed.
+   * than a room lost.
+   *
+   * **Sessions created after this deploy can be missing too.**
+   * `DurableObjectStore` puts this row once the room has committed, and logs a
+   * failed put rather than throwing it (`writeIndex`), deliberately: a throw
+   * would report a failed create for a room that already exists. Nothing
+   * rebuilds the row, so the outcome is the one above: a lapse cannot freeze a
+   * room it cannot find, and the room keeps working on a plan that no longer
+   * pays for it. The gap above only shrinks, as those rooms expire; this one
+   * also grows whenever a put fails. A creator's `um:` row is a separate put, so
+   * either row can land without the other, and a room can be listed for its
+   * creator and still be out of a lapse's reach.
    */
   async indexSession(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
@@ -728,6 +769,43 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const prefix = `us:${userId}:`;
+    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /**
+   * `um:<userId>:<sessionId>` — which rooms a person holds a handle in.
+   *
+   * The same shape as `us:` above, and the same injectivity argument: two
+   * variable segments, and neither can contain the separator. A user id is
+   * `u_[A-Za-z0-9_-]+` and a session id is `qs_<uuid>`.
+   *
+   * Keyed by user rather than by member, so a person who joined the same room
+   * from two machines is one entry — the put is idempotent, and the panel wants
+   * the room once.
+   *
+   * **Members who joined before this deploy are not in here, creators of rooms
+   * that already existed included.** For the rooms `us:` knows about, a backfill
+   * is possible in principle — `us:` enumerates their creators and each session
+   * lists its members — and is not worth walking the registry for a listing that
+   * fills itself in as sessions reach their TTL. Older rooms have no list to
+   * enumerate (see `us:`), so for them expiry is the only repair. Until then a
+   * joined room is missing from one screen, which is not a room lost.
+   *
+   * **Members who joined after this deploy can be missing too, creators
+   * included.** `DurableObjectStore` puts this row once the seat has committed,
+   * and logs a failed put rather than throwing it (`writeIndex`), deliberately:
+   * a throw would report a failed join for a seat that had already landed.
+   * Nothing rebuilds the row. The gap above only shrinks, as those rooms expire;
+   * this one also grows whenever a put fails. A creator's `us:` row is a
+   * separate put, so either row can land without the other.
+   */
+  async indexMembership(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`um:${userId}:${sessionId}`, Date.now());
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    const prefix = `um:${userId}:`;
     const map = await this.ctx.storage.list<number>({ prefix, limit });
     return [...map.keys()].map((k) => k.slice(prefix.length));
   }
@@ -817,16 +895,67 @@ export class DurableObjectStore implements BellmanStore {
     return this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId));
   }
 
+  /**
+   * Write into a derived index: attempted after the authoritative state is
+   * committed, and a failure is logged rather than thrown.
+   *
+   * By the time an index is written, SessionDO has already committed the room
+   * or the seat. A write that threw from here would abort the caller after its
+   * effect had landed — a seat with no `member_joined` event and no audit row,
+   * for a joiner who is told it failed. The index is derived and SessionDO is
+   * authoritative, so swallowing costs a room missing from one listing. What
+   * that costs depends on the listing: for `um:` a room missing from its
+   * member's list, for `us:` a room a lapse cannot freeze, which outlives the
+   * plan that pays for it.
+   *
+   * The row stays missing. Nothing rebuilds an index today: re-deriving `um:`
+   * from SessionDO.members needs a list of sessions to walk, and the only list
+   * of sessions the registry holds is `us:`, which has none of its own to be
+   * rebuilt from. So the log line is the record of what to restore, and it
+   * names both halves of the row's key — the user and the room.
+   *
+   * Only for indexes. The join code writes do not come through here: a join
+   * code that does not resolve is a real failure, not a missing listing row.
+   */
+  private async writeIndex(
+    index: string, userId: string, sessionId: string, write: () => Promise<unknown>
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (err) {
+      console.error(
+        `${index} index write failed for ${userId} in ${sessionId}; ` +
+          "that room is missing from their listing:",
+        err,
+      );
+    }
+  }
+
   async createSession(s: Session): Promise<void> {
     await this.session(s.id).createSession(s);
+    // Authoritative, so fatal: a join code that does not resolve is a real
+    // failure, not a missing listing row.
     for (const rec of Object.values(s.joinCodes)) {
       await this.registry.putJoinCode(rec.code, s.id);
     }
-    // A lapsed plan has to find this person's rooms, and bare create counts
-    // cannot say which they are. Another write into a second object with no
-    // transaction spanning it — the same gap as the join code above, tracked on
-    // #62. A missed index entry means a room that is not frozen, not one lost.
-    await this.registry.indexSession(s.createdBy, s.id);
+    // From here on every write is an index, derived from what is committed above
+    // and attempted after it, so a failure is logged rather than thrown (see
+    // writeIndex). Each is a write into a second object with no transaction
+    // spanning it — the same gap as the join code, tracked on #62 — and a lost
+    // one costs a row in one listing, never the room.
+    //
+    // `us:` is how a lapsed plan finds this person's rooms, which bare create
+    // counts cannot say. A missed entry means a room that is not frozen.
+    await this.writeIndex("us", s.createdBy, s.id, () =>
+      this.registry.indexSession(s.createdBy, s.id));
+    // The members a session is created with are seated directly — bellman_start
+    // hands over the creator in `members` and never calls addMember — so the
+    // joined index is written here as well as in addMember. A missed entry
+    // leaves the room out of that person's joined listing.
+    for (const m of s.members) {
+      await this.writeIndex("um", m.userId, s.id, () =>
+        this.registry.indexMembership(m.userId, s.id));
+    }
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -867,7 +996,22 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
-    return this.session(sessionId).addMember(member);
+    const added = await this.session(sessionId).addMember(member);
+    // Gated on the result: addMember refuses an unknown, frozen or closed
+    // session, and indexing regardless would put rooms into a person's joined
+    // listing that they were turned away from.
+    //
+    // Attempted after the seat is committed, and a failure is logged rather than
+    // thrown (see writeIndex): the caller still has the join event and the audit
+    // row to write, and a joiner who was seated must not be told otherwise. A
+    // second write into a second object with no transaction spanning it — the
+    // same gap as the join code and the creator index, tracked on #62 — so a
+    // lost write costs the room a row in one listing and nothing else.
+    if (added) {
+      await this.writeIndex("um", member.userId, sessionId, () =>
+        this.registry.indexMembership(member.userId, sessionId));
+    }
+    return added;
   }
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {
@@ -881,12 +1025,32 @@ export class DurableObjectStore implements BellmanStore {
     await this.clearJoinCodes(sessionId);
   }
 
+  async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
+    // The decision is SessionDO's, made in one invocation. What follows it is
+    // cleanup in a second object, with no transaction spanning the two (the gap
+    // docs/ARCHITECTURE.md section 9 describes). A Worker that dies between them
+    // leaves a stale registry row and not an open door: getSessionByJoinCode
+    // refuses a closed session whatever the registry still holds.
+    const closed = await this.session(sessionId).closeSessionIfEmpty();
+    // Only a closed room gives up its codes, as closeSession does. A room left
+    // open keeps them, because they are how its next member gets in. And a room
+    // that was ALREADY closed gives them up too, not only one this call closed:
+    // the retry of a close that died before the registry was reached finishes
+    // the clear here, from the codes SessionDO left in the record.
+    if (closed) await this.clearJoinCodes(sessionId);
+    return closed;
+  }
+
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     return this.registry.sessionsCreatedBy(userId, limit);
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsJoinedBy(userId, limit);
   }
 
   async appendEvent(

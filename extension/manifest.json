@@ -85,6 +85,10 @@
       "description": "Leave the room and tell the others."
     },
     {
+      "name": "bellman_evict",
+      "description": "Creator-only: remove a member and retire their seat's code."
+    },
+    {
       "name": "bellman_audit",
       "description": "Read every crossing that touched your org's boundary."
     }

@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 
   console.log("\n— tool discovery —");
   const tools = await jesse.listTools();
-  assert(tools.tools.length === 8, `8 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
+  assert(tools.tools.length === 9, `9 tools registered (${tools.tools.map((t) => t.name).join(", ")})`);
 
   console.log("\n— session creation + entitlements —");
   const started = await call(jesse, "bellman_start", {

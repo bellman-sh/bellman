@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import type {
-  AuditEntry, Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent, Verb,
+  Brief, Capability, Identity, Member, RoomManifest, Session, SessionEvent, Verb,
 } from "./types.js";
 import { entitlementsFor } from "./auth.js";
 import {
@@ -10,6 +10,10 @@ import {
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
+import {
+  FROZEN, activeMembers, audit, evictMember, findMember, issueInvite, leaveRoom, revokeInvite,
+  sessionStatus,
+} from "./rooms.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 
@@ -101,17 +105,6 @@ function untrusted<T>(origin: { memberId: string; label: string }, data: T) {
   return { trust: "untrusted", origin, data };
 }
 
-function activeMembers(s: Session): Member[] {
-  return s.members.filter((m) => m.leftAt === null);
-}
-
-function findMember(s: Session, memberId: string, identity: Identity): Member | undefined {
-  const m = s.members.find((mm) => mm.memberId === memberId);
-  // A member handle can only be driven by the identity that created it.
-  if (!m || m.userId !== identity.userId) return undefined;
-  return m;
-}
-
 function publicMember(m: Member) {
   return {
     member_id: m.memberId,
@@ -193,47 +186,9 @@ function publicEvent(e: SessionEvent) {
   };
 }
 
-/**
- * Enterprise audit trail. Cross-org sessions write one entry per involved org
- * so each org's admins see the crossings that touched THEIR boundary —
- * without being able to read the other org's unrelated activity.
- */
-async function audit(
-  store: BellmanStore,
-  session: Session,
-  actor: Identity,
-  action: string,
-  detail: Record<string, unknown>
-): Promise<void> {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId]);
-  for (const orgId of orgs) {
-    if (orgId === null) continue;
-    const entry: AuditEntry = {
-      at: Date.now(),
-      orgId,
-      sessionId: session.id,
-      actorUserId: actor.userId,
-      action,
-      detail,
-    };
-    await store.appendAudit(entry);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Server factory — one McpServer per request, bound to the caller's identity
 // ---------------------------------------------------------------------------
-
-/**
- * Refused while frozen, allowed while frozen: writes stop, reads do not.
- *
- * Freezing is what a lapsed plan does to a room, and it has to be reversible
- * without costing anyone their work — so membership, history and sync all keep
- * working, and only sending, joining and inviting are refused.
- */
-const FROZEN =
-  "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
-  "history is still readable, but nothing new can be sent or joined until the plan is restored.";
 
 /**
  * An event the caller can rely on, or a thrown refusal.
@@ -256,9 +211,6 @@ async function appendOrFrozen(
   if (!event) throw new FrozenError();
   return event;
 }
-
-const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
-  session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
 export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
@@ -506,9 +458,17 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         leftAt: null,
       };
       // The guard above read the session; this is the one that counts. A freeze
-      // landing in between would otherwise let a frozen room grow, and the
-      // store refuses inside the object where there is no gap to land in.
-      if (!(await s.addMember(session.id, member))) return fail(FROZEN);
+      // or a close landing in between would otherwise seat a member in a frozen
+      // room or one that is over, and the store refuses inside the object where
+      // there is no gap to land in.
+      if (!(await s.addMember(session.id, member))) {
+        // Both guards above had passed, so the room changed since: it froze, or it
+        // closed, and the joiner is owed which. Closed wins, as it does for a
+        // leaver in rooms.ts: calling a room that is over frozen points them at
+        // paying to fix something payment will not.
+        const now = await s.getSession(session.id);
+        return fail(!now || now.closed ? "session no longer exists." : FROZEN);
+      }
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
@@ -564,7 +524,7 @@ So \`invite\` already invalidates an outstanding code, because issuing retires i
 
 Args: session_id, member_id (yours), role (optional), revoke (default false)
 Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
-Members see an invite_issued / invite_revoked event, so reopening the door is never silent. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
+Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
 Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
@@ -577,82 +537,19 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
       },
     },
     async ({ session_id, member_id, role, revoke }): Promise<ToolResult> => {
-      const session = await s.getSession(session_id);
-      if (!session || session.closed) return fail("session not found or closed.");
-      if (session.frozenAt !== null) return fail(FROZEN);
-      const me = findMember(session, member_id, identity);
-      if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
-      // Roles landed. `invite` and `revoke` are separate verbs, so a seat may hold
-      // one without the other. A room whose manifest gives nobody `invite` cannot
-      // be reopened by anyone, its creator included — tests/manifest.test.ts calls
-      // that a legal manifest, so it is the declared behaviour, not a hole.
-      const denial = denyVerb(session, me, revoke ? "revoke" : "invite");
-      if (denial) return fail(denial);
-
-      // An absent role means the usual seat when issuing, and EVERY seat when
-      // revoking. Deliberately asymmetric: over-revoking is recoverable by
-      // minting again, while under-revoking leaves a door open behind someone
-      // who believes they shut it.
-      if (role !== undefined && !Object.hasOwn(session.manifest.roles, role)) {
-        return fail(
-          `this room declares no role "${role}" (it declares: ${Object.keys(session.manifest.roles).join(", ")}).`
-        );
-      }
-
       if (revoke) {
-        // An expired code is not a live code (:555 promises a silent no-op for
-        // "no live code to retire"), but nothing prunes joinCodes when a code
-        // merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
-        // the session-TTL sweep touch the map. So presence alone is not enough:
-        // check expiresAt too, or a bare revoke announces the closing of a door
-        // that had already shut by itself (event + audit row, over-reported roles).
-        const retired = (role ? [role] : Object.keys(session.joinCodes))
-          .filter((r) => {
-            const rec = session.joinCodes[r];
-            return rec !== undefined && Date.now() <= rec.expiresAt;
-          });
-        if (role) await s.consumeJoinCode(session_id, role);
-        else await s.clearJoinCodes(session_id);
-        if (retired.length > 0) {
-          await s.appendEvent(session.id, {
-            type: "invite_revoked",
-            fromMemberId: member_id,
-            fromUserId: identity.userId,
-            fromLabel: identity.label,
-            payload: { roles: retired },
-            refId: null,
-          });
-          await audit(s, session, identity, "invite_revoked", { roles: retired });
-        }
-        return ok({ revoked: true, roles: retired, join_code: null });
+        const r = await revokeInvite(s, identity, session_id, member_id, role);
+        return r.ok ? ok({ revoked: true, roles: r.value.roles, join_code: null }) : fail(r.reason);
       }
-
-      if (activeMembers(session).length >= session.maxMembers) {
-        return fail(`session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`);
-      }
-
-      const issuedRole = role ?? session.manifest.defaultRole;
-      const previous = Boolean(session.joinCodes[issuedRole]);
-      const code = renderJoinCode(issuedRole);
-      const expiresAt = Date.now() + JOIN_CODE_TTL;
-      if (!(await s.setJoinCode(session_id, issuedRole, code, expiresAt))) return fail(FROZEN);
-      await s.appendEvent(session.id, {
-        type: "invite_issued",
-        fromMemberId: member_id,
-        fromUserId: identity.userId,
-        fromLabel: identity.label,
-        payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
-        refId: null,
-      });
-      await audit(s, session, identity, "invite_issued", { role: issuedRole, replaced_previous: previous });
-
+      const r = await issueInvite(s, identity, session_id, member_id, role);
+      if (!r.ok) return fail(r.reason);
       return ok({
-        join_code: code,
-        join_code_expires_at: new Date(expiresAt).toISOString(),
-        role: issuedRole,
-        replaced_previous: previous,
+        join_code: r.value.code,
+        join_code_expires_at: new Date(r.value.expiresAt).toISOString(),
+        role: r.value.role,
+        replaced_previous: r.value.replacedPrevious,
         share_instructions:
-          `Give this code to the joining session. It seats them as "${issuedRole}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
+          `Give this code to the joining session. It seats them as "${r.value.role}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });
     }
   );
@@ -872,32 +769,61 @@ Returns: { left: true, session_status }`,
       },
     },
     async ({ session_id, member_id }): Promise<ToolResult> => {
-      const session = await s.getSession(session_id);
-      if (!session) return fail("session not found.");
-      const me = findMember(session, member_id, identity);
-      if (!me) return fail("member_id is not yours.");
-      if (me.leftAt !== null) return ok({ left: true, session_status: sessionStatus(session) });
+      const r = await leaveRoom(s, identity, session_id, member_id);
+      return r.ok ? ok({ left: true, session_status: r.value.sessionStatus }) : fail(r.reason);
+    }
+  );
 
-      await s.updateMember(session.id, member_id, { leftAt: Date.now() });
-      await s.appendEvent(session.id, {
-        type: "member_left",
-        fromMemberId: member_id,
-        fromUserId: identity.userId,
-        fromLabel: identity.label,
-        payload: { label: identity.label },
-        refId: null,
-      });
+  // -------------------------------------------------------------- bellman_evict
+  server.registerTool(
+    "bellman_evict",
+    {
+      title: "Remove a member from a room you created",
+      description: `Remove someone from a room you created. Only the room's creator can do this — it is not a manifest verb, so no seat grants it and no role can be given it.
 
-      // Re-read: `session` predates the departure.
-      const after = (await s.getSession(session_id)) ?? session;
-      if (activeMembers(after).length === 0) await s.closeSession(session_id);
-      await audit(s, session, identity, "member_left", {});
+Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. Other roles' codes are unaffected, and so is anyone else already in the room. Removal is not a ban: any live code seats them again.
 
-      // Closed wins over frozen: an empty room is over either way, and telling
-      // someone their room is frozen when it has no members left to thaw for
-      // would point them at paying to fix something payment will not fix.
-      const closed = after.closed || activeMembers(after).length === 0;
-      return ok({ left: true, session_status: closed ? "closed" : sessionStatus(after) });
+Reads stay open to the person removed: the history was theirs too. That includes what is said after — their bellman_sync keeps returning new events for as long as the room lives — so removal does not keep later messages from them. What stops is writing: their next bellman_send is refused.
+
+Args: session_id, member_id (THEIRS, not yours)
+Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
+Members see a member_evicted event, the person removed too, unless the room freezes at that instant: the removal still completes, unannounced. Removing the last active member closes the room.
+Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
+      inputSchema: {
+        session_id: z.string().min(4),
+        member_id: z.string().min(4),
+      },
+      // idempotentHint is false. MCP defines it by effect — calling again with the same
+      // arguments has no additional effect on the environment — and eviction can have
+      // one: a code minted for the evicted seat between two calls is live, so the second
+      // call retires it, announces that and audits it. The hint is a claim about effect
+      // and not about retry-safety, and a claim that needs an exception written beside it
+      // is false as stated.
+      //
+      // Whether to retry is a separate question, and the answer is yes. A repeat finishes
+      // an eviction that died partway, whatever of the door, the removal and the closing
+      // was left undone, and after a completed one it announces and audits nothing unless
+      // a code was minted since. That extra effect leans toward over-revoking, and
+      // minting again recovers it.
+      //
+      // bellman_leave keeps idempotentHint: true, for a real reason: once a leave has
+      // completed, a repeat announces and audits nothing, and the closing it may still
+      // finish is of a room that is already empty.
+      annotations: {
+        readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false,
+      },
+    },
+    async ({ session_id, member_id }): Promise<ToolResult> => {
+      // member_id is the TARGET's, not the caller's: every sibling tool takes the
+      // caller's own handle in this slot. The creator-only check lives in evictMember.
+      const r = await evictMember(s, identity, session_id, member_id);
+      return r.ok
+        ? ok({
+            evicted: r.value.evicted,
+            code_retired: r.value.codeRetired,
+            session_status: r.value.sessionStatus,
+          })
+        : fail(r.reason);
     }
   );
 

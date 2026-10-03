@@ -14,6 +14,16 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt">>;
 
 /**
+ * Whether a member is still in the room: they have not left.
+ *
+ * Here, and not in rooms.ts, because the stores now decide a room is empty
+ * (`closeSessionIfEmpty`) and rooms.ts imports this module, not the reverse.
+ * `activeMembers` is built on it, so the members rooms.ts counts and the members
+ * a close is decided on are one reading of `leftAt` and cannot drift apart.
+ */
+export const isActiveMember = (m: Member): boolean => m.leftAt === null;
+
+/**
  * Storage boundary. Everything stateful goes through this interface so the
  * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
  * without touching tool logic.
@@ -91,27 +101,104 @@ export interface BellmanStore {
   /** Issue a code for one role, retiring only that role's previous code. False means frozen. */
   setJoinCode(sessionId: string, role: string, code: string, expiresAt: number): Promise<boolean>;
   /**
-   * Append a member to a session, unless it is frozen. False means frozen.
+   * Append a member to a session, unless it is frozen or closed. False means
+   * refused — frozen, closed, or no such session — and a caller that has to say
+   * which reads the session again.
    *
-   * The refusal is here rather than only in the tool, because the tool reads
+   * The refusals are here rather than only in the tool, because the tool reads
    * the session and then writes, and a freeze landing in that gap would let a
-   * frozen room grow — which is the one thing freezing is for. Unlike the
+   * frozen room grow — which is the one thing freezing is for. A close landing in
+   * it is the same gap with a worse result: a member seated in a room that is
+   * over. This is the other half of `closeSessionIfEmpty`, which keeps a close
+   * from landing on an occupied room; the pair is sound only together. Unlike the
    * cross-object races on #59 and #62, both halves live in the same object, so
    * this one can simply be made not to have a gap.
    */
   addMember(sessionId: string, member: Member): Promise<boolean>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
-  /** Mark a session closed. Idempotent. */
+  /**
+   * Mark a session closed, whoever is in it. Idempotent. To close a room because
+   * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then
+   * calling this is the gap it exists to close.
+   *
+   * No production path calls this today. The room operations close through
+   * `closeSessionIfEmpty`, and only tests use this one. It stays as the
+   * unconditional close, which the close-a-room route #49 lists will need, and
+   * for the contract suite to set a room up closed. Do not read its presence as
+   * behaviour anything depends on.
+   */
   closeSession(sessionId: string): Promise<void>;
+  /**
+   * Close a session if nobody is in it. Resolves to whether the session IS closed
+   * when this returns, and not to whether this call closed it, which is how the
+   * name reads: true for a room this call closed and for one that already was,
+   * false for a room left open because a member is in it, and for one that does
+   * not exist.
+   *
+   * The check and the write are one operation, and cannot be two. A caller that
+   * read the roster, saw it empty and then called `closeSession` would leave a
+   * window for a member to join in, and the room would close over them with its
+   * codes retired. Here the Durable Objects store decides inside the one object
+   * that owns the session, and MemoryStore does not yield between the two.
+   * `addMember`'s refusal of a closed session is the other half: this keeps a
+   * close from landing on an occupied room, that keeps a join from landing on a
+   * closed one, and neither is enough alone.
+   *
+   * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
+   * like any other: freezing refuses writes into a room someone is in, and an
+   * empty one is over either way.
+   *
+   * The answer is a state and not an event, on purpose, and DurableObjectStore
+   * depends on it. An already-closed room answers true whoever is listed in it.
+   * A close can die after the room is marked closed and before the registry drops
+   * its codes, and the retry has to read the room as closed to finish that: "did
+   * this call close it" would answer false there, and leave the rows for good.
+   */
+  closeSessionIfEmpty(sessionId: string): Promise<boolean>;
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
    * Sessions this user created, newest first is not promised — only that a
    * lapsed plan can find the rooms it has to freeze. The create *counts* used
    * for quota cannot answer that: they are timestamps, not identities.
+   *
+   * That promise has two exceptions, both in the Durable Objects store, and a
+   * miss costs more than a row missing from a list: a lapse freezes the rooms
+   * this names, so a room it misses is not frozen and keeps working on a plan
+   * that no longer pays for it. The index starts at its deploy, so a room
+   * created before then is not listed (see `RegistryDO.indexSession`). And a
+   * failed index write is logged rather than thrown, deliberately, so that a
+   * registry failure cannot abort a create whose room had already committed;
+   * nothing rebuilds the row it lost (see `DurableObjectStore.writeIndex`). A
+   * creator's room takes two such writes, one per listing, and either can fail
+   * alone, so a room can be in `sessionsJoinedBy` and absent from here.
    */
   sessionsCreatedBy(userId: string, limit: number): Promise<string[]>;
+  /**
+   * Rooms in which this user has held a member handle — created, joined, left
+   * and closed alike — for as far back as the store's index goes. In MemoryStore
+   * that is everything; in the Durable Objects store it starts at its deploy, so
+   * a handle held before then is not listed (see `RegistryDO.indexMembership`).
+   *
+   * Nor is every handle held since that deploy. The Durable Objects store logs a
+   * failed index write rather than throwing it, deliberately, so that a registry
+   * failure cannot abort a join whose seat had already committed; nothing
+   * rebuilds the row it lost (see `DurableObjectStore.writeIndex`). A creator's
+   * room takes two such writes, one per listing, and either can fail alone, so
+   * the room can be in `sessionsCreatedBy` and absent from here, or the reverse.
+   * Absence from this list is not proof that the user never held a handle.
+   *
+   * Ids only, like `sessionsCreatedBy`, and no status parameter. The consumers
+   * it is meant for do not agree on what counts as current: the control panel
+   * hides closed rooms, a freeze sweep wants exactly the live ones. Encoding
+   * either answer here would make one of them filter twice.
+   *
+   * Order is not promised, and it differs between the stores — insertion order
+   * in MemoryStore, key order in the Durable Objects store — so which rooms
+   * survive `limit` is unspecified too.
+   */
+  sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
 
   /** Append an event. Null means the session is frozen, for the same reason. */
   appendEvent(
@@ -214,6 +301,7 @@ export class MemoryStore implements BellmanStore {
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
   private byCreator = new Map<string, Set<string>>();
+  private byMember = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -234,6 +322,21 @@ export class MemoryStore implements BellmanStore {
     const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
     mine.add(stored.id);
     this.byCreator.set(stored.createdBy, mine);
+    // The members a session is created with are seated directly — bellman_start
+    // hands over the creator in `members` and never calls addMember — so they
+    // are indexed here. addMember indexes everyone who joins afterwards.
+    for (const m of stored.members) this.indexMember(m.userId, stored.id);
+  }
+
+  /**
+   * The one place the joined index is written, so the two ways of seating a
+   * member cannot drift apart. Keyed by user, so a second handle for the same
+   * person in the same room is the same entry.
+   */
+  private indexMember(userId: string, sessionId: string): void {
+    const joined = this.byMember.get(userId) ?? new Set<string>();
+    joined.add(sessionId);
+    this.byMember.set(userId, joined);
   }
 
   async getSession(id: string): Promise<Session | undefined> {
@@ -287,7 +390,13 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     if (s.frozenAt !== null) return false;
+    // Closed is refused for the reason frozen is: the caller read the room before
+    // this write, and a close in the gap would otherwise seat a member in a room
+    // that is over. closeSessionIfEmpty is the other half.
+    if (s.closed) return false;
     s.members.push(detach(member));
+    // After the guards, so a refused add leaves no trace in the listing.
+    this.indexMember(member.userId, sessionId);
     return true;
   }
 
@@ -308,10 +417,34 @@ export class MemoryStore implements BellmanStore {
   async closeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.closeNow(s);
+  }
+
+  async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return false;
+    // No await from here to the write, deliberately. The check and the close are
+    // one operation, and a yield between them is the window a join lands in: the
+    // same rule, and the same reason, as waitForEvents and the guarded grant
+    // writes. The Durable Objects store gets it from the input gate instead.
+    if (s.closed) return true;
+    if (s.members.some(isActiveMember)) return false;
+    this.closeNow(s);
+    return true;
+  }
+
+  /**
+   * The close itself, with no awaits in it, so both public closers can call it
+   * without yielding between their guard and their write. The same arrangement,
+   * and the same reason, as appendNow.
+   *
+   * Agrees with expireIfDue: a closed room's codes stop resolving AND stop
+   * occupying the index, rather than relying on the `closed` guard alone.
+   */
+  private closeNow(s: Session): void {
     s.closed = true;
-    // Agree with expireIfDue: a closed room's codes stop resolving AND stop
-    // occupying the index, rather than relying on the `closed` guard alone.
-    await this.clearJoinCodes(sessionId);
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    s.joinCodes = {};
   }
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
@@ -322,6 +455,10 @@ export class MemoryStore implements BellmanStore {
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
+  }
+
+  async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
+    return [...(this.byMember.get(userId) ?? [])].slice(0, limit);
   }
 
   async appendEvent(

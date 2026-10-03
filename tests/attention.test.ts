@@ -13,10 +13,8 @@ const PRE_EXISTING: EventType[] = [
 ];
 
 describe("attention", () => {
-  it("leaves every pre-existing type interrupting", () => {
-    for (const type of PRE_EXISTING) {
-      expect(attentionOf(type)).toBe("interrupt");
-    }
+  it.each(PRE_EXISTING)("leaves %s interrupting", (type) => {
+    expect(attentionOf(type)).toBe("interrupt");
   });
 
   it("makes a reply ambient and the tick an interrupt", () => {
@@ -27,9 +25,10 @@ describe("attention", () => {
   });
 
   /**
-   * The table is the enforcement, not this test — `satisfies` fails the build
-   * when a type has no posture. This catches the other direction: a key left
-   * behind after a type is removed.
+   * The compiler enforces this table in both directions: `satisfies` rejects a
+   * type with no posture (TS2741) and a key that names no type (TS2353). This
+   * is a runtime backstop for the second, a key left behind after a type is
+   * removed, and not a gap in the compiler's check.
    */
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))

@@ -5,8 +5,8 @@ import type { SessionEvent } from "./types.js";
 // `cloudflare:workers`, so the Node program cannot import it (tsconfig.json
 // excludes it), and importing server.ts from the Durable Object would pull the
 // whole tool layer into it. What both must agree on lives here, with no import
-// beyond a type, as stored-session.ts does for the shape store-do.ts and the
-// tests share.
+// beyond a type or another runtime-free module, as stored-session.ts does for
+// the shape store-do.ts and the tests share.
 
 /**
  * An event as a member is shown it: the one shape that leaves the server, over

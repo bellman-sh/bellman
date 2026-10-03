@@ -27,7 +27,7 @@ const stored = (over: Partial<SessionEvent> = {}): SessionEvent => ({
 });
 
 describe("publicEvent", () => {
-  it("is exactly the six fields a member is shown", () => {
+  it("is exactly the six fields a member is shown, for an interrupting event", () => {
     expect(Object.keys(publicEvent(stored())).sort())
       .toEqual(["at", "cursor", "from", "payload", "ref_id", "type"]);
   });
@@ -75,8 +75,10 @@ describe("publicEvent", () => {
     expect(publicEvent({ ...base, type: "progress" })).toMatchObject({ ambient: true });
   });
 
-  it("never leaks fromUserId", () => {
-    expect("fromUserId" in publicEvent({ ...base, type: "progress" })).toBe(false);
+  it("never leaks fromUserId, whatever the posture", () => {
+    for (const type of ["message", "progress"] as const) {
+      expect(JSON.stringify(publicEvent({ ...base, type }))).not.toContain("u_jesse");
+    }
   });
 });
 

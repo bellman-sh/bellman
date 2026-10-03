@@ -3,10 +3,12 @@ import type { EventType } from "./types.js";
 /**
  * Whether an event should reach a member mid-turn, or wait until it looks.
  *
- * In neither server.ts nor bridge.ts, and with no import beyond a type, for the
- * reason public-event.ts gives: both the server's projection and the client's
- * delivery read it, and a table in either one would make that one the owner of a
- * type list the other has to keep up with.
+ * In neither server.ts nor store-do.ts, and with no import beyond a type, for
+ * the reason public-event.ts gives: publicEvent is called from both, so what
+ * it reads must be importable from both. It is the only reader. It turns a
+ * type's posture into the `ambient` field on the wire, and clients read that
+ * field and not this table, so none of them keeps a type list of its own to
+ * fall behind it.
  */
 export type Attention = "interrupt" | "ambient";
 

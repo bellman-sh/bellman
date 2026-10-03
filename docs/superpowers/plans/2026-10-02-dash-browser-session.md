@@ -2817,11 +2817,18 @@ describe("/auth/signout", () => {
     expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
   });
 
-  it("refuses anything but POST", async () => {
-    const res = await route(new Request(`${ISSUER}/auth/signout`, { method: "GET" }));
+  // The request carries a cookie on purpose. SameSite=Lax sends the cookie on a
+  // top-level GET navigation, so a link someone follows would sign the human out if
+  // GET did, and a 405 sent after the delete would be cosmetic. With no cookie
+  // there is nothing to delete, and the test passes either way.
+  it("refuses anything but POST, and the session survives", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(withCookie("/auth/signout", sid, { method: "GET" }));
 
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("POST");
+    expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
   });
 });
 ```
@@ -2913,9 +2920,9 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./br
 Run: `npx vitest run tests/panel-session.test.ts`
 Expected: PASS.
 
-- [ ] **Step 6: Prove sign-out is server-side, and only for the session it names**
+- [ ] **Step 6: Prove sign-out is server-side, only for the session it names, and only for a POST**
 
-Two mutations, one at a time, restoring between them. They fail different assertions of the same test.
+Three mutations, one at a time, restoring between them. The first two fail different assertions of the same test.
 
 Temporarily drop the `deleteSession` call, leaving only the clearing header. Re-run.
 Expected: "invalidates the session server-side, and only that one" FAILS on the read that follows the sign-out — the signed-out cookie still answers 200, because clearing the browser's copy did nothing to the record. Restore.
@@ -2923,7 +2930,17 @@ Expected: "invalidates the session server-side, and only that one" FAILS on the 
 Then make a sign-out end every session: change `MemoryAuthStore.deleteSession` to `this.sessions.clear()`. Re-run.
 Expected: the same test FAILS on its last assertion — the bystander's cookie now answers 401 — and so does `deleteSession ends only the session it names`, the store's own test of the same defect. The route test asserts the behaviour end to end, so it fails for a sign-out that ends every session whether the fault is in the route or beneath it. Restore.
 
-The first is the distinction that chose a stored session over a signed one. The second is the failure a user would see, signed out everywhere by one click, and a test with a single session cannot see it. Both get an assertion rather than a paragraph.
+Then delete before refusing the method: as the first statement inside the `if (method !== "POST")` block, add
+
+```ts
+      const c = readSessionCookie(request, new URL(config.issuer).protocol === "https:");
+      if (c) await config.store.deleteSession(c);
+```
+
+Re-run.
+Expected: "refuses anything but POST, and the session survives" FAILS on its last assertion — the response is still 405, and the session is gone: 401 where it expects 200. A test that sent no cookie would pass this. Restore.
+
+The first is the distinction that chose a stored session over a signed one. The second is the failure a user would see, signed out everywhere by one click, and a test with a single session cannot see it. The third is the same failure reached by a link instead of a click: SameSite=Lax sends the cookie on a top-level GET navigation, and a 405 answered after the delete would sign the human out regardless. All three get an assertion rather than a paragraph.
 
 - [ ] **Step 7: Verify and commit**
 
@@ -2958,7 +2975,12 @@ still signed in as them afterwards, because a sign-out that ended every
 session passes a test with only one to end. /auth/session is tested the same
 way: the drop of a dead session leaves someone else signed in as themselves,
 and two humans' cookies are read alternately, before the write, so that an
-answer served from the last record gives itself away."
+answer served from the last record gives itself away.
+
+A GET is refused before anything is deleted, and its test carries a cookie
+to see it. SameSite=Lax sends the cookie on a top-level GET navigation, so a
+link someone follows would otherwise sign the human out and be answered 405
+afterwards."
 ```
 
 ---
@@ -3067,6 +3089,13 @@ describe("/admin stays bearer-only", () => {
     key: "github:999", plan: "pro", role: "member", orgId: "acme",
   });
 
+  /** A grant for the revocation tests to act on, written as the operator would. */
+  const seedGrant = () =>
+    cfg.plans!.putGrant({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+      source: "operator", grantedAt: Date.now(), grantedBy: OPERATOR_ADMIN.userId, expiresAt: null,
+    });
+
   beforeEach(() => {
     cfg = panelConfig();
     route = routeWith(cfg);
@@ -3132,6 +3161,44 @@ describe("/admin stays bearer-only", () => {
     });
   });
 
+  // A revocation is a write like the grant is. The guard names no method, and one
+  // written to skip a method would leave a cookie able to take a grant away.
+  it("refuses a cookie-authenticated revocation, and the grant stays", async () => {
+    await seedGrant();
+    const sid = await seedSession(cfg, "admin-sid", {
+      identity: OPERATOR_ADMIN, plan_source: "operator",
+    });
+
+    const res = await route(new Request(`${ISSUER}/admin/grants?key=github:999`, {
+      method: "DELETE",
+      headers: { cookie: `${COOKIE}=${sid}`, origin: PANEL_ORIGIN },
+    }));
+
+    expect(res.status).toBe(401);
+    expect(await cfg.plans!.getGrant("github:999")).toMatchObject({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+    });
+  });
+
+  // The control for the revocation above: the same identity over a bearer token
+  // revokes, so the grant staying is the refusal and not DELETE broken for everyone.
+  it("still accepts the identical identity revoking over a bearer token", async () => {
+    await seedGrant();
+    const token = await signJwt(
+      { iss: ISSUER, sub: OPERATOR_ADMIN.userId, aud: cfg.resource,
+        bellman: OPERATOR_ADMIN, plan_source: "operator" },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS
+    );
+
+    const res = await route(new Request(`${ISSUER}/admin/grants?key=github:999`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(await cfg.plans!.getGrant("github:999")).toBeUndefined();
+  });
+
   it("grants no CORS on /admin, so a browser cannot even read the refusal", async () => {
     const res = await route(new Request(`${ISSUER}/admin/grants`, {
       headers: { origin: PANEL_ORIGIN },
@@ -3164,7 +3231,10 @@ describe("CSRF through the real routes", () => {
     }))).status).toBe(200);
   });
 
-  it("refuses a cookie POST from an origin off the list", async () => {
+  // The same strength as the test above, for the other way into the same rule. A
+  // refusal that deleted first would let a page on any origin sign a human out and
+  // be told 403 about it.
+  it("refuses a cookie POST from an origin off the list, and the session survives", async () => {
     const sid = await seedSession(cfg);
 
     const res = await route(new Request(`${ISSUER}/auth/signout`, {
@@ -3173,6 +3243,9 @@ describe("CSRF through the real routes", () => {
     }));
 
     expect(res.status).toBe(403);
+    expect((await route(new Request(`${ISSUER}/auth/session`, {
+      headers: { cookie: `${COOKIE}=${sid}` },
+    }))).status).toBe(200);
   });
 });
 ```
@@ -3182,7 +3255,7 @@ describe("CSRF through the real routes", () => {
 Run: `npx vitest run tests/browser-safety.test.ts`
 Expected: FAIL — no `OPTIONS` handling; `/admin/grants` accepts a cookie; `/account` carries no CORS.
 
-The bearer test passes here, because nothing in it depends on this task. Its `getGrant("github:999")` assertion is what confirms that call reads the grant the route stored; if that test fails, correct the call before reading anything into the `toBeUndefined()` in the refused write test.
+The bearer tests pass here, because nothing in them depends on this task. The write one's `getGrant("github:999")` assertion is what confirms that call reads the grant the route stored; if it fails, correct the call before reading anything into the `toBeUndefined()` in the refused write test.
 
 - [ ] **Step 3: Add preflight handling**
 
@@ -3272,13 +3345,26 @@ At the top of the `/admin/grants` branch, right after `caller`:
 Run: `npm test`
 Expected: PASS, every file.
 
-- [ ] **Step 7: Prove the `/admin` refusal is not vacuous**
+- [ ] **Step 7: Prove the refusals are not vacuous**
+
+Five mutations, one at a time, restoring between them. The first three are in the `/admin/grants` branch.
 
 Temporarily remove the `who.via === "cookie"` guard. Re-run.
-Expected: both "refuses a cookie-authenticated…" tests FAIL, with 201 and 200. Restore, and confirm the bearer test still passes — that pairing is what distinguishes "cookies refused" from "endpoint broken".
+Expected: all three "refuses a cookie-authenticated…" tests FAIL, with 200, 201 and 200. Restore, and confirm both bearer tests still pass — that pairing is what distinguishes "cookies refused" from "endpoint broken".
 
 Then move the guard instead of removing it: cut it from the top of the branch and paste it just before `return json({ granted: grant }, 201);`, so the grant is written and the refusal comes after. Re-run.
-Expected: "refuses a cookie-authenticated grant write" FAILS on its last assertion — the response is 401, as it should be, and the grant is stored. The status line cannot see that; the `getGrant` line can. The read test fails as well, with 200, because the guard no longer covers a GET. Restore.
+Expected: "refuses a cookie-authenticated grant write" FAILS on its last assertion — the response is 401, as it should be, and the grant is stored. The status line cannot see that; the `getGrant` line can. The read test and the revocation test fail as well, with 200, because the guard no longer covers a GET or a DELETE. Restore.
+
+Then make the guard skip one method: `if (who.via === "cookie" && method !== "DELETE")`. Re-run.
+Expected: "refuses a cookie-authenticated revocation, and the grant stays" FAILS with 200 where it expects 401, because the revocation ran, and nothing else fails. Restore.
+
+The last two are in the `/auth/signout` branch, which is Task 8's.
+
+Move the `csrfRefusal` check below the `deleteSession` call, so that every refused POST deletes first. Re-run.
+Expected: both "refuses a cookie POST…" tests FAIL on their last assertion — 401 where they expect 200, because the session is gone. Restore.
+
+Then delete first only for an off-list origin: replace `if (refusal) return refusal;` with a block that, when the request has an `Origin` header, reads the cookie and calls `deleteSession` before it returns `refusal`. Re-run.
+Expected: "refuses a cookie POST from an origin off the list, and the session survives" FAILS on its last assertion, and the no-Origin test does not. A test of the status alone would pass this. Restore.
 
 - [ ] **Step 8: Verify and commit**
 
@@ -3308,7 +3394,13 @@ The refusal is tested against the identical identity over a bearer
 token, which is what tells 'cookies refused' apart from 'endpoint
 broken'. It is also asserted to have written nothing: a route that stored
 the grant and then answered 401 passed the status check alone, and the
-bearer write is the control that the check can see a write."
+bearer write is the control that the check can see a write.
+
+A revocation is refused like the write and the list, with its grant asserted
+to be still there: a guard written to skip one method passed everything
+else. The sign-out refusals are asserted to leave the session in place for
+both ways in, because a refusal that deleted first would let a page on any
+origin sign a human out and be told 403 about it."
 ```
 
 ---

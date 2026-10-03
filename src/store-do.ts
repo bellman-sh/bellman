@@ -5,8 +5,10 @@ import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
-import type { BellmanStore, EventWrite, MemberPatch, SeatOutcome } from "./store.js";
-import { isActiveMember, seatVictims } from "./store.js";
+import type {
+  AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
+} from "./store.js";
+import { creditReport, isActiveMember, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -96,6 +98,32 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
 });
+
+/**
+ * The `session` row an append writes to credit the sender's report, or null when
+ * it writes none — the append did not ask for a credit, or the stamp already
+ * sits forward of this event.
+ *
+ * A row rather than a put, so the caller folds it into the put it was already
+ * making: `#writeEvent`'s whole argument is that an event and the rows that
+ * belong with it commit in ONE write, and a credit committed separately is the
+ * split this fix exists to remove.
+ *
+ * Module-level and pure. Not a method, because a Durable Object answers RPC for
+ * every method on its class — a writing helper reachable from outside would let a
+ * plain stub forge a report into any room — and because the rule it applies
+ * (`creditReport`) is shared with MemoryStore and belongs to neither.
+ */
+function reportRow(
+  s: StoredSession,
+  memberId: string,
+  at: number,
+  extras: AppendExtras,
+): Record<string, unknown> | null {
+  if (!extras.creditReport) return null;
+  const members = creditReport(s.members, memberId, at);
+  return members ? { session: { ...s, members } } : null;
+}
 
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
@@ -764,14 +792,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and the write are one unit, so two appends take two cursors and neither event
    * overwrites the other. The wake comes after the commit, so nobody hears of an event
    * that did not land, and the wiring tests fail a wake that goes out before it.
+   *
+   * **`extras.creditReport` rides in that same put, and it has to.** The handler
+   * used to stamp `lastReportAt` with an `updateMember` call AFTER this returned,
+   * which is a second RPC into a second transaction — and `#wake` above fires
+   * before it, so a due alarm could read the committed progress event while the
+   * stale stamp still named that member silent. Folded in here the stamp and the
+   * event commit together or not at all, and the wake still waits for both.
+   *
+   * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
+   * ever moves a member's deadline LATER. An alarm already armed is then early —
+   * it fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()`
+   * points it at the right time. One wake spent, and the tick it produces is
+   * correct.
    */
-  async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {
+  async appendEvent(
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {},
+  ): Promise<SessionEvent | null> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      await this.#writeEvent(txn, next);
+      await this.#writeEvent(txn, next, reportRow(s, e.fromMemberId, next.at, extras) ?? {});
       return next;
     });
     if (event) this.#wake(event);
@@ -794,7 +838,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {},
   ): Promise<EventWrite> {
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
@@ -811,6 +856,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!original) {
           throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
         }
+        // The replay credits too, in this transaction. A retry cannot know
+        // whether the first attempt landed the stamp, and skipping it here is
+        // what made a stamp the first attempt never wrote permanent rather than
+        // late. `creditReport` is monotonic, so this is a repair or a no-op and
+        // never a regression — and it writes nothing at all when the stamp is
+        // already forward of the original event.
+        const credit = reportRow(s, e.fromMemberId, original.at, extras);
+        if (credit) await txn.put<unknown>(credit);
         return { outcome: "replayed", event: original };
       }
 
@@ -822,7 +875,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // interruption leaves the event stored with no key naming it, and the
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
-      await this.#writeEvent(txn, event, { [storageKey]: stored });
+      await this.#writeEvent(txn, event, {
+        [storageKey]: stored,
+        ...reportRow(s, e.fromMemberId, event.at, extras),
+      });
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -1870,17 +1926,19 @@ export class DurableObjectStore implements BellmanStore {
 
   async appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {}
   ): Promise<SessionEvent | null> {
-    return this.session(sessionId).appendEvent(e);
+    return this.session(sessionId).appendEvent(e, extras);
   }
 
   async appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {}
   ): Promise<EventWrite> {
-    return this.session(sessionId).appendEventOnce(e, key);
+    return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {

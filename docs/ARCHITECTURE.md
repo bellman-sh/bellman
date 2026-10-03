@@ -603,7 +603,13 @@ a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
 `moveGrant`, `closeSessionIfEmpty`, `seatMember`, `addMember` and the two
-appends are single transactions. `updateMember`, `closeSession` and
+appends are single transactions. An append carries the rows that belong with its
+event — the cursor, an idempotency key's record, and for a `progress` send the
+sending member's own `lastReportAt`. That last one was a second `updateMember`
+call after the append returned, which is a second transaction with the wake
+between them: a due tick could read the committed event while the stale stamp
+still named that member silent, and a retry skipped the patch outright.
+`updateMember`, `closeSession` and
 `freezeSession` are single invocations that await only storage. The input gate
 covers those, and a transaction would be the stronger form: it holds even if an
 await on anything but storage were ever put between the read and the write.
@@ -643,9 +649,12 @@ store reports it actually took.
    session record, and a stored row wins. `SessionDO` has three handlers,
    `outbox`, `ttl` and `heartbeat`, and only `outbox` is stored. The TTL is
    derived from `expiresAt`, so sessions written before named alarms still
-   expire. The tick (#111) is derived from `nextTickAt`, anchored on the
-   session's `lastTickAt` and not on any member's report time, so an alarm that
-   fired and found nobody due cannot fire again at once. `ob_seq`, the counter
+   expire. The tick (#111) is derived from `nextTickAt`, which asks each member
+   at its own `lastReport + cadence` — except one already due at the preceding
+   tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
+   `lastTickAt` is a **floor rather than the clock**, and because both branches
+   land after it, an alarm that fired and found nobody due still cannot fire
+   again at once. The design's D10 and D5 carry the argument. `ob_seq`, the counter
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.

@@ -55,6 +55,41 @@ export const asked = (s: StoredSession, m: Member): boolean =>
   isActiveMember(m) && mustReport(s.manifest, m.roomRole);
 
 /**
+ * The roster with one member's report stamp moved forward to `at`, or null when
+ * nothing moves.
+ *
+ * **Monotonic, and that is the whole rule.** `lastReportAt` only ever moves
+ * later. A credit replayed from an older event, or one arriving out of order
+ * behind a fresher report, would otherwise un-credit an answer the member had
+ * already given — and the next tick would name it silent for having reported.
+ * There is no reading of "it last reported earlier than we thought" that helps
+ * anybody.
+ *
+ * Null for "no write needed" rather than an unchanged roster, so both stores
+ * agree on WHEN a credit writes at all: a replay whose stamp is already forward
+ * of the event touches no storage. A member the roster does not name is the same
+ * answer, for `updateMember`'s reason — an unknown member is a no-op, not a
+ * throw.
+ *
+ * Here beside `asked` and `clearSilence`, and the direction is the same: this is
+ * applied INSIDE both stores, and heartbeat.ts imports this module, so the other
+ * way round would be a cycle.
+ */
+export function creditReport(
+  members: Member[],
+  memberId: string,
+  at: number,
+): Member[] | null {
+  const i = members.findIndex((m) => m.memberId === memberId);
+  if (i < 0) return null;
+  const was = members[i].lastReportAt;
+  if (was !== undefined && was >= at) return null;
+  const next = [...members];
+  next[i] = { ...next[i], lastReportAt: at };
+  return next;
+}
+
+/**
  * The roster a thaw writes back: every seat the room asks is credited with a
  * report at `now`.
  *
@@ -180,6 +215,31 @@ export type EventWrite =
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "frozen" }
   | { outcome: "conflict" };
+
+/**
+ * What an append writes BESIDES the event, in the event's own transaction.
+ *
+ * An explicit argument rather than the store reading `e.type`: nothing in either
+ * store branches on an event's kind, and this is the one write that would have
+ * made it. The caller already knows it is handling a `progress` send — it checked
+ * the verb and validated the payload to get there — so saying so costs it a flag
+ * and leaves the store a log that does not interpret what it logs.
+ *
+ * It is not an optimisation. The stamp and the event have to commit together or
+ * a due tick can read one without the other; see `creditReport` and
+ * `SessionDO.appendEvent`.
+ */
+export interface AppendExtras {
+  /**
+   * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
+   *
+   * Applied on an append AND on an idempotent replay. A replay re-asserts the
+   * stamp because a caller retrying has no way to know whether the first attempt
+   * landed it, and skipping the credit there is what made a lost stamp permanent
+   * rather than late.
+   */
+  creditReport?: boolean;
+}
 
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
@@ -350,10 +410,16 @@ export interface BellmanStore {
    */
   sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
 
-  /** Append an event. Null means the session is frozen, for the same reason. */
+  /**
+   * Append an event. Null means the session is frozen, for the same reason.
+   *
+   * `extras` names what else the append writes, in the same operation; see
+   * `AppendExtras`.
+   */
   appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras?: AppendExtras
   ): Promise<SessionEvent | null>;
   /**
    * Append an event unless this member has already used this key.
@@ -376,7 +442,8 @@ export interface BellmanStore {
   appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras?: AppendExtras
   ): Promise<EventWrite>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
   /**
@@ -671,18 +738,43 @@ export class MemoryStore implements BellmanStore {
 
   async appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {}
   ): Promise<SessionEvent | null> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     if (s.frozenAt !== null) return null;
-    return detach(this.appendNow(s, e));
+    // Synchronous from here, so the event and the credit land together. The
+    // Durable Objects store gets that from a transaction; here it is the absence
+    // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
+    const event = this.appendNow(s, e);
+    this.credit(s, e.fromMemberId, event.at, extras);
+    return detach(event);
+  }
+
+  /**
+   * Apply an append's `creditReport`, if it asked for one. The rule is
+   * `creditReport` in this module, shared with `SessionDO` so the two stores
+   * cannot disagree about when a stamp moves.
+   *
+   * No awaits, for appendEvent's reason above.
+   */
+  private credit(
+    s: Session,
+    memberId: string,
+    at: number,
+    extras: AppendExtras,
+  ): void {
+    if (!extras.creditReport) return;
+    const members = creditReport(s.members, memberId, at);
+    if (members) s.members = members;
   }
 
   async appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {}
   ): Promise<EventWrite> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
@@ -706,6 +798,10 @@ export class MemoryStore implements BellmanStore {
           `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
         );
       }
+      // The replay credits too. A retry cannot know whether the first attempt
+      // landed the stamp, and `creditReport` is monotonic, so re-asserting it is
+      // either a repair or a no-op and never a regression.
+      this.credit(s, e.fromMemberId, original.at, extras);
       return { outcome: "replayed", event: detach(original) };
     }
 
@@ -715,6 +811,7 @@ export class MemoryStore implements BellmanStore {
     const map = seen ?? new Map<string, IdempotencyRecord>();
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
+    this.credit(s, e.fromMemberId, event.at, extras);
     return { outcome: "appended", event: detach(event) };
   }
 

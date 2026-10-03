@@ -158,6 +158,17 @@ export interface HeartbeatPayload {
  * Two thresholds. `silent` is two cadences and the ask is one, so a member is
  * asked for a full interval before any peer is told it has gone quiet. A false
  * silent costs every peer's trust in the signal; a late one costs a few minutes.
+ *
+ * **The ask is addressed to the list, not to the reader.** A `heartbeat` event
+ * reaches every active member — the tick is ambient and nothing filters delivery
+ * by seat — so an `observer` (`can: []`, `reports: false`) receives it too, and
+ * `bellman_send` refuses `progress` from a seat without `send`. An unconditional
+ * "Reply with …" therefore instructed such a member, every cadence, to make a
+ * call this same server rejects. `members` below already names exactly the seats
+ * the room asks, so the ask points there and a reader absent from it can tell
+ * nothing is wanted of it. Narrowing DELIVERY instead would mean the server
+ * knowing per-recipient what it sent, which the one-event-per-room shape does not
+ * have and Invariant 7 would not let it store.
  */
 export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
   // Not a cadence this can describe. `#tickIfDue` refuses a null cadence before
@@ -172,7 +183,8 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
   }
   return {
     cadence_seconds: Math.round(every / 1000),
-    ask: "Reply with bellman_send type=\"progress\", payload { note } — one line on where you are.",
+    ask: "The members listed below: reply with bellman_send type=\"progress\", payload { note } "
+      + "— one line on where you are. Nobody else is being asked.",
     members: reporting(s).map((m) => {
       // `??`, not truthiness. Epoch 0 is a timestamp, and `m.lastReportAt ? … :
       // null` read it as "never reported" — the bug `lastReport` above already

@@ -44,6 +44,15 @@ export interface Member {
    * `lastSeen`, which lifts those to `joinedAt`.
    */
   lastSeenAt?: number;
+  /**
+   * When this member last answered a heartbeat tick with `progress` (#111).
+   *
+   * Distinct from `lastSeenAt`, which any call moves: this moves only on a
+   * deliberate report, because the question it answers is "has this member said
+   * where it is", not "is it there". Absent on rows stored before the field
+   * existed; read it through `lastReport`, which lifts those to `joinedAt`.
+   */
+  lastReportAt?: number;
 }
 
 export type EventType =

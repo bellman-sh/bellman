@@ -6,7 +6,21 @@ import type { Session } from "./types.js";
 // a plain test has to reach lives here, with no Cloudflare imports.
 
 /** The session record as stored — events live under their own keys. */
-export type StoredSession = Omit<Session, "events">;
+export interface StoredSession extends Omit<Session, "events"> {
+  /**
+   * When the heartbeat alarm last fired for this room (#111).
+   *
+   * The tick's clock, and the reason the alarm cannot spin: a tick does not move
+   * any member's `lastReportAt`, so a due time computed from member reports
+   * alone stays in the past for a member that never answers, and `reArm()` would
+   * point the alarm back at it indefinitely — the hazard `alarm()`'s comment
+   * records for `due:outbox`. This strictly advances on every firing.
+   *
+   * Absent until the first firing; `nextTickAt` anchors on the earliest
+   * reporting member's `joinedAt` until then.
+   */
+  lastTickAt?: number;
+}
 
 /**
  * Gate every session read out of Durable Object storage.

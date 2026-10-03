@@ -463,7 +463,7 @@ revoked grant would hold for the session's whole life."
 - Test: `worker-tests/auth-session.test.ts` (create)
 
 **Interfaces:**
-- Consumes: `PanelSession`, `sessionDead`, `SESSION_TOUCH_MS` from Task 1; the existing `sweepPage`, `SweepStorage` and `PURGE_BATCH`.
+- Consumes: `PanelSession`, `sessionDead`, `touchDue` from Task 1; the existing `sweepPage`, `SweepStorage` and `PURGE_BATCH`.
 - Produces: `putSession`, `touchSession`, `deleteSession` on both `AuthDO` and the `AuthStore` facade, with behavior identical to `MemoryAuthStore`.
 
 - [ ] **Step 1: Read how an existing worker test reaches `AuthDO`**
@@ -550,13 +550,35 @@ describe("AuthDO sessions", () => {
     expect((await o.touchSession("sid", T0 + SESSION_TOUCH_MS - 1))?.last_used_at).toBe(T0);
   });
 
-  it("writes last_used_at once it is stale, and it persists", async () => {
+  // Pins the threshold at exactly SESSION_TOUCH_MS: a value that stale is still
+  // fresh enough to skip, which is the boundary two copies of the comparison
+  // could disagree on.
+  it("skips the write at exactly SESSION_TOUCH_MS", async () => {
+    const o = auth("s-threshold");
+    await o.putSession("sid", panelSession());
+
+    expect((await o.touchSession("sid", T0 + SESSION_TOUCH_MS))?.last_used_at).toBe(T0);
+  });
+
+  it("writes last_used_at once it is stale", async () => {
     const o = auth("s-write");
     await o.putSession("sid", panelSession());
     const now = T0 + SESSION_TOUCH_MS + 1;
 
     expect((await o.touchSession("sid", now))?.last_used_at).toBe(now);
-    expect((await o.touchSession("sid", now))?.last_used_at).toBe(now);
+  });
+
+  // Touched again less than SESSION_TOUCH_MS after the value just written, so
+  // only a stored write can produce `now`. Asked again at the same instant, an
+  // object that returned the write without keeping it would answer identically:
+  // stale again, so it writes again.
+  it("persists the last_used_at it writes", async () => {
+    const o = auth("s-persist");
+    await o.putSession("sid", panelSession());
+    const now = T0 + SESSION_TOUCH_MS + 1;
+    await o.touchSession("sid", now);
+
+    expect((await o.touchSession("sid", now + SESSION_TOUCH_MS - 1))?.last_used_at).toBe(now);
   });
 
   /** The same assertion Task 1 makes of MemoryAuthStore. Both or neither. */
@@ -638,7 +660,10 @@ Add the methods after `takeRefresh`:
       await this.ctx.storage.delete(key);
       return undefined;
     }
-    if (now - stored.last_used_at <= SESSION_TOUCH_MS) return stored;
+    // After the dead check and never before it: touchDue says only whether the
+    // stored time is stale, so asked first it would serve a session that is past
+    // its ceiling. See touchDue and MemoryAuthStore.touchSession.
+    if (!touchDue(stored, now)) return stored;
     const touched: PanelSession = { ...stored, last_used_at: now };
     await this.ctx.storage.put(key, touched);
     return touched;
@@ -671,8 +696,8 @@ Extend the import at the top of the file to bring in what these use:
 ```ts
 import {
   CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, PURGE_IDLE_KEY,
-  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, SESSION_TOUCH_MS,
-  clientCount, hasLapsed, purgeDue, sessionDead, sweepPage,
+  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS,
+  clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
   type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient,
   type SweepStorage,
@@ -706,7 +731,7 @@ export type {
 - [ ] **Step 6: Run the worker tests and confirm they pass**
 
 Run: `npm run test:worker`
-Expected: PASS, 10 new tests, and every pre-existing worker test still green.
+Expected: PASS, 12 new tests, and every pre-existing worker test still green.
 
 - [ ] **Step 7: Prove the sweep predicate matters**
 
@@ -717,7 +742,7 @@ Temporarily change `#purgeSessions`'s decide function to the `expires_at` form `
 ```
 
 Re-run `npm run test:worker`.
-Expected: "sweeps a session that died of idleness…" FAILS — `stale` is still readable, because its ceiling is a week away. The other nine still pass, which is the point: the sweep is not covered by them. Restore `sessionDead`.
+Expected: "sweeps a session that died of idleness…" FAILS — `stale` is still readable, because its ceiling is a week away. The other eleven still pass, which is the point: the sweep is not covered by them. Restore `sessionDead`.
 
 - [ ] **Step 8: Verify and commit**
 

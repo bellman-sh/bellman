@@ -118,6 +118,46 @@ describe("delivery across eviction", () => {
   });
 });
 
+describe("the fan-out is not reachable over RPC", () => {
+  it("does not answer over RPC for the method that sends an event to the sockets", async () => {
+    /**
+     * wake() resolves the waiting polls and sends a frame to every socket in the room,
+     * with the event it is handed. It is `#private`: a Durable Object answers RPC for
+     * every method on its class and TypeScript's `private` is erased at compile time, so
+     * a `private` one would let anything holding the SESSION binding put an event in
+     * front of every watching member that was never stored and never will be. Only the
+     * Worker holds that binding today, so this is surface and not a hole.
+     *
+     * The forged event is what a wake that ran would deliver, and its cursor is the
+     * room's next one. Delivered, it would also move every socket's cursor to 1, and the
+     * real event that follows, which is also cursor 1, would be skipped as already seen.
+     * So the assertions are two: the call is refused, and the socket's first and only
+     * frame is the real one. The second is the state check behind the first, and it is
+     * what fails if the refusal were ever satisfied for the wrong reason.
+     *
+     * join-code-outbox.test.ts pins the poll arm of the same method. This is the socket arm.
+     */
+    const { id, append, stub } = await room();
+    const frames = collect(await upgrade(id));
+    const rpc = stub as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>;
+    // A public method answers, so the refusal below is about the method and not the stub.
+    expect(await rpc.eventsAfter(0)).toEqual([]);
+
+    const forged = {
+      cursor: 1, type: "message", fromMemberId: "m_forged", fromUserId: "u_forged",
+      fromLabel: "forged", payload: { text: "forged" }, refId: null, at: 1,
+    };
+    const outcome = await rpc.wake(forged).then(() => "answered", (err: unknown) => String(err));
+    expect(outcome).toMatch(/does not implement/);
+
+    // It did not run. A real append is what the socket receives: its one frame, with the
+    // real text, and nothing forged ahead of it.
+    await append("real");
+    await vi.waitFor(() => expect(frames).toHaveLength(1), { timeout: 3000 });
+    expect(texts(frames)).toEqual(["real"]);
+  });
+});
+
 describe("delivery racing an upgrade", () => {
   it("an event appended while a socket is connecting is delivered exactly once", async () => {
     /**

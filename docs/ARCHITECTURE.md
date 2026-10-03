@@ -61,7 +61,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>eight MCP tools"]
+        MCP["/mcp<br/>nine MCP tools"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
     end
@@ -95,12 +95,12 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the eight tools work over plain remote MCP. The bridge exists
+use Bellman** — the nine tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
 
-This is the load-bearing decision, and cloud agents are why.
+Every other decision here rests on this one, and cloud agents are why.
 
 A Claude Code cloud session runs in Anthropic's infrastructure. You did not
 launch it, you cannot pass it flags, and there is no machine of yours for it to
@@ -209,7 +209,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>TTL alarm, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
     end
@@ -544,9 +544,15 @@ safe to delete only when its `ob:` queue is empty, which is what the drain check
 first. Deleted over queued rows it stops the spin and strands them, with nothing
 armed to deliver them.
 
-**Where it is not applied.** `DurableObjectStore.createSession` still calls
-`registry.indexSession` after the session commits, outside the outbox; a miss
-costs a room that a lapsed plan does not freeze, not a room lost. Room activity
+**Where it is not applied.** `DurableObjectStore.createSession` writes two
+registry indexes after the session commits, both outside the outbox and both
+through `writeIndex`, which logs a failure instead of throwing: `us:` so a
+lapsed plan can find a person's rooms, and `um:` so a room appears in each
+seated member's joined listing. `addMember` writes `um:` the same way. These are
+derived from state already committed, so a miss costs a row in one listing — a
+room that a lapsed plan does not freeze, or a room missing from a joined listing
+— never the room itself. That is the reasoning for logging rather than
+retrying, and it is the same window the outbox closes elsewhere. Room activity
 is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes are guaranteed to
 reach the audit stream. `bellman_confirm`, which commits a seat and then makes a
@@ -587,12 +593,15 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~3,730** | every request, whether or not you are in a room |
+| Tool definitions | **~4,820** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-`bellman_start` alone is 1,352 tokens, 36% of the tool budget, paid even by
+Tool definitions were re-measured on 2026-10-01. The three rows below that one
+are from the original measurement and have not been re-measured since.
+
+`bellman_start` alone is 1,462 tokens, 30% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

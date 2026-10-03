@@ -20,7 +20,7 @@
  * #12's Worker-side tsconfig project should absorb this file and drop the
  * exclusion.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
 // a DurableObject is just something that holds its ctx and env.
@@ -255,6 +255,22 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     expect(legacyStorage.alarms).toEqual([]);
     expect(legacyStorage.snapshot()).toEqual(before);
   });
+
+  it("closeSessionIfEmpty reads it as gone, so it closes nothing and writes nothing", async () => {
+    // An EMPTY room, on purpose. With someone still in it the method declines to
+    // close whether or not it read through the guard, and a bypass of the guard
+    // would leave this test green.
+    const { legacy, legacyStorage } = await worldOn(
+      storeDo,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    const before = legacyStorage.snapshot();
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(false);
+
+    expect(legacyStorage.writes).toBe(0);
+    expect(legacyStorage.snapshot()).toEqual(before);
+  });
 });
 
 describe("a current row is untouched by the guard", () => {
@@ -331,6 +347,70 @@ describe("closing a session drops its registry rows", () => {
   });
 });
 
+describe("closing an empty room drops its registry rows, and only when it closes", () => {
+  /**
+   * The registry half of closeSessionIfEmpty, which only this store has. The
+   * decision is made inside SessionDO and the rows are dropped at the facade,
+   * the one place holding the registry handle. As above, only the raw registry
+   * can tell "the codes stopped working" from "the rows were dropped": a closed
+   * room's codes stop resolving whether or not anything cleared them.
+   */
+  it("drops every role's registry row when it closes the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({
+      id: "qs_emptied",
+      members: [member({ leftAt: Date.now() })],
+      joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+    });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the rows are there to drop")
+      .toEqual(expect.arrayContaining(["jc:BELL-AAAA-01", "jc:BELL-CCCC-03"]));
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).not.toContain("jc:BELL-AAAA-01");
+    expect(keys).not.toContain("jc:BELL-CCCC-03");
+  });
+
+  // The other direction, and the one that costs most when it is wrong: a room
+  // that stays open has to keep its door. The creator is still in this one.
+  it("leaves every registry row alone when someone is still in the room", async () => {
+    const { store, registryStorage } = await worldOn(storeDo);
+    const s = session({ id: "qs_occupied", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+    await store.createSession(s);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+
+    expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+    const keys = Object.keys(registryStorage.snapshot());
+    expect(keys).toContain("jc:BELL-AAAA-01");
+    expect(keys).toContain("jc:BELL-CCCC-03");
+    expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
+  });
+
+  // What a close leaves behind if it dies between SessionDO and the registry:
+  // the room closed, its rows standing. The retry has to read the room as
+  // closed AND still drop the rows. A call that answered "nothing to do" for an
+  // already-closed room would leave them for good, since no later call has any
+  // reason to look.
+  it("finishes a close whose registry rows were never dropped", async () => {
+    const { store, legacy, registryStorage } = await worldOn(
+      storeDo,
+      currentRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+    await store.setJoinCode(LEGACY_ID, "peer_b", "BELL-AAAA-01", Date.now() + 60_000);
+    expect(await legacy.closeSessionIfEmpty(), "setup: closed inside the object only").toBe(true);
+    expect(Object.keys(registryStorage.snapshot()), "setup: the row outlived the close")
+      .toContain("jc:BELL-AAAA-01");
+
+    expect(await store.closeSessionIfEmpty(LEGACY_ID)).toBe(true);
+
+    expect(Object.keys(registryStorage.snapshot())).not.toContain("jc:BELL-AAAA-01");
+  });
+});
+
 describe("negative control: the same calls with the guard removed", () => {
   /**
    * Without this, every "reads as gone" above could be a broken harness returning
@@ -401,6 +481,23 @@ describe("negative control: the same calls with the guard removed", () => {
     // Same subset-match pitfall as the test above: assert the clear itself, exactly.
     expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
+  });
+
+  /**
+   * The same again for closeSessionIfEmpty's own guard test above, which could
+   * otherwise pass because the harness never gave the row to the method. The room
+   * is empty, so that with the guard gone the method has something to close.
+   */
+  it("lets closeSessionIfEmpty close it", async () => {
+    const unguarded = await loadStoreDoWithoutGuard();
+    const { legacy, legacyStorage } = await worldOn(
+      unguarded,
+      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+    );
+
+    expect(await legacy.closeSessionIfEmpty()).toBe(true);
+
+    expect(legacyStorage.snapshot().session).toMatchObject({ closed: true });
   });
 });
 
@@ -517,5 +614,108 @@ describe("SessionDO.appendEventOnce", () => {
     // this "replayed" or "conflict" rather than a fresh append.
     const after = await store.appendEventOnce(LEGACY_ID, keyed(), "send-0001");
     expect(after.outcome).toBe("appended");
+  });
+});
+
+describe("a failed index write does not fail the operation it indexes", () => {
+  /**
+   * By the time DurableObjectStore writes an index, SessionDO has committed the
+   * room or the seat. An index write that threw would abort the caller after the
+   * effect had landed: a seat with no member_joined event and no audit row, for
+   * a joiner who is told it failed. The index is derived and SessionDO is
+   * authoritative, so the write is logged and swallowed, and the cost is a room
+   * missing from one listing.
+   *
+   * The failure is injected by making the registry refuse the index prefixes.
+   * Every other registry write, the join code above all, still goes through.
+   */
+  const refuse = (registryStorage: ReturnType<typeof fakeStorage>, prefixes: string[]) => {
+    const realPut = registryStorage.put;
+    registryStorage.put = async (keyOrEntries: unknown, value?: unknown) => {
+      if (typeof keyOrEntries === "string" && prefixes.some((p) => keyOrEntries.startsWith(p))) {
+        throw new Error("registry unavailable");
+      }
+      return realPut(keyOrEntries, value);
+    };
+  };
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("createSession still creates the room, and its join code still resolves", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["us:", "um:"]);
+
+    // Distinct creator and seated ids, so the log can be checked for naming the
+    // right person on each index rather than the same one twice.
+    await store.createSession(session({
+      id: "qs_idx",
+      createdBy: "u_creator",
+      members: [member({ userId: "u_seated" })],
+      joinCodes: oneCode("BELL-IDX-01", "peer_b"),
+    }));
+
+    expect((await store.getSession("qs_idx"))?.members).toHaveLength(1);
+    expect((await store.getSessionByJoinCode("BELL-IDX-01"))?.session.id).toBe("qs_idx");
+    // Neither index took its write, and each failure was said out loud. A lost
+    // row is identified by the pair (user, room), so the log names both: it is
+    // the only record of what to restore.
+    expect(Object.keys(registryStorage.snapshot()).filter((k) => /^(us|um):/.test(k))).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(2);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("us index write failed for u_creator in qs_idx"), expect.any(Error),
+    );
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write failed for u_seated in qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("addMember still seats the member, and still says it did", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    await store.createSession(session({ id: "qs_idx", members: [] }));
+    refuse(registryStorage, ["um:"]);
+
+    expect(await store.addMember("qs_idx", member({ memberId: "m_joiner", userId: "u_peer" })))
+      .toBe(true);
+
+    expect((await store.getSession("qs_idx"))?.members.map((m) => m.memberId))
+      .toEqual(["m_joiner"]);
+    // The whole cost: one row missing from one listing.
+    expect(await store.sessionsJoinedBy("u_peer", 10)).toEqual([]);
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("um index write failed for u_peer in qs_idx"), expect.any(Error),
+    );
+  });
+
+  it("but a join code that cannot be registered leaves the session and queues the code", async () => {
+    // This was the contrast that kept the rule about indexes: a join code was
+    // authoritative, so a registry that refused it failed the whole createSession.
+    // #62 changed that premise. The code's registration is now enqueued in the same
+    // transaction as the session, so a refused write does not lose it and does not
+    // have to take the room down with it. The session stands and the intent waits.
+    //
+    // What that costs is a window, and it is asserted below: until delivery lands the
+    // code does not resolve. The old behaviour's cost was larger — a transient registry
+    // failure meant the room was never created at all.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, registryStorage } = await worldOn(storeDo);
+    refuse(registryStorage, ["jc:"]);
+
+    await expect(
+      store.createSession(session({ id: "qs_nocode", joinCodes: oneCode("BELL-NOPE-01", "peer_b") })),
+    ).resolves.toBeUndefined();
+
+    // The room is real, which is the point of committing the intent rather than the row.
+    expect(await store.getSession("qs_nocode")).toBeDefined();
+    // And the code is not resolvable yet, which is the window the queue closes later.
+    expect(await store.getSessionByJoinCode("BELL-NOPE-01")).toBeUndefined();
+    // Not an index write, so nothing is logged and swallowed here either.
+    expect(logged).not.toHaveBeenCalled();
+
+    // The retry itself needs a real alarm, so it is pinned in the Workers program:
+    // worker-tests/join-code-outbox.test.ts drives the queued row through delivery and
+    // asserts the code resolves afterwards.
   });
 });

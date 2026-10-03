@@ -23,6 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
+| `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
@@ -252,7 +253,7 @@ parsed object reaches the server, which has no YAML parser.
 
 ### When a plan lapses
 
-A session whose plan has lapsed is **frozen**, not closed. Everyone stays a member, the whole history stays readable and `bellman_sync` keeps working; what stops is writing — `bellman_send`, `bellman_invite` and `bellman_confirm` refuse and say why. Restoring the plan thaws it and the room is the same room.
+A session whose plan has lapsed is **frozen**, not closed. Everyone stays a member, the whole history stays readable and `bellman_sync` keeps working; what stops is writing — `bellman_send`, `bellman_invite`, `bellman_confirm` and `bellman_evict` refuse and say why. Restoring the plan thaws it and the room is the same room.
 
 Losing the room would be the wrong punishment for a failed card, and it is not reversible: the point of freezing is that paying again gives you back exactly what you had.
 

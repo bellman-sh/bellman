@@ -271,6 +271,151 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    // ------------------------------------------------- closing an empty room
+    /**
+     * A room closes when nobody is left in it, and that has to be one operation.
+     * A caller that read the roster and then called closeSession would leave a
+     * window for a member to join in, and the room would close over them with
+     * its codes retired.
+     *
+     * The answer is whether the room is closed, not whether this call closed it:
+     * a room that was already closed answers true. That is what lets a retry of
+     * a close that died partway finish the work, instead of reading as a no-op.
+     */
+    it("closeSessionIfEmpty closes a room nobody is in, and reports that it did", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty retires every code when it closes, not just the default role's", async () => {
+      const s = session({
+        members: [member({ leftAt: Date.now() })],
+        joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
+      });
+      (await store.createSession(s));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+
+      (await store.closeSessionIfEmpty(s.id));
+
+      expect((await store.getSession(s.id))?.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
+    });
+
+    it("closeSessionIfEmpty leaves a room alone while a member is in it, and says so", async () => {
+      const s = session();
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.closed).toBe(false);
+      // A refusal must not retire the door: the codes are how the room's next
+      // member gets in.
+      expect(after.joinCodes).toEqual(s.joinCodes);
+      expect((await store.getSessionByJoinCode("BELL-TEST-01"))?.session.id).toBe(s.id);
+    });
+
+    it("closeSessionIfEmpty counts a member as out only once they have left", async () => {
+      // One gone and one still in is not an empty room, and the one who stays
+      // leaving is what empties it.
+      const s = session({
+        maxMembers: 3,
+        members: [
+          member({ leftAt: Date.now() }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
+        ],
+      });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+
+      (await store.updateMember(s.id, "m_peer", { leftAt: Date.now() }));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * Closed wins over frozen. Freezing refuses writes into a room someone is
+     * in; it is no reason to keep a room open that has nobody left to thaw it
+     * for. A guard copied from addMember's would get this wrong.
+     */
+    it("closeSessionIfEmpty closes an empty room even while it is frozen", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })], frozenAt: Date.now() });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("closeSessionIfEmpty is idempotent on a room that is already closed", async () => {
+      const s = session({ members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      (await store.closeSession(s.id));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    /**
+     * The idempotence above holds for an already-closed room that is also empty,
+     * and would hold with no check for `closed` at all. This is the room that
+     * check exists for: closed with a member still listed, which is what the
+     * read-then-close race left behind in rooms written before it was fixed.
+     * "Someone is in it" is a reason to refuse closing an open room. A room that
+     * is closed has nothing left to refuse, and has to say so.
+     */
+    it("closeSessionIfEmpty reports a closed room closed even with a member listed in it", async () => {
+      const s = session({ closed: true });
+      (await store.createSession(s));
+
+      expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+    });
+
+    it("closeSessionIfEmpty ignores a session that does not exist", async () => {
+      await expect(store.closeSessionIfEmpty("qs_nope")).resolves.toBe(false);
+    });
+
+    /**
+     * The two halves of one guarantee, and the case that says there is no gap
+     * between them: closeSessionIfEmpty will not close an occupied room, and
+     * addMember will not seat anyone in a closed one. Neither is enough alone.
+     * With only the first, a join landing after the close seats a member in a
+     * room that is over. With only the second, a close that decided on an old
+     * roster closes over a member who joined meanwhile.
+     *
+     * Started together, each way round, so whichever lands first wins and the
+     * other has to give way. Exactly one may succeed: both is a closed room with
+     * a member in it, and neither is a join refused by a room that never closed.
+     */
+    it.each([
+      { first: "close", second: "join" },
+      { first: "join", second: "close" },
+    ])("lets exactly one of a close and a join win when started together, $first first", async ({ first }) => {
+      const s = session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] });
+      (await store.createSession(s));
+      const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
+      const close = () => store.closeSessionIfEmpty(s.id);
+      const join = () => store.addMember(s.id, joiner);
+
+      const [a, b] = await Promise.all(first === "close" ? [close(), join()] : [join(), close()]);
+      const closed = first === "close" ? a : b;
+      const joined = first === "close" ? b : a;
+
+      const after = (await store.getSession(s.id))!;
+      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(joined);
+      expect(after.closed).toBe(closed);
+      expect(after.members.some((m) => m.memberId === "m_late")).toBe(joined);
+    });
+
     // --------------------------------------------------------------- freezing
     /**
      * Frozen is not closed. A lapsed plan must be undoable without costing
@@ -356,6 +501,141 @@ export function describeStoreContract(
       }
 
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    /**
+     * The panel's main screen splits rooms a person created from rooms they
+     * joined, and only the first had an index. `um:` is the second.
+     *
+     * The store returns ids for every room the user has ever held a handle in
+     * — created, joined, left and closed alike. Filtering is the caller's, so
+     * that one index can serve a panel screen and a freeze sweep that disagree
+     * about what counts as current (D1, D4).
+     */
+    it("lists the rooms a person joined, and nobody else's", async () => {
+      await store.createSession(session({ id: "qs_hers", createdBy: "u_peer", members: [] }));
+      await store.createSession(session({ id: "qs_his", createdBy: "u_peer", members: [] }));
+      await store.addMember("qs_hers", member({ memberId: "m_1", userId: "u_jesse" }));
+      await store.addMember("qs_his", member({ memberId: "m_2", userId: "u_other" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_hers"]);
+      expect(await store.sessionsJoinedBy("u_other", 10)).toEqual(["qs_his"]);
+      expect(await store.sessionsJoinedBy("u_nobody", 10)).toEqual([]);
+    });
+
+    it("keeps two users whose ids share a prefix apart", async () => {
+      // A user id that is a prefix of another's must not pull the other's rooms
+      // into its listing, or the reverse. Whatever a store keys its index on,
+      // u_a lists only u_a's rooms and u_ab only u_ab's.
+      await store.createSession(session({ id: "qs_of_a", createdBy: "u_a", members: [] }));
+      await store.createSession(session({ id: "qs_of_ab", createdBy: "u_ab", members: [] }));
+      await store.addMember("qs_of_a", member({ memberId: "m_a", userId: "u_a" }));
+      await store.addMember("qs_of_ab", member({ memberId: "m_ab", userId: "u_ab" }));
+
+      expect(await store.sessionsJoinedBy("u_a", 10)).toEqual(["qs_of_a"]);
+      expect(await store.sessionsJoinedBy("u_ab", 10)).toEqual(["qs_of_ab"]);
+    });
+
+    it("lists a room once for a person who joined it from two machines", async () => {
+      await store.createSession(session({ id: "qs_twice", members: [] }));
+      await store.addMember("qs_twice", member({ memberId: "m_laptop", userId: "u_jesse" }));
+      await store.addMember("qs_twice", member({ memberId: "m_desktop", userId: "u_jesse" }));
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_twice"]);
+    });
+
+    it("lists the creator's own room, because the creator holds a handle too", async () => {
+      // The production path. bellman_start passes the creator in `members` and
+      // never calls addMember, so createSession seats them directly and the
+      // index has to be written there. addMember is the join path; the cases
+      // around this one cover it.
+      await store.createSession(
+        session({ id: "qs_mine", createdBy: "u_jesse", members: [member({ userId: "u_jesse" })] }),
+      );
+
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_mine"]);
+    });
+
+    it("indexes every member a session is created with, once each", async () => {
+      // The field is an array, and the index reflects all of it, not just the
+      // first seat. Two handles for one person are still one entry, as they are
+      // on the addMember path.
+      await store.createSession(session({
+        id: "qs_seated",
+        createdBy: "u_first",
+        members: [
+          member({ memberId: "m_a", userId: "u_first" }),
+          member({ memberId: "m_b", userId: "u_second" }),
+          member({ memberId: "m_c", userId: "u_second" }),
+        ],
+      }));
+
+      expect(await store.sessionsJoinedBy("u_first", 10)).toEqual(["qs_seated"]);
+      expect(await store.sessionsJoinedBy("u_second", 10)).toEqual(["qs_seated"]);
+    });
+
+    it("keeps listing a room after the member left it", async () => {
+      await store.createSession(session({ id: "qs_past", members: [] }));
+      await store.addMember("qs_past", member({ memberId: "m_gone", userId: "u_jesse" }));
+      await store.updateMember("qs_past", "m_gone", { leftAt: Date.now() });
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_past"]);
+    });
+
+    /** REVIEW FOCUS 5 — status is the caller's filter, not the store's. */
+    it("keeps listing a room after it closed", async () => {
+      await store.createSession(session({ id: "qs_over", members: [] }));
+      await store.addMember("qs_over", member({ memberId: "m_was", userId: "u_jesse" }));
+      await store.closeSession("qs_over");
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_over"]);
+    });
+
+    it("honours the limit on the joined listing", async () => {
+      for (const id of ["qs_j1", "qs_j2", "qs_j3"]) {
+        await store.createSession(session({ id, members: [] }));
+        await store.addMember(id, member({ memberId: `m_${id}`, userId: "u_jesse" }));
+      }
+
+      expect(await store.sessionsJoinedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    it("indexes nothing when addMember refuses a frozen session", async () => {
+      await store.createSession(session({ id: "qs_cold", members: [] }));
+      await store.freezeSession("qs_cold", Date.now());
+
+      expect(await store.addMember("qs_cold", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    it("indexes nothing when addMember refuses an unknown session", async () => {
+      expect(await store.addMember("qs_ghost", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
+    });
+
+    /**
+     * The other half of closeSessionIfEmpty. A join that read the room while it
+     * was open and writes after it closed would seat a member in a room that is
+     * over: the join reports success, and the roster lists someone in a closed
+     * room, which is the state the close was written to rule out. So the refusal
+     * is the write's own and not only the reader's.
+     *
+     * There are two ways to refuse in name only, and the assertions below are one
+     * each: a seat written and then refused leaves a ghost in the roster, and an
+     * index row written before the guard lists the room for a person who was
+     * turned away.
+     */
+    it("indexes nothing when addMember refuses a closed session", async () => {
+      await store.createSession(session({ id: "qs_shut", members: [] }));
+      await store.closeSession("qs_shut");
+
+      expect(await store.addMember("qs_shut", member({ memberId: "m_no", userId: "u_jesse" })))
+        .toBe(false);
+      expect((await store.getSession("qs_shut"))?.members).toEqual([]);
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
     });
 
     // ---------------------------------------------------------------- events

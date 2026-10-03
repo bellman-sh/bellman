@@ -137,6 +137,25 @@ describe("AuthDO sessions", () => {
     expect(await o.touchSession("sid", T0)).toBeUndefined();
   });
 
+  // Sign-out ends the session it names and no other. The test above deletes the
+  // only session in the object, so a deleteSession that cleared the whole object
+  // would pass it; here a second session has to survive. Built from Date.now()
+  // and not T0: the second put sweeps, and a T0 session is dead by the object's
+  // own clock.
+  it("deleteSession ends only the session it names", async () => {
+    const o = auth("s-delete-only");
+    const now = Date.now();
+    const live = panelSession({
+      created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+    });
+    await o.putSession("one", live);
+    await o.putSession("two", live);
+
+    await o.deleteSession("one");
+
+    expect(await storedIds("s-delete-only")).toEqual(["sess:two"]);
+  });
+
   it("skips the write while last_used_at is fresh", async () => {
     const o = auth("s-skip");
     await o.putSession("sid", panelSession());

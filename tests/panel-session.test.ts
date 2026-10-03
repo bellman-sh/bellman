@@ -177,6 +177,20 @@ describe("MemoryAuthStore sessions", () => {
     await expect(store.deleteSession("never-existed")).resolves.toBeUndefined();
   });
 
+  // Sign-out ends the session it names and no other. The tests above delete the
+  // only session in the store, so a deleteSession that cleared the whole store
+  // would pass all of them; here a second session has to survive.
+  it("deleteSession ends only the session it names", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("one", panelSession());
+    await store.putSession("two", panelSession());
+
+    await store.deleteSession("one");
+
+    expect(await store.touchSession("one", T0)).toBeUndefined();
+    expect(await store.touchSession("two", T0)).toBeDefined();
+  });
+
   // The constraint touchSession is written around: a sign-out that lands while a
   // touch is in flight has to stay a sign-out. A touch that yielded between its
   // read and its write would be overtaken by the delete and then write the

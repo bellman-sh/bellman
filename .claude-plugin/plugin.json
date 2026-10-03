@@ -1,0 +1,12 @@
+{
+  "name": "bellman",
+  "description": "Author Bellman room manifests. Use when declaring a room in a repo with .bellman/room.yaml, choosing between the pair, swarm and review presets, or deciding which verbs each role should hold.",
+  "version": "0.2.0",
+  "author": {
+    "name": "mcfearsome"
+  },
+  "homepage": "https://bellman.sh",
+  "repository": "https://github.com/bellman-sh/bellman.git",
+  "license": "MIT",
+  "keywords": ["mcp", "agents", "collaboration", "bellman", "room-manifest"]
+}

@@ -170,8 +170,15 @@ export interface BellmanStore {
    * refused — frozen, closed, or no such session — and a caller that has to say
    * which reads the session again.
    *
-   * The refusals are here rather than only in the tool, because the tool reads
-   * the session and then writes, and a freeze landing in that gap would let a
+   * No production path calls this today. The join is `seatMember`, which makes
+   * these same refusals and also allocates the seat, and only tests use this
+   * one. It stays as the unconditional append, for the contract suite and for a
+   * caller that is not allocating a seat, the same relationship `closeSession`
+   * has to `closeSessionIfEmpty`. Do not read its presence as behaviour anything
+   * depends on.
+   *
+   * The refusals are here rather than only in a tool, because a tool reads the
+   * session and then writes, and a freeze landing in that gap would let a
    * frozen room grow — which is the one thing freezing is for. A close landing in
    * it is the same gap with a worse result: a member seated in a room that is
    * over. Like `seatMember`'s, this is the other half of `closeSessionIfEmpty`,

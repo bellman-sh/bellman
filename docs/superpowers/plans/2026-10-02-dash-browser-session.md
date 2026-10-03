@@ -2316,6 +2316,11 @@ by anything that is not a browser."
 
 ### Task 7: Signing in — `/auth/signin` and the session callback
 
+> **Two corrections to `verifyState`'s doc comment, carried from Task 3's review. This task edits that comment anyway; make these part of the edit.**
+>
+> - It says returning the audience "lets it dispatch on the answer rather than verify a second time to find out". That is false, and it was my claim: an upgrade state costs two `verifyJwt` calls in the old `??` chain and in `verifyState` alike, because the second verify was never redundant — it was how the callback discovered which audience it had. Nothing was removed. Say instead that the dispatch reads the answer the loop already produced, rather than repeating the verification in a branch of its own, and that the call count is unchanged.
+> - It says "A further audience is one more entry in each list". It is also one more dispatch arm, which is exactly what this task adds. The review measured that a third audience with no arm reaches the authorize default and dies at `new URL(pending.redirect_uri)` with `TypeError: Invalid URL` — it fails closed, which is the good direction, but the sentence as written undersells what adding an audience costs.
+
 **Files:**
 - Modify: `src/oauth/routes.ts` (`SESSION_AUDIENCE`, `panelDestination`, `finishSession`, the `/auth/signin` route, the callback's third branch)
 - Test: `tests/panel-session.test.ts` (extend)

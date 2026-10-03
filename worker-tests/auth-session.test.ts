@@ -8,13 +8,17 @@
  * drifts. So each store-level test in tests/panel-session.test.ts has a twin
  * here, against the real object, and a change to one is a change to the other.
  * Its tests of the pure functions (sessionDead, replannedAt) have none. The
- * object calls sessionDead rather than copying it, and the twins below hold it
- * to that only as far as they reach: both limits, and a NaN last_used_at. A copy
- * written as the negation of the two limits would pass them without sessionDead's
- * finiteness guards, because NaN fails closed in that form; Infinity and the
- * other non-finite values are pinned on the function itself, in Node. The sweep
- * exists only in the object and is covered only here, and some tests here read
- * storage or count writes, which the in-memory store does not expose.
+ * object calls sessionDead from two places, touchSession and the sweep, rather
+ * than copying it. The twins below hold touchSession's call to that only as far
+ * as they reach: both limits, and a NaN last_used_at. A copy written as the
+ * negation of the two limits would pass them without sessionDead's finiteness
+ * guards, because NaN fails closed in that form; Infinity and the other
+ * non-finite values are pinned on the function itself, in Node. Nothing holds the
+ * sweep's call at its limits: its tests keep an hour of margin and never sit on
+ * one, so a sweep that re-inlined the predicate with exclusive limits, or in the
+ * negation form, would pass them. The sweep exists only in the object and is
+ * covered only here, and some tests here read storage or count writes, which the
+ * in-memory store does not expose.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
@@ -167,7 +171,9 @@ describe("AuthDO sessions", () => {
   // Nor can the stored value, because a write of the record already there leaves
   // it unchanged. So this counts storage.put inside the object. The second touch
   // is the positive control: it is one past the threshold and must count exactly
-  // one write, which shows the counter sees real ones.
+  // one write, which shows the counter sees real ones. It sees storage.put and
+  // nothing else: a skip path that wrote through storage.transaction() would not
+  // be counted.
   it("does not call storage.put while last_used_at is fresh, and does once it is stale", async () => {
     const o = auth("s-put-count");
     await o.putSession("sid", panelSession());

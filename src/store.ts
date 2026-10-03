@@ -170,14 +170,21 @@ export interface BellmanStore {
    * refused — frozen, closed, or no such session — and a caller that has to say
    * which reads the session again.
    *
-   * The refusals are here rather than only in the tool, because the tool reads
-   * the session and then writes, and a freeze landing in that gap would let a
+   * No production path calls this today. The join is `seatMember`, which makes
+   * these same refusals and also allocates the seat, and only tests use this
+   * one. It stays as the unconditional append, for the contract suite and for a
+   * caller that is not allocating a seat, the same relationship `closeSession`
+   * has to `closeSessionIfEmpty`. Do not read its presence as behaviour anything
+   * depends on.
+   *
+   * The refusals are here rather than only in a tool, because a tool reads the
+   * session and then writes, and a freeze landing in that gap would let a
    * frozen room grow — which is the one thing freezing is for. A close landing in
    * it is the same gap with a worse result: a member seated in a room that is
-   * over. This is the other half of `closeSessionIfEmpty`, which keeps a close
-   * from landing on an occupied room; the pair is sound only together. Unlike the
-   * cross-object races on #59 and #62, both halves live in the same object, so
-   * this one can simply be made not to have a gap.
+   * over. Like `seatMember`'s, this is the other half of `closeSessionIfEmpty`,
+   * which keeps a close from landing on an occupied room; the pair is sound only
+   * together. Unlike the cross-object races on #59 and #62, both halves live in
+   * the same object, so this one can simply be made not to have a gap.
    */
   addMember(sessionId: string, member: Member): Promise<boolean>;
   /**
@@ -196,9 +203,9 @@ export interface BellmanStore {
    * again *after* the reclaim decision was taken against it, and a freeze
    * landing there removes a member from a room that is meant to cost nobody
    * their place. Deciding and writing inside the object closes all three: the
-   * Durable Objects store is one invocation under workerd's input gate, and
-   * MemoryStore does not yield between the read and the write — the rule
-   * `closeSessionIfEmpty` and the guarded grant writes already follow.
+   * Durable Objects store is one transaction, and MemoryStore does not yield
+   * between the read and the write — the rule `closeSessionIfEmpty` and the
+   * guarded grant writes already follow.
    *
    * `staleBefore` is the cutoff, so the store holds no presence policy: a member
    * last heard from before it may lose its seat. Pass `Date.now()` for `now` so
@@ -238,10 +245,11 @@ export interface BellmanStore {
    * read the roster, saw it empty and then called `closeSession` would leave a
    * window for a member to join in, and the room would close over them with its
    * codes retired. Here the Durable Objects store decides inside the one object
-   * that owns the session, and MemoryStore does not yield between the two.
-   * `addMember`'s refusal of a closed session is the other half: this keeps a
-   * close from landing on an occupied room, that keeps a join from landing on a
-   * closed one, and neither is enough alone.
+   * that owns the session, in one transaction, and MemoryStore does not yield
+   * between the two. `seatMember`'s refusal of a closed session is the other half,
+   * and `addMember`'s is the same refusal: this keeps a close from landing on an
+   * occupied room, those keep a join from landing on a closed one, and neither is
+   * enough alone.
    *
    * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
    * like any other: freezing refuses writes into a room someone is in, and an
@@ -514,7 +522,7 @@ export class MemoryStore implements BellmanStore {
   ): Promise<SeatOutcome> {
     // No await from here to the write, deliberately — the same rule, and the
     // same reason, as closeSessionIfEmpty. The Durable Objects store gets it
-    // from the input gate instead.
+    // from a transaction instead.
     const s = this.sessions.get(sessionId);
     if (!s) return { refused: "not_found", reclaimed: [] };
     if (s.closed) return { refused: "closed", reclaimed: [] };
@@ -562,7 +570,7 @@ export class MemoryStore implements BellmanStore {
     // No await from here to the write, deliberately. The check and the close are
     // one operation, and a yield between them is the window a join lands in: the
     // same rule, and the same reason, as waitForEvents and the guarded grant
-    // writes. The Durable Objects store gets it from the input gate instead.
+    // writes. The Durable Objects store gets it from a transaction instead.
     if (s.closed) return true;
     if (s.members.some(isActiveMember)) return false;
     this.closeNow(s);

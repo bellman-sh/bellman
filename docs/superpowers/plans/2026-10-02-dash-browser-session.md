@@ -2005,9 +2005,7 @@ async function sessionCaller(
 
   const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
   // Written back so the next request inside the window is served from the
-  // record rather than re-resolving again. Best effort: a failed write costs a
-  // repeated re-resolution, not a wrong answer, and must not cost the human
-  // their session.
+  // record rather than re-resolving again.
   //
   // replanSession, not putSession. Re-resolving can await the registry, so a
   // sign-out can land between the touch above and this write, and putSession
@@ -2017,12 +2015,25 @@ async function sessionCaller(
   // last_used_at that another request bumped in the same gap, which a
   // whole-record write would revert.
   //
-  // It answers false when the session was gone, and that answer is ignored
-  // here: this request began before the sign-out, so it is still answered, and
-  // the next one finds no session. A caller that would rather refuse can read it.
-  await config.store
-    .replanSession(id, current.identity, current.source, now)
-    .catch((err) => console.error("could not store a re-resolved panel session:", err));
+  // Its answer is acted on. False means the record is gone, because the human
+  // signed out or the session was swept as dead, and either way there is no
+  // session, so this request is refused rather than finished. It began before
+  // the sign-out, and letting an in-flight request finish is ordinary
+  // elsewhere, but the reason to store a session at all is that sign-out takes
+  // effect now, and one more authenticated response after it gives that back.
+  // The window is small: this path runs about once per ACCESS_TOKEN_TTL_SECONDS
+  // per session.
+  //
+  // A write that fails is a different thing. It costs a repeated
+  // re-resolution, not a wrong answer, and says nothing about whether the
+  // session is still there, so it must not cost the human their session.
+  let merged = true;
+  try {
+    merged = await config.store.replanSession(id, current.identity, current.source, now);
+  } catch (err) {
+    console.error("could not store a re-resolved panel session:", err);
+  }
+  if (!merged) return null;
   return { identity: current.identity, planSource: current.source, via: "cookie" };
 }
 ```
@@ -2096,6 +2107,14 @@ without it a grant revoked on day one would keep applying for six more.
 The bound is the token's deliberately — one staleness number for the
 system, and a revoked grant cannot outlive on the panel what it
 outlives on /mcp.
+
+The result is written back with replanSession, not putSession, because a
+sign-out can land while the plan is being re-resolved and an upsert would
+recreate the session. A false answer, meaning the session is gone, ends
+the request with a 401 instead of finishing it: a session is stored so that
+sign-out takes effect now, and one more authenticated response after it
+would give that back. A write that merely fails is logged and the request
+carries on, since it says nothing about whether the session is still there.
 
 replannedAt reads an absent field as 0 rather than comparing against
 undefined. Both plausible phrasings of that comparison make NaN mean

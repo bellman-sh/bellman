@@ -181,9 +181,11 @@ and stay signed in. It would also overwrite a `last_used_at` that another reques
 bumped in the same gap. `replanSession` merges the three fields it owns into
 what is stored now, and does nothing if the record is gone. It makes no liveness
 decision, because those fields are not the ones `sessionDead` reads. It answers
-whether it merged, so the caller learns that its session ended while it worked
-and decides whether to still answer a request that began before the sign-out.
-`putSession` stays an upsert, for creating a session and for nothing else.
+whether it merged, and the cookie branch acts on the answer: false means the
+session is gone, and the request is refused with a 401 rather than finished,
+although it began before the sign-out. A session is stored so that sign-out
+takes effect now, and one more authenticated response after it would give that
+back. `putSession` stays an upsert, for creating a session and for nothing else.
 
 #### Why `touchSession` skips most writes
 
@@ -249,7 +251,8 @@ counting on: authorization logic stays in one place.
 
 The cookie branch runs `replanOnRefresh(stored.identity, stored.identity_keys,
 config)` when `now - replanned_at > ACCESS_TOKEN_TTL_SECONDS * 1000`, and writes
-the result back with `replanSession`, not `putSession`.
+the result back with `replanSession`, not `putSession`, and answers 401 if that
+finds the session gone.
 
 The bound is deliberately the same 10 minutes the access token already bounds
 plan staleness to. A grant revoked mid-session cannot outlive on the panel what

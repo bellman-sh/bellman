@@ -356,6 +356,13 @@ describe("AuthDO: a method touches only the session it names", () => {
 });
 
 describe("AuthDO session sweep", () => {
+  /** The live session the sweep must leave alone, as it is put. */
+  const liveRecord = (now: number) => panelSession({
+    created_at: now + HOUR - SESSION_TTL_MS,
+    last_used_at: now - 23 * HOUR,
+    expires_at: now + HOUR,
+  });
+
   /**
    * Put a live session, then a dead one, then a third whose put runs the last
    * sweep, and return the ids stored afterwards and the live session as stored.
@@ -380,12 +387,6 @@ describe("AuthDO session sweep", () => {
    * The result is read with storedIds: touchSession drops a dead session itself
    * when it reads one, so it cannot show what the sweep left behind.
    */
-  const liveRecord = (now: number) => panelSession({
-    created_at: now + HOUR - SESSION_TTL_MS,
-    last_used_at: now - 23 * HOUR,
-    expires_at: now + HOUR,
-  });
-
   async function swept(name: string, now: number, dead: Partial<PanelSession>) {
     const o = auth(name);
     await o.putSession("a-live", liveRecord(now));

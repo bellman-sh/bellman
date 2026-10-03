@@ -57,9 +57,10 @@ describe("sessionDead", () => {
     expect(sessionDead(s, T0 + SESSION_TTL_MS)).toBe(false);
   });
 
-  // Fails closed: a record whose time is corrupt reads as dead. NaN fails every
-  // comparison, so a predicate that asked whether a limit had been passed would
-  // call such a session alive forever.
+  // Fails closed: a record whose time is corrupt reads as dead, and so does a
+  // clock that cannot be trusted. NaN fails every comparison and infinity passes
+  // them in the wrong direction, so a predicate that only asked whether a limit
+  // had been passed would call such a session alive forever.
   it("is dead when expires_at is NaN", () => {
     expect(sessionDead(panelSession({ expires_at: NaN }), T0)).toBe(true);
   });
@@ -70,6 +71,18 @@ describe("sessionDead", () => {
 
   it("is dead when now is NaN", () => {
     expect(sessionDead(panelSession(), NaN)).toBe(true);
+  });
+
+  it("is dead when expires_at is Infinity", () => {
+    expect(sessionDead(panelSession({ expires_at: Infinity }), T0)).toBe(true);
+  });
+
+  it("is dead when last_used_at is Infinity", () => {
+    expect(sessionDead(panelSession({ last_used_at: Infinity }), T0)).toBe(true);
+  });
+
+  it("is dead when now is -Infinity", () => {
+    expect(sessionDead(panelSession(), -Infinity)).toBe(true);
   });
 });
 

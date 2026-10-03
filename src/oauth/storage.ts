@@ -73,7 +73,10 @@ export interface PanelSession {
   identity_keys: string[];
   created_at: number;
   last_used_at: number;
-  /** When the plan was last re-resolved. See replannedAt for absent. */
+  /**
+   * When the plan was last re-resolved. Read it through replannedAt, which
+   * treats anything that is not a finite number as never.
+   */
   replanned_at: number;
   expires_at: number;
 }
@@ -123,16 +126,20 @@ export const SESSION_TOUCH_MS = 60 * 60 * 1000;
  * each decide separately will eventually disagree, and the shape that bug takes
  * is a session still usable because no purge has run yet.
  *
- * It is written as the negation of "inside both limits" so that it fails
- * closed. NaN fails every comparison, so "is it past the ceiling?" reads false
- * for a record whose expires_at is corrupt or missing, and that session would
- * never expire; "is it still inside?" reads false for the same record, and
- * false there means dead. Ending sessions reliably is the reason this is a
- * stored record rather than a signed cookie, so on a malformed record the
- * answer has to be dead. `now` is inside the same test on purpose: a NaN clock
- * drops the one session it touches, which costs a re-sign-in and can only
- * follow from a bug, where the alternative waves every session through for as
- * long as the clock is broken.
+ * It is written as the negation of "every input is finite and inside both
+ * limits", so that anything it cannot show to be alive is dead. Two kinds of
+ * malformed value defeat a plain "is it past the limit?" test, in different
+ * ways. NaN fails every comparison, so a record whose expires_at is corrupt or
+ * missing reads as not past its ceiling, and that session would never expire.
+ * Infinity passes the comparisons in the wrong direction: an expires_at or
+ * last_used_at of +Infinity is never past, and a clock of -Infinity is before
+ * everything. So each input is checked for finiteness as well as compared.
+ * Ending sessions reliably is the reason this is a stored record rather than a
+ * signed cookie, so on a malformed record the answer has to be dead. `now` is
+ * one of the three inputs on purpose: a clock that is NaN or infinite drops the
+ * one session it touches, which costs a re-sign-in and can only follow from a
+ * bug, where the alternative waves every session through for as long as the
+ * clock is broken.
  * hasLapsed goes the other way on an absent expires_at because older client
  * records must keep working; no session record predates this one, so there is
  * nothing to grandfather.
@@ -141,7 +148,10 @@ export function sessionDead(
   s: Pick<PanelSession, "last_used_at" | "expires_at">,
   now: number
 ): boolean {
-  return !(now <= s.expires_at && now <= s.last_used_at + SESSION_IDLE_MS);
+  return !(
+    Number.isFinite(now) && Number.isFinite(s.expires_at) && Number.isFinite(s.last_used_at) &&
+    now <= s.expires_at && now <= s.last_used_at + SESSION_IDLE_MS
+  );
 }
 
 /**
@@ -151,9 +161,12 @@ export function sessionDead(
  * method, and two copies of this comparison can drift apart at exactly
  * SESSION_TOUCH_MS. One predicate means one boundary, pinned once.
  *
- * Ask it only of a session sessionDead has already passed. It is a comparison,
- * so a NaN last_used_at reads as not due, and a record that is already dead
- * would be served and never written.
+ * Ask it only of a session sessionDead has already passed. It says whether the
+ * stored time is stale and nothing about liveness. A session past its ceiling
+ * whose last_used_at is fresh reads as not due, so asked first it would be
+ * served past the ceiling for up to SESSION_TOUCH_MS, and no malformed value is
+ * needed to get there. A NaN last_used_at reads as not due too, and would be
+ * served and never written.
  */
 export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): boolean {
   return now - s.last_used_at > SESSION_TOUCH_MS;
@@ -175,8 +188,11 @@ export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): bo
  *
  * The lesson is the class, not this field: a number read off a stored record
  * has to be checked for finiteness, or tested by a predicate that fails closed
- * on non-finite input, as sessionDead is. Anyone adding a timestamp to
- * PanelSession takes on one more of these.
+ * on non-finite input, as sessionDead now is for all three of its inputs. It
+ * was paid for four times in this file: sessionDead's two time fields,
+ * replannedAt's own type check, sessionDead's infinities, and the first
+ * version of this very paragraph, which claimed sessionDead was already safe.
+ * Anyone adding a timestamp to PanelSession takes on one more of these.
  */
 export function replannedAt(s: PanelSession): number {
   return Number.isFinite(s.replanned_at) ? s.replanned_at : 0;
@@ -567,10 +583,13 @@ export class MemoryAuthStore implements AuthStorage {
     // first read that sees it: a clock that moves backwards cannot revive the
     // session. The sweep reclaims space; it does not decide liveness.
     //
-    // This check has to stay ahead of the touchDue test below. That is a
-    // comparison, and a NaN last_used_at fails it, so a record already dead
-    // would read as not due and be served, never written and never dropped.
-    // Tests hold the order.
+    // This check has to stay ahead of the touchDue test below, which says
+    // whether the stored time is stale and knows nothing about liveness.
+    // Reordered, a session past its ceiling whose last_used_at is fresh would
+    // read as not due and be served until that time went stale, up to
+    // SESSION_TOUCH_MS past the ceiling, with no malformed value needed to get
+    // there. A NaN last_used_at fails the comparison too and would be served
+    // and never dropped. Tests hold the order.
     if (sessionDead(stored, now)) {
       this.sessions.delete(id);
       return undefined;

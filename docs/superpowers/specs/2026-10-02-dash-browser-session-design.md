@@ -193,10 +193,13 @@ last request, depending on whether that request happened to write. What holds:
   after the stored value writes it back, so `last_used_at` never lags a session
   in continuous use by more than that.
 
-That reasoning is the kind that rots, and a test holds only part of it.
-Continuous use across more than the idle window must not expire the session, and
-that test guards against the skip never writing. It passes for any
-`SESSION_TOUCH_MS` below the idle window, so it does not pin the 23-hour margin.
+That reasoning is the kind that rots, so it gets tests rather than only this
+paragraph. Continuous use across more than the idle window must not expire the
+session; that test guards against the skip never writing, and it passes for any
+`SESSION_TOUCH_MS` below the idle window, so it does not pin the margin. Two
+more tests do. After a request that skipped the write, the session survives a
+gap of 23 hours and dies one millisecond past it, with the 23 hours written out
+so that changing either constant fails one of them.
 
 #### Purging
 

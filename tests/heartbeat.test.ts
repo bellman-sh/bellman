@@ -374,6 +374,33 @@ describe("snapshotOf", () => {
     }
   });
 
+  /**
+   * A `heartbeat` event reaches EVERY active member, non-reporting observers
+   * included — the tick is ambient, and nothing filters delivery by seat. So an
+   * unconditional "Reply with …" told an `observer` (`can: []`, `reports: false`)
+   * to make a call `bellman_send` then refuses, every cadence, forever.
+   *
+   * The snapshot's `members` list already names exactly the seats the room asks,
+   * so the ask points at that list rather than at whoever is reading it. A reader
+   * absent from the list can then tell the instruction is not addressed to it,
+   * which is the only thing the payload can give it: delivery cannot be narrowed
+   * without making presence a stored fact, which Invariant 7 forbids.
+   */
+  it("directs the members it lists, not whoever reads it", () => {
+    const s = stored({ members: [lead(), watcher()] });
+    const snap = snapshotOf(s, T0 + FIVE_MIN);
+
+    // The observer is in the room and is NOT in the list — so the list is a real
+    // qualifier and not a restatement of "everybody".
+    expect(snap.members.map((m) => m.member_id)).toEqual(["m_lead"]);
+    expect(snap.ask).toContain("listed");
+    // Not an unconditional imperative at the reader.
+    expect(snap.ask).not.toMatch(/^Reply with/);
+    // Still the call the tick wants, which tests/tools/progress.test.ts pins to
+    // what bellman_send accepts.
+    expect(snap.ask).toContain('bellman_send type="progress"');
+  });
+
   it("carries the cadence and the ask", () => {
     const snap = snapshotOf(stored({ members: [lead()] }), T0);
     expect(snap.cadence_seconds).toBe(300);

@@ -643,9 +643,12 @@ store reports it actually took.
    session record, and a stored row wins. `SessionDO` has three handlers,
    `outbox`, `ttl` and `heartbeat`, and only `outbox` is stored. The TTL is
    derived from `expiresAt`, so sessions written before named alarms still
-   expire. The tick (#111) is derived from `nextTickAt`, anchored on the
-   session's `lastTickAt` and not on any member's report time, so an alarm that
-   fired and found nobody due cannot fire again at once. `ob_seq`, the counter
+   expire. The tick (#111) is derived from `nextTickAt`, which asks each member
+   at its own `lastReport + cadence` — except one already due at the preceding
+   tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
+   `lastTickAt` is a **floor rather than the clock**, and because both branches
+   land after it, an alarm that fired and found nobody due still cannot fire
+   again at once. The design's D10 and D5 carry the argument. `ob_seq`, the counter
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.

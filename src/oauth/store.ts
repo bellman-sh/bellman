@@ -16,13 +16,14 @@ import type { Identity } from "../types.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
- * authorization codes, and refresh tokens. One object, because all three are
- * small, global, and read on a path where a wrong answer is a security bug
- * rather than a slow page.
+ * authorization codes, refresh tokens, and browser sessions. One object, because
+ * all four are small, global, and read on a path where a wrong answer is a
+ * security bug rather than a slow page.
  *
- * Access tokens are absent on purpose — they are signed, not stored. The shapes
- * and the in-memory implementation live in storage.ts, which stays importable
- * from plain Node.
+ * Access tokens are absent on purpose — they are signed, not stored. Browser
+ * sessions are stored for the opposite reason: sign-out has to be able to delete
+ * one. The shapes and the in-memory implementation live in storage.ts, which
+ * stays importable from plain Node.
  */
 
 const CODE = "code:";

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
-  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import net from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -244,6 +244,32 @@ describe("election: the socket is the lock (D8)", () => {
     const first = await open();
     rmSync(socketPath(), { force: true });
     await expect(first.close()).resolves.toBeUndefined();
+  });
+
+  it("does not remove a socket that has taken its path when it closes", async () => {
+    // Closing a listening server unlinks its path by NAME, so a coordinator whose file had
+    // been removed and replaced used to delete its successor's socket on the way out, and
+    // the next opener found a vacancy where a live coordinator was.
+    const a = asCoordinator(await open());
+    rmSync(socketPath(), { force: true }); // whoever opens next elects, and takes the name
+    const b = asCoordinator(await open());
+    const inode = statSync(socketPath()).ino;
+
+    await a.close();
+
+    expect(await probe(socketPath())).toBe("connected"); // B's socket still answers
+    expect(statSync(socketPath()).ino).toBe(inode); // and it is B's own file put back, not a copy
+    expect(readdirSync(root).filter((n) => n.includes("kept"))).toEqual([]); // nothing left beside it
+    expect((await open()).role).toBe("subscriber"); // so the next opener finds B and not a vacancy
+    await vi.waitFor(() => expect(b.stats().connections).toBe(1));
+  });
+
+  it("leaves alone whatever else has taken its path, even a file that is not a socket", async () => {
+    const a = await open();
+    rmSync(socketPath(), { force: true });
+    writeFileSync(socketPath(), "somebody else's file");
+    await a.close();
+    expect(readFileSync(socketPath(), "utf8")).toBe("somebody else's file");
   });
 
   it("gives two identities on one machine two separate buses", async () => {

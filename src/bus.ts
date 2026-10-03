@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, unlinkSync } from "node:fs";
+import { lstatSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import net from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -298,8 +298,56 @@ function removeStale(path: string, tested: FileId | undefined): "removed" | "gon
   }
 }
 
+/** What a coordinator knows about the file it bound, filled in once the bind has succeeded. */
+interface Claim { file?: FileId }
+
+/**
+ * Closing a listening server unlinks its path by NAME. libuv does it, synchronously,
+ * inside close() (measured on Node 22.16 and 25.8; Node's documentation says
+ * server.close() unlinks the socket). If the file at that name is no longer the one this
+ * server bound, because it was removed and another process has since bound the name,
+ * the unlink deletes THAT process's socket on the way out, and the next opener finds a
+ * vacancy where a live coordinator was. That turned a rare double election into an
+ * outage caused by cleanup, in the process that had already lost.
+ *
+ * This is an identity check on our own file, not a lock: the bind's own file is recorded
+ * and, on the way out, compared with what is at the path now. If it is ours, or gone,
+ * libuv's unlink is exactly right. If it is not, the file is theirs and we have no
+ * business removing it: move it aside for the length of close(), and the caller puts it
+ * back. Both renames, and the close between them, happen in one synchronous turn, so no
+ * event-loop turn runs while the name is empty. It is empty for the microseconds between
+ * the renames, and an opener probing in exactly that gap sees ENOENT and elects: the same
+ * class of residual as removeStale's, and far narrower than deleting a successor outright.
+ *
+ * Returns the function that puts the file back; it does nothing when nothing was moved.
+ */
+function shieldSuccessor(path: string, own: FileId | undefined, log: (message: string) => void): () => void {
+  const nothing = (): void => undefined;
+  let now: FileId | undefined;
+  try {
+    now = identify(path);
+  } catch {
+    return nothing;
+  }
+  if (!now || !own || sameFile(own, now)) return nothing;
+  const aside = `${path}.kept-${process.pid}`;
+  try {
+    renameSync(path, aside);
+  } catch {
+    return nothing; // whatever stopped this stops libuv's unlink the same way
+  }
+  return () => {
+    try {
+      renameSync(aside, path);
+    } catch (error) {
+      log(`bus: could not put ${path} back after closing: ${messageOf(error)}; it is at ${aside}`);
+    }
+  };
+}
+
 type Listen =
-  | { kind: "listening" }
+  /** `file` is what the bind created, read back the moment it returned: see shieldSuccessor. */
+  | { kind: "listening"; file: FileId | undefined }
   | { kind: "taken"; code: string }
   | { kind: "blocked"; error: NodeJS.ErrnoException };
 
@@ -322,6 +370,7 @@ type Listen =
  */
 function listen(server: net.Server, path: string): Promise<Listen> {
   return new Promise((resolve) => {
+    let file: FileId | undefined;
     const failed = (error: NodeJS.ErrnoException): void => {
       server.off("listening", bound);
       resolve(
@@ -332,7 +381,7 @@ function listen(server: net.Server, path: string): Promise<Listen> {
     };
     const bound = (): void => {
       server.off("error", failed);
-      resolve({ kind: "listening" });
+      resolve({ kind: "listening", file });
     };
     server.once("error", failed);
     server.once("listening", bound);
@@ -341,8 +390,16 @@ function listen(server: net.Server, path: string): Promise<Listen> {
       server.listen(path);
     } catch (error) {
       failed(error as NodeJS.ErrnoException);
+      return;
     } finally {
       process.umask(mask);
+    }
+    // The bind has happened by now, so what is at the path is the socket this call just
+    // made. Read it back here, in the same turn: it is what close() must recognise later.
+    try {
+      file = identify(path);
+    } catch {
+      // Without it close() treats the file as its own, which is what it did before this.
     }
   });
 }
@@ -441,9 +498,11 @@ async function elect(opts: BusOptions): Promise<Bus> {
     // no handle once it has settled (five failed binds left only the winner's), so
     // losing the race leaves nothing to clean up.
     const server = net.createServer();
-    const coordinator = coordinatorOver(server, opts);
+    const claim: Claim = {};
+    const coordinator = coordinatorOver(server, path, opts, claim);
     const bound = await listen(server, path);
     if (bound.kind === "listening") {
+      claim.file = bound.file;
       log(`bus: coordinating at ${path}`);
       return coordinator;
     }
@@ -688,7 +747,7 @@ interface Sub {
   end(reason: Error): void;
 }
 
-function coordinatorOver(server: net.Server, opts: BusOptions): Coordinator {
+function coordinatorOver(server: net.Server, path: string, opts: BusOptions, claim: Claim): Coordinator {
   const log = opts.log ?? (() => undefined);
   const rooms = new Map<string, Room>();
   const remotes = new Set<Conn>();
@@ -956,13 +1015,15 @@ function coordinatorOver(server: net.Server, opts: BusOptions): Coordinator {
           hook("onRoomClose", () => opts.onRoomClose?.(room.id));
         }
         local.subs.clear();
-        // Closing a listening server unlinks its socket file: that is libuv's doing,
-        // and it is how "a clean exit unlinks its own" (D8) holds. It unlinks by NAME,
-        // so a coordinator whose file was replaced (see removeStale) removes its
-        // successor's file when it closes: measured, the successor then answers ENOENT.
-        // Nothing here can tell it has been replaced; the cost is that the next opener
-        // elects a coordinator that need not exist.
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        // Closing a listening server unlinks its socket file: that is libuv's doing, and it
+        // is how "a clean exit unlinks its own" (D8) holds. It unlinks by NAME, so when the
+        // file at the path is no longer ours it is moved aside for the length of the close
+        // and put back: see shieldSuccessor.
+        const putBack = shieldSuccessor(path, claim.file, log);
+        await new Promise<void>((resolve) => {
+          server.close(() => resolve());
+          putBack(); // the unlink inside close() has already run: it is synchronous
+        });
       })();
       return closing;
     },

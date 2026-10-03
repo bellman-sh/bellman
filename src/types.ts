@@ -36,12 +36,21 @@ export interface Member {
   brief: Brief;
   joinedAt: number;
   leftAt: number | null;
+  /**
+   * When this member was last heard from — any call it made, not a heartbeat.
+   * `src/presence.ts` reads it to tell a member that went quiet from one that
+   * left, which is what keeps a dead session from holding its seat forever.
+   * Absent on rows stored before the field existed; read it through
+   * `lastSeen`, which lifts those to `joinedAt`.
+   */
+  lastSeenAt?: number;
 }
 
 export type EventType =
   | "member_joined"
   | "member_left"
   | "member_evicted"
+  | "member_timed_out"
   | "message"
   | "artifact"
   | "action_request"

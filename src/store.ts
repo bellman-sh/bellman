@@ -12,7 +12,7 @@ const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
-export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt">>;
+export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt">>;
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -23,6 +23,63 @@ export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftA
  * a close is decided on are one reading of `leftAt` and cannot drift apart.
  */
 export const isActiveMember = (m: Member): boolean => m.leftAt === null;
+
+/**
+ * When this member was last heard from, falling back to when it joined.
+ *
+ * Here beside `isActiveMember`, and not in presence.ts, because `seatMember`
+ * has to read it inside the store — presence.ts imports this module, so the
+ * other direction would be a cycle. The fallback is the legacy lift: members
+ * stored before `lastSeenAt` existed have none, and reading `undefined` as
+ * "never seen" would make every one of them reclaimable on the next join.
+ * Joining is a call the member made, so `joinedAt` is the honest answer for a
+ * row that predates the field — the same read-time `??` lift commit 7d19453
+ * applies to `joinCode`.
+ */
+export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * What `seatMember` did. `refused` is null exactly when the member is seated.
+ *
+ * `reclaimed` lists the stale members this call departed to make the room, and
+ * it is non-empty only when the seating succeeded — so a caller announcing them
+ * is announcing removals that actually happened. A call that cannot free enough
+ * seats refuses "full" and removes nobody: a partial reap would remove a member
+ * for a joiner that never got in.
+ */
+export interface SeatOutcome {
+  refused: "not_found" | "closed" | "frozen" | "full" | null;
+  reclaimed: Member[];
+}
+
+/**
+ * Pick the stale members to reclaim so one more can be seated, or say it cannot.
+ *
+ * Shared by both stores so the seat rule is one piece of code rather than two
+ * that can drift — the same reason `isActiveMember` lives here. It is pure, and
+ * takes the cutoff rather than a window, so the store holds no presence policy:
+ * all it knows is that a member last heard from before `staleBefore` may lose
+ * its seat.
+ *
+ * `null` means refuse: the room is full of members that are not reclaimable.
+ * An empty array means seat them with nobody removed.
+ */
+export function seatVictims(
+  members: Member[],
+  maxMembers: number,
+  staleBefore: number,
+): Member[] | null {
+  const active = members.filter(isActiveMember);
+  const needed = active.length - maxMembers + 1;
+  if (needed <= 0) return [];
+  // Longest-quiet first: if only one seat has to go, it is the one whose member
+  // has been gone longest.
+  const victims = active
+    .filter((m) => lastSeen(m) < staleBefore)
+    .sort((a, b) => lastSeen(a) - lastSeen(b))
+    .slice(0, needed);
+  return victims.length < needed ? null : victims;
+}
 
 /**
  * Storage boundary. Everything stateful goes through this interface so the
@@ -113,16 +170,56 @@ export interface BellmanStore {
    * refused — frozen, closed, or no such session — and a caller that has to say
    * which reads the session again.
    *
-   * The refusals are here rather than only in the tool, because the tool reads
-   * the session and then writes, and a freeze landing in that gap would let a
+   * No production path calls this today. The join is `seatMember`, which makes
+   * these same refusals and also allocates the seat, and only tests use this
+   * one. It stays as the unconditional append, for the contract suite and for a
+   * caller that is not allocating a seat, the same relationship `closeSession`
+   * has to `closeSessionIfEmpty`. Do not read its presence as behaviour anything
+   * depends on.
+   *
+   * The refusals are here rather than only in a tool, because a tool reads the
+   * session and then writes, and a freeze landing in that gap would let a
    * frozen room grow — which is the one thing freezing is for. A close landing in
    * it is the same gap with a worse result: a member seated in a room that is
-   * over. This is the other half of `closeSessionIfEmpty`, which keeps a close
-   * from landing on an occupied room; the pair is sound only together. Unlike the
-   * cross-object races on #59 and #62, both halves live in the same object, so
-   * this one can simply be made not to have a gap.
+   * over. Like `seatMember`'s, this is the other half of `closeSessionIfEmpty`,
+   * which keeps a close from landing on an occupied room; the pair is sound only
+   * together. Unlike the cross-object races on #59 and #62, both halves live in
+   * the same object, so this one can simply be made not to have a gap.
    */
   addMember(sessionId: string, member: Member): Promise<boolean>;
+  /**
+   * Seat a member, reclaiming stale seats if that is what it takes, as ONE
+   * operation.
+   *
+   * This is the production join path; `addMember` is the unconditional append,
+   * kept for the contract suite and for a caller that is not allocating a seat,
+   * the same relationship `closeSession` has to `closeSessionIfEmpty`.
+   *
+   * It cannot be three calls, and it was. A tool that reclaimed, re-read, checked
+   * capacity and then appended handed two concurrent confirms a window to agree
+   * on the same free slot: both would reap the same victim, both announce it,
+   * both pass the check, and the room would end with more members than it has
+   * seats. Worse, a `bellman_sync` landing in the window makes a member live
+   * again *after* the reclaim decision was taken against it, and a freeze
+   * landing there removes a member from a room that is meant to cost nobody
+   * their place. Deciding and writing inside the object closes all three: the
+   * Durable Objects store is one transaction, and MemoryStore does not yield
+   * between the read and the write — the rule `closeSessionIfEmpty` and the
+   * guarded grant writes already follow.
+   *
+   * `staleBefore` is the cutoff, so the store holds no presence policy: a member
+   * last heard from before it may lose its seat. Pass `Date.now()` for `now` so
+   * the departure stamp and the joiner's `joinedAt` agree.
+   *
+   * Refuses rather than partially reaping. Reclaiming one of two seats a joiner
+   * needs would remove a member for somebody who never got in.
+   */
+  seatMember(
+    sessionId: string,
+    member: Member,
+    staleBefore: number,
+    now: number,
+  ): Promise<SeatOutcome>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /**
@@ -148,10 +245,11 @@ export interface BellmanStore {
    * read the roster, saw it empty and then called `closeSession` would leave a
    * window for a member to join in, and the room would close over them with its
    * codes retired. Here the Durable Objects store decides inside the one object
-   * that owns the session, and MemoryStore does not yield between the two.
-   * `addMember`'s refusal of a closed session is the other half: this keeps a
-   * close from landing on an occupied room, that keeps a join from landing on a
-   * closed one, and neither is enough alone.
+   * that owns the session, in one transaction, and MemoryStore does not yield
+   * between the two. `seatMember`'s refusal of a closed session is the other half,
+   * and `addMember`'s is the same refusal: this keeps a close from landing on an
+   * occupied room, those keep a join from landing on a closed one, and neither is
+   * enough alone.
    *
    * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
    * like any other: freezing refuses writes into a room someone is in, and an
@@ -416,6 +514,35 @@ export class MemoryStore implements BellmanStore {
     return true;
   }
 
+  async seatMember(
+    sessionId: string,
+    member: Member,
+    staleBefore: number,
+    now: number,
+  ): Promise<SeatOutcome> {
+    // No await from here to the write, deliberately — the same rule, and the
+    // same reason, as closeSessionIfEmpty. The Durable Objects store gets it
+    // from a transaction instead.
+    const s = this.sessions.get(sessionId);
+    if (!s) return { refused: "not_found", reclaimed: [] };
+    if (s.closed) return { refused: "closed", reclaimed: [] };
+    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+
+    const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+    if (victims === null) return { refused: "full", reclaimed: [] };
+
+    const reclaimed: Member[] = [];
+    for (const v of victims) {
+      const row = s.members.find((m) => m.memberId === v.memberId)!;
+      row.leftAt = now;
+      reclaimed.push(detach(row));
+    }
+    s.members.push(detach(member));
+    // After the guards, so a refused seating leaves no trace in the listing.
+    this.indexMember(member.userId, sessionId);
+    return { refused: null, reclaimed };
+  }
+
   async updateMember(
     sessionId: string,
     memberId: string,
@@ -428,6 +555,7 @@ export class MemoryStore implements BellmanStore {
     if (patch.brief !== undefined) m.brief = detach(patch.brief);
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
+    if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -442,7 +570,7 @@ export class MemoryStore implements BellmanStore {
     // No await from here to the write, deliberately. The check and the close are
     // one operation, and a yield between them is the window a join lands in: the
     // same rule, and the same reason, as waitForEvents and the guarded grant
-    // writes. The Durable Objects store gets it from the input gate instead.
+    // writes. The Durable Objects store gets it from a transaction instead.
     if (s.closed) return true;
     if (s.members.some(isActiveMember)) return false;
     this.closeNow(s);

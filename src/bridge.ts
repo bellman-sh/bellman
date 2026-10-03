@@ -18,6 +18,7 @@ import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
+import type { EventType } from "./types.js";
 
 /**
  * The Bellman bridge for Claude Code.
@@ -236,6 +237,14 @@ function textOf(result: CallToolResult): string {
 }
 
 /**
+ * The two ways the server takes a seat away. Typed as `EventType[]` so a
+ * misspelling is a compile error: as a bare `string[]` it would still satisfy
+ * `includes`, the guard below would silently never match, and a removed
+ * member's watcher would poll a room it is out of forever.
+ */
+const REMOVAL_EVENTS: readonly EventType[] = ["member_evicted", "member_timed_out"];
+
+/**
  * Whether these events show `memberId` being evicted.
  *
  * One definition for the two places the bridge reads a member's events: the
@@ -246,16 +255,26 @@ function textOf(result: CallToolResult): string {
  * The type is checked before the payload because the payload of everything a
  * peer can send is the peer's: a message can carry any member_id, and a joiner
  * reads every member's id off the roster bellman_confirm returns. Only the
- * server writes a member_evicted, and a peer cannot send that kind. Drop the
- * type check and a peer stops another member's watcher by naming them, with
- * nothing to tell that member why their room went quiet.
+ * server writes a member_evicted or a member_timed_out, and a peer cannot send
+ * either kind. Drop the type check and a peer stops another member's watcher by
+ * naming them, with nothing to tell that member why their room went quiet.
+ *
+ * `member_timed_out` is here for the reason `member_evicted` is, and not
+ * because the watcher believes it: a timed-out seat has been given to somebody
+ * else, so this member's handle can no longer send, and a watcher polling on it
+ * forever is noise. It is not self-inflicted either — a bridge still polling is
+ * a bridge still touching `lastSeenAt`, so seeing this about yourself means the
+ * seat went while the watcher was down.
  */
 function showsEvictionOf(events: unknown, memberId: string): boolean {
   return (
     Array.isArray(events) &&
     events.some(
       (e: WireEnvelope) =>
-        e.data.type === "member_evicted" &&
+        // Widened at the lookup, not at the declaration: `e.data.type` is a
+        // string off the wire, while the list above stays checked against
+        // EventType.
+        (REMOVAL_EVENTS as readonly string[]).includes(e.data.type) &&
         (e.data.payload as { member_id?: string } | null)?.member_id === memberId
     )
   );

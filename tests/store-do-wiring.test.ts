@@ -1141,7 +1141,7 @@ describe("wake: socket delivery", () => {
       type: "message", fromMemberId: "m9", fromUserId: "u9",
       fromLabel: "peer", payload: { n }, refId: null,
     });
-    return { doi, ctx, post };
+    return { doi, ctx, post, storage };
   };
   const open = (ctx: ReturnType<typeof fakeCtx>, cursor: number, members = "m1") =>
     new Request("https://do/ws?cursor=" + cursor, {
@@ -1210,6 +1210,34 @@ describe("wake: socket delivery", () => {
     expect((await polling).map((e) => e.cursor)).toEqual([1]);
     // Both arms, one event. The long poll is permanent for remote clients.
     expect(ctx.sockets[0].sent).toHaveLength(1);
+  });
+
+  const peerMessage = {
+    type: "message" as const, fromMemberId: "m9", fromUserId: "u9",
+    fromLabel: "peer", payload: { n: 1 }, refId: null,
+  };
+  it.each([
+    { name: "appendEvent", append: (doi: InstanceType<typeof storeDo.SessionDO>) => doi.appendEvent(peerMessage) },
+    { name: "appendEventOnce", append: (doi: InstanceType<typeof storeDo.SessionDO>) => doi.appendEventOnce(peerMessage, "k-1") },
+  ])("$name wakes nobody for an append whose transaction did not commit", async ({ append }) => {
+    // The fake runs a transaction's closure on the live storage and cannot roll it back, so a
+    // commit that fails is simulated by throwing once the closure has returned. A wake sent
+    // from inside the closure has reached the poll and the socket by then, for an event that
+    // did not land. A wake sent after the commit is never sent.
+    const { doi, ctx, storage } = await world();
+    await doi.fetch(open(ctx, 0));
+    const polling = doi.waitForEvents(0, 50);
+    const commit = storage.transaction;
+    storage.transaction = async <T>(closure: (txn: unknown) => Promise<T>): Promise<T> => {
+      await commit(closure);
+      throw new Error("commit failed");
+    };
+
+    await expect(append(doi)).rejects.toThrow("commit failed");
+
+    storage.transaction = commit;
+    expect(ctx.sockets[0].sent).toEqual([]);
+    expect(await polling).toEqual([]);
   });
 
   it("delivers session_expired over the socket too", async () => {

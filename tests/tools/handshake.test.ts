@@ -363,15 +363,20 @@ describe("INVARIANT 2 — two-phase connect", () => {
    * passed by then, so only the store's refusal can answer, which is what the
    * tests below are about. (Freezing the room before confirm, as freeze.test.ts
    * does, is stopped by the handler's guard and never reaches the store.)
+   *
+   * Hooked on `seatMember`, which is the production join path: it reclaims any
+   * stale seat, decides capacity and appends in one operation, so that is the
+   * one call whose refusal the handler has to translate. `addMember` is the
+   * unconditional append and no tool calls it.
    */
   async function confirmWhileRoomChanges(
     change: (store: MemoryStore, sessionId: string) => Promise<void>,
   ) {
     const store = new MemoryStore();
-    const seat = store.addMember.bind(store);
-    store.addMember = async (sessionId, m) => {
+    const seat = store.seatMember.bind(store);
+    store.seatMember = async (sessionId, m, staleBefore, now) => {
       await change(store, sessionId);
-      return seat(sessionId, m);
+      return seat(sessionId, m, staleBefore, now);
     };
     const raced = new Harness(store);
     try {
@@ -1023,10 +1028,11 @@ describe("bellman_start lists the room for its creator", () => {
 });
 
 describe("bellman_confirm lists the room for the member it seats", () => {
-  // The join half of the case above. bellman_confirm is the only production
-  // caller of store.addMember, and the contract proves addMember indexes the
-  // member it is handed — not that the tool hands it the joiner. Nothing else
-  // drives a real join and then reads the listing (#49, D4).
+  // The join half of the case above. bellman_confirm seats through
+  // store.seatMember, the production join. The contract's listing cases join
+  // through addMember, which no tool calls, so none of them shows that the tool's
+  // join lists the room. Nothing else drives a real join and then reads the
+  // listing (#49, D4).
   it("puts the room it just joined in the joiner's listing", async () => {
     const { joiner, sessionId } = await pairUp(h);
 

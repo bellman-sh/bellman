@@ -257,6 +257,142 @@ export function describeStoreContract(
       expect(fresh.members[0].label).toBe("jesse@codenerd");
     });
 
+    it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
+      // The production join path. Read-then-write capacity was the bug: two
+      // confirms agreeing on one seat overfill the room, and a sync landing in
+      // the gap makes a member live again after it was chosen as the victim. So
+      // every store has to decide and write without yielding.
+      const s = session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      const outcome = await store.seatMember(
+        s.id,
+        member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }),
+        1_000_000,
+        9_000_000,
+      );
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
+      // Reported with leftAt already set, so the caller announces a removal
+      // that happened rather than one it predicted.
+      expect(outcome.reclaimed[0].leftAt).toBe(9_000_000);
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
+    });
+
+    it("seatMember seats into a room with a spare seat, reclaiming nobody", async () => {
+      const s = session({
+        maxMembers: 5,
+        members: [member({ memberId: "m_quiet", lastSeenAt: 1 })],
+      });
+      (await store.createSession(s));
+
+      const outcome = await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      );
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [] });
+      // Held for them, not taken: the joiner can have the free seat, so the
+      // quiet member keeps its own.
+      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_quiet")?.leftAt)
+        .toBeNull();
+    });
+
+    it("seatMember refuses a full room of present members, reclaiming nobody", async () => {
+      const s = session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 2_000_000 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      expect(await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "full", reclaimed: [] });
+      expect((await store.getSession(s.id))!.members).toHaveLength(2);
+    });
+
+    it("seatMember refuses a frozen room, and a closed one, reclaiming nobody", async () => {
+      const stale = () => session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 1 }),
+        ],
+      });
+      const frozen = stale();
+      (await store.createSession(frozen));
+      (await store.freezeSession(frozen.id, 5));
+
+      // The guards are inside the operation because the removal and its
+      // announcement are separate writes: updateMember has no frozen guard and
+      // appendEvent returns null, so reaping here would remove members
+      // permanently AND silently from a state meant to be reversible.
+      expect(await store.seatMember(
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "frozen", reclaimed: [] });
+      expect((await store.getSession(frozen.id))!.members
+        .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+
+      (await store.freezeSession(frozen.id, null));
+      (await store.closeSession(frozen.id));
+      expect((await store.seatMember(
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).refused).toBe("closed");
+    });
+
+    it("seatMember refuses rather than freeing some of the seats a joiner needs", async () => {
+      const s = session({
+        maxMembers: 2,
+        members: [
+          member({ memberId: "m_a", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_b", userId: "u_b", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_c", userId: "u_c", lastSeenAt: 1 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      // Three undeparted members in a two-seat room needs two seats freed and
+      // only one is reclaimable. A partial reap would remove a member for
+      // somebody who never got in.
+      expect(await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "full", reclaimed: [] });
+      expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
+        .toEqual([]);
+    });
+
+    it("seatMember reports an unknown session rather than throwing", async () => {
+      expect(await store.seatMember(
+        "qs_nope", member({ memberId: "m_late", userId: "u_late" }), 0, 9_000_000
+      )).toEqual({ refused: "not_found", reclaimed: [] });
+    });
+
+    it("updateMember patches lastSeenAt on its own", async () => {
+      // The liveness write, and the only one of these a store sees on every
+      // bellman_sync. A store that dropped it would read every member as stale
+      // and reap the room out from under itself (#103), so both must apply it.
+      const s = session({ members: [member({ lastSeenAt: 1 })] });
+      (await store.createSession(s));
+
+      (await store.updateMember(s.id, "m_creator", { lastSeenAt: 1_700_000_000_000 }));
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members[0].lastSeenAt).toBe(1_700_000_000_000);
+      // Going quiet and leaving are separate facts: a touch must not revive a
+      // member that left, and must not mark a present one as gone.
+      expect(fresh.members[0].leftAt).toBeNull();
+    });
+
     it("updateMember ignores unknown members and sessions", async () => {
       const s = session();
       (await store.createSession(s));
@@ -387,14 +523,31 @@ export function describeStoreContract(
     /**
      * The two halves of one guarantee, and the case that says there is no gap
      * between them: closeSessionIfEmpty will not close an occupied room, and
-     * addMember will not seat anyone in a closed one. Neither is enough alone.
+     * seatMember will not seat anyone in a closed one. Neither is enough alone.
      * With only the first, a join landing after the close seats a member in a
      * room that is over. With only the second, a close that decided on an old
      * roster closes over a member who joined meanwhile.
      *
+     * The join is seatMember because that is the production path, the one
+     * bellman_confirm calls. addMember is the unconditional append and no tool
+     * calls it, so racing that pair would guard a door nobody uses.
+     *
      * Started together, each way round, so whichever lands first wins and the
-     * other has to give way. Exactly one may succeed: both is a closed room with
-     * a member in it, and neither is a join refused by a room that never closed.
+     * other has to give way. Exactly one may succeed, and `refused` says which: it
+     * is null exactly when the member is seated. Both is a closed room with a
+     * member in it. Neither is a join refused by a room that never closed, so a
+     * join that loses has to have lost to the close and not to some other refusal.
+     *
+     * Under vitest-pool-workers this case is reliable only because SessionDO makes
+     * each half one transaction. Two plain reads and puts started together lose an
+     * update there in about 1% of rounds (#120), which real workerd has not shown
+     * (none in 24,000 rounds under `wrangler dev`, and its documentation says the
+     * input gate prevents it). That is the pool failing to be workerd and not a bug
+     * in production, and the transaction is what makes the case independent of it.
+     * The case keeps its power where it matters: a facade that read the room and
+     * then closed it, outside the object, fails every close-first round.
+     * worker-tests/session-close-join-race.test.ts holds each half open to pin the
+     * transaction itself.
      */
     it.each([
       { first: "close", second: "join" },
@@ -404,16 +557,24 @@ export function describeStoreContract(
       (await store.createSession(s));
       const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
       const close = () => store.closeSessionIfEmpty(s.id);
-      const join = () => store.addMember(s.id, joiner);
+      // Nobody is stale and nobody is active, so nothing is reclaimed either way.
+      const join = () => store.seatMember(s.id, joiner, 0, Date.now());
 
-      const [a, b] = await Promise.all(first === "close" ? [close(), join()] : [join(), close()]);
-      const closed = first === "close" ? a : b;
-      const joined = first === "close" ? b : a;
+      // Property order is call order: whichever is named first is started first.
+      const started = first === "close"
+        ? { closing: close(), seating: join() }
+        : { seating: join(), closing: close() };
+      const [closed, outcome] = await Promise.all([started.closing, started.seating]);
+      const seated = outcome.refused === null;
 
       const after = (await store.getSession(s.id))!;
-      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(joined);
+      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(seated);
       expect(after.closed).toBe(closed);
-      expect(after.members.some((m) => m.memberId === "m_late")).toBe(joined);
+      expect(after.members.some((m) => m.memberId === "m_late")).toBe(seated);
+      // A join that lost, lost to the close. "full" or "frozen" here would be another
+      // bug, which the checks above could not tell from losing the race.
+      if (!seated) expect(outcome.refused).toBe("closed");
+      expect(outcome.reclaimed).toEqual([]);
     });
 
     // --------------------------------------------------------------- freezing
@@ -886,6 +1047,13 @@ export function describeStoreContract(
      * Both calls are issued before either is awaited, so an implementation
      * that yields between reading the key and writing the event appends twice.
      * Every other test here awaits in between and would pass regardless.
+     *
+     * Under vitest-pool-workers this case is reliable only because SessionDO makes
+     * the append one transaction, the read of the cursor included. Two plain reads
+     * and puts started together took the same cursor there in about 1% of rounds
+     * (#120), both reporting `appended`. worker-tests/session-append-race.test.ts
+     * holds the first call between its read of the cursor and its write to pin the
+     * transaction itself.
      */
     it("appends once when two calls with the same key race", async () => {
       const s = session();

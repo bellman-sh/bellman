@@ -158,17 +158,34 @@ describe("AuthDO sessions", () => {
     expect((await o.touchSession("sid", T0 + SESSION_TOUCH_MS))?.last_used_at).toBe(T0);
   });
 
-  // The skip is a decision not to write, which the record a touch returns cannot
-  // show: a touch that stored the new time and handed back the stale record would
-  // pass every assertion made through its return value. This reads what is
-  // stored.
-  it("does not write last_used_at while it is fresh", async () => {
-    const o = auth("s-skip-storage");
+  // The skip is a decision not to write, and only a count of the writes can see
+  // it. The record a touch returns cannot: one that stored the new time and handed
+  // back the stale record passes every assertion made through its return value.
+  // Nor can the stored value, because a write of the record already there leaves
+  // it unchanged. So this counts storage.put inside the object. The second touch
+  // is the positive control: it is one past the threshold and must count exactly
+  // one write, which shows the counter sees real ones.
+  it("does not call storage.put while last_used_at is fresh, and does once it is stale", async () => {
+    const o = auth("s-put-count");
     await o.putSession("sid", panelSession());
 
-    await o.touchSession("sid", T0 + SESSION_TOUCH_MS); // exactly the threshold: a skip
+    const [skipped, stale] = await runInDurableObject(o, async (instance: AuthDO, ctx) => {
+      const storage = ctx.storage as unknown as { put: (...a: unknown[]) => Promise<void> };
+      const real = storage.put.bind(storage);
+      let puts = 0;
+      storage.put = (...a: unknown[]) => { puts++; return real(...a); };
+      try {
+        await instance.touchSession("sid", T0 + SESSION_TOUCH_MS); // exactly the threshold: a skip
+        const afterSkip = puts;
+        await instance.touchSession("sid", T0 + SESSION_TOUCH_MS + 1); // one past it: a write
+        return [afterSkip, puts - afterSkip];
+      } finally {
+        delete (storage as { put?: unknown }).put;
+      }
+    });
 
-    expect((await storedSession("s-skip-storage", "sid"))?.last_used_at).toBe(T0);
+    expect(skipped).toBe(0);
+    expect(stale).toBe(1);
   });
 
   it("writes last_used_at once it is stale", async () => {

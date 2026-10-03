@@ -2330,14 +2330,22 @@ Append to `tests/panel-session.test.ts`, extending the helpers import with `fake
 
 ```ts
 describe("signing in to the panel", () => {
-  /** Walk /auth/signin → provider → callback, and return the callback response. */
+  /**
+   * Walk /auth/signin → provider hand-off → callback, and return the callback
+   * response. The hand-off is asserted on the way: it takes its own list of
+   * audiences, apart from the callback's, so a response stepped over here would
+   * let a hand-off that refused SESSION_AUDIENCE return a 400 nobody reads, and
+   * the callback below would still pass.
+   */
   async function signIn(returnTo?: string) {
     const query = returnTo === undefined ? "" : `?return_to=${encodeURIComponent(returnTo)}`;
     const chooser = await route(new Request(`${ISSUER}/auth/signin${query}`));
     const req = decodeURIComponent(
       /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
     );
-    await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
+    const handoff = await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
+    expect(handoff.status).toBe(302);
+    expect(handoff.headers.get("location")).toContain("github.com/login/oauth/authorize");
     return route(new Request(
       `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`
     ));
@@ -2640,7 +2648,7 @@ import { readSessionCookie, serializeSessionCookie } from "./cookies.js";
 Run: `npx vitest run tests/panel-session.test.ts`
 Expected: PASS.
 
-- [ ] **Step 8: Prove the `return_to` validator matters, and that each sign-in gets its own session**
+- [ ] **Step 8: Prove the `return_to` validator matters, that each sign-in gets its own session, and that the hand-off admits the audience**
 
 Temporarily change `panelDestination`'s final line to the prefix form:
 
@@ -2653,6 +2661,14 @@ Re-run. Expected: "ignores a return_to that merely prefixes the panel origin" FA
 Then remove the `try`/`catch` and re-run. Expected: "ignores a relative return_to rather than throwing" FAILS with a `TypeError`. Restore.
 
 Then mint a constant id: change `const id = randomId();` in `finishSession` to `const id = "fixed";`. Re-run. Expected: "gives each sign-in its own session…" FAILS — the second sign-in overwrote the first's record, and both cookies are the same string. Restore.
+
+Then drop `SESSION_AUDIENCE` from the hand-off's list only, leaving the callback's alone:
+
+```ts
+    const state = await verifyState(req, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE]);
+```
+
+Re-run. Expected: every test that goes through `signIn` FAILS at the hand-off assertion, with 400 where 302 was expected, and none gets as far as the callback. Restore.
 
 - [ ] **Step 9: Verify and commit**
 
@@ -2684,7 +2700,12 @@ holds the provider's authorization code, and it must not be handed on.
 Each sign-in gets its own session. A test signs two humans in to one store,
 asserts that the ids differ and reads each cookie back as its own human,
 alternately: an id minted once and reused would hand one human another's
-session."
+session.
+
+The sign-in helper asserts that the provider hand-off answers 302. The
+hand-off keeps its own list of audiences, apart from the callback's, and a
+response nothing reads would let a hand-off that refused the session
+audience pass every test that goes on to the callback."
 ```
 
 ---

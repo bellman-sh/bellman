@@ -417,15 +417,16 @@ quiet close itself, destroying the history the returning session came back for.
 Departure is permanent and may close a room. Staleness is reversible and must
 never.
 
-**A gap this leaves open.** #99's hibernating WebSocket has already landed:
-`SessionDO` accepts sockets, handles `webSocketClose`, and `SocketAttachment`
-carries the member ids — so the object holds a hard fact about who is connected,
-which beats any timeout because it is being told rather than inferring.
-Presence consults none of it. That is latent only while every client still
-long-polls `bellman_sync`; the first one that prefers the socket stops touching
-`lastSeenAt` and looks stale with a live connection. Closing it means touching
-the attached member ids on accept and consulting the open sockets in
-`presenceOf`, which changes a `SessionDO` path the seat bug does not.
+**A gap this leaves open: #140.** #99's hibernating WebSocket has already
+landed, and `SocketAttachment` carries the member ids — so the object holds a
+hard fact about who is connected, which beats any timeout because it is being
+told rather than inferring. Presence consults none of it. That is latent only
+while every client still long-polls `bellman_sync`; the first one that prefers
+the socket stops touching `lastSeenAt`, looks stale with a live connection, and
+is then the quietest member in the room by construction, so the next joiner
+takes its seat. Closing it means stamping `lastSeenAt` when the socket is
+accepted and excluding connected members from `seatVictims` inside the object,
+which changes a `SessionDO` path the seat bug does not.
 
 ## 6. Identity, plans and entitlements
 
@@ -600,10 +601,13 @@ conflating them would have produced an outbox where a lock was needed. To tell
 which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
-Within one object the problem is tractable: the guarded grant writes and
-`moveGrant` are single transactions, `closeSessionIfEmpty` and `seatMember` are
-single invocations that await only storage, and the frozen-write guards are the
-same shape. Across objects there is no transaction to widen.
+Within one object the problem is tractable: the guarded grant writes,
+`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `addMember` and the two
+appends are single transactions. `updateMember`, `closeSession` and
+`freezeSession` are single invocations that await only storage. The input gate
+covers those, and a transaction would be the stronger form: it holds even if an
+await on anything but storage were ever put between the read and the write.
+Across objects there is no transaction to widen.
 
 `seatMember` is the newest of those, and it is worth reading as the pattern.
 Seating a joiner means reclaiming a stale seat if that is what it takes,
@@ -613,7 +617,7 @@ announce the same reclaimed member, both pass the check, and leave the room with
 more members than seats. A `bellman_sync` landing in the window makes a member
 live again *after* it was chosen as the victim, and a freeze landing there
 removes somebody from a room that is meant to cost nobody their place. One
-invocation closes all three. The handler keeps only what the store cannot know:
+transaction closes all three. The handler keeps only what the store cannot know:
 which sentence the joiner reads, and the events and audit rows for the seats the
 store reports it actually took.
 

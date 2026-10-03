@@ -222,6 +222,73 @@ it("writes no tick into a closed room even when the alarm names it", async () =>
 });
 
 /**
+ * Push `expiresAt` into the past, as a room does by outliving its TTL between two
+ * firings. Raw rows, and the room stays OPEN: `#expireIfDue` is what closes it,
+ * and this is the state the alarm finds before it has.
+ */
+const lapseRoom = (stub: DurableObjectStub, expiresAt: number) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<Record<string, unknown>>("session");
+    await ctx.storage.put("session", { ...s, expiresAt });
+  });
+
+/**
+ * The expired room, and the only one of the three guards the ORDINARY path
+ * reaches — no `nameTheTick` here, because nothing has to be told anything.
+ *
+ * `derivedDue` refuses a tick to a frozen or closed room, so those two guards are
+ * on trial only when the alarm is told. An expired room is different: it is not
+ * closed until `#expireIfDue` closes it, so `derivedDue` hands back BOTH names,
+ * `dueNames` sorts them, and "heartbeat" sorts before "ttl". A firing delayed past
+ * `expiresAt` therefore ran the tick first — appending and waking every watcher on
+ * a room the very next iteration of that same loop closed. Members cannot answer
+ * an expired room: every send into it is refused.
+ */
+it("writes no tick into a room past its TTL, which the alarm closes in the same firing", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_lapsed"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_lapsed"));
+  await ageRoom(stub);
+  await lapseRoom(stub, Date.now() - 1_000);
+
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  // The control for the line above, and the reason it is worth asserting: the
+  // firing DID reach both handlers, so "no tick" is the guard's decision rather
+  // than an alarm that never dispatched. A tick and an expiry in one log is the
+  // room this test is about.
+  expect(after.events.filter((e) => e.type === "session_expired")).toHaveLength(1);
+});
+
+/**
+ * A room whose TTL is still ahead of it ticks as it always did, which is what says
+ * the guard above refuses the lapsed room and not every room with a TTL. "appends
+ * a tick from the server" is the same reading on the default expiry; this one puts
+ * the expiry close enough to be the thing under test.
+ *
+ * The `>` / `>=` boundary itself is NOT pinned here, deliberately. `#expireIfDue`
+ * acts only once `now` is past `expiresAt` and this guard matches it, but `alarm()`
+ * reads its own clock, so no test outside the object can hold `now` equal to
+ * `expiresAt` — and an assertion that cannot be made to fail for its own reason is
+ * worth less than the comment saying why.
+ */
+it("still ticks a room whose expiry is ahead of it", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_before_expiry"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_before_expiry"));
+  await ageRoom(stub);
+  await lapseRoom(stub, Date.now() + 30_000);
+
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toHaveLength(1);
+  expect(after.events.filter((e) => e.type === "session_expired")).toEqual([]);
+});
+
+/**
  * The other half of "advances on every firing". The nobody-due path is covered
  * above; this is the firing that writes. The tick, the cursor and the clock go in
  * one put, so a second firing finds the next time in the future and asks nobody

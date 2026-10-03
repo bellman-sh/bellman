@@ -267,7 +267,7 @@ export async function audit(
  * room, saw it empty and then called closeSession, and a member who joined in
  * the gap was closed over: the room ended with them in it, and its codes
  * retired. That gap cannot be closed from this side of the store, which is why
- * the decision moved into it. The other half is `addMember` refusing a closed
+ * the decision moved into it. The other half is `seatMember` refusing a closed
  * room, so a join arriving after the close is turned away and not seated.
  */
 async function closeIfEmpty(store: BellmanStore, session: StoredSession): Promise<string> {

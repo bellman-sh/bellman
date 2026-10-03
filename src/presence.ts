@@ -56,16 +56,18 @@ export { lastSeen };
  * a live member mid-conversation, and only one of those is recoverable by
  * waiting.
  *
- * **A gap this leaves open.** The hibernating WebSocket of #99 has already
- * landed (`SessionDO` accepts sockets and handles `webSocketClose`, and
- * `SocketAttachment` carries the member ids), so the object holds a hard fact
- * about who is connected — better than any timeout, because it is being told
- * rather than inferring. Nothing here consults it. That is latent only while
- * every client still long-polls `bellman_sync`: the first one that prefers the
- * socket stops touching `lastSeenAt` and looks stale with a live connection.
- * Closing it means touching the attached member ids on accept, and consulting
- * the open sockets in `presenceOf` — tracked on #103's follow-up rather than
- * done here, because it changes a `SessionDO` path the seat bug does not.
+ * **A gap this leaves open: #140.** The hibernating WebSocket of #99 has
+ * already landed, and `SocketAttachment` carries the member ids
+ * (`store-do.ts`), so the object holds a hard fact about who is connected —
+ * better than any timeout, because it is being told rather than inferring.
+ * Nothing here consults it. That is latent only while every client still
+ * long-polls `bellman_sync`: the first one that prefers the socket stops
+ * touching `lastSeenAt` and looks stale with a live connection, and is then the
+ * quietest member in the room by construction, so the next joiner takes its
+ * seat. Closing it means stamping `lastSeenAt` when the socket is accepted and
+ * excluding connected members from `seatVictims` inside the object — not
+ * `webSocketClose`, which `store-do.ts` records as the wrong hook because the
+ * runtime drops a closed socket from `getWebSockets()` on its own.
  */
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 

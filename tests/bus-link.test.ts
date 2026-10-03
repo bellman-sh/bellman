@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -261,6 +261,47 @@ describe("through the bus", () => {
     expect(theirs.watched.events[0].payload).toEqual(hostile);
   });
 
+  it("elects one coordinator when two links first need the bus in the same turn, and neither falls back", async () => {
+    // Both probe an empty path before either has bound it, and both go on to listen(). One loses the bind and has to
+    // connect to the winner, not give up and poll: the first thing in the link that waited would serialise them, and
+    // the log line is how this knows the race really happened.
+    const r = room(R1, "m1", "m2");
+    const a = open();
+    const b = open();
+    const wa = watch(a.link, R1, "m1");
+    const wb = watch(b.link, R1, "m2");
+    await until(() => [a.link.role(), b.link.role()].sort().join() === "coordinator,subscriber", "one of each");
+
+    r.append();
+    await until(() => wa.events.length === 1 && wb.events.length === 1, "both to hear");
+    expect(logs.filter((l) => /lost the race to bind/.test(l))).toHaveLength(1);
+    expect(wa.fallbacks).toEqual([]);
+    expect(wb.fallbacks).toEqual([]);
+    expect(rooms.sockets).toHaveLength(1);
+  });
+
+  it("serves a member that is behind the coordinator's window by asking Bellman for what it missed, as that member", async () => {
+    const r = room(R1, "m1", "m2");
+    for (let n = 0; n < 5; n++) r.append();
+    const a = await coordinatorWith(R1, "m1", 5); // the room's window starts at 5
+    const b = open();
+    const behind = watch(b.link, R1, "m2", 2); // behind it: 3, 4 and 5 are not in the window
+
+    await until(() => behind.events.length === 3, "the three events it missed");
+    r.append(); // 6, live
+    await until(() => behind.events.length === 4, "the live event after them");
+
+    expect(behind.cursors()).toEqual([3, 4, 5, 6]);
+    expect(behind.events[0]).toMatchObject({
+      session_id: R1, member_id: "m2", type: "message", from_member_id: "m_peer", from_label: "peer@laptop",
+      payload: { text: "event 3" }, at: "2026-10-03T12:00:03.000Z",
+    });
+    expect(a.conn.calls.filter((c) => c.member_id === "m2" && c.wait_seconds === 0)).toEqual([
+      { name: "bellman_sync", session_id: R1, member_id: "m2", since_cursor: 2, wait_seconds: 0 },
+    ]);
+    expect(behind.fallbacks).toEqual([]);
+  });
+
   it("serves two bridges' members of one room from one upstream socket", async () => {
     const r = room(R1, "m1", "m2");
     const a = await coordinatorWith(R1, "m1");
@@ -294,7 +335,7 @@ describe("through the bus", () => {
 });
 
 describe("when the coordinator goes away", () => {
-  it("the other bridge takes over, losing and repeating nothing", async () => {
+  it("the surviving bridge takes over, losing and repeating nothing", async () => {
     const r = room(R1, "m1", "m2");
     const a = await coordinatorWith(R1, "m1");
     const b = await subscriberWith(R1, "m2");
@@ -391,6 +432,29 @@ describe("when the bus cannot be had", () => {
     const third = watch(link, R1, "m3");
     await until(() => third.fallbacks.length === 1, "the third fallback");
     expect(asked).toBe(2);
+  });
+
+  it("falls back when the socket's path would be too long, and does not truncate it into somebody else's", async () => {
+    const { link } = open({ root: join(tmp, "x".repeat(120)) });
+    const w = watch(link, R1, "m1");
+    await until(() => w.fallbacks.length === 1, "the fallback");
+    expect(w.fallbacks[0]).toMatch(/bus path is \d+ bytes and a socket path may be at most/);
+    expect(rooms.upgrades).toEqual([]);
+  });
+
+  it("falls back where the directory for the socket cannot be made", async () => {
+    // A sandbox that refuses it: a read-only parent, which is how EACCES looks from here.
+    const locked = join(tmp, "locked");
+    mkdirSync(locked, { mode: 0o500 });
+    chmodSync(locked, 0o500);
+    try {
+      const { link } = open({ root: join(locked, "bus") });
+      const w = watch(link, R1, "m1");
+      await until(() => w.fallbacks.length === 1, "the fallback");
+      expect(w.fallbacks[0]).toMatch(/cannot create the bus directory/);
+    } finally {
+      chmodSync(locked, 0o700); // so that afterEach can remove it
+    }
   });
 
   it("falls back when the credential cannot say who it is, and makes no bus for nobody", async () => {
@@ -525,6 +589,29 @@ describe("when the socket cannot be had", () => {
     expect(b.watched.fallbacks).toEqual([]);
   });
 
+  it("polls the room, and the members still hear everything, where there is no WebSocket to use at all", async () => {
+    // Node's global WebSocket is on by default from 22, and the Desktop bundle's manifest allows Node 20. There the
+    // constructor is not there to call: every attempt fails at once, and the coordinator has to poll instead.
+    class NoWebSocket {
+      constructor() {
+        throw new TypeError("WebSocket is not a constructor");
+      }
+    }
+    const r1 = room(R1, "m1", "m2");
+    const a = await coordinatorWith(R1, "m1", 0, { roomSocket: { ...FAST_ROOM, WebSocket: NoWebSocket as never } });
+    const b = await subscriberWith(R1, "m2");
+
+    r1.append();
+    r1.append();
+    await until(() => a.watched.events.length === 2 && b.watched.events.length === 2, "both to hear through the poll");
+    expect(a.watched.cursors()).toEqual([1, 2]);
+    expect(b.watched.cursors()).toEqual([1, 2]);
+    expect(rooms.upgrades).toEqual([]); // there was never a socket to open
+    expect(a.conn.calls.some((c) => Number(c.wait_seconds) > 0)).toBe(true);
+    expect(a.watched.fallbacks).toEqual([]);
+    expect(b.watched.fallbacks).toEqual([]);
+  });
+
   it("goes back to the socket when it can be had, without repeating or losing an event", async () => {
     const r1 = room(R1, "m1");
     rooms.refuse(503);
@@ -622,6 +709,17 @@ describe("a room's upstream", () => {
     watch(link, R1, "m1", 3);
     await until(() => rooms.sockets.length === 1, "the socket again");
     expect(rooms.upgrades.filter((u) => u.answered === 101).map((u) => u.cursor)).toEqual(["0", "3"]);
+  });
+
+  it("ends a room whose socket cannot be opened at all, so its members are told and none is left waiting", async () => {
+    // A URL that is not one: the bus opens and the room's socket cannot, and the bus would hold the room open with
+    // nothing behind it unless somebody said so.
+    room(R1, "m1", "m2");
+    const a = await coordinatorWith(R1, "m1", 0, { url: "not a url" });
+    const b = await subscriberWith(R1, "m2", 0, { url: "not a url" });
+    await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
+    expect(a.watched.fallbacks[0]).toMatch(/url is not a URL/);
+    expect(rooms.upgrades).toEqual([]);
   });
 
   it("keeps the room open while another member still watches it", async () => {

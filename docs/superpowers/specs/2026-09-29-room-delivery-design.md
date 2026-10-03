@@ -168,6 +168,27 @@ outside the WHATWG spec, which is a real dependency on non-standard behaviour;
 the third line is the fallback if a future Node drops it, and it is recorded
 here so that a later maintainer finds the answer rather than the surprise.
 
+**What that API will not give you is the refusal's status.** Measured on Node
+22.16 (undici 6.21.2) and 25.8.2 (undici 7.24.4): 400, 401, 403, 404, 409, 426,
+500 and 503 all arrive as one bare `error` event with the status nowhere
+readable. This matters because the route's codes are deliberately different
+answers — 409 means the room is closed and retrying is pointless, 401 means the
+credential is gone and retrying is harmful — and a client that cannot tell them
+apart must treat every refusal the same.
+
+The way out is a second request: after a failed handshake, ask again with
+`node:http`, same URL and headers, purely to read the status. It has to carry
+the upgrade headers, because a non-upgrade request is answered 426 before any
+of the interesting checks run — which means the probe can itself be answered
+101, so whatever socket that hands back must be destroyed rather than leaked.
+
+**Two more behaviours worth not rediscovering.** On Node 22 a refused handshake
+emits no `close` at all and `readyState` stays 0 indefinitely, so there is no
+event that ever reports the failure; a connect timeout of the client's own is
+the entire failure path on that runtime, not a safety net. And a server that
+accepts TCP and never answers the handshake leaves the client waiting with no
+timeout of any kind.
+
 ### D3 — The Worker never forwards the client's `Request` to the object.
 
 It reads `?session=` and `?cursor=`, validates them, resolves identity, and

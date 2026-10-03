@@ -188,6 +188,30 @@ describe("snapshotOf", () => {
     expect(snap.cadence_seconds).toBe(300);
     expect(snap.ask).toMatch(/bellman_send/);
   });
+
+  /**
+   * Epoch 0 is a timestamp. `m.lastReportAt ? … : null` read it as "never
+   * reported", which is the one place in this module that did not use the `??`
+   * idiom `lastReport` uses. Not reachable in practice; the row it produced was
+   * wrong in the direction that matters, claiming a member had never answered
+   * when the stored value says when it did.
+   */
+  it("reads a report at epoch 0 as a report, not as never", () => {
+    const row = snapshotOf(stored({ members: [lead({ lastReportAt: 0 })] }), T0).members[0];
+    expect(row.last_report_at).toBe(new Date(0).toISOString());
+  });
+
+  /**
+   * A cadence of null cannot be described, and every numeric default lies about
+   * it: `?? 0` made `silent` true for every member and reported a cadence of zero
+   * seconds — the false silent D10 exists to prevent, applied to the whole room.
+   * #tickIfDue refuses a null cadence before this is reached, so the throw is
+   * about what this says when something changes, not about today's callers.
+   */
+  it("refuses to describe a room that declared no cadence", () => {
+    const s = stored({ members: [lead()], manifest: roomManifest({ heartbeatOnMs: null }) });
+    expect(() => snapshotOf(s, T0)).toThrow(/no heartbeat cadence/);
+  });
 });
 
 /**

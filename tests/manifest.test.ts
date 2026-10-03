@@ -498,6 +498,34 @@ describe("heartbeat_on", () => {
     expect(MAX_HEARTBEAT_MS).toBe(3_600_000);
   });
 
+  /**
+   * The two assertions above pin the message's literal text, which is exactly
+   * what lets a bound change leave it lying: move MAX_HEARTBEAT_MS to 30m and a
+   * hardcoded "1h" keeps the regex above satisfied while telling every caller a
+   * bound that no longer exists.
+   *
+   * So this reads the bounds back OUT of the message and makes the parser judge
+   * them. Rendered from the constants, each one is a duration the parser accepts
+   * and resolves to the constant it came from; hardcoded, the first bound change
+   * breaks one of these two lines.
+   */
+  it("names bounds the parser itself accepts, so the message cannot outlive them", () => {
+    let message = "";
+    try {
+      resolveManifest(authored({ heartbeat_on: "10s" }));
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    const named = /between (\S+) and (\S+) /.exec(message);
+    expect(named, message).not.toBe(null);
+    const [, low, high] = named!;
+
+    expect(resolveManifest(authored({ heartbeat_on: low })).heartbeatOnMs)
+      .toBe(MIN_HEARTBEAT_MS);
+    expect(resolveManifest(authored({ heartbeat_on: high })).heartbeatOnMs)
+      .toBe(MAX_HEARTBEAT_MS);
+  });
+
   it("bounds the echoed value so a long string cannot reach the audit log", () => {
     let message = "";
     try {

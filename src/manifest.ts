@@ -48,6 +48,19 @@ const DURATION = /^(\d{1,4})(s|m|h)$/;
 const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
 
 /**
+ * Milliseconds back to the shortest duration that denotes them — the inverse of
+ * what parseHeartbeatOn reads, so an error can name a bound in the same notation
+ * the caller wrote. Largest unit that divides exactly, so 3_600_000 is "1h"
+ * rather than "60m".
+ */
+const duration = (ms: number): string => {
+  for (const [unit, size] of [["h", UNIT_MS.h], ["m", UNIT_MS.m]] as const) {
+    if (ms % size === 0) return `${ms / size}${unit}`;
+  }
+  return `${ms / UNIT_MS.s}s`;
+};
+
+/**
  * `"30s"`, `"5m"`, `"1h"` to milliseconds.
  *
  * The raw value is echoed by both errors, and those reach tool errors and the
@@ -64,7 +77,11 @@ function parseHeartbeatOn(raw: string): number {
   }
   const ms = Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS];
   if (ms < MIN_HEARTBEAT_MS || ms > MAX_HEARTBEAT_MS) {
-    throw new ManifestError(`heartbeat_on must be between 30s and 1h (got "${raw}")`);
+    // Rendered from the constants, not restated. A bound change would otherwise
+    // leave this message wrong while the test pinning its literal text passed.
+    throw new ManifestError(
+      `heartbeat_on must be between ${duration(MIN_HEARTBEAT_MS)} and ${duration(MAX_HEARTBEAT_MS)} (got "${raw}")`,
+    );
   }
   return ms;
 }

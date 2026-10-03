@@ -641,7 +641,7 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, or brief update to every other member of the room.
+      description: `Send a message, artifact, action request, action response, brief update, or progress report to the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm
@@ -807,9 +807,11 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         }
         // Patched here rather than inside appendEvent, so the store stays
         // type-agnostic — nothing in it branches on an event's kind. A failed
-        // patch after a committed event leaves the member looking like it
-        // reported later than it did, and the next tick asks again; a store that
-        // inspected payloads to find out would be the worse trade.
+        // patch after a committed event leaves lastReportAt un-advanced, so the
+        // member looks like it reported EARLIER than it did and the next tick
+        // asks again; a store that inspected payloads to find out would be the
+        // worse trade. The cost of that failure is one redundant ask, which is
+        // the right direction for it to fail in.
         if (type === "progress") {
           await s.updateMember(session_id, member_id, { lastReportAt: event.at });
         }

@@ -134,16 +134,31 @@ export interface HeartbeatPayload {
  * silent costs every peer's trust in the signal; a late one costs a few minutes.
  */
 export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
-  const every = s.manifest.heartbeatOnMs ?? 0;
+  // Not a cadence this can describe. `#tickIfDue` refuses a null cadence before
+  // it gets here, so this is unreachable — but a DEFAULT would have to be a
+  // number, and every number is a lie: `0` makes `silent` true for every member
+  // and reports a cadence of zero seconds, which is the false silent D10 exists
+  // to prevent, applied to the whole room at once. Throwing is the honest answer
+  // for "called in a state that should not reach it".
+  const every = s.manifest.heartbeatOnMs;
+  if (every === null) {
+    throw new Error("snapshotOf: the room declared no heartbeat cadence");
+  }
   return {
     cadence_seconds: Math.round(every / 1000),
     ask: "Reply with bellman_send type=\"progress\", payload { note } — one line on where you are.",
-    members: reporting(s).map((m) => ({
-      member_id: m.memberId,
-      label: m.label,
-      last_report_at: m.lastReportAt ? new Date(m.lastReportAt).toISOString() : null,
-      silent_for_seconds: Math.max(0, Math.round((now - lastReport(m)) / 1000)),
-      silent: now - lastReport(m) >= 2 * every,
-    })),
+    members: reporting(s).map((m) => {
+      // `??`, not truthiness. Epoch 0 is a timestamp, and `m.lastReportAt ? … :
+      // null` read it as "never reported" — the bug `lastReport` above already
+      // avoids this way, and this was the one place in the module that did not.
+      const at = m.lastReportAt ?? null;
+      return {
+        member_id: m.memberId,
+        label: m.label,
+        last_report_at: at === null ? null : new Date(at).toISOString(),
+        silent_for_seconds: Math.max(0, Math.round((now - lastReport(m)) / 1000)),
+        silent: now - lastReport(m) >= 2 * every,
+      };
+    }),
   };
 }

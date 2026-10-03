@@ -257,6 +257,142 @@ export function describeStoreContract(
       expect(fresh.members[0].label).toBe("jesse@codenerd");
     });
 
+    it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
+      // The production join path. Read-then-write capacity was the bug: two
+      // confirms agreeing on one seat overfill the room, and a sync landing in
+      // the gap makes a member live again after it was chosen as the victim. So
+      // every store has to decide and write without yielding.
+      const s = session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      const outcome = await store.seatMember(
+        s.id,
+        member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }),
+        1_000_000,
+        9_000_000,
+      );
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
+      // Reported with leftAt already set, so the caller announces a removal
+      // that happened rather than one it predicted.
+      expect(outcome.reclaimed[0].leftAt).toBe(9_000_000);
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
+    });
+
+    it("seatMember seats into a room with a spare seat, reclaiming nobody", async () => {
+      const s = session({
+        maxMembers: 5,
+        members: [member({ memberId: "m_quiet", lastSeenAt: 1 })],
+      });
+      (await store.createSession(s));
+
+      const outcome = await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      );
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [] });
+      // Held for them, not taken: the joiner can have the free seat, so the
+      // quiet member keeps its own.
+      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_quiet")?.leftAt)
+        .toBeNull();
+    });
+
+    it("seatMember refuses a full room of present members, reclaiming nobody", async () => {
+      const s = session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 2_000_000 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      expect(await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "full", reclaimed: [] });
+      expect((await store.getSession(s.id))!.members).toHaveLength(2);
+    });
+
+    it("seatMember refuses a frozen room, and a closed one, reclaiming nobody", async () => {
+      const stale = () => session({
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 1 }),
+        ],
+      });
+      const frozen = stale();
+      (await store.createSession(frozen));
+      (await store.freezeSession(frozen.id, 5));
+
+      // The guards are inside the operation because the removal and its
+      // announcement are separate writes: updateMember has no frozen guard and
+      // appendEvent returns null, so reaping here would remove members
+      // permanently AND silently from a state meant to be reversible.
+      expect(await store.seatMember(
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "frozen", reclaimed: [] });
+      expect((await store.getSession(frozen.id))!.members
+        .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+
+      (await store.freezeSession(frozen.id, null));
+      (await store.closeSession(frozen.id));
+      expect((await store.seatMember(
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).refused).toBe("closed");
+    });
+
+    it("seatMember refuses rather than freeing some of the seats a joiner needs", async () => {
+      const s = session({
+        maxMembers: 2,
+        members: [
+          member({ memberId: "m_a", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_b", userId: "u_b", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_c", userId: "u_c", lastSeenAt: 1 }),
+        ],
+      });
+      (await store.createSession(s));
+
+      // Three undeparted members in a two-seat room needs two seats freed and
+      // only one is reclaimable. A partial reap would remove a member for
+      // somebody who never got in.
+      expect(await store.seatMember(
+        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+      )).toEqual({ refused: "full", reclaimed: [] });
+      expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
+        .toEqual([]);
+    });
+
+    it("seatMember reports an unknown session rather than throwing", async () => {
+      expect(await store.seatMember(
+        "qs_nope", member({ memberId: "m_late", userId: "u_late" }), 0, 9_000_000
+      )).toEqual({ refused: "not_found", reclaimed: [] });
+    });
+
+    it("updateMember patches lastSeenAt on its own", async () => {
+      // The liveness write, and the only one of these a store sees on every
+      // bellman_sync. A store that dropped it would read every member as stale
+      // and reap the room out from under itself (#103), so both must apply it.
+      const s = session({ members: [member({ lastSeenAt: 1 })] });
+      (await store.createSession(s));
+
+      (await store.updateMember(s.id, "m_creator", { lastSeenAt: 1_700_000_000_000 }));
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members[0].lastSeenAt).toBe(1_700_000_000_000);
+      // Going quiet and leaving are separate facts: a touch must not revive a
+      // member that left, and must not mark a present one as gone.
+      expect(fresh.members[0].leftAt).toBeNull();
+    });
+
     it("updateMember ignores unknown members and sessions", async () => {
       const s = session();
       (await store.createSession(s));

@@ -25,6 +25,7 @@ import { connectSignedIn } from "../src/signin.js";
 import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { STALE_AFTER_MS } from "../src/presence.js";
 
 /**
  * The bridge against the real Bellman tool handlers. Each "remote" is an
@@ -378,6 +379,109 @@ describe("channel delivery", () => {
     } finally {
       polls.release();
     }
+  });
+
+  // `member_timed_out` is the second way the server takes a seat away, so it has to disarm a
+  // watcher exactly as `member_evicted` does — and, more to the point, it has to be checked the
+  // same way: the TYPE before the payload. A peer can put any member_id in a message it sends;
+  // only the server writes these two kinds. Drop the type check and a peer stops another
+  // member's watcher by naming them, with nothing to tell that member why their room went quiet.
+  // The two cases below pin both halves of that guard.
+  //
+  // The seat is taken by a third agent confirming into the room, because that is the only path
+  // that reclaims one. `goQuiet` ages the member past the window the way a closed laptop does.
+  const timeOutJoinerSeat = async (
+    creator: Session, sessionId: string, creatorMember: string, joinerMember: string,
+  ) => {
+    await store.updateMember(sessionId, joinerMember, { lastSeenAt: Date.now() - STALE_AFTER_MS - 1 });
+    const invited = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMember });
+    expect(invited.isError, invited.text).toBe(false);
+    const third = await open(DEV_KEY.outsider);
+    const preview = await third.call("bellman_connect", { join_code: invited.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    const confirmed = await third.call("bellman_confirm", {
+      connect_token: preview.data.connect_token,
+      brief: brief({ goal: "Take the seat of a session that died" }),
+      capabilities: caps,
+    });
+    expect(confirmed.isError, confirmed.text).toBe(false);
+  };
+
+  it("stops watching when the agent's own sync shows this member's seat timed out", async () => {
+    // The watcher's polls are parked, so it cannot be what reacts: only the sync below can tell
+    // the bridge, and that sync also moves the watcher's cursor past the event, so a watcher left
+    // armed would never see what disarms it and would poll the room for the life of the process.
+    const polls = parkedPolls(DEV_KEY.peer);
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    try {
+      const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+      expect(b.bridge.watching()).toHaveLength(1);
+
+      await timeOutJoinerSeat(a, sessionId, creatorMember, joinerMember);
+
+      const synced = await b.call("bellman_sync", {
+        session_id: sessionId, member_id: joinerMember, since_cursor: 0, wait_seconds: 0,
+      });
+      const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+      // Delivered BEFORE the stop: a member whose seat went needs to be told why its room went
+      // quiet, so the event has to reach it and only then disarm the watcher.
+      expect(types).toContain("member_timed_out");
+
+      expect(b.bridge.watching()).toHaveLength(0);
+    } finally {
+      polls.release();
+    }
+  });
+
+  it("keeps watching when the agent's own sync shows somebody else's seat timing out", async () => {
+    // The joiner's polls are parked so its own watcher cannot refresh its lastSeenAt out from
+    // under the test — see the case below, where that is the behaviour under test rather than a
+    // nuisance.
+    const polls = parkedPolls(DEV_KEY.peer);
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+    try {
+      const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+      expect(a.bridge.watching()).toHaveLength(1);
+
+      await timeOutJoinerSeat(a, sessionId, creatorMember, joinerMember);
+
+      const synced = await a.call("bellman_sync", {
+        session_id: sessionId, member_id: creatorMember, since_cursor: 0, wait_seconds: 0,
+      });
+      const types = (synced.data.events as { data: { type: string } }[]).map((e) => e.data.type);
+      expect(types).toContain("member_timed_out");
+
+      // The creator is still in the room, so the sync showed them news, not their own exit. The
+      // payload names a member; only the match against THIS member may stop THIS watcher.
+      expect(a.bridge.watching()).toHaveLength(1);
+    } finally {
+      polls.release();
+    }
+  });
+
+  it("will not take the seat of a member whose bridge is still watching", async () => {
+    // The point of deriving presence from calls a member already makes: a live watcher IS the
+    // liveness signal. Aging lastSeenAt here does not strand the member, because its own poll
+    // lands and refreshes it, so the seat stays occupied and the joiner is turned away. This is
+    // the case that keeps the seat fix from evicting live members, and it caught a test of mine
+    // that aged a member whose polls were not parked.
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember, joinerMember } = await pair(a, b);
+
+    await store.updateMember(sessionId, joinerMember, { lastSeenAt: Date.now() - STALE_AFTER_MS - 1 });
+    await until(async () => {
+      const room = await store.getSession(sessionId);
+      const me = room?.members.find((m) => m.memberId === joinerMember);
+      return Date.now() - (me?.lastSeenAt ?? 0) < STALE_AFTER_MS;
+    });
+
+    const invited = await a.call("bellman_invite", { session_id: sessionId, member_id: creatorMember });
+    expect(invited.isError).toBe(true);
+    expect(invited.text).toMatch(/full/i);
+    expect(b.bridge.watching()).toHaveLength(1);
   });
 
   it("keeps watching when the agent's own sync shows somebody else's eviction", async () => {

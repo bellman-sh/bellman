@@ -5,8 +5,8 @@ import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
-import type { BellmanStore, EventWrite, MemberPatch } from "./store.js";
-import { isActiveMember } from "./store.js";
+import type { BellmanStore, EventWrite, MemberPatch, SeatOutcome } from "./store.js";
+import { isActiveMember, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -508,6 +508,37 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return true;
   }
 
+  /**
+   * Reclaim stale seats and seat the member, in one invocation.
+   *
+   * Every await below is a storage operation, and workerd's input gate delivers
+   * no other request to this object while one is outstanding — so no confirm,
+   * sync or freeze can land between the decision and the write. That is the
+   * guarantee `closeSessionIfEmpty` relies on, for the same reason: a caller
+   * that read the roster, chose a victim and then wrote would be handed exactly
+   * the window two concurrent joiners need to overfill the room.
+   */
+  async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
+    const s = await this.stored();
+    if (!s) return { refused: "not_found", reclaimed: [] };
+    if (s.closed) return { refused: "closed", reclaimed: [] };
+    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+
+    const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+    if (victims === null) return { refused: "full", reclaimed: [] };
+
+    const departed = new Set(victims.map((v) => v.memberId));
+    const reclaimed: Member[] = [];
+    const members = s.members.map((m) => {
+      if (!departed.has(m.memberId)) return m;
+      const next = { ...m, leftAt: now };
+      reclaimed.push(next);
+      return next;
+    });
+    await this.ctx.storage.put("session", { ...s, members: [...members, member] });
+    return { refused: null, reclaimed };
+  }
+
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
     const s = await this.stored();
     if (!s) return;
@@ -517,6 +548,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (patch.brief !== undefined) next.brief = patch.brief;
       if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
       if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
+      if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
       return next;
     });
     await this.ctx.storage.put("session", { ...s, members });
@@ -1487,6 +1519,25 @@ export class DurableObjectStore implements BellmanStore {
         this.registry.indexMembership(member.userId, sessionId));
     }
     return added;
+  }
+
+  async seatMember(
+    sessionId: string,
+    member: Member,
+    staleBefore: number,
+    now: number,
+  ): Promise<SeatOutcome> {
+    const seated = await this.session(sessionId).seatMember(member, staleBefore, now);
+    // The same membership index write addMember does, under the same rules:
+    // gated on the result so a refused seating leaves no room in this person's
+    // joined listing, attempted after the seat is committed, and a failure
+    // logged rather than thrown. Reclaiming a seat does not retract the
+    // reclaimed member's own row — their history is still theirs to list.
+    if (seated.refused === null) {
+      await this.writeIndex("um", member.userId, sessionId, () =>
+        this.registry.indexMembership(member.userId, sessionId));
+    }
+    return seated;
   }
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {

@@ -45,6 +45,7 @@ export function member(over: Partial<Member> = {}): Member {
     roomRole: "peer_a",
     brief: brief(),
     joinedAt: Date.now(),
+    lastSeenAt: Date.now(),
     leftAt: null,
     ...over,
   };

@@ -4,7 +4,10 @@ import {
   type Bus, type BusOptions, type Coordinator, type Subscription, type SyncFrom,
 } from "./bus.js";
 import { fromEnvelope, type PeerEvent, type WireEnvelope } from "./inbox.js";
-import { RoomEnded, openRoomSocket, type Poll, type RoomSocket, type RoomSocketTuning } from "./room-socket.js";
+import {
+  RoomEnded, openRoomSocket,
+  type Poll, type RoomSocket, type RoomSocketTuning, type StopReason,
+} from "./room-socket.js";
 
 /**
  * What a bridge does with the local bus (src/bus.ts) and a room's socket (src/room-socket.ts): keep each
@@ -117,6 +120,17 @@ const MAX_LOSSES = 5;
 const LOSS_WINDOW_MS = 30_000;
 
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/**
+ * What each way a room's socket can end for good means, for a person. It is the middle of the line a member's own
+ * bridge writes when this hands it back to polling, so it says what the socket found. The poll that follows says what
+ * that member finds, and the two are meant to read as a cause and its confirmation and not as two faults.
+ */
+const ENDED_UPSTREAM: Partial<Record<StopReason, string>> = {
+  closed: "the room is closed",
+  gone: "Bellman says the room is not there, or the member is not this identity's",
+  unauthorized: "Bellman no longer accepts this bridge's connection",
+};
 
 /** One macrotask, which is long enough for every promise reaction already queued to have run. */
 const nextTurn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -277,7 +291,11 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
       // The bus holds the room open with nothing behind it unless somebody is told. Deferred, so that no
       // handler runs inside the subscribe() that is in the middle of opening this room.
       log(`room ${sessionId}: no socket could be opened: ${messageOf(error)}`);
-      queueMicrotask(() => coordinator.endRoom(sessionId, error instanceof Error ? error : new Error(String(error))));
+      const told = new Error(
+        `the process holding this room's socket could not open one (${messageOf(error)}), so each member checks for itself`,
+        { cause: error }
+      );
+      queueMicrotask(() => coordinator.endRoom(sessionId, told));
       return;
     }
     slot.upstreams.set(sessionId, socket);
@@ -288,10 +306,14 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
       // something does.
       if (slot.upstreams.get(sessionId) !== socket) return;
       slot.upstreams.delete(sessionId);
-      log(`room ${sessionId} is over upstream: ${reason}`);
+      const found = ENDED_UPSTREAM[reason] ?? reason;
+      log(`room ${sessionId} is over upstream (${found}): telling every member of it on this machine to check for itself`);
       // Every member of it, here and on other bridges, is told: each polls for itself, and its own poll is what
       // reads closed, gone and not-accepted the way it always has.
-      coordinator.endRoom(sessionId, new Error(`the room is over for this machine: ${reason}`));
+      coordinator.endRoom(
+        sessionId,
+        new Error(`the process holding this room's socket found that ${found}, so each member checks for itself`)
+      );
     });
   }
 

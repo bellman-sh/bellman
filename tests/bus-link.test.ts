@@ -653,8 +653,9 @@ describe("when the socket cannot be had", () => {
     r1.close();
     r1.drop(); // the reconnect is what learns it: the upgrade is refused 409
     await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
-    expect(a.watched.fallbacks[0]).toMatch(/closed/);
-    expect(b.watched.fallbacks[0]).toMatch(/closed/);
+    // What the member's own bridge will log: what the socket found, and that each member now checks for itself.
+    expect(a.watched.fallbacks[0]).toMatch(/found that the room is closed, so each member checks for itself/);
+    expect(b.watched.fallbacks[0]).toMatch(/found that the room is closed, so each member checks for itself/);
     // One last ask, with no wait, for what the room said before it closed: the 409 comes instead of a replay.
     expect(a.conn.calls.some((c) => c.session_id === R1 && c.wait_seconds === 0)).toBe(true);
   });
@@ -664,7 +665,7 @@ describe("when the socket cannot be had", () => {
     const a = await coordinatorWith(R1, "m1");
     const b = await subscriberWith(R1, "m2");
     await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
-    expect(a.watched.fallbacks[0]).toMatch(/gone/);
+    expect(a.watched.fallbacks[0]).toMatch(/found that Bellman says the room is not there, or the member is not this identity's/);
   });
 
   it("takes a connection to Bellman that has been retired as the credential being gone, and ends the room", async () => {
@@ -676,7 +677,7 @@ describe("when the socket cannot be had", () => {
     r1.append();
 
     await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
-    expect(a.watched.fallbacks[0]).toMatch(/unauthorized/);
+    expect(a.watched.fallbacks[0]).toMatch(/found that Bellman no longer accepts this bridge's connection/);
     expect(a.conn.calls).toEqual([]); // and it never asked for a connection of its own
   });
 
@@ -718,7 +719,7 @@ describe("a room's upstream", () => {
     const a = await coordinatorWith(R1, "m1", 0, { url: "not a url" });
     const b = await subscriberWith(R1, "m2", 0, { url: "not a url" });
     await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
-    expect(a.watched.fallbacks[0]).toMatch(/url is not a URL/);
+    expect(a.watched.fallbacks[0]).toMatch(/could not open one \(.*url is not a URL.*\), so each member checks for itself/);
     expect(rooms.upgrades).toEqual([]);
   });
 

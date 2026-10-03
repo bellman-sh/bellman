@@ -26,12 +26,14 @@ const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeou
 const MAX_PAYLOAD_CHARS = 20_000;
 
 /** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
-const SEND_KINDS = ["message", "artifact", "action_request", "action_response", "brief_update"] as const;
+const SEND_KINDS = [
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress",
+] as const;
 type SendKind = (typeof SEND_KINDS)[number];
 
 /**
  * Which verb each send kind needs. A Record rather than a ternary with a default
- * arm: a sixth kind must declare its verb here or this stops compiling. A default
+ * arm: a new kind must declare its verb here or this stops compiling. A default
  * would hand it `send` silently, and a closed enum exists so that every guard is
  * one somebody chose.
  *
@@ -45,6 +47,13 @@ const SEND_VERB = {
   // peer's context. A seat that may not speak may not restate itself either —
   // which is exactly what `observer` promises its readers.
   brief_update: "send",
+  /**
+   * A reply to the room's heartbeat tick. `send` and not a new verb: manifest.ts
+   * is explicit that a verb lands only in the PR that adds its operation, and a
+   * seat that may not speak may not report either — brief_update's reasoning.
+   * `RoleDef.reports` already answers who is asked.
+   */
+  progress: "send",
   action_request: "request_actions",
   action_response: "respond_actions",
 } as const satisfies Record<SendKind, Verb>;
@@ -78,6 +87,18 @@ const CapabilitiesShape = z
   .describe(
     "What you ALLOW peers to do to you. request_actions must be explicitly granted."
   );
+
+/**
+ * A heartbeat reply. `strictObject`, so every key the shape does not name is
+ * refused — which is how `status`, `alive`, `present` and `healthy` are kept out
+ * without a denylist that falls behind the first name somebody forgets. The
+ * payload is a claim about when it was sent, never about now (invariant 7).
+ */
+const ProgressShape = z.strictObject({
+  note: z.string().min(1).max(500),
+  step: z.string().max(40).optional(),
+  eta_seconds: z.number().int().nonnegative().max(86_400).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -619,6 +640,7 @@ Args:
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
+      "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized
   - ref_id: required for action_response
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
@@ -700,6 +722,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
         updatedBrief = parsed.data as Brief;
       }
+      // Validated for the same reason, and refused before the append: a payload the
+      // shape rejects must leave neither an event nor a stamp behind.
+      if (type === "progress") {
+        const parsed = ProgressShape.safeParse(payload);
+        if (!parsed.success) {
+          return fail(`progress payload must be { note, step?, eta_seconds? }: ${parsed.error.issues[0]?.message}`);
+        }
+      }
 
       const draft = {
         type,
@@ -748,6 +778,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       if (!replayed) {
         if (updatedBrief) {
           await s.updateMember(session_id, member_id, { brief: updatedBrief });
+        }
+        // Patched here rather than inside appendEvent, so the store stays
+        // type-agnostic — nothing in it branches on an event's kind. A failed
+        // patch after a committed event leaves the member looking like it
+        // reported later than it did, and the next tick asks again; a store that
+        // inspected payloads to find out would be the worse trade.
+        if (type === "progress") {
+          await s.updateMember(session_id, member_id, { lastReportAt: event.at });
         }
         await audit(s, session, identity, `sent_${type}`, {
           chars: serialized.length,

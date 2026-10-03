@@ -550,6 +550,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
       if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
       if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
+      if (patch.lastReportAt !== undefined) next.lastReportAt = patch.lastReportAt;
       return next;
     });
     await this.ctx.storage.put("session", { ...s, members });

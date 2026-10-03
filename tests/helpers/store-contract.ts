@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
+import { lastReport } from "../../src/heartbeat.js";
 import { member, oneCode, session } from "./fixtures.js";
 
 /**
@@ -391,6 +392,27 @@ export function describeStoreContract(
       // Going quiet and leaving are separate facts: a touch must not revive a
       // member that left, and must not mark a present one as gone.
       expect(fresh.members[0].leftAt).toBeNull();
+    });
+
+    it("patches lastReportAt, and reads a member stored without it as joinedAt", async () => {
+      // The heartbeat's stamp (#111). A member stored before the field existed has
+      // none, and `lastReport` lifts it to joinedAt rather than reading it as
+      // "never reported", which would name every such member silent on the first
+      // tick. Both stores have to apply the patch and both have to hand the lift
+      // the same raw value.
+      const joinedAt = Date.now();
+      await store.createSession(session({ members: [member({ lastReportAt: undefined, joinedAt })] }));
+      const before = await store.getSession("qs_test");
+      expect(before!.members[0].lastReportAt).toBeUndefined();
+      expect(lastReport(before!.members[0])).toBe(joinedAt);
+
+      await store.updateMember("qs_test", "m_creator", { lastReportAt: joinedAt + 60_000 });
+      const after = await store.getSession("qs_test");
+      expect(after!.members[0].lastReportAt).toBe(joinedAt + 60_000);
+      expect(lastReport(after!.members[0])).toBe(joinedAt + 60_000);
+      // Reporting is not liveness, and not leaving: the other two stay where they were.
+      expect(after!.members[0].lastSeenAt).toBe(before!.members[0].lastSeenAt);
+      expect(after!.members[0].leftAt).toBeNull();
     });
 
     it("updateMember ignores unknown members and sessions", async () => {

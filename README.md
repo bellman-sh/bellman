@@ -20,7 +20,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
 | `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are enforced by the server). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
-| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` |
+| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
@@ -231,6 +231,15 @@ than its own, and can take that seat itself by leaving and rejoining. Give
 A room role is not `Identity.role`. The latter is `member` | `admin` over an
 *org* and buys nothing inside a room: an org admin holds exactly what their
 seat holds.
+
+A room can also ask its members to report. A top-level `heartbeat_on` (a
+duration such as `"5m"`, from 30 seconds to an hour) is the cadence on which the
+server appends a `heartbeat` tick saying who has reported and who has gone
+quiet, and `reports: true` on a role says members in that seat must answer it,
+by sending `progress`. With no `heartbeat_on` there is no tick and `reports`
+asks for nothing; no preset sets either key. A joiner sees both before it
+accepts a seat: the connect preview carries `heartbeat_on_seconds` and
+`you_report`.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

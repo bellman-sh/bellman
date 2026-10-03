@@ -647,7 +647,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * One transaction, for the reason stored() gives: the session read, the cursor read
    * and the write are one unit, so two appends take two cursors and neither event
    * overwrites the other. The wake comes after the commit, so nobody hears of an event
-   * that did not land.
+   * that did not land, and the wiring tests fail a wake that goes out before it.
    */
   async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {

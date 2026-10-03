@@ -34,7 +34,7 @@
 
 Five input classes the spec implies and no happy-path task exercises, most likely to bite first. Each one's test is assigned to the task that owns the code.
 
-1. **A malformed or duplicated `Cookie` header.** `Cookie: __Host-bellman_session` with no `=`, a value with surrounding whitespace, or the same name appearing twice because a sibling subdomain tossed one in. A naive `split(";").find()` mishandles all three, and a throw here 500s every panel request. → **Task 4**
+1. **A malformed or duplicated `Cookie` header.** `Cookie: __Host-bellman_session` with no `=`, a value with surrounding whitespace, the same name appearing twice because a sibling subdomain tossed one in, or a name padded with a Unicode space. The form Task 4's break-it step first prescribed, `split(";").find((p) => p.trim().startsWith(name))`, copes with the first two on their own and fails the other two: it returns whichever duplicate comes first, which the sender can arrange, and `trim()` reads a padded name as the protected one. It also takes a name that merely begins with ours for ours, and a bare name ahead of the real cookie hides it. A form that does not guard `split("=")[1]` throws on a bare name, and a throw here 500s every panel request. → **Task 4**
 2. **`return_to` that is not an absolute http(s) URL.** `javascript:alert(1)` parses fine and has origin `"null"`; a relative `/rooms` throws from `new URL`. Both must land on the configured fallback — not throw, not redirect. → **Task 7**
 3. **`panelOrigins` unset or empty.** A deploy that forgot `BELLMAN_PANEL_ORIGINS`. It must fail **closed** — no browser auth at all — rather than treating an absent allowlist as "allow anything". → **Task 5**
 4. **`Origin: null`.** Browsers send the literal string `"null"` from sandboxed iframes and some redirect chains. It must never match an allowlist entry, and must not be mistaken for an absent header on the CSRF path. → **Task 5**
@@ -3677,11 +3677,18 @@ Add to `docs/ARCHITECTURE.md`, in the trust-boundaries material alongside the ex
   cannot read: 32 random bytes over a `PanelSession` record in `AuthDO`, so
   `POST /auth/signout` invalidates rather than clearing the browser's copy. The
   cookie is `__Host-`-prefixed, which makes the browser enforce host-only
-  scoping — a sibling subdomain of `bellman.sh` cannot set that name, so it
-  cannot toss a session cookie at the API. It resolves through the same `caller`
-  seam a bearer token does, and the stored plan is re-resolved on the access
-  token's own staleness bound, so a revoked grant cannot outlive on the panel
-  what it outlives on `/mcp`.
+  scoping: it refuses a sibling subdomain of `bellman.sh` that tries to set that
+  exact name with a `Domain`. The prefix binds only the exact name, so the rest
+  is the reader's. `readSessionCookie` compares names after trimming space and
+  tab and nothing else (`trimOws`, in `src/oauth/cookies.ts`), because a name
+  padded with a Unicode space is outside the prefix's rules and
+  `String.prototype.trim` would read it as ours. Whether a browser will set such
+  a name is not established, and the parser does not rely on the answer.
+  Loosening that comparison, to `trim()` or to a prefix or suffix match, removes
+  the reader's half of the protection. The cookie resolves through the same
+  `caller` seam a bearer token does, and the stored plan is re-resolved on the
+  access token's own staleness bound, so a revoked grant cannot outlive on the
+  panel what it outlives on `/mcp`.
 
   **The cookie carries tenant-scoped identity only.** `Identity` has no operator
   field, and `role: "admin"` is admin of an org. `/admin/*` refuses a cookie
@@ -3894,11 +3901,17 @@ gets, and that is not a deal a page showing billing should take.
 
 **It is `__Host-`-prefixed.** The design called for host-only with no
 `Domain`, which our code honours. The prefix makes the *browser* enforce
-it, which additionally stops a sibling subdomain of `bellman.sh` setting
-this name and tossing a cookie at the API — RFC 6265 leaves the order of
-two same-named cookies unspecified, so without it the one we read is
-attacker-selectable. It requires `Secure`, so `http://localhost` gets the
-unprefixed name and is the one place the protection is absent.
+it, which additionally refuses a sibling subdomain of `bellman.sh` that
+tries to set this exact name and toss a cookie at the API — RFC 6265
+leaves the order of two same-named cookies unspecified, so without it
+the one we read is attacker-selectable. The prefix binds only the exact
+name, so the rest is the reader's: `readSessionCookie` trims space and
+tab and nothing else (`trimOws`), because a name padded with a Unicode
+space is outside the prefix's rules and `String.prototype.trim` would
+read it as ours. Whether a browser will set such a name is not
+established; the parser does not rely on it. The prefix requires
+`Secure`, so `http://localhost` gets the unprefixed name and is the one
+place the protection is absent.
 
 **`/admin/*` refuses a cookie outright** rather than checking a role. Its
 writes gate on `planSource === "operator"`, so a cookie carrying that

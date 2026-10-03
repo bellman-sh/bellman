@@ -734,11 +734,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * nobody was allowed to report in costs nobody their standing — spec D10, and
    * `clearSilence` carries the whole argument. The rule belongs to heartbeat.ts;
    * this picks the moment to apply it.
+   *
+   * **The moment is the TRANSITION, not the argument.** `frozenAt === null` alone
+   * credits on a call that thawed nothing, because the room was already thawed —
+   * handing every reporting seat a fresh stamp with nobody having reported. A
+   * caller retrying this idempotent call on a schedule would reset every member's
+   * clock for good: nobody ever due, no tick ever asking, `silent` never true, and
+   * nothing in the log to say why. So the credit is paid only when the record as
+   * read was frozen, which pays a freeze-then-thaw once however many thaws follow.
+   *
+   * The reArm() stays unconditional, and the two are not the same question. It
+   * costs one derived read and points the alarm where it already was, and it has to
+   * run on the thaw that matters; the credit writes member state, so it needs the
+   * transition.
    */
   async freezeSession(frozenAt: number | null): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    const members = frozenAt === null ? clearSilence(s, Date.now()) : s.members;
+    const thawing = frozenAt === null && s.frozenAt !== null;
+    const members = thawing ? clearSilence(s, Date.now()) : s.members;
     await this.ctx.storage.put("session", { ...s, frozenAt, members });
     await this.driver.reArm();
   }

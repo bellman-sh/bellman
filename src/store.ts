@@ -645,12 +645,20 @@ export class MemoryStore implements BellmanStore {
    * read back through `getSession`, so a store that left it alone would report
    * every member silent for the length of the outage. The contract suite has the
    * case, and that is what keeps the two implementations saying the same thing.
+   *
+   * **The credit is paid on the TRANSITION, not on the argument.** A `null` on a
+   * room that is already thawed thaws nothing, and crediting on it stamps every
+   * reporting seat with a report nobody made — so a caller retrying this
+   * idempotent call keeps resetting every member's clock and nobody is ever due
+   * again. `wasFrozen` is read before the assignment below, because that
+   * assignment is what destroys the answer.
    */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    const wasFrozen = s.frozenAt !== null;
     s.frozenAt = frozenAt;
-    if (frozenAt === null) s.members = clearSilence(s, Date.now());
+    if (frozenAt === null && wasFrozen) s.members = clearSilence(s, Date.now());
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

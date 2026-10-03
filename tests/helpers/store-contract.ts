@@ -670,6 +670,57 @@ export function describeStoreContract(
     });
 
     /**
+     * **The credit belongs to the thaw, so only a real thaw may pay it.**
+     *
+     * `freezeSession(null)` on a room that is already thawed is not a thaw. It
+     * clears `frozenAt`, which is already clear, and crediting on it hands every
+     * reporting seat a fresh `lastReportAt` with nobody having reported — so
+     * silence is measured from a moment no member had anything to do with.
+     *
+     * That is not a hypothetical call. `freezeSession(null)` is idempotent by
+     * design and so the obvious thing to retry, and a caller that retries it on a
+     * schedule keeps every member's clock reset for good: nobody is ever due, no
+     * tick asks anybody, and `silent` never becomes true. The feature goes quiet in
+     * exactly the room it exists for, and nothing in the log says why.
+     *
+     * The condition is the TRANSITION and not the argument, so it reads `frozenAt
+     * !== null` off the record. A freeze-then-thaw pays once, however many thaws
+     * follow it.
+     */
+    it("credits nobody when a thaw lands on a room that was not frozen", async () => {
+      const manifest = roomManifest({
+        roles: { lead: { can: ["send"], description: null, reports: true } },
+        defaultRole: "lead",
+        creatorRole: "lead",
+        heartbeatOnMs: 300_000,
+      });
+      const longAgo = Date.now() - 3_600_000;
+      const s = session({
+        manifest,
+        members: [member({ memberId: "m_lead", roomRole: "lead", lastReportAt: longAgo })],
+      });
+      (await store.createSession(s));
+
+      // Never frozen, and the room says so.
+      expect((await store.getSession(s.id))!.frozenAt).toBe(null);
+      (await store.freezeSession(s.id, null));
+
+      // The member's standing is its own: an hour of genuine silence, still an hour.
+      expect((await store.getSession(s.id))!.members[0].lastReportAt).toBe(longAgo);
+
+      // And the retry of a real thaw pays once, not once per attempt. The first
+      // thaw credits; a second call finds nothing frozen and leaves that credit
+      // where it is rather than moving it forward again.
+      (await store.freezeSession(s.id, Date.now()));
+      (await store.freezeSession(s.id, null));
+      const credited = (await store.getSession(s.id))!.members[0].lastReportAt!;
+      expect(credited).toBeGreaterThan(longAgo);
+
+      (await store.freezeSession(s.id, null));
+      expect((await store.getSession(s.id))!.members[0].lastReportAt).toBe(credited);
+    });
+
+    /**
      * The tool reads the session, then writes. A freeze landing in that gap
      * would let a frozen room grow, which is the one thing freezing is for —
      * so the refusal has to come from the write, not only from the read.

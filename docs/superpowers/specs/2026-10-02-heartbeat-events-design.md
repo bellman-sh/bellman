@@ -170,9 +170,22 @@ counterexample.
 and `derivedDue()` already computes a due time from the session record rather
 than storing one. A heartbeat is the same shape as the TTL:
 
-- `derivedDue()` adds `["heartbeat", nextTickAt(s, now)]`
-- `alarm()` gains a branch calling `#tickIfDue(s, now)`
+- `derivedDue()` adds `["heartbeat", nextTickAt(s)]` — no `now`, because every
+  anchor it reads is stored state (D10)
+- `alarm()` gains a branch calling `#tickIfDue(now)`
 - `#tickIfDue` mirrors `#expireIfDue`: build the event, `#writeEvent`, `#wake`
+
+**It takes `now` and nothing else, and reads the session inside the transaction
+it writes in.** Handed a record `alarm()` had read before several awaits, it wrote
+that whole record back — it has to write the session at all, because the advanced
+`lastTickAt` and the event belong in one put — so anything that committed in the
+gap was written away by a handler that never read it. A freeze reverted that way
+reopens a room nobody thawed; a member's own `lastReportAt` reverted that way
+leaves it named silent for having answered, which is the one write a tick must
+never lose. Reading inside the transaction makes the record it writes the record
+it decided on, and `#wake` then waits for the commit so nobody hears of a tick
+that did not land. `#tickIfDue` makes no cross-object call, so the closure stays
+within ARCHITECTURE.md §9 runtime fact 2.
 
 **Derived rather than stored, deliberately.** `alarm()`'s comment warns that a
 name the driver can report with no branch below is never consumed, so the
@@ -278,12 +291,62 @@ here."
 
 ### D10 — The tick fires only when somebody is due, and never into a room that cannot answer.
 
-`nextTickAt(session, now)` is the earliest `lastReportAt + heartbeatOnMs` across
-members that must report. So a room where everyone reports promptly ticks less
-often, and a room nobody is answering ticks at the cadence — the volume tracks
-the need.
+**Two decisions, not one, and keeping them apart is what makes the rule
+tractable.** `nextTickAt(session)` says when to WAKE; `dueMembers(session, now)`
+says whether that waking writes anything. The alarm can only ever be an
+approximation — the roster changes between arming and firing, and a member
+reporting in that gap does not re-arm — so the firing re-decides from the record
+it finds. One answer serving both would have to be either pessimistic about
+waking or wrong about asking.
 
-Two thresholds, kept from the same reasoning `STALE_AFTER_MS` is chosen for:
+**`nextTickAt` anchors each member on its own clock.** A member's deadline is its
+own `lastReport + heartbeatOnMs`, and the alarm takes the earliest across the
+members the room asks. So a room where everyone reports promptly ticks less
+often, and a room nobody is answering ticks at the cadence — the volume tracks
+the need. It takes no `now`: every anchor is stored state.
+
+Two properties have to hold together, and that is the part worth arguing:
+
+- **P1. A reporting member is asked within one cadence of its last report.**
+  That is what the room declared, and it is the promise a member can check.
+- **P2. The armed time is strictly after `lastTickAt`.** A tick moves nobody's
+  `lastReportAt` — only a reply does — so a member that never answers has a
+  deadline fixed in the past. Returning it points `reArm()` back at a time
+  already gone, and the alarm fires back to back for as long as the object
+  lives: the documented rollback hazard for `due:outbox`, reached by arithmetic
+  rather than by a stored row.
+
+**Neither anchor alone keeps both.** Anchoring every member on `lastTickAt` keeps
+P2 and loses P1: a tick at T, a member reporting at T+1s, and at T+5m it is not
+due by one second — so nothing is written, the clock advances anyway, and the
+next tick is T+10m. The room asks it 9m59s after its report having declared 5m.
+Anchoring on member reports alone keeps P1 and loses P2, as above.
+
+So `lastTickAt` is a **floor** rather than the clock, and it applies only to the
+members a firing actually asked:
+
+- A member **not yet due at the last tick** keeps its own deadline. That firing
+  did not ask it, so nothing has been spent on it.
+- A member **already due at the last tick** was asked then, so it is asked again
+  no sooner than one cadence after that ask: `lastTickAt + cadence`. Its own
+  deadline is in the past and stays there until it answers, so honouring that
+  would mean asking it continuously.
+
+Both branches land after `lastTickAt` — the first by its own test, the second
+because a cadence is positive — so **P2 holds by construction, with nothing to
+clamp.** The split uses the boundary `dueMembers` uses, read the other way round,
+which is what keeps the two decisions agreeing: a deadline at or before
+`lastTickAt` means the member genuinely was in that firing's list. Together they
+also give a property a single clock did not have: every armed firing finds
+somebody due.
+
+A mixed roster is the case that defeats a floor applied to everybody — one member
+that reported recently, one already overdue. The overdue member forces an earlier
+tick, correctly, and that tick must not swallow the prompt member's own deadline
+and push it out to the next fixed boundary.
+
+Two thresholds for what the tick then SAYS, kept from the same reasoning
+`STALE_AFTER_MS` is chosen for:
 
 - **1× the cadence** — the member is due, and the tick asks.
 - **2× the cadence** — the member is `silent: true` in the snapshot.
@@ -293,15 +356,29 @@ it has gone quiet. A false silent is worse than a late one: being late costs a
 peer learning a few minutes after it could have, and being wrong costs every
 peer learning to ignore the signal.
 
-No tick is written when the room is **frozen, closed, or holds no member that
-must report**:
+No tick is written when the room is **frozen, closed, past its TTL, or holds no
+member that must report**:
 
 - A member cannot report its way out of a frozen room, so none may be named
   silent in one. A freeze must cost nobody their standing, which is the same
-  rule that keeps `reclaimStaleSeats` out of a frozen room.
+  rule that keeps `reclaimStaleSeats` out of a frozen room. Writing no tick is
+  only half of it: `silent_for_seconds` is measured from a stamp the freeze
+  stopped anybody from moving, so a **thaw credits every reporting seat with a
+  report** — paid on the non-null → null transition only, because a `null` handed
+  to an already-thawed room thaws nothing and a credit for it is a report nobody
+  made.
 - A closed session derives no due time, for the reason `derivedDue` already
   gives about the TTL: deriving one would re-arm the alarm to a time already
   past and fire for as long as the object existed.
+- A room **past `expiresAt`** is refused by the handler rather than by the
+  derived time, because it is the one of these the ordinary path reaches. Such a
+  room is not closed until `#expireIfDue` closes it, so `derivedDue` offers both
+  names, `dueNames` sorts them, and `"heartbeat"` sorts before `"ttl"`: a firing
+  delayed past the expiry appended and woke every watcher on a room that the next
+  iteration of the same loop closed. The guard reads `now > expiresAt`, which is
+  `#expireIfDue`'s own test, rather than reordering the handlers — reordering
+  fixes this one pair and leaves the next to be discovered, and a precondition a
+  handler reads is checkable where a name's place in an alphabet is an accident.
 
 ### D11 — Overdue is the tick's business. There is no `member_overdue`.
 
@@ -359,11 +436,11 @@ flowchart TB
     AUTHOR["manifest: heartbeat_on 5m<br/>roles.helper.reports: true"] --> RESOLVE["resolveManifest<br/>→ heartbeatOnMs"]
     RESOLVE --> SESSION["immutable on the session"]
 
-    SESSION --> DD["derivedDue()<br/>heartbeat → nextTickAt(s, now)"]
+    SESSION --> DD["derivedDue()<br/>heartbeat → nextTickAt(s)"]
     DD --> ALARM["SessionDO.alarm()"]
-    ALARM --> TICK["#tickIfDue<br/>snapshot of who reported when"]
-    TICK --> WRITE["#writeEvent: heartbeat<br/>fromMemberId: system"]
-    WRITE --> WAKE["#wake()"]
+    ALARM --> TICK["#tickIfDue(now)<br/>one transaction: read, decide, write"]
+    TICK --> WRITE["#writeEvent: heartbeat<br/>+ advanced lastTickAt"]
+    WRITE --> WAKE["#wake(), after the commit"]
 
     WAKE --> POLL["held bellman_sync returns"]
     WAKE --> WS["held /ws socket"]
@@ -417,9 +494,17 @@ the code that uses them.
   closed, the way `verbsOfRole` does).
 - **`worker-tests/` covers the alarm**: a tick fires at the cadence; a reply
   pushes the next tick out; a frozen room writes none; a closed room arms none;
-  a room with no reporting member arms none; and the rollback property — an
-  object with no heartbeat branch strands no due row, because the due time is
-  derived.
+  a room past its TTL writes none even though the sorted handlers reach it
+  first; a room with no reporting member arms none; a tick forced by an overdue
+  member leaves a prompt member's own deadline armed (D10's P1, read off the
+  time `reArm()` actually wrote); and the rollback property — an object with no
+  heartbeat branch strands no due row, because the due time is derived.
+- **A held tick is raced against a real freeze and a real report**, in
+  `session-close-join-race.test.ts`'s idiom: the handler is held between its
+  read of the session and its write, and the other call is let in. The input
+  gate makes the unprotected shape atomic whenever every await between a read
+  and a write is storage, so a regression would otherwise surface as a rare
+  flake rather than as its cause. These fail every time.
 - **The attention table is asserted against the real event-type union**, so a
   type added without a posture fails rather than defaulting.
 - **Delivery is tested through the bridge's `deliver()`**, not only the table: a

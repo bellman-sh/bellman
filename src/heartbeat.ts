@@ -34,9 +34,39 @@ import { mustReport } from "./roles.js";
  */
 export const lastReport = (m: Member): number => m.lastReportAt ?? m.joinedAt;
 
+/** Whether the room asks this member for reports. */
+const asked = (s: StoredSession, m: Member): boolean =>
+  isActiveMember(m) && mustReport(s.manifest, m.roomRole);
+
 /** Members holding a seat the room expects reports from. */
-const reporting = (s: StoredSession): Member[] =>
-  s.members.filter((m) => isActiveMember(m) && mustReport(s.manifest, m.roomRole));
+const reporting = (s: StoredSession): Member[] => s.members.filter((m) => asked(s, m));
+
+/**
+ * The roster a thaw writes back: every seat the room asks is credited with a
+ * report at `now`.
+ *
+ * Spec D10. "A member cannot report its way out of a frozen room, so none may be
+ * named silent in one. A freeze must cost nobody their standing." `#tickIfDue`
+ * honours the letter by writing no tick while frozen, but that is not enough on
+ * its own: `silent_for_seconds` is measured from `lastReport`, which the freeze
+ * stopped anybody from moving. A room frozen for an hour on a 5m cadence would
+ * otherwise produce, on its first tick after the thaw, `silent: true` for every
+ * member — a measurement of the freeze, not of anyone's behaviour, and exactly
+ * the false silent D10 is written to avoid.
+ *
+ * What this loses is the pre-freeze report age, which after an outage long enough
+ * to freeze a room is not something a peer can act on anyway. The faithful
+ * alternative — carrying the frozen interval on the session and subtracting it in
+ * `snapshotOf` — buys that back for a stored field and a second clock to keep
+ * consistent with the first.
+ *
+ * Pure, and here rather than in the store, for the reason at the top of this file:
+ * the store holds no heartbeat policy. Who the room asks is this module's rule,
+ * and a store that filtered the roster itself would be a second copy of it.
+ */
+export function clearSilence(s: StoredSession, now: number): Member[] {
+  return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
+}
 
 /**
  * When the heartbeat alarm should next fire, or null for a room that needs none.

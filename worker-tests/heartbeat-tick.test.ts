@@ -432,3 +432,96 @@ it("arms, fires, and goes quiet once the seated member reports", async () => {
   expect(after.events.filter((e) => e.type === "heartbeat")).toHaveLength(1);
 });
 
+// ---------------------------------------------------------------------------
+// Spec D10. "A member cannot report its way out of a frozen room, so none may
+// be named silent in one. A freeze must cost nobody their standing."
+// ---------------------------------------------------------------------------
+
+/**
+ * Age the room by `cadences`, as waiting that long with nobody reporting would.
+ * Raw rows: no call produces this state, and `lastReportAt` is left unset so
+ * `lastReport` falls back to `joinedAt`, which is the shape a member that has
+ * never answered actually has.
+ */
+const ageBy = (stub: DurableObjectStub, cadences: number) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<{ members: { joinedAt: number }[] }>("session");
+    const ago = Date.now() - cadences * FIVE_MIN;
+    await ctx.storage.put("session", {
+      ...s,
+      lastTickAt: ago,
+      members: s!.members.map((m) => ({ ...m, joinedAt: ago })),
+    });
+  });
+
+/** Who every tick in the log named silent, across all of them. */
+const namedSilent = async (stub: DurableObjectStub) => {
+  const after = await rows(stub);
+  return after.events
+    .filter((e) => e.type === "heartbeat")
+    .flatMap((e) => (e.payload as { members: { member_id: string; silent: boolean }[] }).members)
+    .filter((row) => row.silent)
+    .map((row) => row.member_id);
+};
+
+/**
+ * `#tickIfDue` honours D10's letter — no tick is written while the room is frozen
+ * — but `silent_for_seconds` was measured from a stamp the freeze itself stopped
+ * anybody from moving. A room frozen for an hour on a 5m cadence produced, on its
+ * first tick after the thaw, `silent: true` for EVERY member: a measurement of the
+ * freeze rather than of anyone's behaviour. That is the false silent D10 exists to
+ * prevent, and #66's scribe acts on a member named quiet.
+ */
+it("names nobody silent on the first tick after a thaw", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_thaw_silent"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_thaw_silent"));
+
+  await store.freezeSession("qs_thaw_silent", Date.now());
+  // The outage: well past the two cadences that make a member silent.
+  await ageBy(stub, 12);
+  await store.freezeSession("qs_thaw_silent", null);
+
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  expect(await namedSilent(stub)).toEqual([]);
+});
+
+/**
+ * The control for the case above, and it is the reason that one is worth running:
+ * without it, "nobody was named silent" would also be satisfied by a tick that
+ * never fires or a `silent` flag that is never set. Identical ageing, no freeze —
+ * so this member HAS had twelve cadences to report in and has not.
+ */
+it("still names a member silent when no freeze explains the gap", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_genuine_silence"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_genuine_silence"));
+
+  await ageBy(stub, 12);
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  expect(await namedSilent(stub)).toEqual(["m_lead"]);
+});
+
+/**
+ * What the thaw buys: a full cadence before anyone is asked again. The stamp is
+ * the whole mechanism, so this is the direct reading of it — the room is due a
+ * tick the moment it thaws, and the tick asks nobody because nobody owes an
+ * answer yet.
+ */
+it("gives a thawed room a fresh cadence before it asks again", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_thaw_fresh"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_thaw_fresh"));
+
+  await store.freezeSession("qs_thaw_fresh", Date.now());
+  await ageBy(stub, 12);
+  await store.freezeSession("qs_thaw_fresh", null);
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  // Due, so the handler ran; nobody owing an answer, so it wrote no tick.
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
+});

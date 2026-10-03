@@ -19,7 +19,7 @@ import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
 import { lastReport } from "../../src/heartbeat.js";
-import { member, oneCode, session } from "./fixtures.js";
+import { member, oneCode, roomManifest, session } from "./fixtures.js";
 
 /**
  * Cases an implementation cannot pass, each mapped to the reason it cannot.
@@ -598,6 +598,50 @@ export function describeStoreContract(
 
       (await store.freezeSession(s.id, null));
       expect((await store.getSession(s.id))?.frozenAt).toBeNull();
+    });
+
+    /**
+     * Spec D10: "A member cannot report its way out of a frozen room, so none
+     * may be named silent in one. A freeze must cost nobody their standing."
+     *
+     * Here rather than only in the store that serves production, because this is
+     * what a THAW means and not what an alarm does: `lastReportAt` is read back
+     * through `getSession`, so a store that left it alone would report a member
+     * silent for the whole outage. The heartbeat tick is derived in one
+     * implementation and absent in the other, but the stamp is interface
+     * behaviour, and a divergence in it is exactly what this suite is for.
+     */
+    it("credits every reporting seat on a thaw, so a freeze costs nobody their standing", async () => {
+      const manifest = roomManifest({
+        roles: {
+          lead: { can: ["send"], description: null, reports: true },
+          observer: { can: [], description: null, reports: false },
+        },
+        defaultRole: "observer",
+        creatorRole: "lead",
+        heartbeatOnMs: 300_000,
+      });
+      const longAgo = Date.now() - 3_600_000;
+      const s = session({
+        manifest,
+        members: [
+          member({ memberId: "m_lead", roomRole: "lead", lastReportAt: longAgo }),
+          member({ memberId: "m_obs", userId: "u_obs", roomRole: "observer", lastReportAt: longAgo }),
+        ],
+      });
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, Date.now()));
+      (await store.freezeSession(s.id, null));
+
+      const after = (await store.getSession(s.id))!;
+      const row = (id: string) => after.members.find((m) => m.memberId === id)!;
+      // The hour nobody was allowed to report in is not held against the seat the
+      // room asks: its clock starts again at the thaw.
+      expect(lastReport(row("m_lead"))).toBeGreaterThan(Date.now() - 5_000);
+      // And the seat the room does not ask is untouched. Nothing reads that stamp,
+      // and a write that nothing reads is a field that later disagrees for no reason.
+      expect(row("m_obs").lastReportAt).toBe(longAgo);
     });
 
     /**

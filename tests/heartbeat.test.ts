@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { lastReport, nextTickAt, dueMembers, snapshotOf } from "../src/heartbeat.js";
+import { clearSilence, lastReport, nextTickAt, dueMembers, snapshotOf } from "../src/heartbeat.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { StoredSession } from "../src/stored-session.js";
 
@@ -187,5 +187,43 @@ describe("snapshotOf", () => {
     const snap = snapshotOf(stored({ members: [lead()] }), T0);
     expect(snap.cadence_seconds).toBe(300);
     expect(snap.ask).toMatch(/bellman_send/);
+  });
+});
+
+/**
+ * Spec D10: "A member cannot report its way out of a frozen room, so none may be
+ * named silent in one. A freeze must cost nobody their standing."
+ *
+ * The rule is pure and lives here; that it lands in the data on a thaw is proved
+ * under real alarms in worker-tests/heartbeat-tick.test.ts, because snapshotOf
+ * cannot see a freeze and no unit test can stand in for that.
+ */
+describe("clearSilence", () => {
+  it("credits every seat the room asks with a report", () => {
+    const s = stored({ members: [lead({ lastReportAt: T0 })] });
+    const after = clearSilence(s, T0 + 12 * FIVE_MIN);
+    expect(after[0].lastReportAt).toBe(T0 + 12 * FIVE_MIN);
+    // And the thawed room then owes nobody an answer for a full cadence.
+    expect(dueMembers({ ...s, members: after }, T0 + 12 * FIVE_MIN)).toEqual([]);
+  });
+
+  it("credits a member that had never reported, so a freeze cannot strand it", () => {
+    const s = stored({ members: [lead({ lastReportAt: undefined })] });
+    expect(clearSilence(s, T0 + FIVE_MIN)[0].lastReportAt).toBe(T0 + FIVE_MIN);
+  });
+
+  /**
+   * Only the seats the room asks. A stamp on a member nothing reads is a field
+   * that later disagrees with the roster for no reason — and the question of who
+   * is asked has exactly one answer in this module.
+   */
+  it("leaves a member the room does not ask untouched", () => {
+    const s = stored({ members: [watcher({ lastReportAt: T0 })] });
+    expect(clearSilence(s, T0 + FIVE_MIN)[0].lastReportAt).toBe(T0);
+  });
+
+  it("leaves a departed member untouched, however its role reads", () => {
+    const s = stored({ members: [lead({ lastReportAt: T0, leftAt: T0 + 1 })] });
+    expect(clearSilence(s, T0 + FIVE_MIN)[0].lastReportAt).toBe(T0);
   });
 });

@@ -12,7 +12,7 @@ import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -666,11 +666,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * already held — so without this, a frozen room wakes once at that time to be
    * refused by #tickIfDue, and only then re-arms to the TTL. Re-arming here moves
    * it out to the TTL at the freeze and spends that wake on nothing.
+   *
+   * The thaw also credits every reporting seat with a report, so the interval
+   * nobody was allowed to report in costs nobody their standing — spec D10, and
+   * `clearSilence` carries the whole argument. The rule belongs to heartbeat.ts;
+   * this picks the moment to apply it.
    */
   async freezeSession(frozenAt: number | null): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    await this.ctx.storage.put("session", { ...s, frozenAt });
+    const members = frozenAt === null ? clearSilence(s, Date.now()) : s.members;
+    await this.ctx.storage.put("session", { ...s, frozenAt, members });
     await this.driver.reArm();
   }
 

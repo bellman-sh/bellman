@@ -4,6 +4,17 @@ import type {
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+// heartbeat.ts imports `isActiveMember` from this module, so this import closes a
+// cycle — the first one in src/ involving store.ts, and deliberate. Both sides are
+// functions called at runtime and neither module reads the other during its own
+// evaluation, which is what makes an ESM cycle safe; checked under both tsc
+// programs, the Node suite and workerd.
+//
+// The alternative is to duplicate a predicate, and there is no third option: the
+// rule needs `isActiveMember`, which lives here, and this store needs the rule. A
+// copy of either would be a second place for the two to drift, and `freezeSession`
+// is answered by two implementations that the contract suite requires to agree.
+import { clearSilence } from "./heartbeat.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -586,10 +597,21 @@ export class MemoryStore implements BellmanStore {
     s.joinCodes = {};
   }
 
+  /**
+   * Freeze the room, or thaw it with null.
+   *
+   * The thaw credits every reporting seat with a report: spec D10, and
+   * `clearSilence` carries the argument. Here as well as in `SessionDO` because it
+   * is what a thaw MEANS rather than anything the alarm does — `lastReportAt` is
+   * read back through `getSession`, so a store that left it alone would report
+   * every member silent for the length of the outage. The contract suite has the
+   * case, and that is what keeps the two implementations saying the same thing.
+   */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     s.frozenAt = frozenAt;
+    if (frozenAt === null) s.members = clearSilence(s, Date.now());
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

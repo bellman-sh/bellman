@@ -170,7 +170,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * through here, so hydrateStoredSession's rules reach all of it: getSession
    * (and the facade's getSession and getSessionByJoinCode with it), every
    * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
-   * one predating frozenAt reads as not frozen. Nothing rewrites either.
+   * one predating frozenAt reads as not frozen; one predating the heartbeat reads
+   * as asking for none. Nothing rewrites any of them.
    *
    * A mutator reads through its own transaction, so the check and the write it
    * guards are one unit rather than two that rely on nothing getting between them.

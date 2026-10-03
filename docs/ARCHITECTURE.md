@@ -8,7 +8,7 @@ applies-when: |
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md]
 last-verified-against-source: af052f0c
-last-updated: 2026-10-02
+last-updated: 2026-10-03
 ---
 
 # Bellman Architecture
@@ -62,6 +62,7 @@ flowchart TB
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
         MCP["/mcp<br/>nine MCP tools"]
+        WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
     end
@@ -76,6 +77,7 @@ flowchart TB
 
     CCT --> BRIDGE
     BRIDGE --> MCP
+    BRIDGE -->|"one per room"| WS
     BRIDGE -.-> HOOK
     CCC --> MCP
     DESK --> MCP
@@ -83,6 +85,7 @@ flowchart TB
 
     AS --> AUTH
     MCP --> SDO
+    WS --> SDO
     MCP --> RDO
     MCP --> ADO
     BILL --> AUTH
@@ -154,9 +157,15 @@ process; it is under [two delivery paths](#two-delivery-paths) below.)
 ```mermaid
 flowchart TB
     EVENT["a peer appends an event"] --> SDO["SessionDO"]
+    SDO --> WSK["/ws room socket<br/>one per room, per machine"]
     SDO --> POLL["bellman_sync<br/>long poll, up to 25s"]
 
-    POLL --> B["the bridge holds the poll"]
+    WSK --> CO["the coordinator bridge"]
+    CO --> BUS["local bus<br/>Unix socket"]
+    BUS --> B["every bridge<br/>on the machine"]
+    POLL -.->|"no socket: the<br/>coordinator polls"| CO
+    POLL -.->|"no bus: each<br/>bridge polls"| B
+
     B --> CH["channel notification<br/>pushed into the session"]
     B --> IQ["inbox queue on disk"]
     IQ --> SH["Stop hook drains it<br/>at end of turn"]
@@ -176,15 +185,15 @@ flowchart TB
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync` until MCP Apps ([#28](../../../issues/28)) |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
-Two consequences worth stating plainly:
+Two consequences:
 
 - **Push is an optimisation, never a dependency.** Every surface degrades to
   polling, and a bridge that fails to start must not cost anyone their messages.
-- **The bridge is per-session today, which does not scale on one machine.** Five
-  sessions in a room means five processes each holding a poll for the same
-  events. [#43](../../../issues/43) elects one bridge as coordinator and fans
-  out over a local socket — no new daemon, and it falls back to independent
-  polling when the lock or socket cannot be created.
+- **Every session spawns its own bridge, and that used to cost a poll each.**
+  Five sessions in a room meant five processes holding a poll for the same
+  events. [#43](../../../issues/43) shares one upstream connection per room
+  between them, over a local socket — no new daemon, and every bridge polls as
+  before where that cannot be had ([the local bus](#the-local-bus)).
 
 ### Two delivery paths
 
@@ -199,7 +208,7 @@ socket. The decisions, and what was measured to reach them, are in the
 
 | | `bellman_sync` long poll | `/ws` room socket |
 |---|---|---|
-| For | remote MCP clients: ChatGPT connectors, Claude's web connector | clients that can reach a local process: the bridge, once [#43](../../../issues/43) lands |
+| For | remote MCP clients: ChatGPT connectors, Claude's web connector | clients that can reach a local process: the bridge, through [the local bus](#the-local-bus) |
 | Held as | an in-flight request, so the object stays resident | a socket the runtime holds, so the object hibernates |
 | Scope | one member | the whole room |
 | The member's own events | dropped | included |
@@ -213,8 +222,8 @@ peer's events, so the stored event would hand one user another's upstream
 identity. Everything around the event differs, because a poll is per member and
 a socket is per room. The poll is permanent, so a change to what a watcher sees
 has to land on both. And a socket frame carries no wrapper, so whatever reads it
-must frame it as untrusted and escape `<` before a model sees it, as the
-bridge's `renderEvent` does for poll results today.
+must frame it as untrusted and escape `<` before a model sees it. The bridge does
+that in `renderEvent` (`src/inbox.ts`), whichever path brought the event.
 
 **Why the socket is cheaper.** A long poll is an in-flight request, an in-flight
 request keeps the object resident, and a resident object bills duration for its
@@ -267,11 +276,58 @@ the runtime holds. `wake()` is synchronous for the same reason.
 **One socket per (machine, room).** A socket binds to one `SessionDO`, so a
 machine watching three rooms holds three. That is already fewer than per-member
 polls hold, because a room socket carries every event in the room and the
-members of one room on one machine can share it. But the server half only makes
-that possible. The client half, [#43](../../../issues/43) in plan 2 of the spec,
-is what makes it one per machine per room rather than one per member per
-session: one bridge holds the sockets and fans out locally. Until it lands the
-bridge still long-polls, and no shipped client opens `/ws`.
+members of one room on one machine can share it. The server half only made that
+possible. The client half ([#43](../../../issues/43), plan 2 of the spec) is what
+does it: one bridge holds the sockets and the rest read from it, as
+[the local bus](#the-local-bus) describes.
+
+### The local bus
+
+A machine used to hold one long poll per member per session, so five sessions in
+one room held five polls for the same events. It now holds **one upstream
+connection per room**. Every session still spawns its own bridge, and a bridge
+either holds that connection or subscribes to the one a sibling holds, over a
+Unix socket at `~/.claude/bellman/bus/<hash>.sock`. The hash covers the server
+URL and the identity (the `BELLMAN_KEY`, or the signed-in person), so two
+identities on one machine never share a bus. The bus shares a connection and is
+not where a room lives: the room stays on the server
+([section 3](#3-why-the-server-is-remote-first)), so a session with no bridge, a
+cloud one for instance, still takes part over `/mcp` as before.
+
+The bridge that holds the connections is the *coordinator*. It keeps each room's
+recent events in a bounded window and serves every subscriber from it, in order
+and without gaps; a subscriber that has fallen behind the window gets what it
+missed from the server, as the member it is. It is also where a room's stream
+becomes each member's: every event is addressed to each subscribing member, less
+that member's own. Delivery itself did not move. Each bridge still writes its
+own session's channel or inbox, so what is shared is the connection and not the
+writer. `src/bus.ts` holds the election, the wire and the window,
+`src/room-socket.ts` the upstream socket, and `src/bus-link.ts` what a bridge
+asks of them.
+
+**The socket is the election.** A bridge connects to the bus path. If something
+answers, it subscribes. If nothing does, because the path is absent or holds a
+socket nobody listens at, it binds and becomes the coordinator, and a bridge
+that loses the bind connects to the winner. Being connectable stands in for
+being alive, so the election needs no lock file and no pid check: a coordinator
+that was killed leaves a socket nobody can connect to, which the next bridge
+removes, and one that exits cleanly removes its own. The stand-in has two known
+gaps. A coordinator that is stopped but not dead still accepts connections, so a
+subscriber gives up on one that does not acknowledge its subscribe and polls for
+that member instead. And with no lock, two bridges racing can both win (1 race
+in 160 in the spec's measurement, eight processes on macOS);
+[D8](superpowers/specs/2026-09-29-room-delivery-design.md) records what that
+costs.
+
+**The fallback is mandatory, in two layers.** Where a room's socket cannot be had
+or will not stay, the coordinator long-polls the room itself and keeps serving
+the bus, going back to the socket when one opens, and its subscribers cannot
+tell. Where the bus cannot be had (Windows, a socket path past the operating
+system's limit, a directory that cannot be made) or stops answering, each bridge
+polls for its own members with the same `watch()` loop it ran before there was a
+bus. So a socket that fails does not undo the collapse into one connection per
+room, and a bus that fails does not cost anyone their messages. Neither is a
+dependency (invariant 6 below).
 
 ## 5. Storage
 
@@ -394,10 +450,10 @@ sequenceDiagram
     participant YH as You
 
     PA->>W: bellman_send (type, payload)
-    Note over W: identity comes from the bearer token;<br/>a sender cannot name itself
+    Note over W: identity comes from the bearer token#59;<br/>a sender cannot name itself
     W->>SDO: appendEvent, stamped with<br/>member, user, label, cursor
-    SDO-->>BR: the long poll returns the event
-    Note over BR: wrapped as trust untrusted, origin, data;<br/>the less-than character is escaped,<br/>so it cannot close the channel tag
+    SDO-->>BR: the room socket sends the event,<br/>or a long poll returns it
+    Note over BR: renderEvent wraps it as untrusted and escapes<br/>the less-than character, so it cannot<br/>close the channel tag
     BR->>YA: channel notification, wrapper intact
     alt type is action_request
         YA->>YH: show it, do not act
@@ -413,6 +469,11 @@ loud:
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
   instead, so the client that reads it does the wrapping and owns this rule.
+  The bridge is that client: `renderEvent` (`src/inbox.ts`) does the wrapping,
+  after the bus. `deliver` (`src/bridge.ts`) calls it for a channel push, and the
+  Stop hook and `bellman_wait` call it, through `renderBatch`, for the events
+  `deliver` queued. An event is escaped and framed as untrusted whichever path
+  brought it, and it does not become trusted by passing through a local process.
 - **`<` is escaped to `<`** so a payload cannot close the `<channel>` tag
   and impersonate the harness.
 - **An `action_request` is approved by the receiving human**, never by the

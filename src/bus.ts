@@ -148,8 +148,14 @@ export interface Coordinator extends BusBase {
    *
    * `onRoomOpen` names no member, and the process holding a room's upstream sometimes has to act as
    * one of them: a long poll of the room needs a member the identity owns, and a room opened by
-   * another bridge's subscriber may have none of this process's. Every subscriber on a bus is the
-   * same identity (D8), so any member named here is one the coordinator may sync as (D10).
+   * another bridge's subscriber may have none of this process's.
+   *
+   * These are member ids this process may not hold itself, and using them is not a leak. The bus's
+   * socket path hashes the server URL and the credential together (D8, `busPath`), so everyone who
+   * can subscribe to one bus is the same identity, and that identity owns every member any of them
+   * asks about. It is the argument D10 already makes for `SyncFrom`, which calls `bellman_sync` on
+   * a subscriber's behalf; a poll of the room is the same call made for the same reason. Nor is it
+   * a way to learn who is in a room: the ids are the ones this machine's own subscribers sent.
    */
   members(sessionId: string): string[];
   /**
@@ -160,6 +166,11 @@ export interface Coordinator extends BusBase {
    * The room is closed (`onRoomClose`) before anyone is told, and is out of the registry by then.
    * A subscriber that subscribes again from inside its `onEnd` therefore starts a room of its own,
    * with an upstream of its own, and does not join the one that just ended.
+   *
+   * `reason` reaches every subscriber's `onEnd`, and a bridge writes it to its log when it falls
+   * back to polling, so write it for a person: say what the upstream found and what happens next.
+   * What each member's own poll then finds is a second message about the same cause, and the two
+   * should read as one cause and its confirmation, not as two faults.
    */
   endRoom(sessionId: string, reason: Error): void;
   stats(): CoordinatorStats;

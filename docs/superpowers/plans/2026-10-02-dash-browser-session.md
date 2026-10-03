@@ -16,8 +16,8 @@
 - **Nothing importing `cloudflare:workers` can be imported by a vitest test.** `src/oauth/store.ts`, `src/worker.ts` and `src/store-do.ts` are excluded from the Node build. Shapes and pure logic go in `src/oauth/storage.ts`, which stays importable from plain Node.
 - **`npm run verify` before every commit.** It is `typecheck && typecheck:worker && build && test && test:worker`.
 - **Read and register in the same turn** — no `await` between a read and the write that depends on it, in any method that must be atomic.
-- **Every operation that writes, deletes or drops a record by the key it was given, error-path cleanups included, has at least one test with another record present that the operation must not touch.** A single-record test cannot distinguish "operates on the record I named" from "operates on everything": the claim that the named record changed has a second producer, that every record changed. The rule is per operation and not per test, so a boundary test of a pure predicate needs no bystander. This plan has met the gap in the sweep tests, in `deleteSession`'s, in the writes of `touchSession` and `replanSession`, and in `touchSession`'s drop of a dead session, which is an error-path cleanup: a drop written as `deleteAll()` on the singleton `AuthDO` passed every test, and would have taken every session, every refresh token, every client registration and the billing ledger with it. The bystander assertion has three parts, and the rule binds route tests as well:
-  - **Untouched.** Compare it with a value built for the comparison. Where the store keeps the objects it is given, freeze the shared fixtures or copy every nested object, because rebuilding the top level is not enough when what leaks is nested.
+- **Every operation that creates, writes, deletes or drops a record by a key, error-path cleanups included, has at least one test with another record present that the operation must not touch.** A single-record test cannot distinguish "operates on the record I named" from "operates on everything": the claim that the named record changed has a second producer, that every record changed. The rule is per operation and not per test, so a boundary test of a pure predicate needs no bystander. For a create the failure is a collision, a key minted once and reused, which hands one human another's record: two creations in one store, with the keys asserted different and each key answering as its own record, catch it. This plan has met the gap in the sweep tests, in `deleteSession`'s, in the writes of `touchSession` and `replanSession`, and in `touchSession`'s drop of a dead session, which is an error-path cleanup: a drop written as `deleteAll()` on the singleton `AuthDO` passed every test, and would have taken every session, every refresh token, every client registration and the billing ledger with it. The bystander assertion has three parts, and the rule binds route tests as well:
+  - **Untouched.** "Survives" means its content is unchanged, not that its key is still there: a sweep that rewrote every live session with a refreshed `last_used_at` would leave every key and defeat the idle timeout, and a check of ids cannot see it. Compare its content with a value built for the comparison. Where the store keeps the objects it is given, freeze the shared fixtures or copy every nested object, because rebuilding the top level is not enough when what leaks is nested.
   - **Answers with its own record.** Read the keys alternately, with nothing written between the reads, and give the bystander values different from everything the operation writes. A cache that ignores the key is cleared by every write, so a read that follows a write cannot catch it, and a bleed that writes the same value is invisible.
   - **At route level, still signed in as themselves.** Reading a session touches it, so "untouched" there means a status and an identity, never a timestamp; an assertion that the bystander's record is unchanged to the byte cannot hold. A sign-out test needs a second session that stays signed in.
 - **A room holds many members, not two.** Never write "the other session" or "two sessions" in code, comments, commits or docs. Say *members*, *the room*, or *peers*.
@@ -464,7 +464,7 @@ revoked grant would hold for the session's whole life."
 
 ### Task 2: The same session methods on `AuthDO`, with a sweep
 
-> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `feafe33`, `f386e69`, `08b9800`, `66d857d`, `9bc7b30`, `5df1e78`, `113edd2`, `e3e6c24`, `b53007c`, `c4b17e2`, `d72e814`, `eda146c` and `47ef292`. They add what the blocks do not have: `AuthStorage` declares the session methods (Task 1 could not, because widening the interface without an implementation reds `typecheck:worker`); a fourth method, `replanSession`, which Task 6's write-back calls so that a sign-out landing between the touch and the write-back is not undone, and which resolves true when it merged and false when the session was gone; tests for it in both programs; three tests for the no-yield constraint, each a sign-out in flight against `touchSession` or `replanSession`; the workerd twins of the Node suite's boundary, NaN, skip and 23-hour tests, with the skip pinned by counting `storage.put` calls; and, in both programs, tests that each mutating method leaves a second session alone and that each id answers with its own record. The sweep tests and Step 7 are corrected in place, twice over: the test as first asked for could not fail, and its replacement never had a live session in front of a sweep. Where a block and a commit differ, the commit wins.
+> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `feafe33`, `f386e69`, `08b9800`, `66d857d`, `9bc7b30`, `5df1e78`, `113edd2`, `e3e6c24`, `b53007c`, `c4b17e2`, `d72e814`, `eda146c`, `47ef292`, `69a3120` and `a24a8a3`. They add what the blocks do not have: `AuthStorage` declares the session methods (Task 1 could not, because widening the interface without an implementation reds `typecheck:worker`); a fourth method, `replanSession`, which Task 6's write-back calls so that a sign-out landing between the touch and the write-back is not undone, and which resolves true when it merged and false when the session was gone; tests for it in both programs; three tests for the no-yield constraint, each a sign-out in flight against `touchSession` or `replanSession`; the workerd twins of the Node suite's boundary, NaN, skip and 23-hour tests, with the skip pinned by counting `storage.put` calls; and, in both programs, tests that each mutating method leaves a second session alone, its content included, and that each id answers with its own record. The sweep tests and Step 7 are corrected in place, twice over: the test as first asked for could not fail, and its replacement never had a live session in front of a sweep. Where a block and a commit differ, the commit wins.
 
 **Files:**
 - Modify: `src/oauth/store.ts` (`AuthDO`, `AuthStore`)
@@ -526,6 +526,11 @@ const storedIds = (name: string) =>
   runInDurableObject(auth(name), async (_i: AuthDO, ctx) => [
     ...(await ctx.storage.list({ prefix: "sess:" })).keys(),
   ]);
+
+/** The record an object holds under an id, read from inside it. */
+const storedSession = (name: string, id: string) =>
+  runInDurableObject(auth(name), async (_i: AuthDO, ctx) =>
+    ctx.storage.get<PanelSession>(`sess:${id}`));
 
 describe("AuthDO sessions", () => {
   it("stores and returns a session", async () => {
@@ -624,9 +629,16 @@ describe("AuthDO sessions", () => {
 describe("AuthDO session sweep", () => {
   const HOUR = 60 * 60 * 1000;
 
+  /** The live session the sweep must leave alone, as it is put. */
+  const liveRecord = (now: number) => panelSession({
+    created_at: now + HOUR - SESSION_TTL_MS,
+    last_used_at: now - 23 * HOUR,
+    expires_at: now + HOUR,
+  });
+
   /**
    * Put a live session, then a dead one, then a third whose put runs the last
-   * sweep, and return the ids stored afterwards.
+   * sweep, and return the ids stored afterwards and the live session as stored.
    *
    * putSession sweeps before it writes, so a session put last is never looked at
    * by its own call. A live session put after the dead one would be stored
@@ -634,6 +646,11 @@ describe("AuthDO session sweep", () => {
    * assertion would hold for a sweep that deleted everything. So the live one
    * goes first and is present for two sweeps, and what is asserted is the whole
    * set that survives, not only that the dead one is gone.
+   *
+   * Survives means unchanged, not only still there: the live session's stored
+   * content is returned too, to be compared with the record that was put. A sweep
+   * that rewrote every live session with a refreshed last_used_at would leave its
+   * key and defeat the idle timeout, and a set of ids cannot see it.
    *
    * The live session is an hour short of both limits, idle for 23 of its 24
    * hours and an hour from its ceiling. That is close enough that a sweep with a
@@ -643,19 +660,15 @@ describe("AuthDO session sweep", () => {
    * The result is read with storedIds: touchSession drops a dead session itself
    * when it reads one, so it cannot show what the sweep left behind.
    */
-  async function sweptIds(name: string, now: number, dead: Partial<PanelSession>) {
+  async function swept(name: string, now: number, dead: Partial<PanelSession>) {
     const o = auth(name);
-    await o.putSession("a-live", panelSession({
-      created_at: now + HOUR - SESSION_TTL_MS,
-      last_used_at: now - 23 * HOUR,
-      expires_at: now + HOUR,
-    }));
+    await o.putSession("a-live", liveRecord(now));
     await o.putSession("b-dead", panelSession(dead));
     await o.putSession("c-trigger", panelSession({
       created_at: now, last_used_at: now, replanned_at: now,
       expires_at: now + SESSION_TTL_MS,
     }));
-    return storedIds(name);
+    return { ids: await storedIds(name), live: await storedSession(name, "a-live") };
   }
 
   /**
@@ -665,25 +678,27 @@ describe("AuthDO session sweep", () => {
    */
   it("sweeps a session that died of idleness, not only one past its ceiling, and keeps the live ones", async () => {
     const now = Date.now();
-    const ids = await sweptIds("s-sweep-idle", now, {
+    const { ids, live } = await swept("s-sweep-idle", now, {
       created_at: now - 2 * SESSION_IDLE_MS,
       last_used_at: now - 2 * SESSION_IDLE_MS,
       expires_at: now + SESSION_TTL_MS,
     });
 
     expect(ids).toEqual(["sess:a-live", "sess:c-trigger"]);
+    expect(live).toEqual(liveRecord(now));
   });
 
   // The other clause. Just used, so it is not idle; only the ceiling kills it.
   it("sweeps a session past its ceiling, although it was just used, and keeps the live ones", async () => {
     const now = Date.now();
-    const ids = await sweptIds("s-sweep-ceiling", now, {
+    const { ids, live } = await swept("s-sweep-ceiling", now, {
       created_at: now - SESSION_TTL_MS - 1_000,
       last_used_at: now,
       expires_at: now - 1,
     });
 
     expect(ids).toEqual(["sess:a-live", "sess:c-trigger"]);
+    expect(live).toEqual(liveRecord(now));
   });
 });
 ```
@@ -818,8 +833,9 @@ Then each of these in turn, restoring `sessionDead` between them:
 - **Idleness alone**, `(value) => (now - value.last_used_at > 24 * 60 * 60 * 1000 ? { action: "delete" } : { action: "keep" })`. Exactly "sweeps a session past its ceiling…" FAILS.
 - **Delete everything**, `(value) => ({ action: "delete" })`. Both sweep tests FAIL, because `a-live` is gone.
 - **The touch interval where the idle window belongs**, `(value) => (value.expires_at < now || now - value.last_used_at > 60 * 60 * 1000 ? { action: "delete" } : { action: "keep" })`. Both FAIL, because `a-live` has been idle for 23 hours. This is the one that would ship unnoticed: `SESSION_TOUCH_MS` and `SESSION_IDLE_MS` are neighbours in `storage.ts`, and it would end every other browser's session that had been idle for an hour, at every sign-in.
+- **Rewrite every live session**, `(value) => (sessionDead(value, now) ? { action: "delete" } : { action: "rewrite", value: { ...value, last_used_at: now } })`. Both FAIL on their last assertion: `a-live` is still stored, with a refreshed `last_used_at`. That is an idle-expiry bypass at every sign-in, and a set of ids cannot see it.
 
-Two properties make these tests honest, and any other sweep assertion needs both. It has to read the object's own storage, because `touchSession` drops a dead session itself when it reads one, so an assertion made through it passes whether the sweep deleted the record, used the `expires_at` form, or never ran. And it has to assert the whole set of survivors with a live session present for a sweep, because `putSession` sweeps before it writes: "the dead one is gone" holds for a sweep that deletes everything, and a live session put last is stored by write order alone. Run any new sweep assertion against all of the above, and against `putSession` not sweeping at all, before trusting it.
+Three properties make these tests honest, and any other sweep assertion needs all of them. It has to read the object's own storage, because `touchSession` drops a dead session itself when it reads one, so an assertion made through it passes whether the sweep deleted the record, used the `expires_at` form, or never ran. It has to assert the whole set of survivors with a live session present for a sweep, because `putSession` sweeps before it writes: "the dead one is gone" holds for a sweep that deletes everything, and a live session put last is stored by write order alone. And it has to compare the survivor's content, not only its key: a survivor that was modified is still there. Run any new sweep assertion against all of the above, and against `putSession` not sweeping at all, before trusting it.
 
 - [ ] **Step 8: Verify and commit**
 
@@ -1737,10 +1753,23 @@ export const RESOURCE = "https://mcp.example.test/mcp";
 export const PANEL = "https://dash.example.test";
 export const COOKIE = "__Host-bellman_session";
 
-export const IDENTITY: Identity = {
+// Frozen: seedSession hands this to the store by reference, and a store that keeps
+// what it is given would show a method that changed it in place to every test that
+// shares it. A write to a frozen object throws.
+export const IDENTITY: Identity = Object.freeze({
   userId: "u_github_4242", orgId: null, plan: "free", role: "member",
   label: "jesse@example.dev",
-};
+});
+
+/**
+ * Someone else, for the sessions a route has no business touching. Their plan is
+ * not one any test re-resolves to, so a write that lands on the wrong record
+ * shows in the answer.
+ */
+export const BYSTANDER: Identity = Object.freeze({
+  userId: "u_github_9999", orgId: null, plan: "pro", role: "member",
+  label: "sam@example.dev",
+});
 
 /** GitHub stubbed at the fetch boundary; everything else is the real thing. */
 export const fakeFetch = (async (input: RequestInfo | URL) => {
@@ -1791,6 +1820,16 @@ export async function seedSession(
   return id;
 }
 
+/** A live session for someone else. Returns its id. */
+export const seedBystander = (
+  config: OAuthConfig,
+  id = "bystander",
+  over: Partial<PanelSession> = {}
+) =>
+  seedSession(config, id, {
+    identity: BYSTANDER, plan_source: "grant", identity_keys: ["github:9999"], ...over,
+  });
+
 /** A request carrying a session cookie. */
 export const withCookie = (path: string, id: string, init: RequestInit = {}) =>
   new Request(`${ISSUER}${path}`, {
@@ -1808,8 +1847,8 @@ import { afterEach, beforeEach, vi } from "vitest";
 import type { OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import {
-  COOKIE, IDENTITY as PANEL_IDENTITY, ISSUER, PANEL, RESOURCE,
-  panelConfig, routeWith, seedSession, withCookie,
+  BYSTANDER, COOKIE, IDENTITY as PANEL_IDENTITY, ISSUER, PANEL, RESOURCE,
+  panelConfig, routeWith, seedBystander, seedSession, withCookie,
 } from "./helpers/panel.js";
 ```
 
@@ -1843,12 +1882,38 @@ describe("caller, over a cookie", () => {
     expect((await route(withCookie("/account", "no-such-session"))).status).toBe(401);
   });
 
-  it("refuses /account with a dead cookie", async () => {
+  it("refuses /account with a dead cookie, and drops that one only", async () => {
     const sid = await seedSession(cfg, "dead", {
       last_used_at: Date.now() - SESSION_IDLE_MS - 1,
     });
+    const yours = await seedBystander(cfg);
 
     expect((await route(withCookie("/account", sid))).status).toBe(401);
+
+    // The drop is an error-path cleanup. Someone else, signed in, still answers
+    // as themselves after it.
+    const res = await route(withCookie("/account", yours, {
+      headers: { accept: "application/json" },
+    }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: BYSTANDER.plan });
+  });
+
+  // The touch writes when last_used_at is stale, and a cookie is a key. With
+  // someone else signed in, each cookie has to answer with its own record, read
+  // alternately with nothing written between the reads: a route that answers from
+  // the last record it served gives itself away on the second.
+  it("answers each cookie with its own record, after a touch that wrote", async () => {
+    const mine = await seedSession(cfg, "mine", {
+      last_used_at: Date.now() - 2 * 60 * 60 * 1000, // stale enough that the touch writes
+    });
+    const yours = await seedBystander(cfg);
+    const who = async (id: string) =>
+      (await route(withCookie("/account", id, { headers: { accept: "application/json" } }))).json();
+
+    expect(await who(mine)).toMatchObject({ user_id: PANEL_IDENTITY.userId, plan: "free" });
+    expect(await who(yours)).toMatchObject({ user_id: BYSTANDER.userId, plan: "pro" });
+    expect(await who(mine)).toMatchObject({ user_id: PANEL_IDENTITY.userId, plan: "free" });
   });
 
   it("refuses a cookie outright when no panel origin is configured", async () => {
@@ -1894,7 +1959,7 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     expect(((await res.json()) as { plan: string }).plan).toBe("pro");
   });
 
-  it("drops a revoked grant once the window closes", async () => {
+  it("drops a revoked grant once the window closes, for that session only", async () => {
     vi.useFakeTimers();
     const now = Date.now();
     const sid = await seedSession(cfg, "stale-plan", {
@@ -1902,11 +1967,21 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     });
 
     vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+    // Someone else, whose plan is fresh at this instant, so nothing re-resolves
+    // it. Seeded after the clock moves for that reason.
+    const yours = await seedBystander(cfg);
     const res = await route(withCookie("/account", sid, {
       headers: { accept: "application/json" },
     }));
 
     expect(((await res.json()) as { plan: string }).plan).toBe("free");
+    // The write-back landed on the session that was re-resolved and on no other.
+    // The bystander's plan is "pro", not the "free" it was re-resolved to, so a
+    // write-back that reached them would show.
+    const other = await route(withCookie("/account", yours, {
+      headers: { accept: "application/json" },
+    }));
+    expect(await other.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: "pro" });
   });
 
   // Review Focus 5 — a record whose replanned_at is absent or non-finite.
@@ -2093,7 +2168,22 @@ Restore `replannedAt`, which is correct under either phrasing.
 Temporarily move the cookie branch above the bearer branch. Re-run.
 Expected: "prefers a bearer token when both are present" FAILS. Restore.
 
-- [ ] **Step 8: Verify and commit**
+- [ ] **Step 8: Prove the bystander assertions can fail**
+
+Three mutations, one at a time, restoring between them.
+
+Make `MemoryAuthStore.replanSession` merge into every session instead of the one named: loop over `this.sessions` and set each to `{ ...s, identity, plan_source: planSource, replanned_at: now }`. Re-run.
+Expected: "drops a revoked grant once the window closes, for that session only" FAILS on its last assertion — the bystander's `/account` now answers as the wrong human on the wrong plan — and so does the store's own `touchSession and replanSession change only the session they name`, the same defect seen from beneath. Restore.
+
+Make the dead-session drop in `MemoryAuthStore.touchSession` clear the map (`this.sessions.clear()`). Re-run.
+Expected: "refuses /account with a dead cookie, and drops that one only" FAILS — the bystander is now 401 — and so does `dropping a dead session removes that one and leaves the others`. Restore.
+
+Make `sessionCaller` answer from the last identity it served: keep a module-level `let last` set on every successful return, and return it for the next cookie request that arrives within a second, whatever the cookie. Re-run.
+Expected: "answers each cookie with its own record, after a touch that wrote" FAILS on its second read, which comes back as the first human. Restore.
+
+The route tests assert the behaviour end to end, so they fail for either of the first two faults whether it sits in `caller` or beneath it; the store's own tests say which.
+
+- [ ] **Step 9: Verify and commit**
 
 ```bash
 npm run verify
@@ -2111,6 +2201,12 @@ without it a grant revoked on day one would keep applying for six more.
 The bound is the token's deliberately — one staleness number for the
 system, and a revoked grant cannot outlive on the panel what it
 outlives on /mcp.
+
+Every by-key operation in the cookie branch has a bystander test: the touch
+that writes, the re-resolution's write-back, and the drop of a dead cookie.
+Each asserts that another human's session still answers as them, on a plan the
+operation does not write, and the cookies are read alternately so that an
+answer served from the last record gives itself away.
 
 The result is written back with replanSession, not putSession, because a
 sign-out can land while the plan is being re-resolved and an upsert would
@@ -2144,7 +2240,7 @@ by anything that is not a browser."
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `tests/panel-session.test.ts`:
+Append to `tests/panel-session.test.ts`, extending the helpers import with `fakeFetch`:
 
 ```ts
 describe("signing in to the panel", () => {
@@ -2199,6 +2295,31 @@ describe("signing in to the panel", () => {
 
     expect(account.status).toBe(200);
     expect(((await account.json()) as { user_id: string }).user_id).toBe("u_github_4242");
+  });
+
+  // The rule's "creates" case. Sign-in mints a session id, and an id minted once
+  // and reused would hand the second human the first's session, or the first
+  // cookie the second's. Two humans sign in to one store, with the ids asserted
+  // different and each cookie answering as its own, read alternately.
+  it("gives each sign-in its own session, and each cookie answers as its own human", async () => {
+    const idOf = (res: Response) =>
+      /__Host-bellman_session=([^;]+)/.exec(res.headers.get("set-cookie")!)![1];
+    const first = idOf(await signIn(PANEL));
+    // GitHub answers as someone else for the second sign-in.
+    cfg.fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input) === "https://api.github.com/user"
+        ? Response.json({ id: 9999, login: "sam", email: null })
+        : fakeFetch(input, init)) as typeof fetch;
+    const second = idOf(await signIn(PANEL));
+
+    expect(second).not.toBe(first);
+    const who = async (id: string) =>
+      ((await (await route(withCookie("/account", id, {
+        headers: { accept: "application/json" },
+      }))).json()) as { user_id: string }).user_id;
+    expect(await who(first)).toBe("u_github_4242");
+    expect(await who(second)).toBe("u_github_9999");
+    expect(await who(first)).toBe("u_github_4242");
   });
 
   it("falls back to the panel origin when return_to is absent", async () => {
@@ -2433,7 +2554,7 @@ import { readSessionCookie, serializeSessionCookie } from "./cookies.js";
 Run: `npx vitest run tests/panel-session.test.ts`
 Expected: PASS.
 
-- [ ] **Step 8: Prove the `return_to` validator matters**
+- [ ] **Step 8: Prove the `return_to` validator matters, and that each sign-in gets its own session**
 
 Temporarily change `panelDestination`'s final line to the prefix form:
 
@@ -2444,6 +2565,8 @@ Temporarily change `panelDestination`'s final line to the prefix form:
 Re-run. Expected: "ignores a return_to that merely prefixes the panel origin" FAILS — the browser is sent to `https://dash.example.test.evil.example/steal`. Restore.
 
 Then remove the `try`/`catch` and re-run. Expected: "ignores a relative return_to rather than throwing" FAILS with a `TypeError`. Restore.
+
+Then mint a constant id: change `const id = randomId();` in `finishSession` to `const id = "fixed";`. Re-run. Expected: "gives each sign-in its own session…" FAILS — the second sign-in overwrote the first's record, and both cookies are the same string. Restore.
 
 - [ ] **Step 9: Verify and commit**
 
@@ -2470,7 +2593,12 @@ refuses it; a relative path throws instead. Both land on the fallback,
 because a sign-in that completed should end somewhere usable.
 
 The callback response carries referrer-policy: no-referrer. Its own URL
-holds the provider's authorization code, and it must not be handed on."
+holds the provider's authorization code, and it must not be handed on.
+
+Each sign-in gets its own session. A test signs two humans in to one store,
+asserts that the ids differ and reads each cookie back as its own human,
+alternately: an id minted once and reused would hand one human another's
+session."
 ```
 
 ---
@@ -2534,12 +2662,33 @@ describe("/auth/session", () => {
     expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
   });
 
-  it("is 401 once the session is dead", async () => {
+  it("is 401 once the session is dead, and drops that one only", async () => {
     const sid = await seedSession(cfg, "expired", {
       last_used_at: Date.now() - SESSION_IDLE_MS - 1,
     });
+    const yours = await seedBystander(cfg);
 
     expect((await route(withCookie("/auth/session", sid))).status).toBe(401);
+
+    // The drop is an error-path cleanup. Someone else, signed in, still answers
+    // as themselves after it.
+    const res = await route(withCookie("/auth/session", yours));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { user_id: string }).user_id).toBe(BYSTANDER.userId);
+  });
+
+  // Cookies are keys. Two humans read alternately, with nothing written between
+  // the reads: a route that answers from the last record it served gives itself
+  // away on the second, which one session cannot show.
+  it("answers each cookie with its own identity", async () => {
+    const mine = await seedSession(cfg, "mine");
+    const yours = await seedBystander(cfg);
+    const userOf = async (id: string) =>
+      ((await (await route(withCookie("/auth/session", id))).json()) as { user_id: string }).user_id;
+
+    expect(await userOf(mine)).toBe(PANEL_IDENTITY.userId);
+    expect(await userOf(yours)).toBe(BYSTANDER.userId);
+    expect(await userOf(mine)).toBe(PANEL_IDENTITY.userId);
   });
 });
 
@@ -2555,19 +2704,28 @@ describe("/auth/signout", () => {
 
   it("invalidates the session server-side, and only that one", async () => {
     const mine = await seedSession(cfg, "mine");
-    const yours = await seedSession(cfg, "yours", {
-      identity: { ...PANEL_IDENTITY, userId: "u_github_9999", label: "sam@example.dev" },
-      identity_keys: ["github:9999"],
-    });
+    const yours = await seedBystander(cfg, "yours");
+    const read = async (id: string) => {
+      const res = await route(withCookie("/auth/session", id));
+      return {
+        status: res.status,
+        user: res.status === 200 ? ((await res.json()) as { user_id: string }).user_id : null,
+      };
+    };
+
+    // Alternating, with nothing written between: a route that answers from the
+    // last record it served gives itself away on the second read. These come
+    // before the sign-out, which is a write and would clear such a cache.
+    expect(await read(mine)).toEqual({ status: 200, user: PANEL_IDENTITY.userId });
+    expect(await read(yours)).toEqual({ status: 200, user: BYSTANDER.userId });
+    expect(await read(mine)).toEqual({ status: 200, user: PANEL_IDENTITY.userId });
 
     expect((await signout(mine)).status).toBe(204);
 
-    expect((await route(withCookie("/auth/session", mine))).status).toBe(401);
+    expect(await read(mine)).toEqual({ status: 401, user: null });
     // Another browser, signed in as someone else, stays signed in as them. A test
     // with a single session to end passes a sign-out that ends every session.
-    const still = await route(withCookie("/auth/session", yours));
-    expect(still.status).toBe(200);
-    expect(((await still.json()) as { user_id: string }).user_id).toBe("u_github_9999");
+    expect(await read(yours)).toEqual({ status: 200, user: BYSTANDER.userId });
   });
 
   it("clears the cookie with every attribute that set it", async () => {
@@ -2696,10 +2854,10 @@ Expected: PASS.
 Two mutations, one at a time, restoring between them. They fail different assertions of the same test.
 
 Temporarily drop the `deleteSession` call, leaving only the clearing header. Re-run.
-Expected: "invalidates the session server-side, and only that one" FAILS on its first `/auth/session` assertion — the signed-out cookie still answers 200, because clearing the browser's copy did nothing to the record. Restore.
+Expected: "invalidates the session server-side, and only that one" FAILS on the read that follows the sign-out — the signed-out cookie still answers 200, because clearing the browser's copy did nothing to the record. Restore.
 
 Then make a sign-out end every session: change `MemoryAuthStore.deleteSession` to `this.sessions.clear()`. Re-run.
-Expected: the same test FAILS on its last assertion — another browser's cookie now answers 401 — and so does `deleteSession ends only the session it names`, the store's own test of the same defect. The route test asserts the behaviour end to end, so it fails for a sign-out that ends every session whether the fault is in the route or beneath it. Restore.
+Expected: the same test FAILS on its last assertion — the bystander's cookie now answers 401 — and so does `deleteSession ends only the session it names`, the store's own test of the same defect. The route test asserts the behaviour end to end, so it fails for a sign-out that ends every session whether the fault is in the route or beneath it. Restore.
 
 The first is the distinction that chose a stored session over a signed one. The second is the failure a user would see, signed out everywhere by one click, and a test with a single session cannot see it. Both get an assertion rather than a paragraph.
 
@@ -2733,7 +2891,10 @@ stored id rather than a signed token.
 
 The same test keeps a second session, for someone else, and asserts it is
 still signed in as them afterwards, because a sign-out that ended every
-session passes a test with only one to end."
+session passes a test with only one to end. /auth/session is tested the same
+way: the drop of a dead session leaves someone else signed in as themselves,
+and two humans' cookies are read alternately, before the write, so that an
+answer served from the last record gives itself away."
 ```
 
 ---
@@ -3201,13 +3362,10 @@ One test that walks the whole thing in the order a human meets it. The unit test
 describe("the whole panel session, end to end", () => {
   it("signs in, reads the account, signs out, is then refused, and signs nobody else out", async () => {
     // Someone else is already signed in, in another browser. Established before
-    // the walk begins and checked at the end: the walk asserts that the right
-    // human was signed out and nobody else was, and a walk with a single session
-    // passes a sign-out that ends every session.
-    const bystander = await seedSession(cfg, "bystander", {
-      identity: { ...PANEL_IDENTITY, userId: "u_github_9999", label: "sam@example.dev" },
-      identity_keys: ["github:9999"],
-    });
+    // the walk begins, read between the walker's own reads and again at the end:
+    // the walk asserts that the right human was signed out and nobody else was,
+    // and a walk with a single session passes a sign-out that ends every session.
+    const bystander = await seedBystander(cfg);
 
     // 1. The panel boots with nothing. 401, no WWW-Authenticate, CORS present.
     const cold = await route(new Request(`${ISSUER}/auth/session`, {
@@ -3240,12 +3398,23 @@ describe("the whole panel session, end to end", () => {
     expect(session.status).toBe(200);
     expect(((await session.json()) as { user_id: string }).user_id).toBe("u_github_4242");
 
+    // 3b. Someone else's browser answers as them, between the walker's own reads.
+    // Walker, bystander, walker, with nothing written between: a route that
+    // answers from the last record it served gives itself away on the walker's
+    // next read, and a sign-in that disturbed a session already there shows here.
+    const other = await route(withCookie("/auth/session", bystander, {
+      headers: { origin: PANEL },
+    }));
+    expect(other.status).toBe(200);
+    expect(await other.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: BYSTANDER.plan });
+
     // 4. And so does the account screen, with CORS and the full body.
     const account = await route(withCookie("/account", sid, {
       headers: { origin: PANEL, accept: "application/json" },
     }));
     expect(account.status).toBe(200);
     const body = (await account.json()) as Record<string, unknown>;
+    expect(body.user_id).toBe("u_github_4242");
     expect(body.plan).toBe("free");
     expect(body.entitlements).toBeDefined();
     expect(account.headers.get("access-control-allow-credentials")).toBe("true");
@@ -3279,7 +3448,7 @@ describe("the whole panel session, end to end", () => {
       headers: { origin: PANEL },
     }));
     expect(untouched.status).toBe(200);
-    expect(((await untouched.json()) as { user_id: string }).user_id).toBe("u_github_9999");
+    expect(await untouched.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: BYSTANDER.plan });
   });
 });
 ```
@@ -3304,10 +3473,10 @@ Eight steps in the order a human meets them: a cold boot refused, a
 GitHub sign-in, the boot call answering, the account screen with CORS,
 /admin still refused, a forged write refused with the session intact,
 a sign-out that is final, and everyone else still signed in. Another
-person's session is seeded before the walk begins and checked at the end:
-that the right human was signed out and nobody else was is what an end to
-end sign-out test is for, and a walk with a single session passes a
-sign-out that ends every session.
+person's session is seeded before the walk begins, read between the walker's
+own reads and again at the end: that the right human was signed out and
+nobody else was is what an end to end sign-out test is for, and a walk with
+a single session passes a sign-out that ends every session.
 
 The unit tests prove each piece. This is the one that would notice if
 they stopped composing — a cookie whose attributes are right but which

@@ -353,7 +353,8 @@ class Peer implements FakeSocket {
         if (this.room.silent) continue;
         // setWebSocketAutoResponse("ping", "pong"): the runtime answers that exact
         // text. Any other frame reaches webSocketMessage, which closes a
-        // receive-only socket with 1003.
+        // receive-only socket with 1003. These literals copy the registration in
+        // SessionDO's constructor (src/store-do.ts), and nothing ties them to it.
         if (text === "ping") this.send("pong");
         else this.write(closeFrame(1003, "This socket is receive-only."));
       } else if (frame.opcode === OPCODE.close) {

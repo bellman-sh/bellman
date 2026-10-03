@@ -200,12 +200,21 @@ const POLL_WAIT_SECONDS = 25;
 const POLL_FLOOR_MS = 1_000;
 
 /**
- * The text the Durable Object answers itself: `setWebSocketAutoResponse(ping, pong)`, in the
- * constructor of SessionDO (src/store-do.ts). The runtime replies with no JavaScript running, so
- * a keepalive does not wake a hibernated object (measured in the server half, see that
- * constructor's comment); any other text a client sends reaches `webSocketMessage`, which closes
- * the socket with 1003 (D1). A keepalive has to be exactly this. Against `wrangler dev` this module's
- * keepalive ran for six seconds at 0.5 s of silence per ping without the socket once closing.
+ * The keepalive's two texts, which are half of a pair whose other half is in another file. SessionDO's
+ * constructor (src/store-do.ts) registers `new WebSocketRequestResponsePair("ping", "pong")`: literals,
+ * with no constant to import, so nothing compiles or runs the two files together. The runtime answers
+ * a frame that equals the first string exactly, with no JavaScript running and the object not
+ * constructed. Any other text reaches `webSocketMessage`, which closes the socket with 1003 (D1);
+ * "ping ", "Ping" and "ping\n" each did, in the measurement below. So PING must stay equal to that
+ * first literal: a client that drifted from it would be what kills the connection at its first
+ * keepalive, and from here that looks like a server-side drop. PONG matters less: any frame counts as
+ * proof of life, and it only keeps the reply out of the log.
+ *
+ * Measured in `wrangler dev` (workerd 1.20260915.1) against SessionDO with a log line added to each of
+ * its constructions, with this module at its default cadence of 30 s of silence per ping: six
+ * keepalives, each answered "pong", and nothing reached the object from the first to the last (no
+ * construction, no frame at webSocketMessage); a real event sent a second after them did construct it,
+ * so it had been hibernating. Local workerd only. What a ping costs on a bill is not measured.
  */
 const PING = "ping";
 const PONG = "pong";
@@ -352,7 +361,11 @@ function handshakeKey(): string {
  * "invalid upgrade header", and nothing reaches the server). The cost is one extra request after a failure
  * that has already cost one, and failures are already spaced by the backoff. On Node 25 a refused upgrade
  * costs more than that when the status is 401: its WebSocket sends the request a second time itself
- * (measured: two identical requests for a 401, one for a 409 or a 503; Node 22.16 sends one every time).
+ * (measured: two identical requests for a 401, one for a 409 or a 503; Node 22.16 sends one every time),
+ * so a 401 there is three requests: the upgrade, undici's repeat of it, and this one.
+ *
+ * That is the price of knowing the status, paid on purpose and not a retry that got out of hand: at most
+ * one probe per failed attempt, and never a probe of a probe.
  */
 function probeStatus(
   wsUrl: string,

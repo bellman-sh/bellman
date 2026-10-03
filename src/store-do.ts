@@ -135,6 +135,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * risk. Any frame that is not that text reaches webSocketMessage and is
    * closed, so a client's keepalive has to be exactly that.
    *
+   * The client that sends it is the keepalive in src/room-socket.ts, whose
+   * `PING` has to equal the first literal in the call below (its `PONG` the
+   * second, though it only keeps the reply out of that module's log). These are
+   * literals here and a constant there, and nothing compiles or runs the two
+   * together: the wiring test pins this registration, and the room-socket tests
+   * pin the client's text against a fake that carries its own copy. Change one
+   * side and update only its own test, and every test stays green while the
+   * client is closed 1003 at its first keepalive, which looks like a server-side
+   * drop. Measured with that client at its default cadence: see the comment on
+   * `PING` there.
+   *
    * Where to register was settled against workerd 1.20260926.1 at compat date
    * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
    * left idle for 25 to 30 s so they were evicted. The Worker counted

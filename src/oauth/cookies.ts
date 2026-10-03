@@ -60,17 +60,22 @@ export function clearedSessionCookie(secure: boolean): string {
 }
 
 /**
- * Trims space and tab, the WSP of RFC 6265, rather than String.prototype.trim,
- * which also strips non-breaking and Unicode spaces.
+ * Trims space and tab, all the whitespace that HTTP's optional whitespace (OWS)
+ * and RFC 6265's WSP allow, rather than String.prototype.trim, which also
+ * strips non-breaking and Unicode spaces and the byte-order mark.
  *
- * The difference is a way round `__Host-`. A browser applies that prefix's rules
- * only to a name that starts with it, so `\u2000__Host-bellman_session` is an
- * ordinary name to the browser, outside the rules, and a sibling subdomain can
- * set it with Domain=.bellman.sh. The Workers runtime decodes header bytes as
- * UTF-8, so that space reaches readSessionCookie as a single character, and
- * trim() would hand the name back as exactly ours: the cookie the prefix exists
- * to keep out, selected by whoever set it. Trimming only what the grammar allows
- * leaves such a name as what it is, a cookie we do not read.
+ * The difference matters because a browser applies `__Host-` only to a name
+ * that starts with it, so `\u2000__Host-bellman_session` is outside the
+ * prefix's rules. The Workers runtime decodes header bytes as UTF-8, so that
+ * space reaches readSessionCookie as one character (measured on workerd with
+ * U+2000, U+00A0 and U+FEFF), and trim() would hand the name back as exactly
+ * ours. If a browser will set such a name with Domain=.bellman.sh, that is the
+ * cookie the prefix exists to keep out, selected by whoever set it.
+ *
+ * Whether a browser will is not demonstrated. RFC 6265 gives a cookie name as a
+ * token, which is ASCII, so a conforming browser may refuse the name outright,
+ * and no browser has been tried. The trimming does not wait on the answer: a
+ * name that is not ours once space and tab are set aside is not ours.
  */
 function trimOws(text: string): string {
   return text.replace(/^[ \t]+|[ \t]+$/g, "");
@@ -95,6 +100,11 @@ function trimOws(text: string): string {
  * sign-out and sign-in, because the Set-Cookie for ours cannot overwrite it, so
  * the user stays refused until it expires or they clear it. That is accepted
  * because the alternative lets whoever set the duplicate pick the session.
+ *
+ * Where the browser enforces __Host-, nothing can plant such a duplicate under
+ * the secure name, and trimOws closes the padded-name route, so the refusal is
+ * a backstop there. Over http the name is unprefixed and the lockout is real,
+ * in development only.
  */
 export function readSessionCookie(request: Request, secure: boolean): string | undefined {
   const header = request.headers.get("cookie");

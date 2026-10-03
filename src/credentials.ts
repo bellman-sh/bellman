@@ -252,11 +252,14 @@ export function tokensUsable(tokens: StoredTokens | undefined, now = Date.now())
  * this is not that transport. So it is read from the file each time it is wanted, because every bridge on a
  * machine shares the file and whichever one refreshes writes the new token into it.
  *
- * It does not ask whether the token is still spendable (`tokensUsable`), and that is on purpose. An expired one
- * is refused with a 401, which the room socket reads as "this credential is not accepted" and answers by polling
- * the room through the MCP connection; that call is what refreshes the token, the file changes, and the next
- * attempt carries the new one. Throwing here instead would turn a refusal that is handled at once into a
- * credential that "could not be read", which waits three failures before the room is polled at all.
+ * It does not ask whether the token is still spendable (`tokensUsable`), and that is on purpose. One that has
+ * expired is refused with a 401, which the room socket reads as "this credential is not accepted": it polls the
+ * room through the MCP connection and tries the credential again as soon as it has changed
+ * (tests/room-socket.test.ts). The MCP transport refreshes an expired token on a 401 of its own and writes the new
+ * one to this file (src/signin.ts), so the file is where a fresher token turns up, including one that another
+ * bridge refreshed. That chain is built from those two tested halves and has not been run end to end against a
+ * real expiry. Throwing here instead would turn a refusal that is handled at once into a credential that "could
+ * not be read", which waits three failures before the room is polled at all.
  */
 export function storedAccessToken(dir: string, serverUrl: string): string | undefined {
   const token = readServer(dir, serverUrl).tokens?.access_token;

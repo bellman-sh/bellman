@@ -22,8 +22,9 @@ import { RoomEnded, openRoomSocket, type Poll, type RoomSocket, type RoomSocketT
  *     for that member the way it always has. #43 failing never costs anyone their messages.
  *
  * Nothing here is a dependency. Every way of not getting what was asked for ends in `onFallback` or in a
- * retry that has a limit, and a fallback is final for the member it is for: the caller's own loop is not one
- * that can be handed back to the bus half way, because it has its own cursor and its own request in flight.
+ * retry that has a limit. A fallback is final for the member it is for: the loop the caller starts for it can
+ * only be ended by ending the member, and it may have a request in flight, so it cannot be handed back to the
+ * bus half way.
  */
 
 /** The one tool of the bridge's connection that the link calls. `Remote` (src/bridge.ts) satisfies it. */

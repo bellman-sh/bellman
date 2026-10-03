@@ -1028,10 +1028,11 @@ describe("bellman_start lists the room for its creator", () => {
 });
 
 describe("bellman_confirm lists the room for the member it seats", () => {
-  // The join half of the case above. bellman_confirm is the only production
-  // caller of store.addMember, and the contract proves addMember indexes the
-  // member it is handed — not that the tool hands it the joiner. Nothing else
-  // drives a real join and then reads the listing (#49, D4).
+  // The join half of the case above. bellman_confirm seats through
+  // store.seatMember, the production join. The contract's listing cases join
+  // through addMember, which no tool calls, so none of them shows that the tool's
+  // join lists the room. Nothing else drives a real join and then reads the
+  // listing (#49, D4).
   it("puts the room it just joined in the joiner's listing", async () => {
     const { joiner, sessionId } = await pairUp(h);
 

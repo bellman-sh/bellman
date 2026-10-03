@@ -523,14 +523,31 @@ export function describeStoreContract(
     /**
      * The two halves of one guarantee, and the case that says there is no gap
      * between them: closeSessionIfEmpty will not close an occupied room, and
-     * addMember will not seat anyone in a closed one. Neither is enough alone.
+     * seatMember will not seat anyone in a closed one. Neither is enough alone.
      * With only the first, a join landing after the close seats a member in a
      * room that is over. With only the second, a close that decided on an old
      * roster closes over a member who joined meanwhile.
      *
+     * The join is seatMember because that is the production path, the one
+     * bellman_confirm calls. addMember is the unconditional append and no tool
+     * calls it, so racing that pair would guard a door nobody uses.
+     *
      * Started together, each way round, so whichever lands first wins and the
-     * other has to give way. Exactly one may succeed: both is a closed room with
-     * a member in it, and neither is a join refused by a room that never closed.
+     * other has to give way. Exactly one may succeed, and `refused` says which: it
+     * is null exactly when the member is seated. Both is a closed room with a
+     * member in it. Neither is a join refused by a room that never closed, so a
+     * join that loses has to have lost to the close and not to some other refusal.
+     *
+     * Under vitest-pool-workers this case is reliable only because SessionDO makes
+     * each half one transaction. Two plain reads and puts started together lose an
+     * update there in about 1% of rounds (#120), which real workerd has not shown
+     * (none in 24,000 rounds under `wrangler dev`, and its documentation says the
+     * input gate prevents it). That is the pool failing to be workerd and not a bug
+     * in production, and the transaction is what makes the case independent of it.
+     * The case keeps its power where it matters: a facade that read the room and
+     * then closed it, outside the object, fails every close-first round.
+     * worker-tests/session-close-join-race.test.ts holds each half open to pin the
+     * transaction itself.
      */
     it.each([
       { first: "close", second: "join" },
@@ -540,16 +557,24 @@ export function describeStoreContract(
       (await store.createSession(s));
       const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
       const close = () => store.closeSessionIfEmpty(s.id);
-      const join = () => store.addMember(s.id, joiner);
+      // Nobody is stale and nobody is active, so nothing is reclaimed either way.
+      const join = () => store.seatMember(s.id, joiner, 0, Date.now());
 
-      const [a, b] = await Promise.all(first === "close" ? [close(), join()] : [join(), close()]);
-      const closed = first === "close" ? a : b;
-      const joined = first === "close" ? b : a;
+      // Property order is call order: whichever is named first is started first.
+      const started = first === "close"
+        ? { closing: close(), seating: join() }
+        : { seating: join(), closing: close() };
+      const [closed, outcome] = await Promise.all([started.closing, started.seating]);
+      const seated = outcome.refused === null;
 
       const after = (await store.getSession(s.id))!;
-      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(joined);
+      expect(closed, "a close and a join both succeeded, or neither did").not.toBe(seated);
       expect(after.closed).toBe(closed);
-      expect(after.members.some((m) => m.memberId === "m_late")).toBe(joined);
+      expect(after.members.some((m) => m.memberId === "m_late")).toBe(seated);
+      // A join that lost, lost to the close. "full" or "frozen" here would be another
+      // bug, which the checks above could not tell from losing the race.
+      if (!seated) expect(outcome.refused).toBe("closed");
+      expect(outcome.reclaimed).toEqual([]);
     });
 
     // --------------------------------------------------------------- freezing

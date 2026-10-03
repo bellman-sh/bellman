@@ -174,6 +174,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * A mutator reads through its own transaction, so the check and the write it
    * guards are one unit rather than two that rely on nothing getting between them.
+   * That makes explicit what the input gate gives implicitly. The gate holds other
+   * calls off only while a storage operation is outstanding, so a read and then a
+   * put is atomic as long as every await between them is storage, and nothing in
+   * the code says so. The transaction does, and it keeps holding if a later edit
+   * puts an await on anything else in between (a fetch, a timer), the one case the
+   * gate does not cover; AuditDO.append gives the same reason. That is a net under a
+   * mistake and not a licence for one: the closure holds every other call to this
+   * object until it commits (docs/ARCHITECTURE.md section 9, runtime fact 2), so
+   * what goes inside it is storage and nothing slower.
+   * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
+   *
+   * Not every mutator has been converted. updateMember, closeSession, freezeSession,
+   * appendEvent and appendEventOnce still read and then put. They are unconverted,
+   * not exempt: the input gate covers them in production, since every await between
+   * their read and their write is storage, and the transaction is the stronger form.
+   * appendEventOnce's own comment records what the local test pool has done to it.
    */
   private async stored(
     from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
@@ -495,50 +511,66 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return set;
   }
 
+  /**
+   * Append a member, refused only when the room is missing, frozen or closed. No
+   * capacity check and no reclaiming. No tool calls it: the production join is
+   * seatMember, which makes the same refusals and also allocates the seat. It stays
+   * for the contract suite and for a caller that is not allocating one, as
+   * BellmanStore.seatMember says.
+   *
+   * One transaction, for the reason stored() gives. Closed is the other half of
+   * closeSessionIfEmpty, as it is in seatMember: that keeps a close from landing on
+   * an occupied room, and this keeps a join from landing on a closed one.
+   */
   async addMember(member: Member): Promise<boolean> {
-    const s = await this.stored();
-    if (!s) return false;
-    // Inside the object, so nothing can freeze or close between this read and the
-    // write. Closed is the other half of closeSessionIfEmpty: that keeps a close
-    // from landing on an occupied room, and this keeps a join from landing on a
-    // closed one.
-    if (s.frozenAt !== null) return false;
-    if (s.closed) return false;
-    await this.ctx.storage.put("session", { ...s, members: [...s.members, member] });
-    return true;
+    return this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return false;
+      if (s.frozenAt !== null) return false;
+      if (s.closed) return false;
+      await txn.put("session", { ...s, members: [...s.members, member] });
+      return true;
+    });
   }
 
   /**
-   * Reclaim stale seats and seat the member, in one invocation.
+   * Reclaim stale seats and seat the member, as one transaction. This is the
+   * production join (bellman_confirm), and the other half of closeSessionIfEmpty:
+   * that keeps a close from landing on an occupied room, and the closed refusal here
+   * keeps a join from landing on a closed one. Neither is enough alone, and the pair
+   * is atomic only if each is one unit.
    *
-   * Every await below is a storage operation, and workerd's input gate delivers
-   * no other request to this object while one is outstanding — so no confirm,
-   * sync or freeze can land between the decision and the write. That is the
-   * guarantee `closeSessionIfEmpty` relies on, for the same reason: a caller
-   * that read the roster, chose a victim and then wrote would be handed exactly
-   * the window two concurrent joiners need to overfill the room.
+   * The decision and the write are one unit for the other callers too: no confirm,
+   * sync or freeze can land between them. A caller that read the roster, chose a
+   * victim and then wrote would be handed exactly the window two concurrent joiners
+   * need to overfill the room. See stored() for what a transaction adds to the input
+   * gate's hold on a read and then a put.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
-    const s = await this.stored();
-    if (!s) return { refused: "not_found", reclaimed: [] };
-    if (s.closed) return { refused: "closed", reclaimed: [] };
-    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+    return this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { refused: "not_found", reclaimed: [] };
+      if (s.closed) return { refused: "closed", reclaimed: [] };
+      if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
 
-    const victims = seatVictims(s.members, s.maxMembers, staleBefore);
-    if (victims === null) return { refused: "full", reclaimed: [] };
+      const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+      if (victims === null) return { refused: "full", reclaimed: [] };
 
-    const departed = new Set(victims.map((v) => v.memberId));
-    const reclaimed: Member[] = [];
-    const members = s.members.map((m) => {
-      if (!departed.has(m.memberId)) return m;
-      const next = { ...m, leftAt: now };
-      reclaimed.push(next);
-      return next;
+      const departed = new Set(victims.map((v) => v.memberId));
+      const reclaimed: Member[] = [];
+      const members = s.members.map((m) => {
+        if (!departed.has(m.memberId)) return m;
+        const next = { ...m, leftAt: now };
+        reclaimed.push(next);
+        return next;
+      });
+      await txn.put("session", { ...s, members: [...members, member] });
+      return { refused: null, reclaimed };
     });
-    await this.ctx.storage.put("session", { ...s, members: [...members, member] });
-    return { refused: null, reclaimed };
   }
 
+  // updateMember, closeSession and freezeSession below, and appendEvent and appendEventOnce
+  // after them, still read and then put. Unconverted, not exempt: see stored().
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
     const s = await this.stored();
     if (!s) return;
@@ -564,12 +596,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Close the room unless somebody is still in it, and say whether it is closed
    * when this returns: true when this call closed it or it already was.
    *
-   * One invocation, and that is the point. Every await below is a storage
-   * operation, and workerd's input gate delivers no other request to this object
-   * while one is outstanding, so nothing can join between the check and the
-   * write. A caller that read the roster itself and then called closeSession
-   * would have handed the object exactly that gap. addMember's refusal of a
-   * closed room is the other half of the same guarantee.
+   * The check and the write are one transaction, and that is the point. A caller
+   * that read the roster itself and then called closeSession would have handed a
+   * join the gap between them, and so would a check and a write that merely follow
+   * one another here, the day an await on something other than storage lands between
+   * them (see stored()). seatMember's refusal of a closed room is the other half of
+   * the same guarantee, as addMember's is: this keeps a close from landing on an
+   * occupied room, those keep a join from landing on a closed one, and neither is
+   * enough alone.
    *
    * Marks the room closed and nothing else. The join codes stay in the record
    * for the facade to retire, because it is the one holding the registry handle:
@@ -577,12 +611,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * between finds them still listed and finishes the job.
    */
   async closeSessionIfEmpty(): Promise<boolean> {
-    const s = await this.stored();
-    if (!s) return false;
-    if (s.closed) return true;
-    if (s.members.some(isActiveMember)) return false;
-    await this.ctx.storage.put("session", { ...s, closed: true });
-    return true;
+    return this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return false;
+      if (s.closed) return true;
+      if (s.members.some(isActiveMember)) return false;
+      await txn.put("session", { ...s, closed: true });
+      return true;
+    });
   }
 
   async freezeSession(frozenAt: number | null): Promise<void> {
@@ -1553,7 +1589,7 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
-    // The decision is SessionDO's, made in one invocation. What follows it is
+    // The decision is SessionDO's, made in one transaction. What follows it is
     // cleanup in a second object, with no transaction spanning the two (the gap
     // docs/ARCHITECTURE.md section 9 describes). A Worker that dies between them
     // leaves a stale registry row and not an open door: getSessionByJoinCode

@@ -7,11 +7,14 @@
  * hand-written implementations of one interface are exactly where behaviour
  * drifts. So each store-level test in tests/panel-session.test.ts has a twin
  * here, against the real object, and a change to one is a change to the other.
- * Its tests of the pure functions (sessionDead, replannedAt) have none: the
- * object calls the first rather than copying it, which the boundary twins below
- * hold it to, and never sees the second. The sweep exists only in the object and
- * is covered only here, and some tests here read storage, which the in-memory
- * store does not expose.
+ * Its tests of the pure functions (sessionDead, replannedAt) have none. The
+ * object calls sessionDead rather than copying it, and the twins below hold it
+ * to that only as far as they reach: both limits, and a NaN last_used_at. A copy
+ * written as the negation of the two limits would pass them without sessionDead's
+ * finiteness guards, because NaN fails closed in that form; Infinity and the
+ * other non-finite values are pinned on the function itself, in Node. The sweep
+ * exists only in the object and is covered only here, and some tests here read
+ * storage or count writes, which the in-memory store does not expose.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";

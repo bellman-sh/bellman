@@ -57,6 +57,69 @@ export interface RefreshToken {
   expires_at: number;
 }
 
+/**
+ * A browser session for the control panel.
+ *
+ * Opaque rather than signed, because `POST /auth/signout` has to invalidate.
+ * Access tokens are signed and unrevocable, and a 10-minute lifetime is what
+ * makes that acceptable on /mcp; a page rendering billing and provider keys
+ * does not get the same deal.
+ */
+export interface PanelSession {
+  identity: Identity;
+  /** Where the plan came from, for /account. Same field the token path carries. */
+  plan_source: string;
+  /** Upstream keys this human resolves under, so the plan can be re-resolved. */
+  identity_keys: string[];
+  created_at: number;
+  last_used_at: number;
+  /** When the plan was last re-resolved. See replannedAt for absent. */
+  replanned_at: number;
+  expires_at: number;
+}
+
+/** The hard ceiling. Deliberately well short of REFRESH_TOKEN_TTL_MS. */
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/** How long a session survives without being used. */
+export const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+/**
+ * How stale last_used_at gets before touchSession writes it back.
+ *
+ * Far below SESSION_IDLE_MS on purpose, and the margin is the correctness
+ * argument: a session in continuous use carries a last_used_at at most this
+ * stale, which the idle test then compares against a window 24 times larger.
+ * Skipping the write cannot bring a live session inside the window.
+ */
+export const SESSION_TOUCH_MS = 60 * 60 * 1000;
+
+/**
+ * Whether a session has ended — past its ceiling, or idle too long.
+ *
+ * One predicate for the same reason hasLapsed is one: a read and a sweep that
+ * each decide separately will eventually disagree, and the shape that bug takes
+ * is a session still usable because no purge has run yet.
+ */
+export function sessionDead(
+  s: Pick<PanelSession, "last_used_at" | "expires_at">,
+  now: number
+): boolean {
+  return now > s.expires_at || now > s.last_used_at + SESSION_IDLE_MS;
+}
+
+/**
+ * When this session's plan was last re-resolved, treating absent as never.
+ *
+ * A record written before this field existed has none, and `now - undefined` is
+ * NaN — which fails every comparison, so a staleness check can read as "not
+ * stale" and the plan would never be re-resolved again for the life of the
+ * session. A revoked grant would hold, silently. Zero forces a re-resolve on
+ * the next request, which is the safe direction. Same hazard
+ * storedIdentityKeys exists for on the refresh path.
+ */
+export function replannedAt(s: PanelSession): number {
+  return typeof s.replanned_at === "number" ? s.replanned_at : 0;
+}
+
 /** Why a registration was refused, or that it was taken. */
 export type Admission = "ok" | "rate_limited" | "full";
 
@@ -296,6 +359,7 @@ export class MemoryAuthStore implements AuthStorage {
   private codes = new Map<string, AuthCode>();
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
+  private sessions = new Map<string, PanelSession>();
   /** Set after a purge that reclaimed nothing; see purgeDue. */
   private purgeIdleUntil: number | undefined;
 
@@ -423,5 +487,33 @@ export class MemoryAuthStore implements AuthStorage {
     if (!value) return undefined;
     this.refreshes.delete(token);
     return Date.now() > value.expires_at ? undefined : value;
+  }
+
+  async putSession(id: string, value: PanelSession): Promise<void> {
+    this.sessions.set(id, value);
+  }
+
+  /**
+   * Synchronous throughout, like admitRegistration and for the same reason: an
+   * await between the read and the write is the window this method exists to
+   * close.
+   */
+  async touchSession(id: string, now: number): Promise<PanelSession | undefined> {
+    const stored = this.sessions.get(id);
+    if (!stored) return undefined;
+    if (sessionDead(stored, now)) {
+      this.sessions.delete(id);
+      return undefined;
+    }
+    // Skipped while the stored value is fresh enough. See SESSION_TOUCH_MS:
+    // a panel that polls would otherwise write on every single request.
+    if (now - stored.last_used_at <= SESSION_TOUCH_MS) return stored;
+    const touched: PanelSession = { ...stored, last_used_at: now };
+    this.sessions.set(id, touched);
+    return touched;
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    this.sessions.delete(id);
   }
 }

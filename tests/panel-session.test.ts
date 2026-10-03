@@ -1,0 +1,168 @@
+import { describe, expect, it } from "vitest";
+import {
+  MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
+  sessionDead, type PanelSession,
+} from "../src/oauth/storage.js";
+import type { Identity } from "../src/types.js";
+
+const IDENTITY: Identity = {
+  userId: "u_github_4242",
+  orgId: null,
+  plan: "free",
+  role: "member",
+  label: "jesse@example.dev",
+};
+
+const T0 = 1_700_000_000_000;
+
+function panelSession(over: Partial<PanelSession> = {}): PanelSession {
+  return {
+    identity: IDENTITY,
+    plan_source: "default",
+    identity_keys: ["github:4242"],
+    created_at: T0,
+    last_used_at: T0,
+    replanned_at: T0,
+    expires_at: T0 + SESSION_TTL_MS,
+    ...over,
+  };
+}
+
+describe("sessionDead", () => {
+  it("is alive when fresh", () => {
+    expect(sessionDead(panelSession(), T0)).toBe(false);
+  });
+
+  it("is dead past the ceiling, even if just used", () => {
+    const s = panelSession({ last_used_at: T0 + SESSION_TTL_MS + 1 });
+    expect(sessionDead(s, T0 + SESSION_TTL_MS + 1)).toBe(true);
+  });
+
+  it("is dead when idle past the window, with the ceiling still ahead", () => {
+    const now = T0 + SESSION_IDLE_MS + 1;
+    expect(now).toBeLessThan(panelSession().expires_at);
+    expect(sessionDead(panelSession(), now)).toBe(true);
+  });
+
+  it("is alive exactly at the idle boundary", () => {
+    expect(sessionDead(panelSession(), T0 + SESSION_IDLE_MS)).toBe(false);
+  });
+
+  // Pins the ceiling as inclusive: dead strictly past expires_at, not at it.
+  // last_used_at is moved up to the ceiling so the idle clause is false and the
+  // ceiling comparison is the only thing deciding; left at T0 the session would
+  // already be idle by then.
+  it("is alive exactly at the ceiling", () => {
+    const s = panelSession({ last_used_at: T0 + SESSION_TTL_MS });
+    expect(sessionDead(s, T0 + SESSION_TTL_MS)).toBe(false);
+  });
+});
+
+describe("MemoryAuthStore sessions", () => {
+  it("stores and returns a session", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+
+    expect((await store.touchSession("sid", T0))?.identity.userId).toBe("u_github_4242");
+  });
+
+  it("returns undefined for an unknown id", async () => {
+    expect(await new MemoryAuthStore().touchSession("nope", T0)).toBeUndefined();
+  });
+
+  it("refuses a session past its ceiling", async () => {
+    const store = new MemoryAuthStore();
+    const now = T0 + SESSION_TTL_MS + 1;
+    await store.putSession("sid", panelSession({ last_used_at: now }));
+
+    expect(await store.touchSession("sid", now)).toBeUndefined();
+  });
+
+  it("refuses a session idle past the window", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+
+    expect(await store.touchSession("sid", T0 + SESSION_IDLE_MS + 1)).toBeUndefined();
+  });
+
+  it("drops a dead session rather than leaving it to a sweep", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    await store.touchSession("sid", T0 + SESSION_IDLE_MS + 1);
+
+    // Dead is terminal: moving the clock back must not revive it.
+    expect(await store.touchSession("sid", T0)).toBeUndefined();
+  });
+
+  it("deleteSession makes the next touch a miss", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    await store.deleteSession("sid");
+
+    expect(await store.touchSession("sid", T0)).toBeUndefined();
+  });
+
+  it("deleteSession is idempotent", async () => {
+    const store = new MemoryAuthStore();
+    await expect(store.deleteSession("never-existed")).resolves.toBeUndefined();
+  });
+
+  it("skips the write while last_used_at is fresher than SESSION_TOUCH_MS", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+
+    const touched = await store.touchSession("sid", T0 + SESSION_TOUCH_MS - 1);
+
+    expect(touched?.last_used_at).toBe(T0);
+  });
+
+  // Pins the touch threshold at <=, not <: a value exactly SESSION_TOUCH_MS
+  // stale is still fresh enough to skip the write.
+  it("skips the write at exactly SESSION_TOUCH_MS", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+
+    const touched = await store.touchSession("sid", T0 + SESSION_TOUCH_MS);
+
+    expect(touched?.last_used_at).toBe(T0);
+  });
+
+  it("writes last_used_at once it is staler than SESSION_TOUCH_MS", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    const now = T0 + SESSION_TOUCH_MS + 1;
+
+    expect((await store.touchSession("sid", now))?.last_used_at).toBe(now);
+  });
+
+  // Touched again inside the window of the value just written, so only a stored
+  // write can produce `now`. Asked again at the same instant, a store that
+  // returned the write without keeping it would answer identically: stale
+  // again, so it writes again.
+  it("persists the last_used_at it writes", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    const now = T0 + SESSION_TOUCH_MS + 1;
+    await store.touchSession("sid", now);
+
+    const later = await store.touchSession("sid", now + SESSION_TOUCH_MS - 1);
+
+    expect(later?.last_used_at).toBe(now);
+  });
+
+  /**
+   * The assertion the SESSION_TOUCH_MS optimisation exists to be checked by.
+   * Writing only hourly looks as though it could let an active session fall
+   * outside a 24-hour idle window; it cannot, and this is the proof.
+   */
+  it("does not expire a session used continuously for longer than the idle window", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+
+    // A request every 30 minutes for three days.
+    const step = 30 * 60 * 1000;
+    for (let now = T0; now < T0 + 3 * SESSION_IDLE_MS; now += step) {
+      expect(await store.touchSession("sid", now), `dead at +${now - T0}ms`).toBeDefined();
+    }
+  });
+});

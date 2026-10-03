@@ -265,3 +265,262 @@ describe("reading, further", () => {
     expect(performance.now() - started).toBeLessThan(500);
   }, 60_000);
 });
+
+// ---------------------------------------------------------------------------
+// Task 5: the origin allowlist, CORS, the CSRF rule, and the config parser.
+// ---------------------------------------------------------------------------
+
+import {
+  allowedOrigin, corsHeaders, csrfRefusal, parsePanelOrigins, preflightResponse,
+} from "../src/oauth/browser.js";
+
+const PANEL = "https://dash.example.test";
+const ORIGINS = [PANEL];
+
+const from = (origin: string | undefined, method = "GET") =>
+  new Request("https://mcp.example.test/auth/session", {
+    method,
+    headers: origin === undefined ? {} : { origin },
+  });
+
+describe("the origin allowlist", () => {
+  it("admits a configured origin", () => {
+    expect(allowedOrigin(from(PANEL), ORIGINS)).toBe(PANEL);
+  });
+
+  it("refuses an origin that is not configured", () => {
+    expect(allowedOrigin(from("https://evil.example"), ORIGINS)).toBeUndefined();
+  });
+
+  it("refuses an origin that merely starts with a configured one", () => {
+    expect(allowedOrigin(from(`${PANEL}.evil.example`), ORIGINS)).toBeUndefined();
+  });
+
+  it("refuses a configured origin that merely starts with the request's", () => {
+    // The other direction of the same mistake: an endsWith or includes test.
+    expect(allowedOrigin(from("https://dash.example"), ORIGINS)).toBeUndefined();
+  });
+
+  it("refuses a different scheme on the same host", () => {
+    expect(allowedOrigin(from("http://dash.example.test"), ORIGINS)).toBeUndefined();
+  });
+
+  it("refuses a different port on the same host", () => {
+    expect(allowedOrigin(from("https://dash.example.test:8443"), ORIGINS)).toBeUndefined();
+  });
+
+  it("returns undefined when no Origin was sent", () => {
+    expect(allowedOrigin(from(undefined), ORIGINS)).toBeUndefined();
+  });
+
+  // Review Focus 4 — the literal string "null".
+  it('refuses the literal origin "null"', () => {
+    expect(allowedOrigin(from("null"), ORIGINS)).toBeUndefined();
+  });
+
+  it('refuses "null" even when it appears in the allowlist', () => {
+    expect(allowedOrigin(from("null"), ["null", PANEL])).toBeUndefined();
+  });
+
+  // Review Focus 3 — a deploy that forgot the var must fail closed.
+  it("admits nothing when the allowlist is undefined", () => {
+    expect(allowedOrigin(from(PANEL), undefined)).toBeUndefined();
+  });
+
+  it("admits nothing when the allowlist is empty", () => {
+    expect(allowedOrigin(from(PANEL), [])).toBeUndefined();
+  });
+
+  it("admits the second entry, not only the first", () => {
+    // A `=== panelOrigins[0]` implementation passes every test above.
+    expect(allowedOrigin(from(PANEL), ["https://other.example", PANEL])).toBe(PANEL);
+  });
+});
+
+describe("CORS headers", () => {
+  it("echoes the allowlisted origin and allows credentials", () => {
+    const headers = corsHeaders(PANEL);
+
+    expect(headers["access-control-allow-origin"]).toBe(PANEL);
+    expect(headers["access-control-allow-credentials"]).toBe("true");
+  });
+
+  it("never answers with a wildcard", () => {
+    expect(Object.values(corsHeaders(PANEL))).not.toContain("*");
+  });
+
+  it("always varies on Origin, so a cache cannot cross-serve", () => {
+    expect(corsHeaders(PANEL).vary).toBe("Origin");
+  });
+
+  it("emits no allow-origin at all for an origin that is not allowlisted", () => {
+    const headers = corsHeaders(undefined);
+
+    expect(headers["access-control-allow-origin"]).toBeUndefined();
+    expect(headers["access-control-allow-credentials"]).toBeUndefined();
+    // Vary still, or a cached no-CORS response is served to the panel.
+    expect(headers.vary).toBe("Origin");
+  });
+});
+
+describe("preflight", () => {
+  it("answers 204 with methods, headers and a max age", async () => {
+    const res = preflightResponse(PANEL);
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(res.headers.get("access-control-allow-headers")).toBe("content-type");
+    expect(Number(res.headers.get("access-control-max-age"))).toBeGreaterThan(0);
+    expect(await res.text()).toBe("");
+  });
+
+  it("allows DELETE, which /admin/grants uses", () => {
+    expect(preflightResponse(PANEL).headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+
+  it("answers 204 with no CORS grant for a stranger, and no methods either", () => {
+    const res = preflightResponse(undefined);
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    // Not just the grant: a stranger learns nothing about what is allowed.
+    expect(res.headers.get("access-control-allow-methods")).toBeNull();
+    expect(res.headers.get("access-control-max-age")).toBeNull();
+    expect(res.headers.get("vary")).toBe("Origin");
+  });
+});
+
+describe("the CSRF rule", () => {
+  it("lets a cookie GET through without an Origin", () => {
+    expect(csrfRefusal(from(undefined, "GET"), "cookie", undefined)).toBeUndefined();
+  });
+
+  it("lets a cookie HEAD through", () => {
+    expect(csrfRefusal(from(undefined, "HEAD"), "cookie", undefined)).toBeUndefined();
+  });
+
+  it("lets a cookie OPTIONS through", () => {
+    expect(csrfRefusal(from(undefined, "OPTIONS"), "cookie", undefined)).toBeUndefined();
+  });
+
+  it("refuses a cookie POST with no Origin", () => {
+    expect(csrfRefusal(from(undefined, "POST"), "cookie", undefined)?.status).toBe(403);
+  });
+
+  it("refuses a cookie POST whose Origin was off the list", () => {
+    // allowedOrigin already turned the off-list header into undefined.
+    expect(csrfRefusal(from("https://evil.example", "POST"), "cookie", undefined)?.status).toBe(403);
+  });
+
+  it("lets a cookie POST from the panel through", () => {
+    expect(csrfRefusal(from(PANEL, "POST"), "cookie", PANEL)).toBeUndefined();
+  });
+
+  it("refuses a cookie DELETE with no Origin, not only POST", () => {
+    expect(csrfRefusal(from(undefined, "DELETE"), "cookie", undefined)?.status).toBe(403);
+  });
+
+  it("refuses a cookie PUT with no Origin", () => {
+    // A SAFE_METHODS set written as a negation of ["POST","DELETE"] passes
+    // every other test here.
+    expect(csrfRefusal(from(undefined, "PUT"), "cookie", undefined)?.status).toBe(403);
+  });
+
+  it("refuses a lowercase cookie post with no Origin", () => {
+    const req = new Request("https://mcp.example.test/auth/signout", { method: "post" });
+    // fetch normalises the common methods to upper case; this pins that the
+    // check reads request.method rather than a string the caller supplied.
+    expect(csrfRefusal(req, "cookie", undefined)?.status).toBe(403);
+  });
+
+  it("says why, in a body the panel can show", async () => {
+    const res = csrfRefusal(from(undefined, "POST"), "cookie", undefined)!;
+    const body = (await res.json()) as { error: string; error_description: string };
+
+    expect(body.error).toBe("invalid_request");
+    expect(body.error_description).toContain("Origin");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  // The exemption, asserted rather than left to the order of the checks.
+  it("lets a bearer POST through with no Origin at all", () => {
+    expect(csrfRefusal(from(undefined, "POST"), "bearer", undefined)).toBeUndefined();
+  });
+
+  it("lets a bearer POST through from an origin off the list", () => {
+    expect(csrfRefusal(from("https://evil.example", "POST"), "bearer", undefined)).toBeUndefined();
+  });
+
+  it("lets a bearer DELETE through with no Origin", () => {
+    expect(csrfRefusal(from(undefined, "DELETE"), "bearer", undefined)).toBeUndefined();
+  });
+});
+
+describe("parsing BELLMAN_PANEL_ORIGINS", () => {
+  it("reads one origin", () => {
+    expect(parsePanelOrigins("https://dash.bellman.sh")).toEqual(["https://dash.bellman.sh"]);
+  });
+
+  it("reads several, comma-separated, and trims them", () => {
+    expect(parsePanelOrigins("https://dash.bellman.sh, https://dash.staging.bellman.sh"))
+      .toEqual(["https://dash.bellman.sh", "https://dash.staging.bellman.sh"]);
+  });
+
+  it("keeps the configured order", () => {
+    expect(parsePanelOrigins("https://b.example, https://a.example"))
+      .toEqual(["https://b.example", "https://a.example"]);
+  });
+
+  it("is empty when the var is unset", () => {
+    expect(parsePanelOrigins(undefined)).toEqual([]);
+  });
+
+  it("is empty for an empty or whitespace-only var", () => {
+    expect(parsePanelOrigins("")).toEqual([]);
+    expect(parsePanelOrigins("   ")).toEqual([]);
+  });
+
+  it("drops entries that are not absolute http(s) origins, keeping the rest", () => {
+    expect(parsePanelOrigins("https://ok.example, not-a-url, javascript:x, /relative"))
+      .toEqual(["https://ok.example"]);
+  });
+
+  it("drops a javascript: entry specifically, whose origin is the string null", () => {
+    expect(parsePanelOrigins("javascript:alert(1)")).toEqual([]);
+  });
+
+  it("normalises a trailing slash away", () => {
+    // The Origin header never carries a path or a trailing slash, so an entry
+    // that does would match nothing and the panel would fail to sign in with
+    // nothing anywhere saying why.
+    expect(parsePanelOrigins("https://dash.bellman.sh/")).toEqual(["https://dash.bellman.sh"]);
+  });
+
+  it("reduces an entry with a path to its origin", () => {
+    expect(parsePanelOrigins("https://dash.bellman.sh/panel")).toEqual(["https://dash.bellman.sh"]);
+  });
+
+  it("keeps a non-default port, which is part of the origin", () => {
+    expect(parsePanelOrigins("https://dash.bellman.sh:8443")).toEqual(["https://dash.bellman.sh:8443"]);
+  });
+
+  it("de-duplicates", () => {
+    expect(parsePanelOrigins("https://a.example, https://a.example/")).toEqual(["https://a.example"]);
+  });
+
+  it("accepts http, for wrangler dev on localhost", () => {
+    expect(parsePanelOrigins("http://localhost:5173")).toEqual(["http://localhost:5173"]);
+  });
+
+  it("round-trips through allowedOrigin", () => {
+    // The two halves have to agree about what an origin looks like: the parser
+    // normalises and the allowlist compares exactly, so a mismatch between them
+    // is a panel that cannot sign in. Neither unit test alone sees that.
+    const origins = parsePanelOrigins("https://dash.bellman.sh/, https://other.example/x");
+
+    expect(allowedOrigin(from("https://dash.bellman.sh"), origins)).toBe("https://dash.bellman.sh");
+    expect(allowedOrigin(from("https://other.example"), origins)).toBe("https://other.example");
+  });
+});

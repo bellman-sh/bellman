@@ -35,6 +35,15 @@ export interface OAuthConfig {
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
   /**
+   * Origins the control panel is served from, e.g. ["https://dash.bellman.sh"].
+   *
+   * Absent or empty means no browser may hold a session: see allowedOrigin.
+   * Browser authentication is a capability this list grants, not a default the
+   * list restricts. Optional so that the Worker program keeps compiling between
+   * here and Task 10, which is where the value arrives.
+   */
+  panelOrigins?: string[];
+  /**
    * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
    * /upgrade/<name> signs the human in and sends them to the link tagged with
    * their user id, which is how the webhook knows whose plan to change.

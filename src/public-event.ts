@@ -1,3 +1,4 @@
+import { isAmbient } from "./attention.js";
 import type { SessionEvent } from "./types.js";
 
 // Deliberately in neither server.ts nor store-do.ts. store-do.ts imports
@@ -29,5 +30,8 @@ export function publicEvent(e: SessionEvent) {
     payload: e.payload,
     ref_id: e.refId,
     at: new Date(e.at).toISOString(),
+    // Only when true. Omission costs nothing for the twelve types that predate
+    // #111, and a client that has never heard of `progress` keeps working.
+    ...(isAmbient(e.type) ? { ambient: true as const } : {}),
   };
 }

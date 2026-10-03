@@ -55,6 +55,29 @@ describe("publicEvent", () => {
     expect(shown.from).toEqual({ member_id: "system", label: "bellman" });
     expect(shown.type).toBe("session_expired");
   });
+
+  const base = {
+    cursor: 7,
+    fromMemberId: "m_a",
+    fromUserId: "u_jesse",
+    fromLabel: "jesse@codenerd",
+    payload: { note: "ran migration 0042" },
+    refId: null,
+    at: 1_773_000_000_000,
+  };
+
+  it("omits ambient for an interrupting event", () => {
+    const out = publicEvent({ ...base, type: "message" });
+    expect("ambient" in out).toBe(false);
+  });
+
+  it("marks an ambient event, so a client need not know the type list", () => {
+    expect(publicEvent({ ...base, type: "progress" })).toMatchObject({ ambient: true });
+  });
+
+  it("never leaks fromUserId", () => {
+    expect("fromUserId" in publicEvent({ ...base, type: "progress" })).toBe(false);
+  });
 });
 
 describe("the poll and the socket share one shape", () => {

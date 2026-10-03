@@ -58,7 +58,11 @@ export type EventType =
   | "brief_update"
   | "invite_issued"
   | "invite_revoked"
-  | "session_expired";
+  | "session_expired"
+  /** The server's tick, on the room's cadence. Never sent by a member (#111). */
+  | "heartbeat"
+  /** A member's answer to a tick. */
+  | "progress";
 
 export interface SessionEvent {
   cursor: number;

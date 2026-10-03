@@ -168,12 +168,13 @@ export class BusUnavailableError extends Error {
  * terminator. The tempting failure is an error, and what Node does depends on its
  * version. Node 22.16 on macOS does not refuse a longer path, it truncates it
  * (measured), and the hash is the last part of ours, so two identities whose paths
- * differ only past the cut are handed one socket. Current Node documentation says it
- * throws instead. This guard sits in front of both: a path that is too long never
- * reaches Node. tests/bus.test.ts carries the measurement as a control, so on whatever
- * platform and Node the tests run this number is checked against what that Node does
- * and not just against me. Only macOS on Node 22.16 has been run: the Linux figure is
- * the documented one.
+ * differ only past the cut are handed one socket. Node 25.8 on the same machine
+ * refuses it with EINVAL (measured), and current Node documentation says it throws.
+ * This guard sits in front of both: a path that is too long never reaches Node.
+ * tests/bus.test.ts carries the measurement as a control, so on whatever platform and
+ * Node the tests run this number is checked against what that Node does and not just
+ * against me. Only macOS has been run, on those two versions: the Linux figure is the
+ * documented one.
  *
  * Platforms known to share Linux's limit get 107; anything else gets the smaller BSD
  * figure, because a limit too small costs a fallback to polling and one too large
@@ -222,7 +223,9 @@ type Probe =
 
 /**
  * Is anyone there? Connectability is the whole liveness test: no pid in a file, no
- * `kill(pid, 0)`, no clock, no pid reuse.
+ * `kill(pid, 0)`, no clock, no pid reuse. It tells a dead coordinator from a live one
+ * and nothing more: a coordinator that is stopped and not dead still accepts the
+ * connection and then serves nothing (measured with SIGSTOP), and nothing here notices.
  */
 function probe(path: string): Promise<Probe> {
   return new Promise((resolve) => {
@@ -279,8 +282,8 @@ function sameFile(a: FileId, b: FileId): boolean {
  * synchronous calls below, and it does not close it. Nothing short of a lock can,
  * and D8 rules out a lock. What is left costs a second coordinator for one
  * identity (the collapse is partly lost until one exits) and never an event. It does
- * happen: once in 40 trials of eight real processes racing at one stale path, on
- * macOS, and in none of 40 at an empty one.
+ * happen: eight real processes racing at one stale path, on macOS, elected two
+ * coordinators in 1 of 160 trials, and in none of 80 at an empty one.
  */
 function removeStale(path: string, tested: FileId | undefined): "removed" | "gone" | "replaced" {
   const now = identify(path);

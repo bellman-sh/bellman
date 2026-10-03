@@ -61,7 +61,7 @@ Three new source files rather than growing `routes.ts`, which is already 997 lin
 
 ### Task 1: The session record, its predicate, and the in-memory store
 
-> The committed implementation diverges from the code blocks below. Commits `2e4fc68`, `c61e3be`, `a22c64a` and `6436419` are authoritative; the blocks record what was originally asked for.
+> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `2e4fc68`, `c61e3be`, `a22c64a`, `6436419`, `b568ad7`. The blocks record what was originally asked for, which is why they are kept rather than rewritten. Commits that edit this plan itself (`0477237`, `9ee8742`, `a2d5f06`, `0a0ee61`) are not listed — they change the blocks, they do not supersede them.
 
 **Files:**
 - Modify: `src/oauth/storage.ts` (add alongside `RefreshToken` and `hasLapsed`)

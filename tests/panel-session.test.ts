@@ -5,16 +5,23 @@ import {
 } from "../src/oauth/storage.js";
 import type { Identity } from "../src/types.js";
 
-const IDENTITY: Identity = {
+// The identities are frozen. MemoryAuthStore keeps the objects it is given, so a
+// method that changed a nested identity in place would change a shared constant,
+// and with it every expectation built from the same constant: the stored record
+// and its expectation would still be one object, and would still agree. A write
+// to a frozen object throws, in a module, where on an unfrozen one it passes.
+const IDENTITY: Identity = Object.freeze({
   userId: "u_github_4242",
   orgId: null,
   plan: "free",
   role: "member",
   label: "jesse@example.dev",
-};
-const REPLANNED: Identity = { ...IDENTITY, plan: "pro" };
+});
+const REPLANNED: Identity = Object.freeze({ ...IDENTITY, plan: "pro" });
 /** Someone else, for the sessions a method has no business touching. */
-const OTHER: Identity = { ...IDENTITY, userId: "u_github_9999", label: "sam@example.dev" };
+const OTHER: Identity = Object.freeze({
+  ...IDENTITY, userId: "u_github_9999", label: "sam@example.dev",
+});
 
 const T0 = 1_700_000_000_000;
 
@@ -373,6 +380,10 @@ describe("a method touches only the session it names", () => {
   // Built anew for each comparison and not kept in a variable. This store keeps
   // the object it is given, so a method that changed a session in place would
   // change the variable too, and a comparison against it would still pass.
+  // Rebuilding the top level is not enough when what leaks is nested: the
+  // identity inside is the frozen OTHER, shared by the stored record and by every
+  // expectation, so a bleed that changed it in place throws instead of changing
+  // both together.
   const yours = () => panelSession({ identity: OTHER, identity_keys: ["github:9999"] });
 
   it("deleteSession ends only the session it names", async () => {

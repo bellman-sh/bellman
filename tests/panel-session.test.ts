@@ -308,10 +308,15 @@ describe("replanSession", () => {
     );
   });
 
-  // The race this method exists for: a request touches the session, spends a
-  // while re-resolving its plan, and writes the result back, and the human signs
-  // out in between. An upsert would recreate the session they just ended.
-  it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
+  // The outcome the race has to have, as the in-memory store shows it: a request
+  // touches the session, spends a while re-resolving its plan, and writes the
+  // result back, and the human signs out in between. It pins that outcome and not
+  // the mechanism. Without replanSession's absence guard this store would write a
+  // record holding only the three merged fields, which sessionDead reads as dead,
+  // so the assertion would still hold. The workerd test of the same sequence
+  // reads storage before it touches, and is the one that pins the guard:
+  //   "leaves a session dead when the sign-out landed between the touch and the replan"
+  it("finds no session on the next touch when the sign-out landed between the touch and the replan", async () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
     await store.touchSession("sid", T0);

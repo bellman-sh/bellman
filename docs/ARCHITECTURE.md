@@ -591,13 +591,12 @@ which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
-`moveGrant`, `closeSessionIfEmpty`, `seatMember` and `addMember` are single
-transactions. `updateMember`, `closeSession`, `freezeSession` and the two
-appends, whose frozen-write guards are the same shape, are single invocations
-that await only storage. The input gate covers those, and a transaction would be
-the stronger form: it holds even if an await on anything but storage were ever
-put between the read and the write. Across objects there is no transaction to
-widen.
+`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `addMember` and the two
+appends are single transactions. `updateMember`, `closeSession` and
+`freezeSession` are single invocations that await only storage. The input gate
+covers those, and a transaction would be the stronger form: it holds even if an
+await on anything but storage were ever put between the read and the write.
+Across objects there is no transaction to widen.
 
 `seatMember` is the newest of those, and it is worth reading as the pattern.
 Seating a joiner means reclaiming a stale seat if that is what it takes,

@@ -185,11 +185,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * what goes inside it is storage and nothing slower.
    * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
    *
-   * Not every mutator has been converted. updateMember, closeSession, freezeSession,
-   * appendEvent and appendEventOnce still read and then put. They are unconverted,
-   * not exempt: the input gate covers them in production, since every await between
-   * their read and their write is storage, and the transaction is the stronger form.
-   * appendEventOnce's own comment records what the local test pool has done to it.
+   * Not every mutator has been converted. updateMember, closeSession and freezeSession
+   * still read and then put. They are unconverted, not exempt: the input gate covers
+   * them in production, since every await between their read and their write is
+   * storage, and the transaction is the stronger form. The appends were converted
+   * after the local test pool lost writes in them (see appendEventOnce).
    */
   private async stored(
     from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
@@ -205,8 +205,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return [...map.values()];
   }
 
-  private async nextCursor(): Promise<number> {
-    return ((await this.ctx.storage.get<number>("cursor")) ?? 0) + 1;
+  /**
+   * The cursor the next event takes: the stored one, plus one.
+   *
+   * It takes the transaction, so a caller that holds none cannot call it. The read of
+   * `cursor` and the write that advances it have to be one unit: two appends that read
+   * the same cursor write the same `e:` key, one event overwrites the other, and the
+   * cursors stay contiguous, so nothing downstream can tell (#120). Every caller reads
+   * it inside the transaction that writes the event, which is the same reasoning as
+   * stored() gives for the session record.
+   */
+  private async nextCursor(txn: DurableObjectTransaction): Promise<number> {
+    return ((await txn.get<number>("cursor")) ?? 0) + 1;
   }
 
   /**
@@ -217,15 +227,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * a log whose whole job is not to drop messages, and silent: the cursors stay
    * contiguous, so nothing downstream can tell.
    *
+   * It writes into the transaction the cursor was read in (see nextCursor), so the
+   * read and this write are one unit.
+   *
    * `#private`, because it writes the event and any extra rows its caller supplies, and a
    * Durable Object answers RPC for every method on its class: TypeScript's `private` is
    * erased at compile time.
    */
   async #writeEvent(
+    txn: DurableObjectTransaction,
     e: SessionEvent,
     extra: Record<string, unknown> = {}
   ): Promise<void> {
-    await this.ctx.storage.put<unknown>({
+    await txn.put<unknown>({
       [eventKey(e.cursor)]: e, cursor: e.cursor, ...extra,
     });
   }
@@ -569,8 +583,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
   }
 
-  // updateMember, closeSession and freezeSession below, and appendEvent and appendEventOnce
-  // after them, still read and then put. Unconverted, not exempt: see stored().
+  // updateMember, closeSession and freezeSession below still read and then put.
+  // Unconverted, not exempt: see stored().
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
     const s = await this.stored();
     if (!s) return;
@@ -627,13 +641,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.put("session", { ...s, frozenAt });
   }
 
+  /**
+   * Append an event, or null when the room is frozen.
+   *
+   * One transaction, for the reason stored() gives: the session read, the cursor read
+   * and the write are one unit, so two appends take two cursors and neither event
+   * overwrites the other. The wake comes after the commit, so nobody hears of an event
+   * that did not land.
+   */
   async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {
-    const s = await this.stored();
-    if (!s) throw new Error("Unknown session");
-    if (s.frozenAt !== null) return null;
-    const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
-    await this.#writeEvent(event);
-    this.#wake(event);
+    const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
+      if (s.frozenAt !== null) return null;
+      const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
+      await this.#writeEvent(txn, next);
+      return next;
+    });
+    if (event) this.#wake(event);
     return event;
   }
 
@@ -641,48 +666,51 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Append the event unless this key has been used: the same key and content replays the
    * first event, and the same key with different content is a conflict.
    *
-   * Everything it decides on is read before anything is written, and the event, the
-   * cursor and the key's record go in one put, so an interruption leaves all three or
-   * none. That is not a claim that two concurrent calls cannot interleave. The input gate
-   * does not hold every other request to this object for the length of a call. On
-   * workerd's local pool, concurrent calls have been seen to
-   * read the same cursor: both then report `appended`, and when their events differ one
-   * overwrites the other. It is rare (1 to 5 pairs in 400, for one key on a freshly
-   * created room) and the mechanism is not established. So nothing here is a guarantee
-   * against a concurrent call.
+   * One transaction, for the reason stored() gives: the key check, the cursor read and
+   * the write of the event, the cursor and the key's record are one unit. Two calls
+   * with the same key therefore resolve as one append and one replay, two with
+   * different keys take two cursors and neither event overwrites the other, and an
+   * interruption leaves all three rows or none. On workerd's local test pool the plain
+   * shape handed two concurrent calls the same cursor in about 1% of rounds, both
+   * reporting `appended` (#120); the transaction is what makes the contract case for it
+   * reliable there. The wake comes after the commit, so nobody hears of an event that
+   * did not land.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
     key: string
   ): Promise<EventWrite> {
-    const s = await this.stored();
-    if (!s) throw new Error("Unknown session");
+    const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) throw new Error("Unknown session");
 
-    const storageKey = idempotencyKey(e.fromMemberId, key);
-    const record = await this.ctx.storage.get<IdempotencyRecord>(storageKey);
-    const print = fingerprint(e);
+      const storageKey = idempotencyKey(e.fromMemberId, key);
+      const record = await txn.get<IdempotencyRecord>(storageKey);
+      const print = fingerprint(e);
 
-    if (record) {
-      if (record.print !== print) return { outcome: "conflict" };
-      const original = await this.ctx.storage.get<SessionEvent>(eventKey(record.cursor));
-      // A key naming a cursor with no event is a storage bug, not a replay.
-      if (!original) {
-        throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+      if (record) {
+        if (record.print !== print) return { outcome: "conflict" };
+        const original = await txn.get<SessionEvent>(eventKey(record.cursor));
+        // A key naming a cursor with no event is a storage bug, not a replay.
+        if (!original) {
+          throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
+        }
+        return { outcome: "replayed", event: original };
       }
-      return { outcome: "replayed", event: original };
-    }
 
-    if (s.frozenAt !== null) return { outcome: "frozen" };
+      if (s.frozenAt !== null) return { outcome: "frozen" };
 
-    const event: SessionEvent = { ...e, cursor: await this.nextCursor(), at: Date.now() };
-    // The key row joins the event and the cursor in one put, for the reason
-    // writeEvent gives carried one step further: committed separately, an
-    // interruption leaves the event stored with no key naming it, and the
-    // retry that follows appends the duplicate this method exists to prevent.
-    const stored: IdempotencyRecord = { cursor: event.cursor, print };
-    await this.#writeEvent(event, { [storageKey]: stored });
-    this.#wake(event);
-    return { outcome: "appended", event };
+      const event: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
+      // The key row joins the event and the cursor in one put, for the reason
+      // writeEvent gives carried one step further: committed separately, an
+      // interruption leaves the event stored with no key naming it, and the
+      // retry that follows appends the duplicate this method exists to prevent.
+      const stored: IdempotencyRecord = { cursor: event.cursor, print };
+      await this.#writeEvent(txn, event, { [storageKey]: stored });
+      return { outcome: "appended", event };
+    });
+    if (result.outcome === "appended") this.#wake(result.event);
+    return result;
   }
 
   async eventsAfter(cursor: number): Promise<SessionEvent[]> {
@@ -901,17 +929,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const rows = await this.driver.enqueue(txn, intents);
       await txn.put<unknown>({ session: { ...s, closed: true, joinCodes: {} }, ...rows });
     });
-    const event: SessionEvent = {
-      cursor: await this.nextCursor(),
-      type: "session_expired" as EventType,
-      fromMemberId: "system",
-      fromUserId: "system",
-      fromLabel: "bellman",
-      payload: { reason: "ttl" },
-      refId: null,
-      at: now,
-    };
-    await this.#writeEvent(event);
+    // The expiry event takes its cursor in a transaction of its own, like any append (see
+    // nextCursor). It stays apart from the close above, as it was: folding the two would
+    // change what an interruption between them leaves, which is not this change's to decide.
+    const event = await this.ctx.storage.transaction<SessionEvent>(async (txn) => {
+      const expired: SessionEvent = {
+        cursor: await this.nextCursor(txn),
+        type: "session_expired" as EventType,
+        fromMemberId: "system",
+        fromUserId: "system",
+        fromLabel: "bellman",
+        payload: { reason: "ttl" },
+        refId: null,
+        at: now,
+      };
+      await this.#writeEvent(txn, expired);
+      return expired;
+    });
     this.#wake(event);
     // Last, so a poll woken above does not wait on the registry. Reached from the
     // alarm and from any read that finds the session lapsed, and both drain here

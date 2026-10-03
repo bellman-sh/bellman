@@ -1047,6 +1047,13 @@ export function describeStoreContract(
      * Both calls are issued before either is awaited, so an implementation
      * that yields between reading the key and writing the event appends twice.
      * Every other test here awaits in between and would pass regardless.
+     *
+     * Under vitest-pool-workers this case is reliable only because SessionDO makes
+     * the append one transaction, the read of the cursor included. Two plain reads
+     * and puts started together took the same cursor there in about 1% of rounds
+     * (#120), both reporting `appended`. worker-tests/session-append-race.test.ts
+     * holds the first call between its read of the cursor and its write to pin the
+     * transaction itself.
      */
     it("appends once when two calls with the same key race", async () => {
       const s = session();

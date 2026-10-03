@@ -78,43 +78,91 @@ export interface PanelSession {
   expires_at: number;
 }
 
-/** The hard ceiling. Deliberately well short of REFRESH_TOKEN_TTL_MS. */
+/**
+ * The hard ceiling: a session ends this long after sign-in, however busy it is.
+ *
+ * Seven days, so a person who uses the panel daily signs in about once a week,
+ * which is a fair price on a page that shows billing. Deliberately well short of
+ * REFRESH_TOKEN_TTL_MS, which is 30 days: giving the panel the refresh token's
+ * lifetime is the arrangement #48 names and rejects.
+ */
 export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-/** How long a session survives without being used. */
+/**
+ * How long a session survives without being used.
+ *
+ * A day, so a session left open on a borrowed laptop is gone by tomorrow
+ * instead of running on to the ceiling.
+ */
 export const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 /**
  * How stale last_used_at gets before touchSession writes it back.
  *
- * Far below SESSION_IDLE_MS on purpose, and the margin is the correctness
- * argument: a session in continuous use carries a last_used_at at most this
- * stale, which the idle test then compares against a window 24 times larger.
- * Skipping the write cannot bring a live session inside the window.
+ * The skip has a cost, and this constant bounds it. Idle time is measured from
+ * last_used_at, which lags the last real request by up to this much, so a
+ * session that goes quiet dies between SESSION_IDLE_MS minus this (23 hours)
+ * and SESSION_IDLE_MS after its last request, depending on whether that request
+ * happened to write. Skipping is never more permissive than writing on every
+ * request: it can only end a quiet session early, never keep one alive longer.
+ *
+ * What a session can rely on is the difference, not the ratio. As long as no
+ * gap between its requests exceeds SESSION_IDLE_MS minus SESSION_TOUCH_MS, it
+ * cannot die of idleness, and every hour added here comes straight off that
+ * guarantee. A ratio is the wrong way to judge a new value: twelve hours is
+ * still "half the window" and would leave a guarantee of only twelve.
  */
 export const SESSION_TOUCH_MS = 60 * 60 * 1000;
 
 /**
- * Whether a session has ended — past its ceiling, or idle too long.
+ * Whether a session has ended — past its ceiling, or idle too long. Exactly at a
+ * limit is alive and strictly past it is dead, matching hasLapsed and
+ * takeRefresh.
  *
  * One predicate for the same reason hasLapsed is one: a read and a sweep that
  * each decide separately will eventually disagree, and the shape that bug takes
  * is a session still usable because no purge has run yet.
+ *
+ * It is written as the negation of "inside both limits" so that it fails
+ * closed. NaN fails every comparison, so "is it past the ceiling?" reads false
+ * for a record whose expires_at is corrupt or missing, and that session would
+ * never expire; "is it still inside?" reads false for the same record, and
+ * false there means dead. Ending sessions reliably is the reason this is a
+ * stored record rather than a signed cookie, so on a malformed record the
+ * answer has to be dead.
+ * hasLapsed goes the other way on an absent expires_at because older client
+ * records must keep working; no session record predates this one, so there is
+ * nothing to grandfather.
  */
 export function sessionDead(
   s: Pick<PanelSession, "last_used_at" | "expires_at">,
   now: number
 ): boolean {
-  return now > s.expires_at || now > s.last_used_at + SESSION_IDLE_MS;
+  return !(now <= s.expires_at && now <= s.last_used_at + SESSION_IDLE_MS);
 }
 
 /**
- * When this session's plan was last re-resolved, treating absent as never.
+ * Whether touchSession should write last_used_at back.
  *
- * A record written before this field existed has none, and `now - undefined` is
- * NaN — which fails every comparison, so a staleness check can read as "not
- * stale" and the plan would never be re-resolved again for the life of the
- * session. A revoked grant would hold, silently. Zero forces a re-resolve on
- * the next request, which is the safe direction. Same hazard
- * storedIdentityKeys exists for on the refresh path.
+ * Shared for the same reason sessionDead is shared: AuthDO implements the same
+ * method, and two copies of this comparison can drift apart at exactly
+ * SESSION_TOUCH_MS. One predicate means one boundary, pinned once.
+ */
+export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): boolean {
+  return now - s.last_used_at > SESSION_TOUCH_MS;
+}
+
+/**
+ * When this session's plan was last re-resolved, treating a missing or
+ * non-numeric value as never.
+ *
+ * The guard is for a record whose replanned_at is missing or not a number, and
+ * it fails closed there, the same discipline sessionDead follows: zero makes
+ * the plan as stale as it can be, so the next request re-resolves it. It also
+ * makes the staleness comparison safe however a later author phrases it.
+ * `now - undefined` is NaN and NaN fails every comparison, so "stale when
+ * now - replanned_at > bound" reads false and serves an old plan for the life
+ * of the session, a revoked grant held silently, while "fresh when
+ * now - replanned_at <= bound" happens to re-resolve. With zero, both phrasings
+ * re-resolve.
  */
 export function replannedAt(s: PanelSession): number {
   return typeof s.replanned_at === "number" ? s.replanned_at : 0;
@@ -496,18 +544,23 @@ export class MemoryAuthStore implements AuthStorage {
   /**
    * Synchronous throughout, like admitRegistration and for the same reason: an
    * await between the read and the write is the window this method exists to
-   * close.
+   * close. A test signs out while a touch is in flight to hold that.
    */
   async touchSession(id: string, now: number): Promise<PanelSession | undefined> {
     const stored = this.sessions.get(id);
     if (!stored) return undefined;
+    // Dropped here rather than left to a sweep, so dead is terminal from the
+    // first read that sees it: a clock that moves backwards cannot revive the
+    // session. The sweep reclaims space; it does not decide liveness.
     if (sessionDead(stored, now)) {
       this.sessions.delete(id);
       return undefined;
     }
-    // Skipped while the stored value is fresh enough. See SESSION_TOUCH_MS:
-    // a panel that polls would otherwise write on every single request.
-    if (now - stored.last_used_at <= SESSION_TOUCH_MS) return stored;
+    // Skipped while the stored value is fresh enough. In memory the write is
+    // free. The skip is here so this store returns the same last_used_at as the
+    // Durable Object for the same calls; there, a panel that polls would
+    // otherwise write on every request. See SESSION_TOUCH_MS for what it costs.
+    if (!touchDue(stored, now)) return stored;
     const touched: PanelSession = { ...stored, last_used_at: now };
     this.sessions.set(id, touched);
     return touched;

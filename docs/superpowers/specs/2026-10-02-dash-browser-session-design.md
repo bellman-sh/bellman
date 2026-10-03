@@ -177,15 +177,26 @@ Without that, a panel that polls writes to Durable Object storage on every
 request. `markClientUsed` already declines a write that would store the value
 the record holds, for the same reason.
 
-The skip looks as though it could expire an active session and cannot, and the
-margin is what makes it safe: a session in continuous use has a `last_used_at`
-that is never more than `SESSION_TOUCH_MS` (1 hour) stale, while the idle test
-compares against `SESSION_IDLE_MS` (24 hours). The stale value is always inside
-the window by 23 hours.
+The skip is not free, and what it costs is bounded. Idle time is measured from
+`last_used_at`, which lags the last real request by up to `SESSION_TOUCH_MS`
+(1 hour), so a session that goes quiet dies between 23 and 24 hours after its
+last request, depending on whether that request happened to write. What holds:
 
-That reasoning is the kind that rots. It gets a test — continuous use across more
-than the idle window must not expire the session — rather than only this
-paragraph.
+- **The skip is never more permissive than writing on every request.** It can
+  only end a quiet session early, by at most `SESSION_TOUCH_MS`. It never keeps
+  one alive longer.
+- **A session whose requests never go more than 23 hours apart cannot die of
+  idleness.** That is `SESSION_IDLE_MS` minus `SESSION_TOUCH_MS`. The difference
+  is the margin, not the 24-to-1 ratio: every hour added to `SESSION_TOUCH_MS`
+  comes straight off it.
+- **Staleness does not accumulate.** Any request more than `SESSION_TOUCH_MS`
+  after the stored value writes it back, so `last_used_at` never lags a session
+  in continuous use by more than that.
+
+That reasoning is the kind that rots, and a test holds only part of it.
+Continuous use across more than the idle window must not expire the session, and
+that test guards against the skip never writing. It passes for any
+`SESSION_TOUCH_MS` below the idle window, so it does not pin the 23-hour margin.
 
 #### Purging
 

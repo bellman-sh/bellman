@@ -56,6 +56,21 @@ describe("sessionDead", () => {
     const s = panelSession({ last_used_at: T0 + SESSION_TTL_MS });
     expect(sessionDead(s, T0 + SESSION_TTL_MS)).toBe(false);
   });
+
+  // Fails closed: a record whose time is corrupt reads as dead. NaN fails every
+  // comparison, so a predicate that asked whether a limit had been passed would
+  // call such a session alive forever.
+  it("is dead when expires_at is NaN", () => {
+    expect(sessionDead(panelSession({ expires_at: NaN }), T0)).toBe(true);
+  });
+
+  it("is dead when last_used_at is NaN", () => {
+    expect(sessionDead(panelSession({ last_used_at: NaN }), T0)).toBe(true);
+  });
+
+  it("is dead when now is NaN", () => {
+    expect(sessionDead(panelSession(), NaN)).toBe(true);
+  });
 });
 
 describe("MemoryAuthStore sessions", () => {
@@ -107,6 +122,22 @@ describe("MemoryAuthStore sessions", () => {
     await expect(store.deleteSession("never-existed")).resolves.toBeUndefined();
   });
 
+  // The constraint touchSession is written around: a sign-out that lands while a
+  // touch is in flight has to stay a sign-out. A touch that yielded between its
+  // read and its write would be overtaken by the delete and then write the
+  // record back, resurrecting a session its owner had ended.
+  it("is not undone by a sign-out that lands mid-touch", async () => {
+    const store = new MemoryAuthStore();
+    await store.putSession("sid", panelSession());
+    const now = T0 + SESSION_TOUCH_MS + 1; // stale enough that the touch writes
+
+    const touching = store.touchSession("sid", now);
+    await store.deleteSession("sid");
+    await touching;
+
+    expect(await store.touchSession("sid", now + 1)).toBeUndefined();
+  });
+
   it("skips the write while last_used_at is fresher than SESSION_TOUCH_MS", async () => {
     const store = new MemoryAuthStore();
     await store.putSession("sid", panelSession());
@@ -135,10 +166,10 @@ describe("MemoryAuthStore sessions", () => {
     expect((await store.touchSession("sid", now))?.last_used_at).toBe(now);
   });
 
-  // Touched again inside the window of the value just written, so only a stored
-  // write can produce `now`. Asked again at the same instant, a store that
-  // returned the write without keeping it would answer identically: stale
-  // again, so it writes again.
+  // Touched again less than SESSION_TOUCH_MS after the value just written, so
+  // only a stored write can produce `now`. Asked again at the same instant, a
+  // store that returned the write without keeping it would answer identically:
+  // stale again, so it writes again.
   it("persists the last_used_at it writes", async () => {
     const store = new MemoryAuthStore();
     await store.putSession("sid", panelSession());
@@ -151,9 +182,15 @@ describe("MemoryAuthStore sessions", () => {
   });
 
   /**
-   * The assertion the SESSION_TOUCH_MS optimisation exists to be checked by.
-   * Writing only hourly looks as though it could let an active session fall
-   * outside a 24-hour idle window; it cannot, and this is the proof.
+   * Pins that skipping the write does not accumulate. Written only hourly,
+   * last_used_at could in principle fall further and further behind a session
+   * in constant use; it does not, because any request more than
+   * SESSION_TOUCH_MS after the stored value writes it back.
+   *
+   * It does not pin the margin. Its 30-minute gaps sit far inside the real
+   * bound, SESSION_IDLE_MS minus SESSION_TOUCH_MS (23 hours), so it passes for
+   * every touch interval below the idle window and fails only once the interval
+   * reaches it.
    */
   it("does not expire a session used continuously for longer than the idle window", async () => {
     const store = new MemoryAuthStore();

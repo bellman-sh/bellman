@@ -8,7 +8,8 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, tokensUsable, writeServer,
+  acquireLock, busCredentials, credentialsDir, decodeIdentity, LOCK_FILE, readServer, storedAccessToken,
+  storedUserId, tokensUsable, writeServer,
   type LockHandle,
 } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
@@ -954,5 +955,136 @@ describe("the lock", () => {
       setTimeoutSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+});
+
+describe("storedAccessToken", () => {
+  it("is the access token the file holds for that server", () => {
+    writeServer(dir, PROD, { tokens: { access_token: "a1", refresh_token: "r1" } });
+    expect(storedAccessToken(dir, PROD)).toBe("a1");
+  });
+
+  it("is read from the file every time, so a refresh another bridge made is the one presented", () => {
+    // Every bridge on a machine shares the file, and whichever refreshes writes the new token into it.
+    // A token read once and kept is the one that was current when this bridge started.
+    writeServer(dir, PROD, { tokens: { access_token: "a1" } });
+    expect(storedAccessToken(dir, PROD)).toBe("a1");
+    writeServer(dir, PROD, { tokens: { access_token: "a2" } });
+    expect(storedAccessToken(dir, PROD)).toBe("a2");
+  });
+
+  it("keeps two servers apart", () => {
+    writeServer(dir, PROD, { tokens: { access_token: "prod" } });
+    writeServer(dir, DEV, { tokens: { access_token: "dev" } });
+    expect(storedAccessToken(dir, PROD)).toBe("prod");
+    expect(storedAccessToken(dir, DEV)).toBe("dev");
+  });
+
+  it("is undefined when there is no file, no entry for the server, or nothing usable in the entry", () => {
+    expect(storedAccessToken(dir, PROD)).toBeUndefined();
+    writeServer(dir, DEV, { tokens: { access_token: "dev" } });
+    expect(storedAccessToken(dir, PROD)).toBeUndefined();
+    writeServer(dir, PROD, { client: { client_id: "c1" } });
+    expect(storedAccessToken(dir, PROD)).toBeUndefined();
+    // A file a person has edited by hand: the type is a hope.
+    for (const token of ["", 123, null, {}]) {
+      writeServer(dir, PROD, { tokens: { access_token: token as unknown as string } });
+      expect(storedAccessToken(dir, PROD), JSON.stringify(token)).toBeUndefined();
+    }
+  });
+});
+
+describe("storedUserId", () => {
+  it("is the user id in the claim of the access token the file holds", () => {
+    writeServer(dir, PROD, { tokens: { access_token: fakeJwt({ bellman: identity }) } });
+    expect(storedUserId(dir, PROD)).toBe("u_jesse");
+  });
+
+  it("is read off the token beside it, and not off a stored identity that may be somebody else's", () => {
+    // An identity is a fact about the access token it was decoded from. Carried past a change of
+    // tokens it names one account while the file signs in as another, and a bus named for the wrong
+    // one would be shared with that other account's bridges.
+    writeServer(dir, PROD, {
+      tokens: { access_token: fakeJwt({ bellman: { ...identity, userId: "u_new" } }) },
+      identity: { ...identity, userId: "u_old" },
+    });
+    expect(storedUserId(dir, PROD)).toBe("u_new");
+  });
+
+  it("is the same user id when the token is replaced, which is what lets it name a bus", () => {
+    const first = fakeJwt({ bellman: identity, jti: "first" });
+    const second = fakeJwt({ bellman: identity, jti: "second" });
+    writeServer(dir, PROD, { tokens: { access_token: first } });
+    const before = storedUserId(dir, PROD);
+    writeServer(dir, PROD, { tokens: { access_token: second } });
+    expect(storedUserId(dir, PROD)).toBe(before);
+  });
+
+  it("is undefined when it cannot be said", () => {
+    expect(storedUserId(dir, PROD)).toBeUndefined(); // nothing cached
+    writeServer(dir, PROD, { client: { client_id: "c1" } });
+    expect(storedUserId(dir, PROD)).toBeUndefined(); // no tokens
+    const unreadable = [
+      "qk_a_static_key_is_not_a_jwt",
+      fakeJwt({ sub: "u_jesse" }), // no bellman claim
+      fakeJwt({ bellman: { ...identity, userId: "" } }),
+      fakeJwt({ bellman: { ...identity, userId: 42 } }),
+      fakeJwt({ bellman: { label: "no user id at all" } }),
+    ];
+    for (const access_token of unreadable) {
+      writeServer(dir, PROD, { tokens: { access_token } });
+      expect(storedUserId(dir, PROD), access_token).toBeUndefined();
+    }
+  });
+});
+
+describe("busCredentials", () => {
+  const asDir = () => dir;
+
+  it("with a key, is the key twice: it names the bus, and it is what a room's upgrade presents", () => {
+    const creds = busCredentials(PROD, "qk_dev_jesse", () => { throw new Error("a key never reads the file"); });
+    expect(creds.identity()).toBe("qk_dev_jesse");
+    expect(creds.bearer()).toBe("qk_dev_jesse");
+  });
+
+  it("treats an empty key as no key, as channel.ts does", () => {
+    // BELLMAN_KEY="" is what an unset-by-assignment variable looks like, and the bridge signs in for it.
+    writeServer(dir, PROD, { tokens: { access_token: fakeJwt({ bellman: identity }) } });
+    const creds = busCredentials(PROD, "", asDir);
+    expect(creds.identity()).toBe("u_jesse");
+    expect(creds.bearer()).toBe(readServer(dir, PROD).tokens!.access_token);
+  });
+
+  it("signed in, names the bus by the user and presents the access token the file holds now", () => {
+    const creds = busCredentials(PROD, undefined, asDir);
+    writeServer(dir, PROD, { tokens: { access_token: fakeJwt({ bellman: identity, jti: "one" }) } });
+    const first = creds.bearer();
+    expect(creds.identity()).toBe("u_jesse");
+    expect(first).toBe(readServer(dir, PROD).tokens!.access_token);
+
+    // A refresh: the token changes and the person does not. The bus must keep its name (a new name is
+    // a new bus, and the old coordinator would go on serving the old one) while the upgrade must
+    // present the new token (the old one is dead after ten minutes).
+    writeServer(dir, PROD, { tokens: { access_token: fakeJwt({ bellman: identity, jti: "two" }) } });
+    expect(creds.identity()).toBe("u_jesse");
+    expect(creds.bearer()).not.toBe(first);
+    expect(creds.bearer()).toBe(readServer(dir, PROD).tokens!.access_token);
+  });
+
+  it("with nothing cached, cannot say who it is, and has nothing to present", () => {
+    const creds = busCredentials(PROD, undefined, asDir);
+    expect(creds.identity()).toBeUndefined();
+    expect(() => creds.bearer()).toThrow(/no signed-in access token/);
+  });
+
+  it("builds without touching the file, which does not exist until the bridge has signed in", () => {
+    const fail = (): string => { throw new Error("the file was read at construction"); };
+    expect(() => busCredentials(PROD, undefined, fail)).not.toThrow();
+  });
+
+  it("does not hide a directory that cannot be found: that is for the caller, which polls instead", () => {
+    const creds = busCredentials(PROD, undefined, () => { throw new Error("no absolute home directory"); });
+    expect(() => creds.identity()).toThrow(/no absolute home directory/);
+    expect(() => creds.bearer()).toThrow(/no absolute home directory/);
   });
 });

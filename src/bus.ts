@@ -346,6 +346,14 @@ interface Claim { file?: FileId }
  * vacancy where a live coordinator was. That turned a rare double election into an
  * outage caused by cleanup, in the process that had already lost.
  *
+ * Why this is not "stat the path, unlink only if it is ours": nothing here performs the
+ * unlink. libuv does, by name and unconditionally, inside close(), and it has already
+ * happened when close() returns, so there is no point at which a check of ours could stop
+ * it. Declining to call close() would leave the listening handle open. What can be done is
+ * to act before the call: take a file that is not ours out of libuv's way, and put it back
+ * afterwards. Replacing those steps with a bare server.close() restores the bug: the test
+ * "does not remove a socket that has taken its path when it closes" goes red.
+ *
  * This is an identity check on our own file, not a lock: the bind's own file is recorded
  * and, on the way out, compared with what is at the path now. If it is ours, or gone,
  * libuv's unlink is exactly right. If it is not, the file is theirs and we have no
@@ -1076,9 +1084,11 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
         }
         local.subs.clear();
         // Closing a listening server unlinks its socket file: that is libuv's doing, and it
-        // is how "a clean exit unlinks its own" (D8) holds. It unlinks by NAME, so when the
-        // file at the path is no longer ours it is moved aside for the length of the close
-        // and put back: see shieldSuccessor.
+        // is how "a clean exit unlinks its own" (D8) holds. It unlinks by NAME, inside close(),
+        // so there is no stat-then-unlink of ours to make conditional: when the file at the
+        // path is no longer ours it is moved aside for the length of the close and put back,
+        // and the name is absent for microseconds in between. Do not simplify this to a bare
+        // server.close(): see shieldSuccessor.
         const putBack = shieldSuccessor(path, claim.file, log);
         await new Promise<void>((resolve) => {
           server.close(() => resolve());

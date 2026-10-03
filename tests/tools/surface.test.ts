@@ -209,4 +209,38 @@ describe("tool surface", () => {
     const send = tools.find((t) => t.name === "bellman_send")!;
     expect(JSON.stringify(send.description)).toContain("20000");
   });
+
+  /**
+   * Spec D1 calls a member's inability to send a `heartbeat` STRUCTURAL rather
+   * than conventional. The structure is `z.enum(SEND_KINDS)` plus `SEND_VERB
+   * satisfies Record<SendKind, Verb>` — and both still compile if somebody adds
+   * "heartbeat" to SEND_KINDS and gives it a verb. Nothing failed in that case,
+   * so the claim rested on nobody doing it.
+   *
+   * Pinned on the shipped schema rather than on the module's own constant: this
+   * is the list a client is handed, so it closes the gap at the surface the claim
+   * is about, and it needs no export from server.ts to do it.
+   */
+  it("offers exactly the six send kinds, and no way to forge a heartbeat", async () => {
+    const { tools } = await jesse.listTools();
+    const send = tools.find((t) => t.name === "bellman_send")!;
+    const kinds = (send.inputSchema.properties as Record<string, { enum?: string[] }>).type.enum;
+
+    expect([...kinds!].sort()).toEqual([
+      "action_request", "action_response", "artifact", "brief_update", "message", "progress",
+    ]);
+    // Said separately, because that is the claim: the tick is the server's to
+    // write, and a member has no name for it to pass here.
+    expect(kinds).not.toContain("heartbeat");
+
+    // And the description is the only documentation a caller has, so every kind
+    // the schema accepts has to be named somewhere in it. That is all this loop
+    // asserts: `toContain` matches a substring of the whole text, so it fails only
+    // for a kind named nowhere in it. It does not read the opening line, which
+    // once listed five after `progress` was added — `progress` is named elsewhere
+    // in the text, so that slip passes here.
+    for (const kind of kinds!) {
+      expect(send.description, `${kind} missing from the description`).toContain(kind);
+    }
+  });
 });

@@ -10,10 +10,15 @@
  * `bellman_sync` long-polls every ~25 seconds, so a watching member announces
  * itself continuously. `lastSeenAt` just stops throwing that away.
  *
- * Not a heartbeat event. Liveness carries nothing and arrives on a timer, so a
- * row per beat in the durable, replayable event log is the worst possible home
- * for it — that is the cost curve #99 and #25 exist to flatten. It is a field
- * on the member, written as a side effect of calls the member already makes.
+ * Not a heartbeat. Liveness carries nothing and arrives on a timer, so a row
+ * per beat in the durable, replayable event log is the worst possible home for
+ * it — that is the cost curve #99 and #25 exist to flatten. It is a field on
+ * the member, written as a side effect of calls the member already makes.
+ *
+ * A `heartbeat` EVENT is a different thing and does exist (#111): the server
+ * appends one on the room's declared cadence, carrying a snapshot of who has
+ * reported, and members answer it with `progress`. That is content with a
+ * recipient. This is liveness with neither. The two never share a field.
  *
  * Presence is DERIVED, never stored:
  *

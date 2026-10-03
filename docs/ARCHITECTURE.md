@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md]
-last-verified-against-source: af052f0c
-last-updated: 2026-10-02
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md]
+last-verified-against-source: 77396879
+last-updated: 2026-10-03
 ---
 
 # Bellman Architecture
@@ -337,12 +337,23 @@ traffic: `bellman_sync` long-polls every ~25 seconds, so a watching member is
 already announcing itself, and `touchMember` stops throwing that away.
 `bellman_send` touches it too.
 
-It is a field and not a `heartbeat` event on purpose. Liveness carries nothing
-and arrives on a timer, so a row per beat in the durable, replayable event log
-is the worst available home for it — that is the cost curve #99 and #25 exist to
-flatten. Progress updates — "still working, currently on the migration script" —
-are the opposite case and *are* events (#111): they exist to reach a peer, and
-they have no timer.
+Liveness is a field, and the `heartbeat` event (#111) is a different thing.
+Liveness carries nothing and arrives on a timer, so a row per beat in the
+durable, replayable event log is the worst available home for it — that is the
+cost curve #99 and #25 exist to flatten. The tick is the server's, on the
+cadence a room declares in its manifest, and it earns its row by carrying what
+only the server can see: for every member the room expects to report, when it
+last did and how long it had been silent at the tick's own `at`. It is written
+only when some member is due, never into a frozen or closed room, and a room
+that declares no cadence gets none. Members answer with `progress` events —
+"still working, currently on the migration script" — which exist to reach a peer
+and have no timer of their own.
+
+`lastSeenAt` and `lastReportAt` are separate on purpose. Any call a member makes
+moves the first; only a deliberate report moves the second. A member can be
+present and silent, and that is the state the tick exists to surface: one field
+would make every poll look like a report, and a member that is there but has
+said nothing would read as fine.
 
 Staleness is reversible because nothing is written when a member goes quiet: it
 calls anything, `lastSeenAt` moves, and it is present again with the same
@@ -626,13 +637,18 @@ store reports it actually took.
    5-minute cap for as long as they fail. `deliver` awaits another object, which
    opens this one's input gate, so `deliverNow()` is single-flight, and a drain
    stops after `MAX_DRAIN_PASSES` (100).
-4. **Named alarms.** An object has one alarm, so handlers share it: each keeps a
-   `due:<name>` row, and `alarm()` runs whichever are due, then points the alarm
-   at the soonest. `SessionDO` has two, `outbox` and `ttl`; its TTL is derived
-   from the session record, so sessions written before named alarms still
-   expire. `ob_seq`, the counter that numbers rows, sits outside the `ob:` prefix
-   or its own drain would list it as a row; the OAuth purge cursor
-   (`AuthDO.#purge` in `src/oauth/store.ts`) follows the same rule.
+4. **Named alarms.** An object has one alarm, so handlers share it: each has a
+   due time, `alarm()` runs whichever are due, then points the alarm at the
+   soonest. A due time is a stored `due:<name>` row or one derived from the
+   session record, and a stored row wins. `SessionDO` has three handlers,
+   `outbox`, `ttl` and `heartbeat`, and only `outbox` is stored. The TTL is
+   derived from `expiresAt`, so sessions written before named alarms still
+   expire. The tick (#111) is derived from `nextTickAt`, anchored on the
+   session's `lastTickAt` and not on any member's report time, so an alarm that
+   fired and found nobody due cannot fire again at once. `ob_seq`, the counter
+   that numbers rows, sits outside the `ob:` prefix or its own drain would list
+   it as a row; the OAuth purge cursor (`AuthDO.#purge` in
+   `src/oauth/store.ts`) follows the same rule.
 
 It is used twice:
 
@@ -750,6 +766,13 @@ safe to delete only when its `ob:` queue is empty, which is what the drain check
 first. Deleted over queued rows it stops the spin and strands them, with nothing
 armed to deliver them.
 
+The heartbeat is the safer half of that rule. A stored `due:` row that an older
+build never consumes is the spin above; a derived due time that a build does not
+know is never computed, so there is nothing for it to leave behind. Rolling back
+past #111 strands no row and needs no cleanup, where rolling back past #62 does.
+An alarm already armed for a tick fires once into the older build, which finds
+nothing to run and re-arms for the TTL.
+
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both
 through `writeIndex`, which logs a failure instead of throwing: `us:` so a
@@ -795,7 +818,12 @@ pull request.
 6. **Push is never a dependency.** Every surface must work by polling.
 7. **Presence is derived, never stored** — not in a field, and not in an event
    payload, which is replayed and would read as present hours after the member
-   went. Going quiet writes nothing, so it is reversible; only a contested seat
+   went. A `heartbeat` tick's snapshot is not a counterexample: it carries
+   measurements taken at the event's own `at` ("silent for 660 seconds at
+   14:05"), which stay true on replay, and never a claim about now — there is no
+   `present`, `status`, `alive` or `healthy` key, and there must not be.
+   Presence itself is still derived, and still lives in `presence.ts`. Going
+   quiet writes nothing, so it is reversible; only a contested seat
    turns stale into departed. `activeMembers` decides when a room has emptied
    and `seatedMembers` decides who holds a seat, and those two readings must not
    be merged.
@@ -814,15 +842,36 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~4,820** | every request, whether or not you are in a room |
+| Tool definitions | **~4,960** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-Tool definitions were re-measured on 2026-10-01. The three rows below that one
-are from the original measurement and have not been re-measured since.
+Tool definitions were re-measured on 2026-10-03, after #111. The three rows
+below that one are from the original measurement and have not been re-measured
+since.
 
-`bellman_start` alone is 1,462 tokens, 30% of the tool budget, paid even by
+The method is cl100k over the compact JSON of the `tools/list` entries, summed.
+List the real server's tools through an in-memory MCP client, as
+`tests/helpers/harness.ts` does; then for each entry count
+`json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
+leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
+where the previous figure was recorded, it gives 4,820, and 1,462 for
+`bellman_start`, so the two measurements are comparable.
+
+#111 added `heartbeat_on` and `reports` to the manifest schema inside
+`bellman_start`, and `progress` to `bellman_send`. It added nothing to
+`bellman_sync`: the ask travels in the tick's payload, paid by rooms that use the
+feature, rather than in a tool description paid by every request.
+
+Counted this way the total is 4,962, which is 142 more than the 4,820 recorded.
+52 of those predate #111 (`bellman_evict` +43 and `bellman_invite` +9 since the
+last measurement). The other 90 are #111's: `bellman_send` +47 for `progress`,
+`bellman_start` +29 for the two manifest keys, and +7 each on `bellman_start` and
+`bellman_connect` for the two preview keys their `Returns:` lines now name.
+`bellman_sync` is 334, as before.
+
+`bellman_start` alone is 1,498 tokens, 30% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

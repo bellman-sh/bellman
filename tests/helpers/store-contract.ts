@@ -18,7 +18,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
-import { member, oneCode, session } from "./fixtures.js";
+import { lastReport } from "../../src/heartbeat.js";
+import { member, oneCode, roomManifest, session } from "./fixtures.js";
 
 /**
  * Cases an implementation cannot pass, each mapped to the reason it cannot.
@@ -393,6 +394,27 @@ export function describeStoreContract(
       expect(fresh.members[0].leftAt).toBeNull();
     });
 
+    it("patches lastReportAt, and reads a member stored without it as joinedAt", async () => {
+      // The heartbeat's stamp (#111). A member stored before the field existed has
+      // none, and `lastReport` lifts it to joinedAt rather than reading it as
+      // "never reported", which would name every such member silent on the first
+      // tick. Both stores have to apply the patch and both have to hand the lift
+      // the same raw value.
+      const joinedAt = Date.now();
+      await store.createSession(session({ members: [member({ lastReportAt: undefined, joinedAt })] }));
+      const before = await store.getSession("qs_test");
+      expect(before!.members[0].lastReportAt).toBeUndefined();
+      expect(lastReport(before!.members[0])).toBe(joinedAt);
+
+      await store.updateMember("qs_test", "m_creator", { lastReportAt: joinedAt + 60_000 });
+      const after = await store.getSession("qs_test");
+      expect(after!.members[0].lastReportAt).toBe(joinedAt + 60_000);
+      expect(lastReport(after!.members[0])).toBe(joinedAt + 60_000);
+      // Reporting is not liveness, and not leaving: the other two stay where they were.
+      expect(after!.members[0].lastSeenAt).toBe(before!.members[0].lastSeenAt);
+      expect(after!.members[0].leftAt).toBeNull();
+    });
+
     it("updateMember ignores unknown members and sessions", async () => {
       const s = session();
       (await store.createSession(s));
@@ -601,6 +623,101 @@ export function describeStoreContract(
 
       (await store.freezeSession(s.id, null));
       expect((await store.getSession(s.id))?.frozenAt).toBeNull();
+    });
+
+    /**
+     * Spec D10: "A member cannot report its way out of a frozen room, so none
+     * may be named silent in one. A freeze must cost nobody their standing."
+     *
+     * Here rather than only in the store that serves production, because this is
+     * what a THAW means and not what an alarm does: `lastReportAt` is read back
+     * through `getSession`, so a store that left it alone would report a member
+     * silent for the whole outage. The heartbeat tick is derived in one
+     * implementation and absent in the other, but the stamp is interface
+     * behaviour, and a divergence in it is exactly what this suite is for.
+     */
+    it("credits every reporting seat on a thaw, so a freeze costs nobody their standing", async () => {
+      const manifest = roomManifest({
+        roles: {
+          lead: { can: ["send"], description: null, reports: true },
+          observer: { can: [], description: null, reports: false },
+        },
+        defaultRole: "observer",
+        creatorRole: "lead",
+        heartbeatOnMs: 300_000,
+      });
+      const longAgo = Date.now() - 3_600_000;
+      const s = session({
+        manifest,
+        members: [
+          member({ memberId: "m_lead", roomRole: "lead", lastReportAt: longAgo }),
+          member({ memberId: "m_obs", userId: "u_obs", roomRole: "observer", lastReportAt: longAgo }),
+        ],
+      });
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, Date.now()));
+      (await store.freezeSession(s.id, null));
+
+      const after = (await store.getSession(s.id))!;
+      const row = (id: string) => after.members.find((m) => m.memberId === id)!;
+      // The hour nobody was allowed to report in is not held against the seat the
+      // room asks: its clock starts again at the thaw.
+      expect(lastReport(row("m_lead"))).toBeGreaterThan(Date.now() - 5_000);
+      // And the seat the room does not ask is untouched. Nothing reads that stamp,
+      // and a write that nothing reads is a field that later disagrees for no reason.
+      expect(row("m_obs").lastReportAt).toBe(longAgo);
+    });
+
+    /**
+     * **The credit belongs to the thaw, so only a real thaw may pay it.**
+     *
+     * `freezeSession(null)` on a room that is already thawed is not a thaw. It
+     * clears `frozenAt`, which is already clear, and crediting on it hands every
+     * reporting seat a fresh `lastReportAt` with nobody having reported — so
+     * silence is measured from a moment no member had anything to do with.
+     *
+     * That is not a hypothetical call. `freezeSession(null)` is idempotent by
+     * design and so the obvious thing to retry, and a caller that retries it on a
+     * schedule keeps every member's clock reset for good: nobody is ever due, no
+     * tick asks anybody, and `silent` never becomes true. The feature goes quiet in
+     * exactly the room it exists for, and nothing in the log says why.
+     *
+     * The condition is the TRANSITION and not the argument, so it reads `frozenAt
+     * !== null` off the record. A freeze-then-thaw pays once, however many thaws
+     * follow it.
+     */
+    it("credits nobody when a thaw lands on a room that was not frozen", async () => {
+      const manifest = roomManifest({
+        roles: { lead: { can: ["send"], description: null, reports: true } },
+        defaultRole: "lead",
+        creatorRole: "lead",
+        heartbeatOnMs: 300_000,
+      });
+      const longAgo = Date.now() - 3_600_000;
+      const s = session({
+        manifest,
+        members: [member({ memberId: "m_lead", roomRole: "lead", lastReportAt: longAgo })],
+      });
+      (await store.createSession(s));
+
+      // Never frozen, and the room says so.
+      expect((await store.getSession(s.id))!.frozenAt).toBe(null);
+      (await store.freezeSession(s.id, null));
+
+      // The member's standing is its own: an hour of genuine silence, still an hour.
+      expect((await store.getSession(s.id))!.members[0].lastReportAt).toBe(longAgo);
+
+      // And the retry of a real thaw pays once, not once per attempt. The first
+      // thaw credits; a second call finds nothing frozen and leaves that credit
+      // where it is rather than moving it forward again.
+      (await store.freezeSession(s.id, Date.now()));
+      (await store.freezeSession(s.id, null));
+      const credited = (await store.getSession(s.id))!.members[0].lastReportAt!;
+      expect(credited).toBeGreaterThan(longAgo);
+
+      (await store.freezeSession(s.id, null));
+      expect((await store.getSession(s.id))!.members[0].lastReportAt).toBe(credited);
     });
 
     /**

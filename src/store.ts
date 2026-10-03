@@ -4,6 +4,7 @@ import type {
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { mustReport } from "./roles.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -12,7 +13,9 @@ const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
-export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt">>;
+export type MemberPatch = Partial<
+  Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
+>;
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -37,6 +40,47 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  * applies to `joinCode`.
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * Whether the room asks this member for reports.
+ *
+ * Here beside `isActiveMember`, and not in heartbeat.ts, because `freezeSession`
+ * applies `clearSilence` inside the store and that reads this — heartbeat.ts
+ * imports this module, so the other direction would be a cycle. One that works
+ * only while every use sits inside a function body: the first at module
+ * evaluation fails at import under the Worker's load order, and neither tsc
+ * program reports it.
+ */
+export const asked = (s: StoredSession, m: Member): boolean =>
+  isActiveMember(m) && mustReport(s.manifest, m.roomRole);
+
+/**
+ * The roster a thaw writes back: every seat the room asks is credited with a
+ * report at `now`.
+ *
+ * Spec D10. "A member cannot report its way out of a frozen room, so none may be
+ * named silent in one. A freeze must cost nobody their standing." `#tickIfDue`
+ * honours the letter by writing no tick while frozen, but that is not enough on
+ * its own: `silent_for_seconds` is measured from `lastReport`, which the freeze
+ * stopped anybody from moving. A room frozen for an hour on a 5m cadence would
+ * otherwise produce, on its first tick after the thaw, `silent: true` for every
+ * member — a measurement of the freeze, not of anyone's behaviour, and exactly
+ * the false silent D10 is written to avoid.
+ *
+ * What this loses is the pre-freeze report age, which after an outage long enough
+ * to freeze a room is not something a peer can act on anyway. The faithful
+ * alternative — carrying the frozen interval on the session and subtracting it in
+ * `snapshotOf` — buys that back for a stored field and a second clock to keep
+ * consistent with the first.
+ *
+ * Pure: it takes `now` rather than reading the clock, so the store contributes the
+ * moment of the thaw and nothing else. Here for the reason `asked` gives. Who the
+ * room asks is `asked`'s rule, and a store that filtered the roster itself would
+ * be a second copy of it.
+ */
+export function clearSilence(s: StoredSession, now: number): Member[] {
+  return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
+}
 
 /**
  * What `seatMember` did. `refused` is null exactly when the member is seated.
@@ -556,6 +600,7 @@ export class MemoryStore implements BellmanStore {
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
     if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
+    if (patch.lastReportAt !== undefined) m.lastReportAt = patch.lastReportAt;
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -591,10 +636,29 @@ export class MemoryStore implements BellmanStore {
     s.joinCodes = {};
   }
 
+  /**
+   * Freeze the room, or thaw it with null.
+   *
+   * The thaw credits every reporting seat with a report: spec D10, and
+   * `clearSilence` carries the argument. Here as well as in `SessionDO` because it
+   * is what a thaw MEANS rather than anything the alarm does — `lastReportAt` is
+   * read back through `getSession`, so a store that left it alone would report
+   * every member silent for the length of the outage. The contract suite has the
+   * case, and that is what keeps the two implementations saying the same thing.
+   *
+   * **The credit is paid on the TRANSITION, not on the argument.** A `null` on a
+   * room that is already thawed thaws nothing, and crediting on it stamps every
+   * reporting seat with a report nobody made — so a caller retrying this
+   * idempotent call keeps resetting every member's clock and nobody is ever due
+   * again. `wasFrozen` is read before the assignment below, because that
+   * assignment is what destroys the answer.
+   */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    const wasFrozen = s.frozenAt !== null;
     s.frozenAt = frozenAt;
+    if (frozenAt === null && wasFrozen) s.members = clearSilence(s, Date.now());
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

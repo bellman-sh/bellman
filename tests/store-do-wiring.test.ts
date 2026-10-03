@@ -631,6 +631,14 @@ describe("negative control: the same calls with the guard removed", () => {
    * and it stops being true the day the expiry tolerates a row with no `joinCodes`, which is
    * when the guard is the only thing keeping the alarm from rewriting it. With the field the
    * alarm gets past that read and does the thing the guard exists to stop: it expires the row.
+   *
+   * The row carries a second field no pre-manifest row had, for the same reason: `manifest`,
+   * holding only a null cadence. Since #111 the alarm's derived due times read
+   * `manifest.heartbeatOnMs` before the expiry is reached, and on a row with no manifest at all
+   * that read is the TypeError the guard exists to prevent, so the unguarded alarm would stop
+   * there and never show the harm this test is about. The stub has no `roles`, so the real
+   * guard still reads the row as gone, and the cadence is null, so `nextTickAt` asks nothing
+   * further of it.
    */
   it("lets a mutator rewrite it and a due alarm expire it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
@@ -640,7 +648,7 @@ describe("negative control: the same calls with the guard removed", () => {
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
     const viaAlarm = await worldOn(unguarded, {
-      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {},
+      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {}, manifest: { heartbeatOnMs: null },
     });
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();

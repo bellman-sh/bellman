@@ -98,6 +98,7 @@ describe("bellman_send — a seat that lacks the verb", () => {
     ["brief_update", "send", { goal: "g", state: "s", constraints: [], open_questions: [], agent: { provider: "openai", model: "gpt-5", client: "chatgpt" } }],
     ["action_request", "request_actions", { action: "do a thing" }],
     ["action_response", "respond_actions", { approved: true }],
+    ["progress", "send", { note: "ran migration 0042" }],
   ] as const)("refuses %s, naming the missing verb %s, and appends nothing", async (type, verb, payload) => {
     // The seat holds every verb EXCEPT the one under test, so nothing else can
     // be doing the refusing.
@@ -135,7 +136,7 @@ describe("bellman_send — a seat that lacks the verb", () => {
   it("refuses every kind to a wholly verbless seat", async () => {
     const p = await pairUp(h, { manifest: seat([]) });
     const before = await eventCount(p.sessionId);
-    for (const type of ["message", "artifact", "action_request", "action_response", "brief_update"]) {
+    for (const type of ["message", "artifact", "action_request", "action_response", "brief_update", "progress"]) {
       const res = await p.joiner.call("bellman_send", {
         session_id: p.sessionId, member_id: p.joinerMemberId,
         type, payload: { text: "x" }, ref_id: "1",
@@ -565,6 +566,7 @@ describe("platform role and room role are different things", () => {
     ["brief_update", "send", brief({ goal: "Restated with administrative authority" })],
     ["action_request", "request_actions", { action: "rerun CI as the org admin" }],
     ["action_response", "respond_actions", { approved: true }],
+    ["progress", "send", { note: "ran migration 0042 as the org admin" }],
   ] as const)("refuses an org admin's %s in a seat holding nothing", async (type, verb, payload) => {
     const p = await adminJoins(seat([], "admin-holds-nothing"));
     // Each row is built so that a bypassed guard would genuinely SUCCEED and flip

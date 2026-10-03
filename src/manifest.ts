@@ -36,6 +36,59 @@ export class ManifestError extends Error {
   }
 }
 
+/**
+ * The cadence bounds. Below the floor it is a liveness timer, which is #103's
+ * job and what #111 explicitly is not. Above the ceiling the cadence says
+ * nothing a peer could act on inside a working session.
+ */
+export const MIN_HEARTBEAT_MS = 30_000;
+export const MAX_HEARTBEAT_MS = 3_600_000;
+
+const DURATION = /^(\d{1,4})(s|m|h)$/;
+const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
+
+/**
+ * Milliseconds back to the shortest duration that denotes them — the inverse of
+ * what parseHeartbeatOn reads, so an error can name a bound in the same notation
+ * the caller wrote. Largest unit that divides exactly, so 3_600_000 is "1h"
+ * rather than "60m".
+ */
+const duration = (ms: number): string => {
+  for (const [unit, size] of [["h", UNIT_MS.h], ["m", UNIT_MS.m]] as const) {
+    if (ms % size === 0) return `${ms / size}${unit}`;
+  }
+  return `${ms / UNIT_MS.s}s`;
+};
+
+/**
+ * `"30s"`, `"5m"`, `"1h"` to milliseconds.
+ *
+ * The raw value is echoed by both errors, and those reach tool errors and the
+ * audit log, so HeartbeatOnShape bounds it to 8 characters before it can get
+ * here. The regex caps the digits too, so neither message can be grown by its
+ * input.
+ */
+function parseHeartbeatOn(raw: string): number {
+  const m = DURATION.exec(raw);
+  if (!m) {
+    throw new ManifestError(
+      `heartbeat_on must be a duration like "30s", "5m" or "1h" (got "${raw}")`,
+    );
+  }
+  const ms = Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS];
+  if (ms < MIN_HEARTBEAT_MS || ms > MAX_HEARTBEAT_MS) {
+    // Rendered from the constants, not restated. A bound change would otherwise
+    // leave this message wrong while the test pinning its literal text passed.
+    throw new ManifestError(
+      `heartbeat_on must be between ${duration(MIN_HEARTBEAT_MS)} and ${duration(MAX_HEARTBEAT_MS)} (got "${raw}")`,
+    );
+  }
+  return ms;
+}
+
+/** Bounded before interpolation. See parseHeartbeatOn. */
+const HeartbeatOnShape = z.string().max(8);
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
@@ -71,6 +124,10 @@ export const RoleKeyShape = z.string()
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),
   description: z.string().max(300).nullish(),
+  // Absent means not asked. A role has to opt in to being expected to report,
+  // for the same reason no preset does (D3): a tick that names members silent
+  // who were never asked for anything is how the signal gets ignored.
+  reports: z.boolean().nullish(),
 });
 
 /**
@@ -115,6 +172,7 @@ const AuthorShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   mode: z.enum(["pair", "swarm"]),
+  heartbeat_on: HeartbeatOnShape.nullish(),
   roles: RolesShape,
   // Both are echoed verbatim by the cross-field errors, which reach tool errors and
   // the audit log, so they are bounded like every other string in the shape.
@@ -150,10 +208,16 @@ export type ManifestInput = z.input<typeof ManifestShape>;
 // Preset catalog
 // ---------------------------------------------------------------------------
 
-type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset">;
+// A preset carries no cadence (D3), so the catalog's shape leaves it out and
+// resolveManifest supplies null. Making it unrepresentable here is stronger than
+// a catalog entry that happens to say null.
+type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs">;
 
 function role(can: Verb[], description: string): RoleDef {
-  return { can, description };
+  // No preset expects a report (D3). Turning this on for shipped presets would
+  // tick every room anyone already runs and name members silent who were never
+  // asked for anything.
+  return { can, description, reports: false };
 }
 
 /**
@@ -255,6 +319,7 @@ export function resolveManifest(input: unknown): RoomManifest {
       roles: structuredClone(body.roles),
       defaultRole: body.defaultRole,
       creatorRole: body.creatorRole,
+      heartbeatOnMs: null,
     };
   }
 
@@ -279,7 +344,29 @@ export function resolveManifest(input: unknown): RoomManifest {
       }
       seen.add(verb);
     }
-    roles[key] = { can: [...def.can], description: def.description ?? null };
+    // A seat that may not speak may not report either: `SEND_VERB.progress` is
+    // `send`, so a `reports: true` role without it is shown an obligation, named
+    // in every heartbeat snapshot, and then refused the one reply that answers
+    // it. Refused here beside the other cross-field checks, because no runtime
+    // state makes it work.
+    //
+    // Refused whether or not the room declares a cadence, because the seat is
+    // what cannot answer. A room with no `heartbeat_on` never ticks, so such a
+    // manifest asks nothing of anybody today — but it is still unanswerable the
+    // day a cadence is added, and the author is here now. `you_report` in the
+    // connect preview is the other half of that split: it reads the cadence AND
+    // the seat, so a room that never ticks promises nothing.
+    if ((def.reports ?? false) && !def.can.includes("send")) {
+      const holds = def.can.length > 0 ? def.can.join(", ") : "none";
+      throw new ManifestError(
+        `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`,
+      );
+    }
+    roles[key] = {
+      can: [...def.can],
+      description: def.description ?? null,
+      reports: def.reports ?? false,
+    };
   }
 
   return {
@@ -290,5 +377,8 @@ export function resolveManifest(input: unknown): RoomManifest {
     roles,
     defaultRole: v.default_role,
     creatorRole: v.creator_role,
+    // `!= null`, not truthiness: an authored "" is a mistake to refuse, not an
+    // absent key. A valueless `heartbeat_on:` in YAML is null and means no cadence.
+    heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : null,
   };
 }

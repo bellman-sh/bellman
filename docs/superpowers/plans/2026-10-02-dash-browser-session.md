@@ -61,6 +61,8 @@ Three new source files rather than growing `routes.ts`, which is already 997 lin
 
 ### Task 1: The session record, its predicate, and the in-memory store
 
+> The committed implementation diverges from the code blocks below. Commits `2e4fc68`, `c61e3be`, `a22c64a` and `6436419` are authoritative; the blocks record what was originally asked for.
+
 **Files:**
 - Modify: `src/oauth/storage.ts` (add alongside `RefreshToken` and `hasLapsed`)
 - Test: `tests/panel-session.test.ts` (create)
@@ -1808,17 +1810,18 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
   // Review Focus 5 — a record whose replanned_at is absent or non-finite.
   it("re-resolves immediately when replanned_at is absent", async () => {
     const now = Date.now();
-    // Deliberately missing replanned_at, the way a record from before the field
-    // would be. `now - undefined` is NaN, and every comparison with NaN is
-    // false — so one plausible phrasing of the staleness test reads "fresh"
-    // forever and the plan never re-resolves, for the session's whole life.
-    await cfg.store.putSession("legacy", {
+    // Deliberately missing replanned_at, to stand in for a malformed record:
+    // nothing writes a session without it. `now - undefined` is NaN, and every
+    // comparison with NaN is false — so one plausible phrasing of the staleness
+    // test reads "fresh" forever and the plan never re-resolves, for the
+    // session's whole life.
+    await cfg.store.putSession("malformed", {
       identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant",
       identity_keys: ["github:4242"], created_at: now, last_used_at: now,
       expires_at: now + SESSION_TTL_MS,
     } as unknown as PanelSession);
 
-    const res = await route(withCookie("/account", "legacy", {
+    const res = await route(withCookie("/account", "malformed", {
       headers: { accept: "application/json" },
     }));
 

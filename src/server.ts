@@ -694,8 +694,23 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         return fail(`payload too large (${serialized.length} chars, limit ${MAX_PAYLOAD_CHARS}). Send a summary and offer details on request.`);
       }
 
+      // Hoisted past the guard, not moved into it: the capability checks below,
+      // and `delivered_to` in the result, read it on every kind.
       const others = activeMembers(session).filter((m) => m.memberId !== member_id);
-      if (others.length === 0) return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
+      // A progress report answers the SERVER's tick, not a peer. Its readers are the
+      // room's log and the next tick's snapshot, both of which exist with nobody
+      // else in the room — and the tick asks for it whether or not anyone has
+      // joined, because D7 makes the cadence observable rather than conditional on
+      // an audience: the startup window is exactly when a human wants to know the
+      // lone agent is alive. Refusing it here would interrupt a member every
+      // cadence with an instruction this same server then rejects, forever.
+      //
+      // Type-aware rather than dropped: the other five kinds are addressed TO the
+      // room, and a member sending one into an empty room has misunderstood where
+      // it is. Only the refusal is conditional.
+      if (type !== "progress" && others.length === 0) {
+        return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
+      }
 
       if (type === "message" || type === "artifact") {
         const deaf = others.filter((m) => !m.capabilities.includes("receive_messages"));

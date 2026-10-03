@@ -8,8 +8,10 @@
  * is the ways a payload is refused, and what a refusal leaves behind: nothing.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { Harness } from "../helpers/harness.js";
+import { Harness, DEV_KEY } from "../helpers/harness.js";
+import { brief } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { snapshotOf } from "../../src/heartbeat.js";
 
 let h: Harness;
 
@@ -132,5 +134,107 @@ describe("bellman_send type=progress", () => {
     const replay = await report(p, { note: "first" }, { idempotency_key: "progress-key-0001" });
     expect(replay.data.replayed).toBe(true);
     expect((await creatorRow(p)).lastReportAt).toBe(stamped);
+  });
+});
+
+/**
+ * A room that ticks with one member in it. The shape is not exotic: a cadence and
+ * a reporting `creator_role` is the ONE shape armed at creation, so it is the
+ * first room any author of this feature builds, and it is alone for as long as it
+ * takes somebody to use the join code.
+ */
+const lonelyTickingRoom = async (h: Harness) => {
+  const creator = await h.connect(DEV_KEY.jesse);
+  const started = await creator.call("bellman_start", {
+    brief: brief(),
+    manifest: {
+      room: "migration-swarm",
+      mode: "swarm",
+      // Every verb, so a refusal below is the lone-member guard's and not the
+      // verb check's — that check runs first, and two of these cases never
+      // reached the guard at all while `lead` held only send and invite.
+      roles: {
+        lead: {
+          can: ["send", "invite", "request_actions", "respond_actions"],
+          reports: true,
+        },
+        helper: { can: ["send"] },
+      },
+      default_role: "helper",
+      creator_role: "lead",
+      heartbeat_on: "5m",
+    },
+  });
+  expect(started.isError, started.text).toBe(false);
+  return {
+    creator,
+    sessionId: String(started.data.session_id),
+    memberId: String(started.data.member_id),
+  };
+};
+
+describe("a member alone in a ticking room", () => {
+  /**
+   * The server asks, so the server must accept the answer.
+   *
+   * The tick interrupts this member with snapshotOf's ask every cadence whether or
+   * not anyone else has joined — D7 makes the cadence observable rather than
+   * conditional on an audience, because the startup window is exactly when a human
+   * wants to know the lone agent is alive. bellman_send's lone-member guard sat
+   * above every per-type branch and caught the reply, so the tick and the refusal
+   * repeated every cadence, forever.
+   */
+  it("may answer the tick with no peer in the room", async () => {
+    const { creator, sessionId, memberId } = await lonelyTickingRoom(h);
+    const out = await creator.call("bellman_send", {
+      session_id: sessionId, member_id: memberId, type: "progress",
+      payload: { note: "still resolving the manifest" },
+    });
+    expect(out.isError, out.text).toBe(false);
+    // Nobody to deliver to, said plainly rather than by refusing the send.
+    expect(out.data.delivered_to).toEqual([]);
+
+    // And the stamp landed, so the next tick has something to read.
+    const me = (await h.store.getSession(sessionId))!.members
+      .find((m) => m.memberId === memberId)!;
+    expect(me.lastReportAt).toBeGreaterThan(0);
+  });
+
+  /** The other five kinds keep the guard exactly as it was. */
+  it.each([
+    ["message", { text: "anyone there?" }],
+    ["artifact", { name: "n", content: "c" }],
+    ["action_request", { text: "run the migration" }],
+    ["brief_update", {}],
+    ["action_response", { approved: true }],
+  ])("is still refused a lone %s", async (type, payload) => {
+    const { creator, sessionId, memberId } = await lonelyTickingRoom(h);
+    const out = await creator.call("bellman_send", {
+      session_id: sessionId, member_id: memberId, type, payload,
+      ...(type === "action_response" ? { ref_id: "1" } : {}),
+    });
+    expect(out.isError, out.text).toBe(true);
+    expect(out.text).toContain("no other active members yet");
+  });
+
+  /**
+   * The ask and the surface, pinned to each other. The tick's instruction names a
+   * `bellman_send` call, so a rename on either side turns the ask into an
+   * instruction the same server rejects — which is the defect above, one layer up.
+   */
+  it("asks for a reply bellman_send actually accepts", async () => {
+    const { creator, sessionId, memberId } = await lonelyTickingRoom(h);
+    const session = (await h.store.getSession(sessionId))!;
+    const ask = snapshotOf(session, Date.now()).ask;
+
+    const kind = /type="([a-z_]+)"/.exec(ask)?.[1];
+    expect(kind, ask).toBe("progress");
+    expect(ask).toContain("bellman_send");
+
+    const sent = await creator.call("bellman_send", {
+      session_id: sessionId, member_id: memberId, type: kind,
+      payload: { note: "doing as the tick asked" },
+    });
+    expect(sent.isError, sent.text).toBe(false);
   });
 });

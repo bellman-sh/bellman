@@ -272,3 +272,163 @@ it("wakes a held poll with the tick", async () => {
   expect(woken).toHaveLength(1);
   expect(woken[0]).toMatchObject({ type: "heartbeat", fromMemberId: "system" });
 });
+
+// ---------------------------------------------------------------------------
+// Arming. The tick is DERIVED, so nothing re-arms it on its own: while
+// nextTickAt is null nothing is scheduled, and no alarm is left to notice the
+// state that made it non-null. Every roster change that can flip that answer
+// therefore has to re-arm after its write commits.
+// ---------------------------------------------------------------------------
+
+/**
+ * The room shape the spec's own architecture diagram authors, and the one every
+ * room using this feature has: no preset sets `reports: true`, so the manifest is
+ * authored, and the role that answers is a JOINER'S seat rather than the
+ * creator's.
+ */
+const joinerReports = roomManifest({
+  roles: {
+    coordinator: { can: ["send", "invite"], description: null, reports: false },
+    helper: { can: ["send"], description: null, reports: true },
+  },
+  defaultRole: "helper",
+  creatorRole: "coordinator",
+  heartbeatOnMs: FIVE_MIN,
+});
+
+/**
+ * `joinCodes: {}` on purpose. A code would queue a registry write, and its drain
+ * ends in reArm() — which is how a `pair` room masks this: bellman_confirm calls
+ * clearJoinCodes once the room fills, and by the time that drain re-arms, the
+ * reporting member is seated. A swarm room that is not yet full makes no such
+ * call, so nothing re-arms as a side effect and the arming has to be its own.
+ */
+const swarm = (id: string, over = {}) =>
+  session({
+    id,
+    manifest: joinerReports,
+    joinCodes: {},
+    members: [member({ memberId: "m_coord", roomRole: "coordinator", label: "coord@a" })],
+    ...over,
+  });
+
+const helper = (memberId: string) =>
+  member({ memberId, userId: "u_helper", roomRole: "helper", label: `${memberId}@b` });
+
+const alarmAndExpiry = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) => ({
+    alarm: await ctx.storage.getAlarm(),
+    expiresAt: (await ctx.storage.get<{ expiresAt: number }>("session"))!.expiresAt,
+  }));
+
+/**
+ * **The regression test for this feature's headline behaviour.** Without the
+ * arming, a room whose creator does not report never ticks at all: createSession
+ * arms the TTL only, no later join arms the tick, and the next thing to touch the
+ * alarm is the TTL firing, which closes the room.
+ */
+it("arms the tick when the member who answers it is seated", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(swarm("qs_seat_arms"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_seat_arms"));
+
+  // Nobody reports yet, so nextTickAt is null and only the TTL is armed.
+  const before = await alarmAndExpiry(stub);
+  expect(before.alarm).toBe(before.expiresAt);
+
+  const seated = await store.seatMember("qs_seat_arms", helper("m_helper"), 0, Date.now());
+  expect(seated.refused).toBe(null);
+
+  // A cadence is minutes; the TTL is hours. The tick is now the sooner of the two.
+  const after = await alarmAndExpiry(stub);
+  expect(after.alarm).toBeLessThan(after.expiresAt);
+  expect(after.alarm).toBeGreaterThan(Date.now());
+});
+
+/** addMember is the other way onto the roster — the creator's own seat, and #66's. */
+it("arms the tick when a reporting member is added", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(swarm("qs_add_arms"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_add_arms"));
+
+  const before = await alarmAndExpiry(stub);
+  expect(before.alarm).toBe(before.expiresAt);
+
+  expect(await store.addMember("qs_add_arms", helper("m_added"))).toBe(true);
+
+  const after = await alarmAndExpiry(stub);
+  expect(after.alarm).toBeLessThan(after.expiresAt);
+});
+
+/**
+ * A thaw. nextTickAt refuses a frozen room, so a freeze leaves nothing armed for
+ * the tick, and clearing frozenAt is the only thing that can put it back.
+ *
+ * The firing between the freeze and the thaw is setup, and it is here so that the
+ * premise below holds either way. A freeze does not disarm anything by itself —
+ * the alarm stays pointed at the tick time it already held — so it takes a firing,
+ * refused by #tickIfDue and re-armed to the TTL alone, to reach the state this
+ * starts from. freezeSession re-arms directly now and would reach it without the
+ * firing, but then the premise, not the conclusion, would be what failed before
+ * the fix, and a test should fail on the line it is about.
+ */
+it("arms the tick again when a frozen room is thawed", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_thaw"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_thaw"));
+
+  await store.freezeSession("qs_thaw", Date.now());
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+  const frozen = await alarmAndExpiry(stub);
+  expect(frozen.alarm).toBe(frozen.expiresAt);
+
+  await store.freezeSession("qs_thaw", null);
+
+  const thawed = await alarmAndExpiry(stub);
+  expect(thawed.alarm).toBeLessThan(thawed.expiresAt);
+});
+
+/**
+ * The chain, end to end under real alarms: a room is created, the member that
+ * answers is seated, the armed tick fires at the cadence, and the reply that
+ * `progress` writes — a `lastReportAt` stamp — quietens the next one. Nothing
+ * drove the feature this far before, which is why both the arming and the
+ * refused reply shipped.
+ */
+it("arms, fires, and goes quiet once the seated member reports", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(swarm("qs_chain"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_chain"));
+  await store.seatMember("qs_chain", helper("m_helper"), 0, Date.now());
+
+  // The tick is armed, and for the cadence rather than the TTL.
+  const armed = await alarmAndExpiry(stub);
+  expect(armed.alarm).toBeLessThan(armed.expiresAt);
+
+  // Wait out one cadence, then let the armed alarm fire.
+  await ageRoom(stub);
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  const ticked = await rows(stub);
+  const tick = ticked.events.find((e) => e.type === "heartbeat")!;
+  expect(tick.fromMemberId).toBe("system");
+  expect(tick.payload).toMatchObject({
+    cadence_seconds: 300,
+    // Only the seat the room asks. The coordinator reports nothing and is not listed.
+    members: [{ member_id: "m_helper" }],
+  });
+
+  // The reply, as bellman_send type=progress writes it.
+  await store.updateMember("qs_chain", "m_helper", { lastReportAt: Date.now() });
+  // Make the NEXT tick due, so the alarm reaches #tickIfDue and the quiet is the
+  // handler's decision rather than a firing that never happened.
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<Record<string, unknown>>("session");
+    await ctx.storage.put("session", { ...s, lastTickAt: Date.now() - FIVE_MIN });
+  });
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toHaveLength(1);
+});
+

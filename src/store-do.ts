@@ -507,6 +507,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return set;
   }
 
+  /**
+   * **The rule the heartbeat's derived alarm imposes on every mutator here, stated
+   * once: a write that can flip `nextTickAt` from null to non-null must `reArm()`
+   * once it has committed.**
+   *
+   * `nextTickAt` returns null for four reasons — no cadence, the room is closed,
+   * the room is frozen, or no active member holds a reporting seat. While it is
+   * null nothing is armed for the tick, so there is no firing left to notice the
+   * state that made it non-null: the answer cannot correct itself. Adding a member
+   * is one such write (this and `seatMember`), and so is clearing `frozenAt`
+   * (`freezeSession`). The other direction needs nothing: the armed alarm fires
+   * once, finds nobody due, and the reArm() that ends `alarm()` drops the tick.
+   *
+   * After the `put`, never inside a `ctx.storage.transaction()` closure.
+   * ARCHITECTURE.md §9: everything awaited in a closure holds every other call to
+   * this object until it commits, and reArm() reads `derivedDue()`, which reads
+   * `stored()`. `OutboxDriver.enqueue` arming from inside a caller's closure is
+   * the one deliberate exception, and it is a bare `setAlarm` with nothing to read.
+   *
+   * Unconditional, not guarded on whether the roster change mattered. reArm() is
+   * idempotent and derived: on a call that changed nothing it costs one storage
+   * read and points the alarm at the time it already held. `createSession`'s
+   * "only when nothing was queued" guard does NOT transfer here — see seatMember.
+   */
   async addMember(member: Member): Promise<boolean> {
     const s = await this.stored();
     if (!s) return false;
@@ -517,6 +541,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (s.frozenAt !== null) return false;
     if (s.closed) return false;
     await this.ctx.storage.put("session", { ...s, members: [...s.members, member] });
+    // A refusal above returns before this, so a join that did not land arms nothing.
+    await this.driver.reArm();
     return true;
   }
 
@@ -529,6 +555,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * guarantee `closeSessionIfEmpty` relies on, for the same reason: a caller
    * that read the roster, chose a victim and then wrote would be handed exactly
    * the window two concurrent joiners need to overfill the room.
+   *
+   * The reArm() at the end is addMember's rule — seating the member the room asks
+   * for reports is the write that flips `nextTickAt` off null, and the room this
+   * feature exists for is exactly the one whose creator does not report. It does
+   * not reopen invariant 9: the seat is already committed, it awaits only this
+   * object's storage so it adds no interleaving point the atomicity argument above
+   * did not already allow, and a reArm() that failed would leave the seat standing
+   * and the arming missed, which is what this method did before it was here.
+   *
+   * `createSession` deliberately skips reArm() when it queued outbox intents,
+   * because `enqueue` arms for the queue's marker — dated now — and a reArm()
+   * would bring the alarm in behind the commit to race the inline delivery. That
+   * guard is about a method's OWN enqueue and does not transfer: this one queues
+   * nothing, so the only due times reArm() can see are the TTL, the tick, and an
+   * outbox marker some earlier call left behind — and a marker still present means
+   * a delivery genuinely is owed, so arming for it is recovery rather than a race.
+   * `bellman_confirm`'s `clearJoinCodes`, which runs after this, arms the alarm
+   * itself inside its own transaction and so overwrites whatever this set.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
     const s = await this.stored();
@@ -548,6 +592,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return next;
     });
     await this.ctx.storage.put("session", { ...s, members: [...members, member] });
+    await this.driver.reArm();
     return { refused: null, reclaimed };
   }
 
@@ -565,6 +610,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return next;
     });
     await this.ctx.storage.put("session", { ...s, members });
+    // addMember's rule, and `leftAt` is the only field in MemberPatch that can
+    // flip nextTickAt off null: clearing it returns a departed member to the
+    // roster. Nothing calls it that way today — every caller sets a time — but
+    // MemberPatch permits it, and the predicate is about what a write CAN do.
+    //
+    // Deliberately narrow, where the three above are unconditional: this is the
+    // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
+    // here, and neither that nor `lastReportAt` reaches nextTickAt at all — the
+    // tick is anchored on `lastTickAt`, which is what keeps the alarm from
+    // spinning (see nextTickAt). A member leaving goes the self-healing way.
+    if (patch.leftAt === null) await this.driver.reArm();
   }
 
   async closeSession(): Promise<void> {
@@ -598,10 +654,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return true;
   }
 
+  /**
+   * Freeze the room, or thaw it with null.
+   *
+   * The reArm() is addMember's rule: a thaw is the write that flips `nextTickAt`
+   * off null for a room whose cadence and roster were there all along, and without
+   * it a thawed room never ticks again.
+   *
+   * It earns its place on the freeze too, and is unconditional for that reason. A
+   * freeze does not disarm anything — the alarm stays pointed at the tick time it
+   * already held — so without this, a frozen room wakes once at that time to be
+   * refused by #tickIfDue, and only then re-arms to the TTL. Re-arming here moves
+   * it out to the TTL at the freeze and spends that wake on nothing.
+   */
   async freezeSession(frozenAt: number | null): Promise<void> {
     const s = await this.stored();
     if (!s) return;
     await this.ctx.storage.put("session", { ...s, frozenAt });
+    await this.driver.reArm();
   }
 
   async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {

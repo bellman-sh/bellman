@@ -12,6 +12,9 @@ const IDENTITY: Identity = {
   role: "member",
   label: "jesse@example.dev",
 };
+const REPLANNED: Identity = { ...IDENTITY, plan: "pro" };
+/** Someone else, for the sessions a method has no business touching. */
+const OTHER: Identity = { ...IDENTITY, userId: "u_github_9999", label: "sam@example.dev" };
 
 const T0 = 1_700_000_000_000;
 
@@ -177,20 +180,6 @@ describe("MemoryAuthStore sessions", () => {
     await expect(store.deleteSession("never-existed")).resolves.toBeUndefined();
   });
 
-  // Sign-out ends the session it names and no other. The tests above delete the
-  // only session in the store, so a deleteSession that cleared the whole store
-  // would pass all of them; here a second session has to survive.
-  it("deleteSession ends only the session it names", async () => {
-    const store = new MemoryAuthStore();
-    await store.putSession("one", panelSession());
-    await store.putSession("two", panelSession());
-
-    await store.deleteSession("one");
-
-    expect(await store.touchSession("one", T0)).toBeUndefined();
-    expect(await store.touchSession("two", T0)).toBeDefined();
-  });
-
   // The constraint touchSession is written around: a sign-out that lands while a
   // touch is in flight has to stay a sign-out. A touch that yielded between its
   // read and its write would be overtaken by the delete and then write the
@@ -309,8 +298,6 @@ describe("MemoryAuthStore sessions", () => {
 const fresh = (): AuthStorage => new MemoryAuthStore();
 
 describe("replanSession", () => {
-  const REPLANNED: Identity = { ...IDENTITY, plan: "pro" };
-
   it("merges the identity, plan source and time into the stored record, and nothing else", async () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
@@ -374,5 +361,53 @@ describe("replanSession", () => {
 
     expect(merged).toBe(true);
     expect(await store.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
+  });
+});
+
+// The store holds every session on the deployment, so a method that wrote to the
+// wrong record, or to all of them, passes any test that gives it a single
+// session: "the session I named changed" has a second producer, "every session
+// changed". So each test here keeps a second session the method has no business
+// touching, and asserts it survives unchanged. A storage method's tests need one.
+describe("a method touches only the session it names", () => {
+  // Built anew for each comparison and not kept in a variable. This store keeps
+  // the object it is given, so a method that changed a session in place would
+  // change the variable too, and a comparison against it would still pass.
+  const yours = () => panelSession({ identity: OTHER, identity_keys: ["github:9999"] });
+
+  it("deleteSession ends only the session it names", async () => {
+    const store = fresh();
+    await store.putSession("one", panelSession());
+    await store.putSession("two", panelSession());
+
+    await store.deleteSession("one");
+
+    expect(await store.touchSession("one", T0)).toBeUndefined();
+    expect(await store.touchSession("two", T0)).toBeDefined();
+  });
+
+  it("touchSession and replanSession change only the session they name", async () => {
+    const store = fresh();
+    await store.putSession("mine", panelSession());
+    await store.putSession("yours", yours());
+
+    const later = T0 + SESSION_TOUCH_MS + 1; // stale, so this touch writes
+    await store.touchSession("mine", later);
+    expect(await store.replanSession("mine", REPLANNED, "grant", later)).toBe(true);
+
+    // Not due at T0, so this hands back what is stored.
+    expect(await store.touchSession("yours", T0)).toEqual(yours());
+  });
+
+  it("dropping a dead session removes that one and leaves the others", async () => {
+    const store = fresh();
+    await store.putSession("yours", yours());
+    await store.putSession("dead", panelSession({
+      created_at: T0 - 2 * SESSION_IDLE_MS, last_used_at: T0 - 2 * SESSION_IDLE_MS,
+    }));
+
+    expect(await store.touchSession("dead", T0)).toBeUndefined();
+
+    expect(await store.touchSession("yours", T0)).toEqual(yours());
   });
 });

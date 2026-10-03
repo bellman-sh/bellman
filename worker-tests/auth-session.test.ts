@@ -26,14 +26,18 @@ const IDENTITY: Identity = {
   label: "jesse@example.dev",
 };
 const REPLANNED: Identity = { ...IDENTITY, plan: "pro" };
+/** Someone else, for the sessions a method has no business touching. */
+const OTHER: Identity = { ...IDENTITY, userId: "u_github_9999", label: "sam@example.dev" };
 
 /**
  * A fixed instant in the past. putSession sweeps with the object's own clock, so
  * a session built from this is long dead by the time the sweep looks at it, and a
  * second put on the same object would remove the first. The tests that use it
- * therefore put once per object; the sweep tests build theirs from Date.now().
+ * therefore put once per object; the tests that need several sessions build
+ * theirs from Date.now().
  */
 const T0 = 1_700_000_000_000;
+const HOUR = 60 * 60 * 1000;
 
 const panelSession = (over: Partial<PanelSession> = {}): PanelSession => ({
   identity: IDENTITY, plan_source: "default", identity_keys: ["github:4242"],
@@ -135,25 +139,6 @@ describe("AuthDO sessions", () => {
     await o.deleteSession("sid");
 
     expect(await o.touchSession("sid", T0)).toBeUndefined();
-  });
-
-  // Sign-out ends the session it names and no other. The test above deletes the
-  // only session in the object, so a deleteSession that cleared the whole object
-  // would pass it; here a second session has to survive. Built from Date.now()
-  // and not T0: the second put sweeps, and a T0 session is dead by the object's
-  // own clock.
-  it("deleteSession ends only the session it names", async () => {
-    const o = auth("s-delete-only");
-    const now = Date.now();
-    const live = panelSession({
-      created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
-    });
-    await o.putSession("one", live);
-    await o.putSession("two", live);
-
-    await o.deleteSession("one");
-
-    expect(await storedIds("s-delete-only")).toEqual(["sess:two"]);
   });
 
   it("skips the write while last_used_at is fresh", async () => {
@@ -261,9 +246,78 @@ describe("AuthDO sessions", () => {
   });
 });
 
-describe("AuthDO session sweep", () => {
-  const HOUR = 60 * 60 * 1000;
+/**
+ * AuthDO is one object holding every session on the deployment, so a method that
+ * wrote to the wrong record, or to all of them, would be the worst failure it can
+ * have, and it passes any test that gives the object a single session. "The
+ * session I named changed" has a second producer, "every session changed".
+ *
+ * So each test here keeps a second session the method has no business touching,
+ * and asserts it survives unchanged. A storage method's tests need one of these.
+ * The sessions are built from Date.now() and not T0, because the second put
+ * sweeps and a T0 session is dead by the object's own clock.
+ */
+describe("AuthDO: a method touches only the session it names", () => {
+  it("deleteSession ends only the session it names", async () => {
+    const o = auth("s-delete-only");
+    const now = Date.now();
+    const live = panelSession({
+      created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+    });
+    await o.putSession("one", live);
+    await o.putSession("two", live);
 
+    await o.deleteSession("one");
+
+    expect(await storedIds("s-delete-only")).toEqual(["sess:two"]);
+  });
+
+  it("touchSession and replanSession change only the session they name", async () => {
+    const name = "s-isolation";
+    const o = auth(name);
+    const now = Date.now();
+    const mine = panelSession({
+      created_at: now - 2 * HOUR, last_used_at: now - 2 * HOUR, replanned_at: now - 2 * HOUR,
+      expires_at: now + SESSION_TTL_MS,
+    });
+    const yours = { ...mine, identity: OTHER, identity_keys: ["github:9999"] };
+    await o.putSession("mine", mine);
+    await o.putSession("yours", yours);
+
+    // Two hours stale, so this touch writes.
+    expect((await o.touchSession("mine", now))?.identity.userId).toBe("u_github_4242");
+    expect(await o.replanSession("mine", REPLANNED, "grant", now)).toBe(true);
+
+    expect(await storedSession(name, "yours")).toEqual(yours);
+    // And each id answers with its own record, not the last one served.
+    expect((await o.touchSession("yours", now))?.identity.userId).toBe("u_github_9999");
+  });
+
+  // The branch every returning browser with an expired cookie runs, and the one
+  // destructive path in touchSession. AuthDO also holds the registered clients,
+  // the refresh tokens and the billing ledger, so a drop that removed more than
+  // the one session would take them too.
+  it("dropping a dead session removes that one and leaves the others", async () => {
+    const name = "s-dead-drop";
+    const o = auth(name);
+    const now = Date.now();
+    await o.putSession("yours", panelSession({
+      created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+    }));
+    // Idle for two days, so dead by the object's own clock. Put second, so the
+    // sweep inside this put runs over `yours` alone and leaves this one stored.
+    await o.putSession("dead", panelSession({
+      created_at: now - 48 * HOUR, last_used_at: now - 48 * HOUR, expires_at: now + SESSION_TTL_MS,
+    }));
+    expect(await storedIds(name)).toEqual(["sess:dead", "sess:yours"]); // precondition
+
+    expect(await o.touchSession("dead", now)).toBeUndefined();
+
+    expect(await storedIds(name)).toEqual(["sess:yours"]);
+  });
+});
+
+describe("AuthDO session sweep", () => {
   /**
    * Put a live session, then a dead one, then a third whose put runs the last
    * sweep, and return the ids stored afterwards.

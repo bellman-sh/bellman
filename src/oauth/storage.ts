@@ -450,6 +450,12 @@ export interface AuthStorage {
    * to `now`, writes nothing else, and does nothing at all when the record is
    * gone. Implementations must not yield between the read and the write.
    *
+   * Resolves true when it merged, and false when there was no session to merge
+   * into, whether it was signed out, swept or never stored. False tells the
+   * caller its session ended while it was working. Whether to still answer the
+   * request it is serving, which began before the sign-out, is the caller's
+   * decision and not this method's.
+   *
    * A request that re-resolves a plan reads the record, spends a while resolving,
    * and then has to put the result back, and a sign-out can land in that gap.
    * Writing the whole record back with putSession would recreate the session the
@@ -462,7 +468,7 @@ export interface AuthStorage {
    * sessionDead reads: merging into a record that has just died revives nothing,
    * and touchSession remains the only place a session is judged.
    */
-  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<void>;
+  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<boolean>;
   /** Sign out. Idempotent: an unknown id is not an error. */
   deleteSession(id: string): Promise<void>;
 }
@@ -652,10 +658,11 @@ export class MemoryAuthStore implements AuthStorage {
     identity: Identity,
     planSource: string,
     now: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const stored = this.sessions.get(id);
-    if (!stored) return;
+    if (!stored) return false;
     this.sessions.set(id, { ...stored, identity, plan_source: planSource, replanned_at: now });
+    return true;
   }
 
   async deleteSession(id: string): Promise<void> {

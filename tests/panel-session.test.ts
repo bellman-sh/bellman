@@ -301,29 +301,31 @@ describe("replanSession", () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
 
-    await store.replanSession("sid", REPLANNED, "grant", T0 + 5);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 5);
 
+    expect(merged).toBe(true);
     expect(await store.touchSession("sid", T0 + 5)).toEqual(
       panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
     );
   });
 
-  // The outcome the race has to have, as the in-memory store shows it: a request
-  // touches the session, spends a while re-resolving its plan, and writes the
-  // result back, and the human signs out in between. It pins that outcome and not
-  // the mechanism. Without replanSession's absence guard this store would write a
-  // record holding only the three merged fields, which sessionDead reads as dead,
-  // so the assertion would still hold. The workerd test of the same sequence
-  // reads storage before it touches, and is the one that pins the guard:
-  //   "leaves a session dead when the sign-out landed between the touch and the replan"
-  it("finds no session on the next touch when the sign-out landed between the touch and the replan", async () => {
+  // The race this method exists for: a request touches the session, spends a
+  // while re-resolving its plan, and writes the result back, and the human signs
+  // out in between. An upsert would recreate the session they just ended.
+  //
+  // The answer is what pins the absence guard in this store. Without the guard it
+  // would write a record holding only the three merged fields and answer true,
+  // and the touch below would still find nothing, because sessionDead reads that
+  // record as dead. The workerd twin also reads storage.
+  it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
     await store.touchSession("sid", T0);
     await store.deleteSession("sid");
 
-    await store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 1);
 
+    expect(merged).toBe(false);
     expect(await store.touchSession("sid", T0 + 1)).toBeUndefined();
   });
 
@@ -354,8 +356,9 @@ describe("replanSession", () => {
     const theirs = mine + SESSION_TOUCH_MS + 1;
     await store.touchSession("sid", theirs); // another request, later
 
-    await store.replanSession("sid", REPLANNED, "grant", mine);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", mine);
 
+    expect(merged).toBe(true);
     expect(await store.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
   });
 });

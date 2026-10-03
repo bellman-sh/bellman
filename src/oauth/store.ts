@@ -370,22 +370,27 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * between them and be reverted.
    *
    * It writes its three fields onto the record as it is stored now, and onto
-   * nothing when there is none. The caller read its copy before the plan was
-   * resolved, which can be a while ago, and putting that copy back with
-   * putSession would recreate a session that was signed out in the meantime.
+   * nothing when there is none, and says which it did. The caller read its copy
+   * before the plan was resolved, which can be a while ago, and putting that copy
+   * back with putSession would recreate a session that was signed out in the
+   * meantime.
    */
   async replanSession(
     id: string,
     identity: Identity,
     planSource: string,
     now: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const key = `${SESSION}${id}`;
     const stored = await this.ctx.storage.get<PanelSession>(key);
-    if (!stored) return;
-    await this.ctx.storage.put(key, {
+    if (!stored) return false;
+    // Typed, as touchSession's record is, so that a field written under the
+    // wrong name fails typecheck:worker instead of being stored as an extra one.
+    const replanned: PanelSession = {
       ...stored, identity, plan_source: planSource, replanned_at: now,
-    });
+    };
+    await this.ctx.storage.put(key, replanned);
+    return true;
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -501,7 +506,7 @@ export class AuthStore implements AuthStorage, BillingStorage {
   touchSession(id: string, now: number): Promise<PanelSession | undefined> {
     return this.object.touchSession(id, now);
   }
-  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<void> {
+  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<boolean> {
     return this.object.replanSession(id, identity, planSource, now);
   }
   deleteSession(id: string): Promise<void> {

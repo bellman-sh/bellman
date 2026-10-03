@@ -313,8 +313,9 @@ describe("AuthDO replanSession", () => {
     const o = auth("s-replan");
     await o.putSession("sid", panelSession());
 
-    await o.replanSession("sid", REPLANNED, "grant", T0 + 5);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", T0 + 5);
 
+    expect(merged).toBe(true);
     expect(await o.touchSession("sid", T0 + 5)).toEqual(
       panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
     );
@@ -324,9 +325,10 @@ describe("AuthDO replanSession", () => {
   // while re-resolving its plan, and writes the result back, and the human signs
   // out in between. An upsert would recreate the session they just ended.
   //
-  // Storage is read before the touch, which would clear away what it was meant
-  // to find. The touch is there too, as the behaviour that matters, but it
-  // cannot catch an upsert on its own: the record that would be written holds
+  // The answer and the stored ids are each enough to see a missing absence
+  // guard. Storage is read before the touch, which would clear away what it was
+  // meant to find, and the touch is there for the behaviour that matters: on its
+  // own it cannot catch an upsert, because the record that would be written holds
   // only the three merged fields, which sessionDead reads as dead.
   it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
     const o = auth("s-replan-delete");
@@ -334,8 +336,9 @@ describe("AuthDO replanSession", () => {
     await o.touchSession("sid", T0);
     await o.deleteSession("sid");
 
-    await o.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", T0 + 1);
 
+    expect(merged).toBe(false);
     expect(await storedIds("s-replan-delete")).toEqual([]);
     expect(await o.touchSession("sid", T0 + 1)).toBeUndefined();
   });
@@ -369,8 +372,9 @@ describe("AuthDO replanSession", () => {
     const theirs = mine + SESSION_TOUCH_MS + 1;
     await o.touchSession("sid", theirs); // another request, later
 
-    await o.replanSession("sid", REPLANNED, "grant", mine);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", mine);
 
+    expect(merged).toBe(true);
     expect(await o.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
   });
 });

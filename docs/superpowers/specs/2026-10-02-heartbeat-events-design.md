@@ -4,12 +4,15 @@ Issues: [#111 Heartbeat events, and a member declaring that it will send them](h
 Status: approved design, pending implementation plan
 Related: [#103](https://github.com/bellman-sh/bellman/issues/103) (liveness, shipped —
 this is deliberately not that), [#99](https://github.com/bellman-sh/bellman/issues/99)
-(the socket this rides on, shipped), [#82](https://github.com/bellman-sh/bellman/issues/82)
+(the delivery path this rides on, shipped),
+[#25](https://github.com/bellman-sh/bellman/issues/25) (`getSession` loads every
+event — the cost D4 answers to), [#82](https://github.com/bellman-sh/bellman/issues/82)
 and [#81](https://github.com/bellman-sh/bellman/issues/81) (the next two users of
-the attention vocabulary in D5), [#66](https://github.com/bellman-sh/bellman/issues/66)
+the attention vocabulary in D9), [#66](https://github.com/bellman-sh/bellman/issues/66)
 (the scribe, which acts on a quiet member), [#49](https://github.com/bellman-sh/bellman/issues/49)
-(a human-visible dashboard), [#78](https://github.com/bellman-sh/bellman/issues/78)
-(generating `bellman_start`'s description — the mitigation for D11's cost)
+(the dashboard D4's snapshot is shaped for),
+[#78](https://github.com/bellman-sh/bellman/issues/78) (generating
+`bellman_start`'s description — the mitigation for D12)
 
 ## Problem
 
@@ -28,56 +31,79 @@ design:
 |---|---|---|
 | Says | "I exist" | "still working, currently on the migration script" |
 | Carries | nothing | content |
-| Arrives | on a timer | when there is something to say |
+| Arrives | on a timer | when asked |
 | Purpose | inform the server | reach a peer |
-| Home | `Member.lastSeenAt`, derived presence | an event in the room |
+| Home | `Member.lastSeenAt`, derived presence | events in the room |
 | Issue | #103, shipped | **this one** |
 
 #103 argued against a heartbeat event type, calling heartbeats "the
-highest-volume, lowest-value events imaginable". That is right about liveness
-and wrong about progress: the volume argument assumes a timer, and a progress
-heartbeat has one only because the *room* set it, which bounds it.
+highest-volume, lowest-value events imaginable". D4 is the answer to that
+critique, and it is the decision this design turns on.
 
 ### Why a declaration is the feature, not the event
 
 Without a declaration, silence is ambiguous. A member that has gone quiet is
 indistinguishable from one that never heartbeats at all. A member expected to
-beat and gone quiet is a signal a peer can act on; a member never expected to
-beat is noise.
+report and gone quiet is a signal a peer can act on; a member never expected to
+report is noise.
 
-That difference is the whole value, and it is also what bounds the cost.
+### Why nothing in the room can be trusted to generate the cadence
+
+The obvious design — a member reports on a cadence it was told about — does not
+work, and it took a wrong turn in this design to see why.
+
+An agent deep in a long task is the exact case heartbeats exist for, and it is
+not calling Bellman. It is reading files, running tests, thinking. It calls
+`bellman_sync` when it is **waiting on a peer**, which is the opposite of when
+it should be reporting. So any mechanism that depends on the member noticing it
+is due fires precisely when the information is least needed and stays silent
+when it is most needed.
+
+Nor can a client hold a timer. A hosted connector — ChatGPT, Claude Desktop —
+has no local process and cannot wake itself. A design that needs one is a design
+that works on one surface.
+
+**So the server generates the cadence, and the server is the only party that
+can.** It is also the only party that can see the whole room at once, which is
+what makes the tick worth more than a nudge (D4).
 
 ## Decisions
 
-### D1 — The room instructs; the member does not promise.
+### D1 — The server ticks. No member puts a heartbeat in the room.
 
-`heartbeatOn` is an **instruction carried by the room**, declared per role in
-the manifest beside `can`. Members do not define their own cadence.
+A `heartbeat` event is appended by `SessionDO` itself, with
+`fromMemberId: "system"`, exactly as `session_expired` and `member_timed_out`
+already are. It is unreachable from `bellman_send`.
 
-The alternative — a per-member promise declared at join — was considered and
-rejected. It makes the signal depend on what each member volunteered, so a
-reader of the room has to ask "was this one expected to beat?" before silence
-means anything, and two members in the same seat can answer differently. A
-room-declared interval makes the expectation a property of the **seat**, which
-is already how authority works here: `roles[x].can` is not negotiated per
-member either.
+That is structural rather than conventional, and it matters for the reason the
+architecture gives for the socket being receive-only: a member-writable
+heartbeat would be a second entry to the write path, with the verb check,
+frozen guard, idempotency record, payload-depth limit and audit write all
+duplicated there and kept identical to the first. "Two delivery paths that must
+not drift is already the cost of this design; two send paths would double it."
 
-The objection to a room-declared cadence is that a member may be unable to keep
-it — a hosted connector has no scheduler and cannot wake itself every five
-minutes. D6 dissolves that objection rather than answering it: the server knows
-the interval and the member is already calling `bellman_sync`, so the cadence is
-satisfied reactively and no client needs a timer.
+**The payoff is that the tick needs no new delivery machinery at all.**
+`#wake()` resolves held long polls and sends to held sockets; the bridge's watch
+loop returns, `deliver()` runs, and the event lands in a heads-down agent's
+context through channel push or the inbox and Stop hook. The path already
+exists and is already tested. A hosted connector that is not polling misses the
+wake and reads the tick on its next `bellman_sync`, because it is a stored event
+with a cursor — **invariant 6 holds: push is an optimisation, never a
+dependency.**
 
-### D2 — Per role, beside `can`, and expanded exactly where presets are.
+### D2 — The room declares one cadence; a role declares who must answer.
 
-`RoleDef` gains `heartbeatOnMs: number | null`. `null` means a member in this
-seat is not expected to beat, and its silence therefore means nothing.
+- `manifest.heartbeatOnMs: number | null` — one schedule for the room.
+- `RoleDef.reports: boolean` — whether members in this seat must answer it.
 
-Per role rather than per room because a seat that does no work should not be
-expected to report on it. `swarm`'s `observer` holds `can: []`; asking it for
-progress would generate `member_overdue` for a member behaving exactly as its
-role describes, and overdue events that were never anybody's fault are how the
-signal gets taught to be ignored.
+One cadence rather than one per role, because the tick is a single event for the
+whole room and per-role intervals would mean several schedules, a partial
+snapshot, and a due calculation spanning roles.
+
+The per-role half is what keeps the signal clean. `swarm`'s `observer` holds
+`can: []`; asking it to report work it does not do would name it silent for
+behaving exactly as its role describes, and overdue reports nobody earned are
+how a signal gets taught to be ignored.
 
 Authors write a duration — `"30s"`, `"5m"`, `"1h"` — under the input key
 `heartbeat_on`, matching the existing snake-case input convention
@@ -86,325 +112,327 @@ Authors write a duration — `"30s"`, `"5m"`, `"1h"` — under the input key
 holds is always concrete, and nothing downstream learns that durations or
 presets exist.
 
-Bounds are **30s to 1h**. Below 30s it is a liveness timer, which is #103's job
-and the thing this issue rejects. Above an hour the expectation says nothing a
-peer could act on inside a working session.
+Bounds are **30s to 1h**. Below 30s it is a liveness timer, which is #103's job.
+Above an hour the cadence says nothing a peer could act on inside a working
+session.
 
-The manifest is immutable after `createSession`, so the interval cannot drift
-under a room mid-life. That is a property worth keeping, not a limitation: a
-peer reading silence is reading it against the same number the member was given.
+The manifest is immutable after `createSession`, so the cadence cannot drift
+under a room mid-life. A peer reading silence reads it against the same number
+every member was given.
 
 ### D3 — No preset expects a heartbeat.
 
-`pair`, `swarm` and `review` all resolve with `heartbeatOnMs: null` on every
-role.
+`pair`, `swarm` and `review` all resolve `heartbeatOnMs: null`, with
+`reports: false` on every role.
 
-Turning this on for shipped presets would start producing `member_overdue` in
-every room anyone already runs, for members that were never told to beat. The
-feature's value rests entirely on an overdue event being worth reading, and the
-fastest way to destroy that is to ship a wave of them nobody earned.
+Turning this on for shipped presets would start ticking every room anyone
+already runs and naming members silent who were never asked for anything. The
+feature's value rests entirely on a tick being worth reading, and the fastest
+way to destroy that is to ship a wave of them nobody earned.
 
-So the mechanism lands opt-in, reachable by authoring a manifest. A preset that
-expects heartbeats is a follow-up worth doing once the mechanism has been used.
+The mechanism lands opt-in, reachable by authoring a manifest. A preset that
+expects heartbeats is a follow-up worth doing once a real room has used it.
 
-### D4 — A heartbeat is a durable event in the room, and its payload may not claim liveness.
+### D4 — The tick carries the roster snapshot. That is what earns its place in the log.
 
-A sixth `SEND_KINDS` entry, `heartbeat`, appended to the event log like every
-other kind.
+A 5-minute cadence is 288 events a day, 8,640 over a 30-day team-plan room, and
+#25 is literally "`SessionDO.getSession` loads every event on every call". A
+content-free tick on a timer is #103's "highest-volume, lowest-value events
+imaginable", and this time the critique would be right.
 
-Durability is forced rather than chosen. The socket is receive-only and
-`webSocketMessage` enforces it, and the architecture refuses a second write path
-by name: "two send paths would double it to save a round trip." So a heartbeat
-is written by a tool call regardless. And `waitForEvents` returns events after a
-cursor — an unstored signal has no cursor, so it would reach only whoever
-happened to be holding a poll at that instant, which breaks **invariant 6,
-push is never a dependency.**
+So the tick is not content-free. **The server is the only party that can see the
+whole room**, so the tick carries what only it knows — for every member that
+must report:
 
-That leaves **invariant 7** to answer: presence is derived, never stored, "not
-in a field, and not in an event payload, which is replayed and would read as
-present hours after the member went."
+- `member_id` and `label`
+- `last_report_at` — ISO 8601, or null if it has never reported
+- `silent_for_seconds` — a measurement taken at `at`
+- `silent: boolean` — past the second threshold (D10)
 
-The invariant's objection is narrower than it first reads. It forbids
-*presence* in a payload because "present" is a claim about **now**, which replay
-re-asserts hours later. A progress note is a claim about **`at`** — "ran
-migration 0042" was true at 14:02 and stays true forever. So the payload is a
-`z.strictObject`:
+Plus the ask itself: the cadence, and the call to answer it.
+
+That inverts the volume critique rather than arguing with it. A periodic
+room-state snapshot is the highest-value recurring row the log could hold: it is
+what #49's dashboard renders, what #66's scribe acts on, and a direct answer to
+this issue's own complaint that **"a room says nothing about its own state."**
+
+**Invariant 7 is unweakened.** The invariant forbids presence in a payload
+because "present" is a claim about **now**, which replay re-asserts hours later.
+Every field above is a claim about `at` — "had been silent 660 seconds at 14:05"
+was true then and stays true forever. The snapshot therefore carries **no**
+`present`, `status`, `alive` or `healthy` key, and derived presence stays
+derived. §10 of the architecture gains a sentence saying why this is not a
+counterexample.
+
+### D5 — The tick is a derived named alarm, mirroring `ttl`.
+
+`SessionDO.alarm()` already dispatches named handlers from `driver.dueNow(now)`,
+and `derivedDue()` already computes a due time from the session record rather
+than storing one. A heartbeat is the same shape as the TTL:
+
+- `derivedDue()` adds `["heartbeat", nextTickAt(s, now)]`
+- `alarm()` gains a branch calling `#tickIfDue(s, now)`
+- `#tickIfDue` mirrors `#expireIfDue`: build the event, `#writeEvent`, `#wake`
+
+**Derived rather than stored, deliberately.** `alarm()`'s comment warns that a
+name the driver can report with no branch below is never consumed, so the
+closing `reArm()` points the alarm back at it and it fires back to back for
+good — the documented rollback hazard for `due:outbox`. A derived due time
+cannot do that: a build that does not know the name does not compute it either,
+so **rolling back past this change strands nothing and needs no cleanup.**
+
+**This corrects an earlier ruling in this design, which rejected an alarm on
+cost grounds.** That conflated two billing shapes:
+
+| | Cost |
+|---|---|
+| Held long poll (what #99 removed) | object **resident**: 3,600 s of duration per watched hour |
+| Alarm firing | brief invocation: ~12 × tens of ms, **under a second** per hour |
+
+Three orders of magnitude apart. And decisively, **`ttl` already arms an alarm
+on every live session** — the object is already waking on a schedule, so adding
+a handler to an alarm that exists is close to free. #99's cost curve is about
+residency, and nothing here holds a request.
+
+### D6 — The tick interrupts. A reply does not.
+
+`heartbeat` is `interrupt`; `progress` is `ambient` (D9).
+
+This is the asymmetry the whole feature rests on. The tick must interrupt,
+because interrupting a working agent to ask where it is **is the feature** — the
+room asked for it, and a tick nobody reads generates no report. A reply must not,
+because a peer that cares is already looking, and progress notes landing in a
+peer's context every five minutes are worse than silence.
+
+Put the other way round: **a report is discoverable by waiting, and the absence
+of one is not.** The tick carries the absence (D4), so the tick is the loud half.
+
+### D7 — The reply is a member send kind, and its payload may not claim liveness.
+
+A sixth `SEND_KINDS` entry, `progress`, which is how a member answers a tick:
 
 - `note` — string, 1 to 500 chars
 - `step` — optional string, ≤ 40 chars
 - `eta_seconds` — optional number
 
-`strictObject` rather than a denylist of `status` / `alive` / `healthy` /
-`state`: every unknown key is rejected, so the rule cannot fall behind a list
-somebody forgot to extend. It is also the existing idiom (`RoleDefShape`).
+A `z.strictObject`, so every unknown key is rejected and `status` / `alive` /
+`healthy` / `state` cannot appear. A denylist would fall behind the first name
+somebody forgot to add; this is also the existing idiom (`RoleDefShape`).
 
-Invariant 7 therefore holds unweakened, and §10 of the architecture gains a
-sentence saying why a heartbeat is not a counterexample.
+A reply is a claim about `at`, same as the snapshot. A member may answer a tick,
+answer late, or never answer — the next tick reports which, and that is the
+entire enforcement model. **The cadence is observable, not compellable**, and
+making non-compliance visible is the design's job rather than making it
+impossible.
 
-### D5 — Attention is a declared property of an event type, and it is on the wire.
+An append sets `Member.lastReportAt`, which is the one new stored fact: when
+this member last reported. Absent on rows written before the field existed, read
+through an accessor that lifts those to `joinedAt`, the way `lastSeen` does.
+Durable Object storage has no migration step, and a persisted type that gains a
+field is silently a union with `undefined` for as long as old records live.
 
-A new `src/attention.ts` holds one table, closed over `EventType`:
+### D8 — `send` is the verb for a reply. No new verb.
 
-- `heartbeat` → `ambient`
-- `member_overdue` → `interrupt`
-- every existing type → `interrupt`
-
-`satisfies Record<EventType, Attention>`, so **a new event type must declare its
-posture or the build stops** — the `SEND_VERB` pattern, which the repo already
-uses to force a verb choice per send kind.
-
-**Every one of the twelve existing types maps to `interrupt`, which is exactly
-what they do today.** The table introduces a classification, not a behaviour
-change: nothing that currently reaches a peer mid-turn stops doing so.
-`invite_issued` and `member_joined` have a reasonable case for being ambient,
-and re-classifying either is a separate change with its own argument to make —
-not a thing this PR does while it happens to be adding the mechanism.
-
-`publicEvent` emits `ambient: true` and omits the key otherwise. Omission costs
-nothing for those twelve, and a client that has never heard of
-`heartbeat` keeps working. It goes in `publicEvent` rather than a table inside
-the bridge because `publicEvent` is the one projection both transports share, so
-a hosted connector, a future dashboard and the bridge all read the same answer
-without one of them owning a type list.
-
-**This is what #82 and #81 reuse.** Both are the same complaint as this issue
-from another angle — #82 that `delivered_to` implies delivery, #81 that an
-action request has no state — and both land as event types that declare their
-posture in this table. That is what keeps the three from producing three
-vocabularies for "what is happening in here."
-
-### D6 — A heartbeat does not interrupt. A missing heartbeat does.
-
-`deliver()` in `src/bridge.ts` is the single fork today: hook delivery enqueues
-to the inbox and the Stop hook drains it at end of turn, channel delivery pushes
-`notifications/claude/channel` immediately, mid-turn. It reads `ambient` off the
-event rather than naming types.
-
-| | channel delivery | hook delivery |
-|---|---|---|
-| `heartbeat` | no push; reached by a solicited `bellman_sync` or `bellman_wait` | inbox, end of turn |
-| `member_overdue` | pushed | inbox, end of turn |
-
-A heartbeat landing in a peer's context every five minutes is worse than
-silence, and a member that cares is already calling `bellman_sync` — so the
-report arrives exactly when somebody is looking. An overdue is the one thing a
-peer **cannot** discover by waiting, so it is the one thing that interrupts.
-
-This inverts the obvious shape, which is to push the beats and poll for silence.
-That shape is why five working members and five crashed ones look identical.
-
-### D7 — The instruction recurs, because an instruction given once decays.
-
-`bellman_confirm` states the expectation when a member takes a seat, and
-`bellman_connect` shows it in the room preview — that one is the consent point,
-where a joiner's human sees the obligation before accepting it.
-
-Neither is enough on its own. A member told "beat every five minutes" at join
-has that fact 50 turns behind it by the time it matters. So **the `bellman_sync`
-response carries it whenever the interval has elapsed**:
-
-- `heartbeat_due: true` — the interval has passed since this member last beat
-- `heartbeat_note` — one sentence naming the interval and the call to make
-
-This is what makes D1 affordable on every surface. The member needs no
-scheduler, because it is told it is due at a moment it was already listening.
-Nothing is pushed, so **invariant 6 holds**: a member that never polls simply
-goes overdue, which is the correct outcome and not a failure of delivery.
-
-### D8 — `send` is the verb. No new verb.
-
-`SEND_VERB.heartbeat = "send"`.
+`SEND_VERB.progress = "send"`.
 
 `manifest.ts` is explicit that a verb lands only in the PR that adds its
 operation, because "adding one sooner lets a role's `can` promise something no
-code can keep." Nothing here needs a `report` verb: `send` already gives the
-right answer in every preset, and a seat that may not speak may not report
-either — the same reasoning `brief_update` carries.
+code can keep." Nothing here needs a `report` verb: a seat that may not speak
+may not report either, the same reasoning `brief_update` carries, and
+`RoleDef.reports` already answers who is asked.
 
-A role could in principle want to report without conversing. No preset wants
-that today, and the verb set is cheap to extend later and impossible to shrink.
+The tick needs no verb at all. The server is not a member and holds no role.
 
-### D9 — Heartbeat state is derived. What is stored is what the server did.
+### D9 — Attention is a declared property of an event type, and it is on the wire.
 
-`src/heartbeat.ts`, beside `presence.ts` and following its shape:
+A new `src/attention.ts` holds one table, closed over `EventType`:
 
-```
-heartbeatStateOf(manifest, member, now)
-  → "not_expected" | "beating" | "due" | "overdue"
-```
+- `progress` → `ambient`
+- `heartbeat` → `interrupt`
+- every one of the twelve existing types → `interrupt`
 
-Derived from the role's `heartbeatOnMs`, the member's `lastHeartbeatAt` and
-`now`. Never stored, for invariant 7's reason exactly.
+`satisfies Record<EventType, Attention>`, so **a new event type must declare its
+posture or the build stops** — the `SEND_VERB` pattern, used to force a verb
+choice per send kind.
 
-Two fields are stored, and both are **facts about what happened** rather than
-claims about now, which is what keeps them inside the invariant:
+**The twelve existing types keep the behaviour they have today.** The table
+introduces a classification, not a change: nothing that currently reaches a peer
+mid-turn stops doing so. `invite_issued` and `member_joined` have a reasonable
+case for being ambient, and re-classifying either is a separate change with its
+own argument to make.
 
-- `Member.lastHeartbeatAt?` — when this member last beat. Absent on rows written
-  before the field existed, read through an accessor that lifts those to
-  `joinedAt`, the way `lastSeen` does. Durable Object storage has no migration
-  step, and a persisted type that gains a field is silently a union with
-  `undefined` for as long as old records live.
-- `Member.overdueAt?` — when the server announced this member overdue. Cleared
-  on the next heartbeat. Permanently true, so replay does not make it lie.
+`publicEvent` emits `ambient: true` and omits the key otherwise — no added bytes
+for those twelve, and a client that has never heard of `progress` keeps working.
+It goes in `publicEvent` rather than a table inside the bridge because
+`publicEvent` is the one projection both transports share, so a hosted
+connector, a future dashboard and the bridge read one answer without any of them
+owning a type list.
 
-`heartbeatOf(manifest, role)` lands in `src/roles.ts` beside `verbsOfRole` and
-**fails closed** the same way: a role the manifest does not define expects
-nothing. Sessions round-trip through JSON in Durable Objects, so an
-unrecognised seat must read as "not expected" rather than throwing.
+`deliver()` in `src/bridge.ts` reads the field rather than naming types.
 
-**Due and overdue are different thresholds, deliberately.** Due at
-`1 × heartbeatOnMs` is what D7 nudges on. Overdue is `2 × heartbeatOnMs`, so a
-member gets a full interval of being told before any peer is told it has gone
-quiet. That gap is the same generosity `STALE_AFTER_MS` is chosen for: a false
-overdue is worse than a late one, because the cost of being late is a peer
-learning a few minutes after it could have, and the cost of being wrong is every
+**This is what #82 and #81 reuse.** Both are this issue's complaint from another
+angle — #82 that `delivered_to` implies delivery, #81 that an action request has
+no state — and both land as event types that declare their posture here. That is
+what keeps the three from producing three vocabularies for "what is happening in
+here."
+
+### D10 — The tick fires only when somebody is due, and never into a room that cannot answer.
+
+`nextTickAt(session, now)` is the earliest `lastReportAt + heartbeatOnMs` across
+members that must report. So a room where everyone reports promptly ticks less
+often, and a room nobody is answering ticks at the cadence — the volume tracks
+the need.
+
+Two thresholds, kept from the same reasoning `STALE_AFTER_MS` is chosen for:
+
+- **1× the cadence** — the member is due, and the tick asks.
+- **2× the cadence** — the member is `silent: true` in the snapshot.
+
+A member therefore gets a full interval of being asked before any peer is told
+it has gone quiet. A false silent is worse than a late one: being late costs a
+peer learning a few minutes after it could have, and being wrong costs every
 peer learning to ignore the signal.
 
-### D10 — Overdue is announced on a wake that already happened, inside the store operation.
+No tick is written when the room is **frozen, closed, or holds no member that
+must report**:
 
-No alarm.
+- A member cannot report its way out of a frozen room, so none may be named
+  silent in one. A freeze must cost nobody their standing, which is the same
+  rule that keeps `reclaimStaleSeats` out of a frozen room.
+- A closed session derives no due time, for the reason `derivedDue` already
+  gives about the TTL: deriving one would re-arm the alarm to a time already
+  past and fire for as long as the object existed.
 
-#99 shipped so that **a quiet room costs nothing**: a hibernating object is
-evicted and stops accruing duration, which is $0.005625 per watched room-hour,
-about $4.05 a month at 24/7. An alarm that fires every few minutes to check
-cadences would wake the object on precisely the rooms that are quiet, regressing
-the thing that just landed.
+### D11 — Overdue is the tick's business. There is no `member_overdue`.
 
-`reclaimStaleSeats` already solved this shape and is the pattern to follow:
-"A room with a spare seat reaps nobody, however long they have been quiet. The
-single moment staleness becomes a write is when a seat is contested." The
-analogue is that **the single moment overdue becomes a write is when something
-else already woke the room.** Every append checks for lapsed expectations and
-announces them alongside. Active rooms get the woken event, dead rooms cost
-nothing, and nobody schedules anything.
+An earlier draft of this design had a `member_overdue` event, an
+`Member.overdueAt` field to stop it repeating, a `heartbeat_due` flag and a
+`heartbeat_note` sentence on the `bellman_sync` response. D4 collapses all four:
+the tick names the silent member, so **the tick is the overdue announcement**, at
+exactly the right granularity by construction and with no extra state to keep
+consistent.
 
-It follows that pattern in four more respects, each of which `reclaimStaleSeats`
-paid for the hard way:
+It also removes the subtlest part of that draft — an announcement that had to
+fire at most once per lapse, inside the store's append operation, to stop two
+concurrent appends both announcing it. The alarm is one invocation by
+construction, so the invariant 9 window never opens.
 
-- **Inside the store's append operation, in one invocation.** Two concurrent
-  appends would otherwise both see the same lapse and both announce it. That is
-  the window **invariant 9** exists for, and a Durable Object's input gate
-  covers one invocation and nothing spans two.
-- **Announced from what the store did**, never from what the handler predicted.
-  The store reports which members it marked, and the handler builds the events
-  and audit rows from that list — `announceReclaimed`'s rule, for the reason
-  that rule exists: nobody is told a member went quiet unless the server really
-  recorded it.
-- **Never in a frozen or closed room.** A member cannot report its way out of a
-  frozen room, so it must not be called overdue in one. `appendEvent` already
-  returns null when frozen; the announcement inherits that.
-- **A pure rule both stores share**, so `MemoryStore` and `DurableObjectStore`
-  cannot drift, and the store holds no policy — it takes a cutoff, the way
-  `seatVictims` does.
-
-`member_overdue` is a system event: `fromMemberId: "system"`, like
-`member_timed_out`.
-
-### D11 — The token cost lands on the hottest line in the system, and is stated rather than absorbed.
+### D12 — The token cost, stated rather than absorbed.
 
 §11 of the architecture measures tool definitions at ~4,820 tokens **on every
 request**, with `bellman_start` alone at 1,462 — 30% of the budget, "paid even
 by sessions that only ever join."
 
-This design adds to exactly that: `heartbeat_on` enters the manifest schema
-inside `bellman_start`, `heartbeat` enters `bellman_send`'s kind list and
-description, and D7's two fields enter `bellman_sync`'s description. Recurring
-instructions are cheap per room and expensive per request.
+This design adds `heartbeat_on` and `reports` to the manifest schema inside
+`bellman_start`, and `progress` to `bellman_send`'s kind list and description.
+It adds **nothing** to `bellman_sync`, because D11 removed the flag and the
+sentence an earlier draft put there — the ask travels in the tick's payload,
+paid by rooms that use the feature, rather than in a tool description paid by
+everyone.
 
-So the implementation **re-measures tool definitions and records the delta**,
-and `heartbeat_note` is generated at runtime rather than described in the schema
-— a sentence in a response is paid by rooms that use the feature, where a
-sentence in a tool description is paid by everyone. #78 proposes generating
-`bellman_start`'s description, which also makes it measurable, and is the real
-mitigation.
-
-### D12 — No `member_resumed`.
-
-When an overdue member beats again, `overdueAt` clears, the derived state
-returns to `beating`, and the heartbeat itself carries the news.
-
-The cost is that a peer interrupted by an overdue is not interrupted by the
-recovery; it learns on its next look. That is the right asymmetry — the
-recovery is discoverable by waiting and the lapse is not, which is D6's whole
-rule — and it is one fewer event type to carry through #82 and #81.
+The implementation re-measures tool definitions and records the delta. #78
+proposes generating `bellman_start`'s description, which also makes it
+measurable, and is the real mitigation.
 
 ### D13 — The word "heartbeat" now means one thing, and two comments must be corrected.
 
-`presence.ts` currently says, of liveness, "Not a heartbeat event." §5 of the
-architecture says the same and gestures at this issue. Both were written when
-the word was unclaimed; with a `heartbeat` send kind shipping, each now reads as
-a contradiction.
-
-Both are corrected in this work, not left for a reader to reconcile: liveness is
-not a heartbeat *event*, and a heartbeat event is the room-instructed progress
-report defined here. Names in play, so that nothing invents a second set:
+`presence.ts` says, of liveness, "Not a heartbeat event." §5 of the architecture
+says the same and gestures at this issue. Both were written when the word was
+unclaimed; with a `heartbeat` event shipping, each now reads as a contradiction.
+Both are corrected here rather than left for a reader to reconcile.
 
 | Name | Is |
 |---|---|
-| `heartbeatOn` / `heartbeatOnMs` | the room's instruction, per role |
-| `heartbeat` | the send kind and event type |
-| `lastHeartbeatAt` | fact: when a member last beat |
-| `overdueAt` | fact: when the server announced a lapse |
-| `member_overdue` | the system event |
-| `heartbeat_due` / `heartbeat_note` | D7's recurring instruction in a sync response |
-| `ambient` / `interrupt` | D5's attention posture |
+| `heartbeatOn` / `heartbeatOnMs` | the room's cadence for the tick |
+| `RoleDef.reports` | whether members in this seat must answer a tick |
+| `heartbeat` | the **server's** tick event, carrying the roster snapshot |
+| `progress` | a **member's** reply, carrying its note |
+| `lastReportAt` | fact: when a member last replied |
+| `ambient` / `interrupt` | D9's attention posture |
+
+Nothing here is named for liveness, and nothing in #103 is named for progress.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    AUTHOR["manifest author<br/>roles.helper.heartbeat_on: 5m"] --> RESOLVE["resolveManifest<br/>→ heartbeatOnMs: 300000"]
-    RESOLVE --> STORE["immutable on the session"]
+    AUTHOR["manifest: heartbeat_on 5m<br/>roles.helper.reports: true"] --> RESOLVE["resolveManifest<br/>→ heartbeatOnMs"]
+    RESOLVE --> SESSION["immutable on the session"]
 
-    STORE --> SYNC["bellman_sync<br/>heartbeat_due + note<br/>when 1× elapsed"]
-    SYNC --> AGENT["member beats"]
-    AGENT --> SEND["bellman_send type=heartbeat<br/>verb: send"]
-    SEND --> APPEND["append, in ONE store operation:<br/>• event row<br/>• lastHeartbeatAt ← now<br/>• overdueAt ← null<br/>• mark any lapsed member"]
+    SESSION --> DD["derivedDue()<br/>heartbeat → nextTickAt(s, now)"]
+    DD --> ALARM["SessionDO.alarm()"]
+    ALARM --> TICK["#tickIfDue<br/>snapshot of who reported when"]
+    TICK --> WRITE["#writeEvent: heartbeat<br/>fromMemberId: system"]
+    WRITE --> WAKE["#wake()"]
 
-    APPEND --> AMB["publicEvent: ambient: true"]
-    APPEND --> OD["member_overdue for each<br/>member the store marked"]
+    WAKE --> POLL["held bellman_sync returns"]
+    WAKE --> WS["held /ws socket"]
+    POLL --> BRIDGE["bridge deliver()"]
+    BRIDGE --> PUSH["interrupt → channel push<br/>or inbox + Stop hook"]
+    PUSH --> AGENT["heads-down agent is asked"]
 
-    AMB --> QUIET["bridge: no channel push<br/>reached by a solicited sync"]
-    OD --> LOUD["bridge: pushed"]
+    AGENT --> REPLY["bellman_send type=progress<br/>verb: send"]
+    REPLY --> LAST["lastReportAt ← now"]
+    LAST --> DD
+    REPLY --> AMB["ambient → no channel push"]
 ```
 
-Three seams carry the whole design, and each is an existing one rather than a
-new one:
+The loop closes on itself: a reply moves `lastReportAt`, which moves
+`nextTickAt`, which is what `derivedDue` computes on the next `reArm()`. No
+state tracks the cadence; it falls out of the one fact a reply writes.
 
-- **`resolveManifest`** turns an authored duration into `heartbeatOnMs`, so
-  nothing downstream knows that durations or presets exist.
-- **The store's append operation** owns every write: the event, the two member
-  facts, and the overdue marking. One invocation, for invariant 9.
-- **`publicEvent`** carries the posture, so both transports and every client
-  read one answer.
+### Where this cannot live behind the store
+
+The tick is a `SessionDO` alarm, and `MemoryStore` has no alarms. So **the tick
+is not a `BellmanStore` method** — it follows the precedent `/ws` set: a
+`watch()` on the interface "could be honoured by one implementation only, and
+the conformance suite is what makes the interface a seam."
+
+What that means in practice:
+
+- The **pure rules** — `nextTickAt`, `snapshotOf`, `mustReport(manifest, role)`,
+  the two thresholds — live in `src/heartbeat.ts`, runtime-free, importable by
+  both test programs and by `SessionDO`.
+- The **tick firing** is tested in `worker-tests/` under real Durable Objects,
+  because nothing else can fire an alarm.
+- The **reply** is an ordinary append and stays fully inside the store contract.
+
+One consequence matters for anyone working on this: **`npm start` with `MemoryStore` never
+ticks.** Exercising this feature locally means `npm run dev:worker`. That is the
+same limitation the hibernating socket has, for the same reason.
 
 ## Testing
 
 Two programs, as always: anything importing `cloudflare:workers` cannot be
-imported by a vitest test, so the pure rules live in runtime-free modules
-(`src/heartbeat.ts`, `src/attention.ts`) beside the code that uses them.
+imported by a vitest test, so the pure rules sit in a runtime-free module beside
+the code that uses them.
 
-- **`tests/helpers/store-contract.ts`** gains the new behaviour, because that
-  suite is what makes `BellmanStore` a seam rather than a comment: an append
-  sets `lastHeartbeatAt` and clears `overdueAt`; an append marks a lapsed
-  member exactly once; a frozen room marks nobody. It runs against
-  `MemoryStore` in the root program and against `DurableObjectStore` in
-  `worker-tests/` under real Durable Objects.
+- **`tests/helpers/store-contract.ts`** covers the reply: a `progress` append
+  sets `lastReportAt`; a row written before the field existed reads as
+  `joinedAt`. It runs against `MemoryStore` in the root program and
+  `DurableObjectStore` in `worker-tests/`.
+- **`src/heartbeat.ts` is unit-tested directly** — `nextTickAt` across members
+  with mixed report times, the 1× and 2× thresholds, a role with
+  `reports: false` excluded from both, and an unknown role excluded (fail
+  closed, the way `verbsOfRole` does).
+- **`worker-tests/` covers the alarm**: a tick fires at the cadence; a reply
+  pushes the next tick out; a frozen room writes none; a closed room arms none;
+  a room with no reporting member arms none; and the rollback property — an
+  object with no heartbeat branch strands no due row, because the due time is
+  derived.
 - **The attention table is asserted against the real event-type union**, so a
   type added without a posture fails rather than defaulting.
-- **Delivery is tested through the bridge's `deliver()`**, not only through the
-  table — a heartbeat must produce no channel push and an overdue must produce
-  one. Testing the classifier while the delivery path ignores it is the gap that
-  matters.
-- **Concurrency**: two appends racing must produce one `member_overdue`, the
-  invariant 9 window.
-- **`bellman_connect`'s preview includes the obligation**, since that is the
-  consent point and a joiner accepting an unseen expectation is the failure.
-- **`extension/manifest.json` is unchanged and that is asserted**: no new tool
-  ships, so the Desktop bundle's list does not move. `tests/extension.test.ts`
+- **Delivery is tested through the bridge's `deliver()`**, not only the table: a
+  tick must produce a channel push and a reply must not. Testing the classifier
+  while the delivery path ignores it is the gap that matters.
+- **`bellman_connect`'s preview shows the cadence and whether the seat must
+  report.** That is the consent point, and a joiner accepting an unseen
+  obligation is the failure.
+- **`extension/manifest.json` is unchanged, and that is asserted.** No new tool
+  ships, so the Desktop bundle's list does not move; `tests/extension.test.ts`
   already fails if it does.
 
-Two rules this repo has paid for, and which apply to every test above:
+Two rules this repo has paid for, applying to every test above:
 
 1. **Run each new assertion against a broken implementation before trusting
    it.** An assertion nobody has seen fail is not evidence.
@@ -415,34 +443,33 @@ Two rules this repo has paid for, and which apply to every test above:
 
 | File | Change |
 |---|---|
-| `src/types.ts` | `EventType` += `heartbeat`, `member_overdue`; `RoleDef` += `heartbeatOnMs`; `Member` += `lastHeartbeatAt?`, `overdueAt?` |
-| `src/manifest.ts` | `RoleDefShape` += `heartbeat_on`; duration parse with bounds; presets resolve `null` |
-| `src/roles.ts` | `heartbeatOf(manifest, role)`, fail-closed like `verbsOfRole` |
-| `src/heartbeat.ts` | new — `heartbeatStateOf`, the due/overdue thresholds, the pure marking rule both stores run |
+| `src/types.ts` | `EventType` += `heartbeat`, `progress`; `RoomManifest` += `heartbeatOnMs`; `RoleDef` += `reports`; `Member` += `lastReportAt?` |
+| `src/manifest.ts` | `heartbeat_on` duration parse with bounds, `reports` on `RoleDefShape`, presets resolve null/false |
+| `src/heartbeat.ts` | new — `nextTickAt`, `snapshotOf`, `mustReport`, the two thresholds. Runtime-free |
 | `src/attention.ts` | new — the `ATTENTION` table and `Attention` type |
 | `src/public-event.ts` | emit `ambient: true` for ambient types |
+| `src/roles.ts` | `mustReport` accessor beside `verbsOfRole`, fail-closed |
 | `src/presence.ts` | correct the "Not a heartbeat event" comment (D13) |
-| `src/server.ts` | `SEND_KINDS`, `SEND_VERB`, the payload shape, `bellman_sync`'s due flag and note, `bellman_connect`'s preview |
-| `src/rooms.ts` | announce overdue from what the store reports |
-| `src/store.ts`, `src/store-do.ts` | the append operation's three extra writes and the marking |
+| `src/store-do.ts` | `derivedDue` += heartbeat, an `alarm()` branch, `#tickIfDue` |
+| `src/server.ts` | `SEND_KINDS`, `SEND_VERB`, the `progress` payload shape, `bellman_connect`'s preview |
+| `src/store.ts` | `lastReportAt` on a `progress` append |
 | `src/bridge.ts` | `deliver()` reads `ambient` |
-| `tests/helpers/store-contract.ts` | conformance for all of the above |
-| `docs/ARCHITECTURE.md` | §5 the liveness/heartbeat distinction, §10 why invariant 7 is unweakened, §11 the re-measured token cost |
+| `tests/helpers/store-contract.ts`, `worker-tests/` | as above |
+| `docs/ARCHITECTURE.md` | §5 the liveness/heartbeat distinction, §9 the new derived alarm, §10 why invariant 7 is unweakened, §11 the re-measured token cost |
 
 ## Out of scope
 
-- **Automatic liveness** — #103, shipped. `lastSeenAt` and derived presence are
-  a different mechanism answering a different question, and D13 keeps the two
-  names apart.
+- **Automatic liveness** — #103, shipped. `lastSeenAt` and derived presence
+  answer a different question, and D13 keeps the names apart.
 - **Housekeeping that acts on a quiet member** — #66. The scribe needs
-  authority before an agent is given leave to nudge or close anything, and this
-  work gives it the signal to act on, not the authority.
+  authority before an agent may nudge or close anything. This work gives it the
+  signal, not the authority.
 - **A preset that expects heartbeats** — D3 ships the mechanism opt-in on
-  purpose. Worth revisiting once a real room has used it.
-- **#82 and #81** — they reuse D5's vocabulary and are not fixed here.
-- **A human-visible view** — #49. A heartbeat is the most useful thing a
-  dashboard could show, and the event is there for it when that lands.
-- **Socket-only members** — a member watching `/ws` and never polling gets no
-  D7 nudge and will go overdue. That is the same gap §5 already records for
-  presence, it is latent while no shipped client opens `/ws` (#43), and it is
-  closed by the same follow-up.
+  purpose.
+- **#82 and #81** — they reuse D9's vocabulary and are not fixed here.
+- **A human-visible view** — #49. D4's snapshot is shaped for it; rendering it
+  is that issue.
+- **Compelling a reply.** D7 is explicit that the cadence is observable, not
+  compellable. A room that wants consequences for silence wants #66.
+- **Ticking under `MemoryStore`.** `npm start` has no alarms, so local
+  development exercises this through `npm run dev:worker`.

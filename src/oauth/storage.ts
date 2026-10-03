@@ -128,18 +128,20 @@ export const SESSION_TOUCH_MS = 60 * 60 * 1000;
  *
  * It is written as the negation of "every input is finite and inside both
  * limits", so that anything it cannot show to be alive is dead. Two kinds of
- * malformed value defeat a plain "is it past the limit?" test, in different
- * ways. NaN fails every comparison, so a record whose expires_at is corrupt or
- * missing reads as not past its ceiling, and that session would never expire.
- * Infinity passes the comparisons in the wrong direction: an expires_at or
- * last_used_at of +Infinity is never past, and a clock of -Infinity is before
+ * value that are not finite numbers defeat a plain "is it past the limit?" test,
+ * in different ways. NaN fails every comparison, so a record whose expires_at is
+ * NaN or missing reads as not past its ceiling, and that session would never
+ * expire. Infinity passes the comparisons in the wrong direction: an expires_at
+ * or last_used_at of +Infinity is never past, and a clock of -Infinity is before
  * everything. So each input is checked for finiteness as well as compared.
  * Ending sessions reliably is the reason this is a stored record rather than a
- * signed cookie, so on a malformed record the answer has to be dead. `now` is
- * one of the three inputs on purpose: a clock that is NaN or infinite drops the
- * one session it touches, which costs a re-sign-in and can only follow from a
- * bug, where the alternative waves every session through for as long as the
- * clock is broken.
+ * signed cookie, so a value that is not a finite number has to read as dead.
+ * That is all it checks: a time that is finite but wrong, such as an expires_at
+ * of 1e300 or a clock running behind, still reads alive. `now` is one of the
+ * three inputs on purpose: a clock that is not a finite number drops the one
+ * session it touches, which costs a re-sign-in and can only follow from a bug,
+ * where the alternative waves every session through for as long as the clock is
+ * broken.
  * hasLapsed goes the other way on an absent expires_at because older client
  * records must keep working; no session record predates this one, so there is
  * nothing to grandfather.
@@ -164,7 +166,7 @@ export function sessionDead(
  * Ask it only of a session sessionDead has already passed. It says whether the
  * stored time is stale and nothing about liveness. A session past its ceiling
  * whose last_used_at is fresh reads as not due, so asked first it would be
- * served past the ceiling for up to SESSION_TOUCH_MS, and no malformed value is
+ * served past the ceiling for up to SESSION_TOUCH_MS, and no non-finite value is
  * needed to get there. A NaN last_used_at reads as not due too, and would be
  * served and never written.
  */
@@ -188,11 +190,8 @@ export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): bo
  *
  * The lesson is the class, not this field: a number read off a stored record
  * has to be checked for finiteness, or tested by a predicate that fails closed
- * on non-finite input, as sessionDead now is for all three of its inputs. It
- * was paid for four times in this file: sessionDead's two time fields,
- * replannedAt's own type check, sessionDead's infinities, and the first
- * version of this very paragraph, which claimed sessionDead was already safe.
- * Anyone adding a timestamp to PanelSession takes on one more of these.
+ * on non-finite input, as sessionDead is for all three of its inputs. Anyone
+ * adding a timestamp to PanelSession takes on one more of these.
  */
 export function replannedAt(s: PanelSession): number {
   return Number.isFinite(s.replanned_at) ? s.replanned_at : 0;
@@ -587,7 +586,7 @@ export class MemoryAuthStore implements AuthStorage {
     // whether the stored time is stale and knows nothing about liveness.
     // Reordered, a session past its ceiling whose last_used_at is fresh would
     // read as not due and be served until that time went stale, up to
-    // SESSION_TOUCH_MS past the ceiling, with no malformed value needed to get
+    // SESSION_TOUCH_MS past the ceiling, with no non-finite value needed to get
     // there. A NaN last_used_at fails the comparison too and would be served
     // and never dropped. Tests hold the order.
     if (sessionDead(stored, now)) {

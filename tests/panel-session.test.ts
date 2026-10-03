@@ -57,10 +57,11 @@ describe("sessionDead", () => {
     expect(sessionDead(s, T0 + SESSION_TTL_MS)).toBe(false);
   });
 
-  // Fails closed: a record whose time is corrupt reads as dead, and so does a
-  // clock that cannot be trusted. NaN fails every comparison and infinity passes
-  // them in the wrong direction, so a predicate that only asked whether a limit
-  // had been passed would call such a session alive forever.
+  // Fails closed: a time that is not a finite number reads as dead, whether it
+  // sits in the record or is the clock. NaN fails every comparison and infinity
+  // passes them in the wrong direction, so a predicate that only asked whether
+  // a limit had been passed would call such a session alive forever. That is
+  // all it checks: a time that is finite but wrong still reads alive.
   it("is dead when expires_at is NaN", () => {
     expect(sessionDead(panelSession({ expires_at: NaN }), T0)).toBe(true);
   });
@@ -83,6 +84,17 @@ describe("sessionDead", () => {
 
   it("is dead when now is -Infinity", () => {
     expect(sessionDead(panelSession(), -Infinity)).toBe(true);
+  });
+
+  // Pins that the finiteness check is the strict one. A numeric string is what a
+  // coercing isFinite lets through, and what a comparison alone gets most wrong:
+  // "1700000000000" + SESSION_IDLE_MS concatenates instead of adding, so the idle
+  // clause would never fire. Three idle windows in is past the idle limit and
+  // inside the ceiling, so only that clause can end it.
+  it("is dead when last_used_at is a numeric string", () => {
+    const s = panelSession({ last_used_at: String(T0) as unknown as number });
+
+    expect(sessionDead(s, T0 + 3 * SESSION_IDLE_MS)).toBe(true);
   });
 });
 
@@ -134,8 +146,8 @@ describe("MemoryAuthStore sessions", () => {
   });
 
   // The order touchSession keeps: the dead check ahead of the touch check. A NaN
-  // last_used_at fails the touch comparison, so a corrupt record would read as
-  // not due and be served unless it is refused first.
+  // last_used_at fails the touch comparison, so a record holding one would read
+  // as not due and be served unless it is refused first.
   it("refuses a record whose last_used_at is NaN", async () => {
     const store = new MemoryAuthStore();
     await store.putSession("sid", panelSession({ last_used_at: NaN }));

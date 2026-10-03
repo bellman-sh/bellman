@@ -669,9 +669,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     //
     // Deliberately narrow, where the three above are unconditional: this is the
     // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
-    // here, and neither that nor `lastReportAt` reaches nextTickAt at all — the
-    // tick is anchored on `lastTickAt`, which is what keeps the alarm from
-    // spinning (see nextTickAt). A member leaving goes the self-healing way.
+    // here, and that one reaches nextTickAt not at all.
+    //
+    // `lastReportAt` DOES reach it, since each member's deadline is its own
+    // report plus the cadence — and it still needs no reArm, because a fresh
+    // stamp only ever moves that deadline LATER. The armed alarm is then early:
+    // it fires, finds nobody due, advances `lastTickAt`, and the closing reArm()
+    // points it at the right time. One wake spent, and the tick that comes out of
+    // it is correct — the same self-healing path a member leaving takes. Arming
+    // here would save that wake and cost a storage read on every sync, which is
+    // a trade about cost and not about correctness.
     if (patch.leftAt === null) await this.driver.reArm();
   }
 

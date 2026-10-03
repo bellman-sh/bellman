@@ -10,14 +10,23 @@ export interface StoredSession extends Omit<Session, "events"> {
   /**
    * When the heartbeat alarm last fired for this room (#111).
    *
-   * The tick's clock, and the reason the alarm cannot spin: a tick does not move
-   * any member's `lastReportAt`, so a due time computed from member reports
-   * alone stays in the past for a member that never answers, and `reArm()` would
-   * point the alarm back at it indefinitely — the hazard `alarm()`'s comment
-   * records for `due:outbox`. This strictly advances on every firing.
+   * **A floor under the tick's due time, not the clock it runs on.** A tick does
+   * not move any member's `lastReportAt`, so a due time computed from member
+   * reports alone stays in the past for a member that never answers, and
+   * `reArm()` would point the alarm back at it indefinitely — the hazard
+   * `alarm()`'s comment records for `due:outbox`. This strictly advances on every
+   * firing, written or not, so a due time resting on it does too.
    *
-   * Absent until the first firing; `nextTickAt` anchors on the earliest
-   * reporting member's `joinedAt` until then.
+   * It is a floor and not the clock because a clock loses the other half: every
+   * member anchored on one firing means a member that reported just after a tick
+   * waits nearly two cadences to be asked. `nextTickAt` therefore gives each
+   * member its own deadline and applies this only to the members that firing
+   * actually asked — the ones already due at it. `askAt` in heartbeat.ts carries
+   * the argument and the two properties it has to keep.
+   *
+   * Absent until the first firing, and `nextTickAt` needs no floor until then:
+   * nothing has been asked yet, so every member simply owes its own deadline,
+   * which `lastReport` dates from `joinedAt` for one that has never answered.
    */
   lastTickAt?: number;
 }

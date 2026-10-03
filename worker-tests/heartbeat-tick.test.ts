@@ -108,16 +108,40 @@ it("appends a tick from the server, never from a member", async () => {
   });
 });
 
-it("advances lastTickAt on every firing, so the alarm cannot spin", async () => {
+/**
+ * A room where the tick is DUE and yet nobody owes an answer, which is the state
+ * both tests below are about.
+ *
+ * It takes `nameTheTick`, and that is a statement about the scheduling rule rather
+ * than a convenience. Every time `nextTickAt` arms for is a moment somebody is due
+ * at — see `askAt` in heartbeat.ts — so the two cannot be reached together by
+ * moving stored state alone. What reaches it in production is a member REPORTING
+ * between the arming and the firing: `updateMember` does not re-arm on that path,
+ * so the alarm keeps the earlier time and arrives to find the answer already in.
+ * Telling the alarm the tick is due is that, made deterministic.
+ *
+ * Forcing `lastTickAt` into the past used to do the job, and silently stopped: a
+ * member whose report is newer than the last tick is simply not due, however long
+ * ago that tick was, so the alarm found nothing due and never dispatched the
+ * handler at all.
+ */
+const quietButDue = async (id: string) => {
   const store = new DurableObjectStore(env as never);
-  await store.createSession(room("qs_spin"));
-  const stub = env.SESSION.get(env.SESSION.idFromName("qs_spin"));
+  await store.createSession(room(id, {
+    members: [member({ memberId: "m_lead", roomRole: "lead", lastReportAt: Date.now() })],
+  }));
+  return env.SESSION.get(env.SESSION.idFromName(id));
+};
 
-  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", { ...s, lastTickAt: Date.now() - 10 * FIVE_MIN });
+const fireNamedTick = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, async (i: SessionDO) => {
+    nameTheTick(i);
+    await i.alarm();
   });
-  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+it("advances lastTickAt on every firing, so the alarm cannot spin", async () => {
+  const stub = await quietButDue("qs_spin");
+  await fireNamedTick(stub);
 
   const after = await rows(stub);
   expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
@@ -128,21 +152,14 @@ it("advances lastTickAt on every firing, so the alarm cannot spin", async () => 
 });
 
 it("writes no tick when nobody is due, but still re-arms", async () => {
-  const store = new DurableObjectStore(env as never);
-  await store.createSession(room("qs_quiet", {
-    members: [member({ memberId: "m_lead", roomRole: "lead", lastReportAt: Date.now() })],
-  }));
-  const stub = env.SESSION.get(env.SESSION.idFromName("qs_quiet"));
-  // The tick is DUE, so the alarm reaches #tickIfDue; the one member reported just
-  // now, so nobody owes an answer. Without this the alarm finds nothing due, never
-  // dispatches the handler, and the assertions below pass on a branch not taken.
-  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", { ...s, lastTickAt: Date.now() - 10 * FIVE_MIN });
-  });
-  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+  const stub = await quietButDue("qs_quiet");
+  await fireNamedTick(stub);
 
   const after = await rows(stub);
+  // The premise, asserted rather than assumed: the clock moved, so the handler ran
+  // and "no tick" is its decision. Without this the two assertions below are also
+  // satisfied by a firing that never dispatched the branch they are about.
+  expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
   expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
   await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
     expect(await ctx.storage.getAlarm()).toBeGreaterThan(Date.now());
@@ -428,6 +445,64 @@ it("arms the tick when a reporting member is added", async () => {
 });
 
 /**
+ * **Finding 1, end to end through the real alarm.** The mixed roster: one member
+ * reported a second ago, one has never answered. The overdue member forces a tick
+ * now, and the question is what that firing leaves armed for the prompt member.
+ *
+ * Anchored on `lastTickAt` alone, this firing moved the clock past the prompt
+ * member's deadline without asking it, and the next ask went to the fixed boundary
+ * one whole cadence later — so the member was asked nearly two cadences after its
+ * report in a room that declared one. The per-member rule keeps that deadline, so
+ * the time left armed here is STRICTLY SOONER than a cadence from the firing.
+ *
+ * Read off `getAlarm()`, which is what `reArm()` actually wrote, so the unit rule
+ * and the arming it drives are both on trial rather than just the former.
+ */
+it("leaves a prompt member's own deadline armed after an overdue member forced a tick", async () => {
+  const store = new DurableObjectStore(env as never);
+  const reportedAt = Date.now() - 1_000;
+  await store.createSession(room("qs_mixed", {
+    members: [
+      member({ memberId: "m_prompt", roomRole: "lead", label: "prompt@a", lastReportAt: reportedAt }),
+      member({
+        memberId: "m_overdue", roomRole: "lead", label: "overdue@b",
+        joinedAt: Date.now() - 20 * FIVE_MIN,
+      }),
+    ],
+  }));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_mixed"));
+  // The last tick was a cadence ago, so the overdue member's floor has come round.
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<Record<string, unknown>>("session");
+    await ctx.storage.put("session", { ...s, lastTickAt: Date.now() - FIVE_MIN });
+  });
+
+  const firedAt = Date.now();
+  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
+
+  // The premise: a tick was written, and it was the overdue member that forced it.
+  // The snapshot lists every seat the room asks rather than only the due ones (see
+  // snapshotOf), so who was DUE is read off the silences — one member a second
+  // behind, one twenty cadences behind.
+  const after = await rows(stub);
+  const tick = after.events.find((e) => e.type === "heartbeat");
+  expect(tick, "no tick was written, so nothing below is about this firing").toBeDefined();
+  const silences = Object.fromEntries(
+    (tick!.payload as { members: { member_id: string; silent_for_seconds: number }[] })
+      .members.map((r) => [r.member_id, r.silent_for_seconds]),
+  );
+  expect(silences.m_prompt).toBeLessThan(300);
+  expect(silences.m_overdue).toBeGreaterThan(300);
+
+  // **The line this test exists for.** One cadence after the REPORT, which is a
+  // second before one cadence after this firing — not the boundary a whole cadence
+  // further out.
+  const armed = await alarmAndExpiry(stub);
+  expect(armed.alarm).toBeLessThan(firedAt + FIVE_MIN);
+  expect(armed.alarm).toBeGreaterThanOrEqual(reportedAt + FIVE_MIN);
+});
+
+/**
  * A thaw. nextTickAt refuses a frozen room, so a freeze leaves nothing armed for
  * the tick, and clearing frozenAt is the only thing that can put it back.
  *
@@ -539,6 +614,33 @@ const namedSilent = async (stub: DurableObjectStub) => {
  * freeze rather than of anyone's behaviour. That is the false silent D10 exists to
  * prevent, and #66's scribe acts on a member named quiet.
  */
+/**
+ * Let one cadence pass after a thaw with nobody reporting: the credited
+ * `lastReportAt` and the clock move back together, which is what waiting looks
+ * like from inside the record.
+ *
+ * The thaw's credit is what makes this necessary. Crediting every asked seat at
+ * the thaw leaves nobody due, so the room is NOT owed a tick the moment it thaws
+ * — a cadence has to pass before anyone is asked, which is the whole point of the
+ * credit. Without this, the firing below finds nobody due and writes no tick, and
+ * "nobody was named silent" is satisfied by a log with no ticks in it.
+ */
+const waitOneCadenceAfterTheThaw = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<{
+      members: { lastReportAt?: number }[];
+      lastTickAt?: number;
+    }>("session");
+    await ctx.storage.put("session", {
+      ...s,
+      lastTickAt: (s!.lastTickAt ?? Date.now()) - FIVE_MIN,
+      members: s!.members.map((m) => ({
+        ...m,
+        lastReportAt: m.lastReportAt === undefined ? undefined : m.lastReportAt - FIVE_MIN,
+      })),
+    });
+  });
+
 it("names nobody silent on the first tick after a thaw", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(room("qs_thaw_silent"));
@@ -548,9 +650,23 @@ it("names nobody silent on the first tick after a thaw", async () => {
   // The outage: well past the two cadences that make a member silent.
   await ageBy(stub, 12);
   await store.freezeSession("qs_thaw_silent", null);
+  // One cadence of the thawed room, so the member is due and the tick asks it.
+  await waitOneCadenceAfterTheThaw(stub);
 
   await runInDurableObject(stub, (i: SessionDO) => i.alarm());
 
+  // The premise, asserted rather than assumed: a tick WAS written and it named
+  // this member. Otherwise the line below reads an empty log and says nothing —
+  // and that is what it did, because a thawed room owes no tick until a cadence
+  // has passed in it.
+  const after = await rows(stub);
+  const tick = after.events.find((e) => e.type === "heartbeat");
+  expect(tick, "no tick was written, so the silence below is not a measurement").toBeDefined();
+  expect((tick!.payload as { members: { member_id: string }[] }).members.map((r) => r.member_id))
+    .toEqual(["m_lead"]);
+
+  // Twelve cadences of freeze and one of waiting, and the member is named but not
+  // silent: the credit means only the one cadence it could have answered in counts.
   expect(await namedSilent(stub)).toEqual([]);
 });
 
@@ -573,9 +689,15 @@ it("still names a member silent when no freeze explains the gap", async () => {
 
 /**
  * What the thaw buys: a full cadence before anyone is asked again. The stamp is
- * the whole mechanism, so this is the direct reading of it — the room is due a
- * tick the moment it thaws, and the tick asks nobody because nobody owes an
- * answer yet.
+ * the whole mechanism, and this is the direct reading of it — the alarm is armed a
+ * cadence out from the THAW rather than at a boundary dated from the outage, so
+ * the room spends no wake and asks nobody until that cadence has run.
+ *
+ * Read off the armed time rather than by firing. Under the per-member rule the
+ * credit leaves nobody due, so nothing is armed in the past and there is no firing
+ * to inspect; a test that fired anyway would be reading a handler the alarm never
+ * dispatched. The second half tells the alarm the tick is due, which is the only
+ * way to put the handler's own decision on trial from here.
  */
 it("gives a thawed room a fresh cadence before it asks again", async () => {
   const store = new DurableObjectStore(env as never);
@@ -584,10 +706,17 @@ it("gives a thawed room a fresh cadence before it asks again", async () => {
 
   await store.freezeSession("qs_thaw_fresh", Date.now());
   await ageBy(stub, 12);
+  const thawedAt = Date.now();
   await store.freezeSession("qs_thaw_fresh", null);
-  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
 
-  // Due, so the handler ran; nobody owing an answer, so it wrote no tick.
+  // A cadence out from the thaw, not from the twelve that went before it, and
+  // sooner than the TTL — so it is the tick that is armed and not the expiry.
+  const armed = await alarmAndExpiry(stub);
+  expect(armed.alarm).toBeGreaterThanOrEqual(thawedAt + FIVE_MIN - 2_000);
+  expect(armed.alarm).toBeLessThan(armed.expiresAt);
+
+  // And asked now, the handler says nobody owes an answer yet.
+  await fireNamedTick(stub);
   const after = await rows(stub);
   expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
   expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);

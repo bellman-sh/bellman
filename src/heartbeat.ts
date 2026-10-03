@@ -40,12 +40,67 @@ export const lastReport = (m: Member): number => m.lastReportAt ?? m.joinedAt;
 const reporting = (s: StoredSession): Member[] => s.members.filter((m) => asked(s, m));
 
 /**
+ * When this member should next be asked, given when the room last ticked.
+ *
+ * **The anchor is per member, and `lastTickAt` is a floor rather than the
+ * clock.** Two cases, and the split between them is the whole rule:
+ *
+ * - A member **not yet due at the last tick** keeps its own deadline,
+ *   `lastReport + cadence`. That tick did not ask it, so nothing has been spent
+ *   on it, and the deadline is the room's promise to it.
+ * - A member **already due at the last tick** was asked then, so it is asked
+ *   again no sooner than one cadence after that ask: `lastTickAt + cadence`. Its
+ *   own deadline is in the past and stays there until it answers, so honouring
+ *   that would mean asking it continuously.
+ *
+ * `deadline > tick` is the boundary `dueMembers` uses, read the other way round:
+ * `dueMembers` calls a member due once `now - lastReport >= cadence`, which is
+ * `deadline <= now`. So a deadline at or before `lastTickAt` means the member
+ * genuinely was in that tick's list, and one after it means it was not. The two
+ * must agree, or a firing arms for a moment nobody owes an answer at.
+ *
+ * A room with no `lastTickAt` has no floor: nothing has been asked yet, so every
+ * member's deadline is simply its own.
+ */
+const askAt = (m: Member, every: number, tick: number | undefined): number => {
+  const deadline = lastReport(m) + every;
+  if (tick === undefined || deadline > tick) return deadline;
+  return tick + every;
+};
+
+/**
  * When the heartbeat alarm should next fire, or null for a room that needs none.
  *
- * Anchored on `lastTickAt` and NOT on member report times, which is what keeps
- * the alarm from spinning: see the field's comment in stored-session.ts.
+ * The earliest moment any member the room asks is due — `askAt` above carries
+ * the per-member rule and the reasoning for it. Two properties hold together,
+ * and tests/heartbeat.test.ts pins each against the shape that satisfies one
+ * alone:
  *
- * Takes no `now`: the anchor is stored state, and a parameter nothing reads
+ * - **P1. A reporting member is asked within one cadence of its last report.**
+ *   This is the room's promise, and what a single global clock cannot keep.
+ *   Anchored on `lastTickAt` alone, a member that reported a second after a tick
+ *   was not due at the next one, and the firing that asked nobody advanced the
+ *   clock anyway — so it was asked two cadences later, nine minutes and
+ *   fifty-nine seconds after its report in a room that declared five. The
+ *   mixed-roster case is the sharp one: an earlier tick forced by an overdue
+ *   member must not swallow a prompt member's own deadline.
+ * - **P2. The answer is always strictly after `lastTickAt`.** This is why the
+ *   clock was anchored there to begin with, and it is not undone. A tick moves
+ *   nobody's `lastReportAt`, so a member that never answers has a deadline fixed
+ *   in the past, and returning it would point `reArm()` back at a moment already
+ *   gone for as long as the object lived — the hazard `alarm()` records for
+ *   `due:outbox`. Both of `askAt`'s branches land after the tick: the first by
+ *   its own test, the second because a cadence is positive. So P2 holds by
+ *   construction, with nothing to clamp.
+ *
+ * Together they give a property the old rule lacked: **every armed firing finds
+ * somebody due.** If the earliest is a deadline, that member is due at it by
+ * definition; if it is `lastTickAt + cadence`, that member's report is a cadence
+ * older still, so it has been due for two. `#tickIfDue`'s nobody-due branch is
+ * still reached constantly, because a member reporting between the arming and
+ * the firing does not re-arm — `updateMember` skips that on the hot path.
+ *
+ * Takes no `now`: every anchor is stored state, and a parameter nothing reads
  * would suggest the answer depends on the clock.
  *
  * Null for a room with no cadence, no member to ask, or that cannot be answered
@@ -54,16 +109,16 @@ const reporting = (s: StoredSession): Member[] => s.members.filter((m) => asked(
  * which is the reason `derivedDue` already gives about the TTL.
  *
  * It may return a time in the past, once, for an object that slept through a
- * tick. That is correct: the alarm fires immediately, the firing moves
- * `lastTickAt` to now, and the next answer is in the future.
+ * tick or for a room that gained a cadence after its members joined. That is
+ * correct: the alarm fires immediately, the firing moves `lastTickAt` to now,
+ * and from then on the floor applies and the next answer is in the future.
  */
 export function nextTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
   if (every === null || s.closed || s.frozenAt !== null) return null;
   const asked = reporting(s);
   if (asked.length === 0) return null;
-  const anchor = s.lastTickAt ?? Math.min(...asked.map((m) => m.joinedAt));
-  return anchor + every;
+  return Math.min(...asked.map((m) => askAt(m, every, s.lastTickAt)));
 }
 
 /** Members that have gone a full cadence without reporting. The tick asks these. */

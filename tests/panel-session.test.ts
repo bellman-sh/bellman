@@ -394,7 +394,8 @@ describe("a method touches only the session it names", () => {
     await store.deleteSession("one");
 
     expect(await store.touchSession("one", T0)).toBeUndefined();
-    expect(await store.touchSession("two", T0)).toBeDefined();
+    // Survives means unchanged, not only still there.
+    expect(await store.touchSession("two", T0)).toEqual(panelSession());
   });
 
   it("touchSession and replanSession change only the session they name", async () => {

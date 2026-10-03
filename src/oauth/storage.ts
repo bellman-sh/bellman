@@ -428,6 +428,43 @@ export interface AuthStorage {
   putRefresh(token: string, value: RefreshToken): Promise<void>;
   /** Single use as well — refresh tokens rotate, so using one retires it. */
   takeRefresh(token: string): Promise<RefreshToken | undefined>;
+  /** Create a browser session. */
+  putSession(id: string, value: PanelSession): Promise<void>;
+  /**
+   * Read a session, test it, and bump last_used_at — as ONE operation.
+   *
+   * Not a get and a put from the caller. The caller is the Worker and the
+   * record is in a Durable Object, so two calls have a window between them;
+   * this is the same reason admitRegistration is one method. Implementations
+   * must not yield between the read and the write.
+   *
+   * Undefined for an unknown session and for a dead one, and a dead one is
+   * dropped rather than left for a sweep — so a clock that moves backwards
+   * cannot revive it.
+   */
+  touchSession(id: string, now: number): Promise<PanelSession | undefined>;
+  /**
+   * Record a re-resolved plan on a session that still exists — as ONE operation.
+   *
+   * Merges identity and plan_source into the stored record and sets replanned_at
+   * to `now`, writes nothing else, and does nothing at all when the record is
+   * gone. Implementations must not yield between the read and the write.
+   *
+   * A request that re-resolves a plan reads the record, spends a while resolving,
+   * and then has to put the result back, and a sign-out can land in that gap.
+   * Writing the whole record back with putSession would recreate the session the
+   * human just ended, so they would sign out and stay signed in. It would also
+   * overwrite a last_used_at that another request bumped in the same gap,
+   * reverting that request's touch. putSession stays an unconditional upsert, for
+   * creating a session and for nothing else.
+   *
+   * It makes no liveness decision, because the fields it writes are not the ones
+   * sessionDead reads: merging into a record that has just died revives nothing,
+   * and touchSession remains the only place a session is judged.
+   */
+  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<void>;
+  /** Sign out. Idempotent: an unknown id is not an error. */
+  deleteSession(id: string): Promise<void>;
 }
 
 /** In-memory implementation, for tests and for the Node server. */
@@ -601,6 +638,24 @@ export class MemoryAuthStore implements AuthStorage {
     const touched: PanelSession = { ...stored, last_used_at: now };
     this.sessions.set(id, touched);
     return touched;
+  }
+
+  /**
+   * Synchronous throughout, for the reason touchSession is: an await between the
+   * read and the write lets a sign-out land in the gap and be written over. One
+   * test signs out while a call is in flight to hold that, and another signs out
+   * between a touch and the call, which is the gap this method closes for its
+   * caller.
+   */
+  async replanSession(
+    id: string,
+    identity: Identity,
+    planSource: string,
+    now: number
+  ): Promise<void> {
+    const stored = this.sessions.get(id);
+    if (!stored) return;
+    this.sessions.set(id, { ...stored, identity, plan_source: planSource, replanned_at: now });
   }
 
   async deleteSession(id: string): Promise<void> {

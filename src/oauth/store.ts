@@ -2,14 +2,17 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, PURGE_IDLE_KEY,
-  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, clientCount, hasLapsed, purgeDue, sweepPage,
-  type Admission, type AuthCode, type AuthStorage, type CounterStorage, type Reclaimed,
-  type RefreshToken, type RegisteredClient, type SweepStorage,
+  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS,
+  clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
+  type Admission, type AuthCode, type AuthStorage, type CounterStorage,
+  type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient,
+  type SweepStorage,
 } from "./storage.js";
 import { BillingLedger, type BillingStorage, type PaidPlan } from "../billing/ledger.js";
 import { reconcilePurchase, type PurchaseGrantStore } from "../billing/grants.js";
 import type { SubscriptionSource } from "../billing/subscription.js";
 import type { BellmanEnv } from "../store-do.js";
+import type { Identity } from "../types.js";
 
 /**
  * Durable Object storage for the authorization server: registered clients,
@@ -26,6 +29,7 @@ const CODE = "code:";
 const REFRESH = "refresh:";
 const CLIENT = "client:";
 const REG = "reg:";
+const SESSION = "sess:";
 const COUNT = CLIENT_COUNT_KEY;
 /** Where each bounded sweep stopped, so the next pass does not re-read page one. */
 const CLIENT_CURSOR_KEY = "clients:cursor";
@@ -325,6 +329,87 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     return Date.now() > value.expires_at ? undefined : value;
   }
 
+  async putSession(id: string, value: PanelSession): Promise<void> {
+    // Cleanup first, like putRefresh: the sweep lists, writes a cursor and
+    // deletes, so it can fail, and a failure after the write would reject this
+    // call with the session already stored and no cookie handed out.
+    await this.#purgeSessions();
+    await this.ctx.storage.put(`${SESSION}${id}`, value);
+  }
+
+  /**
+   * One RPC, awaiting nothing but storage — which is what makes it atomic. The
+   * input gate holds other events off for the duration, so a concurrent request
+   * for the same session cannot read the pre-touch value and write over this
+   * one. Splitting it into a get and a put from the Worker is the window this
+   * exists to close, the same way admitRegistration does.
+   */
+  async touchSession(id: string, now: number): Promise<PanelSession | undefined> {
+    const key = `${SESSION}${id}`;
+    const stored = await this.ctx.storage.get<PanelSession>(key);
+    if (!stored) return undefined;
+    if (sessionDead(stored, now)) {
+      // Dropped here rather than left to the sweep, so a dead session is
+      // terminal the moment it is first read as dead.
+      await this.ctx.storage.delete(key);
+      return undefined;
+    }
+    // After the dead check and never before it: touchDue says only whether the
+    // stored time is stale, so asked first it would serve a session that is past
+    // its ceiling. See touchDue and MemoryAuthStore.touchSession.
+    if (!touchDue(stored, now)) return stored;
+    const touched: PanelSession = { ...stored, last_used_at: now };
+    await this.ctx.storage.put(key, touched);
+    return touched;
+  }
+
+  /**
+   * One RPC, awaiting nothing but storage, for the reason touchSession is. The
+   * input gate covers the read and the write together, so a sign-out cannot land
+   * between them and be written over, and another request's touch cannot land
+   * between them and be reverted.
+   *
+   * It writes its three fields onto the record as it is stored now, and onto
+   * nothing when there is none. The caller read its copy before the plan was
+   * resolved, which can be a while ago, and putting that copy back with
+   * putSession would recreate a session that was signed out in the meantime.
+   */
+  async replanSession(
+    id: string,
+    identity: Identity,
+    planSource: string,
+    now: number
+  ): Promise<void> {
+    const key = `${SESSION}${id}`;
+    const stored = await this.ctx.storage.get<PanelSession>(key);
+    if (!stored) return;
+    await this.ctx.storage.put(key, {
+      ...stored, identity, plan_source: planSource, replanned_at: now,
+    });
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    await this.ctx.storage.delete(`${SESSION}${id}`);
+  }
+
+  /**
+   * Sessions that were abandoned rather than signed out of.
+   *
+   * Its own sweep rather than #purge, because #purge decides on expires_at and
+   * a session can die of idleness with its ceiling still ahead — so reusing it
+   * would leave idle sessions stored for up to the full seven days.
+   *
+   * `#private`; see #clientCount.
+   */
+  async #purgeSessions(): Promise<void> {
+    const now = Date.now();
+    await sweepPage<PanelSession>(
+      // The cursor lives outside the prefix, as #purge's does.
+      this.sweepStorage, SESSION, `cursor:${SESSION}`, PURGE_BATCH,
+      (value) => (sessionDead(value, now) ? { action: "delete" } : { action: "keep" })
+    );
+  }
+
   /**
    * Codes and refresh tokens that were never redeemed would otherwise pile up.
    *
@@ -410,6 +495,20 @@ export class AuthStore implements AuthStorage, BillingStorage {
   takeRefresh(token: string): Promise<RefreshToken | undefined> {
     return this.object.takeRefresh(token);
   }
+  putSession(id: string, value: PanelSession): Promise<void> {
+    return this.object.putSession(id, value);
+  }
+  touchSession(id: string, now: number): Promise<PanelSession | undefined> {
+    return this.object.touchSession(id, now);
+  }
+  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<void> {
+    return this.object.replanSession(id, identity, planSource, now);
+  }
+  deleteSession(id: string): Promise<void> {
+    return this.object.deleteSession(id);
+  }
 }
 
-export type { AuthCode, AuthStorage, RefreshToken, RegisteredClient } from "./storage.js";
+export type {
+  AuthCode, AuthStorage, PanelSession, RefreshToken, RegisteredClient,
+} from "./storage.js";

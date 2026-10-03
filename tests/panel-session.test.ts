@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
-  replannedAt, sessionDead, type PanelSession,
+  replannedAt, sessionDead, type AuthStorage, type PanelSession,
 } from "../src/oauth/storage.js";
 import type { Identity } from "../src/types.js";
 
@@ -283,5 +283,74 @@ describe("MemoryAuthStore sessions", () => {
     await store.touchSession("sid", skipped);
 
     expect(await store.touchSession("sid", skipped + GUARANTEED_GAP + 1)).toBeUndefined();
+  });
+});
+
+// Typed through AuthStorage, not the class. MemoryAuthStore and the AuthStore
+// facade both satisfy the interface while carrying methods it does not declare,
+// so a declaration left out of AuthStorage fails nothing until the first caller
+// that holds an AuthStorage. These tests are that caller, and they call every
+// session method, which makes `npm run typecheck` the place a missing one is
+// found.
+const fresh = (): AuthStorage => new MemoryAuthStore();
+
+describe("replanSession", () => {
+  const REPLANNED: Identity = { ...IDENTITY, plan: "pro" };
+
+  it("merges the identity, plan source and time into the stored record, and nothing else", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession());
+
+    await store.replanSession("sid", REPLANNED, "grant", T0 + 5);
+
+    expect(await store.touchSession("sid", T0 + 5)).toEqual(
+      panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
+    );
+  });
+
+  // The race this method exists for: a request touches the session, spends a
+  // while re-resolving its plan, and writes the result back, and the human signs
+  // out in between. An upsert would recreate the session they just ended.
+  it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession());
+    await store.touchSession("sid", T0);
+    await store.deleteSession("sid");
+
+    await store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+
+    expect(await store.touchSession("sid", T0 + 1)).toBeUndefined();
+  });
+
+  // The same constraint one level down, as for touchSession: a sign-out that
+  // lands while the call is in flight must stay a sign-out. A replan that
+  // yielded between its read and its write would be overtaken by the delete and
+  // then write the record back.
+  it("is not undone by a sign-out that lands mid-replan", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession());
+
+    const replanning = store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    await store.deleteSession("sid");
+    await replanning;
+
+    expect(await store.touchSession("sid", T0 + 1)).toBeUndefined();
+  });
+
+  // Another request touches the session between this one's touch and its
+  // write-back, and the session has to stay as alive as that request left it.
+  // Checked at the far end of the idle window that touch bought: a replan that
+  // pulled last_used_at back to this request's time would be dead by then.
+  it("keeps a last_used_at that another request bumped in the meantime", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession());
+    const mine = T0 + SESSION_TOUCH_MS + 1;
+    await store.touchSession("sid", mine); // this request: stale enough to write
+    const theirs = mine + SESSION_TOUCH_MS + 1;
+    await store.touchSession("sid", theirs); // another request, later
+
+    await store.replanSession("sid", REPLANNED, "grant", mine);
+
+    expect(await store.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
   });
 });

@@ -11,9 +11,10 @@ import {
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
 import { denyVerb, verbsOfRole } from "./roles.js";
 import {
-  FROZEN, activeMembers, audit, evictMember, findMember, issueInvite, leaveRoom, revokeInvite,
-  sessionStatus,
+  FROZEN, activeMembers, audit, evictMember, findMember, issueInvite, leaveRoom,
+  reclaimStaleSeats, revokeInvite, seatedMembers, sessionStatus, touchMember,
 } from "./rooms.js";
+import { presenceOf } from "./presence.js";
 import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
@@ -107,7 +108,11 @@ function untrusted<T>(origin: { memberId: string; label: string }, data: T) {
   return { trust: "untrusted", origin, data };
 }
 
-function publicMember(m: Member) {
+/**
+ * A member as a fact about the record: nothing here is derived from the clock,
+ * so it is safe to persist in an event payload that will be replayed.
+ */
+function storedMember(m: Member) {
   return {
     member_id: m.memberId,
     label: m.label,
@@ -116,6 +121,30 @@ function publicMember(m: Member) {
     capabilities: m.capabilities,
     room_role: m.roomRole,
     active: m.leftAt === null,
+  };
+}
+
+/**
+ * A member on a live roster, which is the only place `presence` belongs: it is
+ * read off the clock, so a stored copy goes wrong the moment it is replayed.
+ *
+ * No `now` parameter, deliberately. This is passed straight to `Array.map`,
+ * which supplies the index as a second argument — an optional `now` here was
+ * silently read as `now = 0` for every member in the roster, and every one of
+ * them came back "present". The type system cannot catch it: `number` matches
+ * `number`. `presenceOf` takes its own default instead.
+ */
+function publicMember(m: Member) {
+  return {
+    ...storedMember(m),
+    /**
+     * "present" | "stale" | "departed". `active` stays beside it and keeps its
+     * old meaning — has not departed — because a client reading `active` should
+     * not have its roster change shape under it. `presence` is the finer
+     * answer: a `stale` member has not left, but has not been heard from, and
+     * that is the distinction #66, #81 and #82 all need. See src/presence.ts.
+     */
+    presence: presenceOf(m),
   };
 }
 
@@ -281,6 +310,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         roomRole: manifest.creatorRole,
         brief: brief as Brief,
         joinedAt: now,
+        lastSeenAt: now,
         leftAt: null,
       };
       const defaultCode = {
@@ -352,7 +382,13 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       if (session.orgOnly && session.orgId !== identity.orgId) {
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
-      if (activeMembers(session).length >= session.maxMembers) {
+      // Seated, not active: a room held full by a session that died is
+      // previewable rather than refused here and at every retry until its TTL
+      // (#103). This only counts. The stale seat is reclaimed by the
+      // bellman_confirm that follows, so this tool stays as read-only as its
+      // annotation promises — a preview any holder of a join code can make,
+      // repeatedly, must not be able to remove anybody.
+      if (seatedMembers(session).length >= session.maxMembers) {
         return fail("session is full.");
       }
       const creator = session.members[0];
@@ -424,7 +460,19 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       const session = await s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
       if (session.frozenAt !== null) return fail(FROZEN);
-      if (activeMembers(session).length >= session.maxMembers) return fail("session filled while you were confirming.");
+      // The one place a stale seat is reclaimed. Below the closed and frozen
+      // guards above, and reached only by a caller holding a valid connect
+      // token who is about to take the seat — the authority the preview and the
+      // `invite` verb do not carry. It frees one seat, longest-quiet first.
+      await reclaimStaleSeats(s, session, identity);
+      // Re-read: the reap wrote to the store, so `session` is stale. The count
+      // would come out the same from either copy, since `seatedMembers` already
+      // excluded the member the reap departed; the re-read is so the roster this
+      // response is built from is the one in storage.
+      const afterReap = (await s.getSession(session.id)) ?? session;
+      if (afterReap.closed) return fail("session no longer exists.");
+      if (afterReap.frozenAt !== null) return fail(FROZEN);
+      if (seatedMembers(afterReap).length >= afterReap.maxMembers) return fail("session filled while you were confirming.");
 
       // ?? handles a pending row written before roomRole existed (predates
       // commit 62608a9): default to the room's default seat rather than
@@ -446,6 +494,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         roomRole,
         brief: brief as Brief,
         joinedAt: Date.now(),
+        lastSeenAt: Date.now(),
         leftAt: null,
       };
       // The guard above read the session; this is the one that counts. A freeze
@@ -465,7 +514,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       const joined = (await s.getSession(session.id)) ?? session;
 
       // A full pair session has no seat for ANY role, so every code goes.
-      if (activeMembers(joined).length >= joined.maxMembers) {
+      if (seatedMembers(joined).length >= joined.maxMembers) {
         await s.clearJoinCodes(joined.id);
       }
 
@@ -474,7 +523,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         fromMemberId: memberId,
         fromUserId: identity.userId,
         fromLabel: identity.label,
-        payload: { member: publicMember(member), brief },
+        // `presence` is deliberately not in here. publicMember computes it from
+        // the clock, and this event is durable and replayed: a stored
+        // "present" would still read as present hours after the member was
+        // reaped. Presence is derived, never stored (ARCHITECTURE.md rule 7),
+        // so it belongs on live roster responses only.
+        payload: { member: storedMember(member), brief },
         refId: null,
       });
       await audit(s, session, identity, "brief_exchanged", {
@@ -584,6 +638,11 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       if (session.frozenAt !== null) return fail(FROZEN);
       const me = findMember(session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
+
+      // Sending is as good a sign of life as polling. Before the verb check, so
+      // a member whose role forbids this kind still counts as present — it is
+      // here, and refusing the send does not make it absent.
+      await touchMember(s, session, me);
 
       // Authority first: before the payload, before who is listening. A seat that
       // may not act hears why, rather than being sent off to shorten a message it
@@ -726,6 +785,15 @@ Always pass the returned cursor next time — even an empty events list can adva
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).default(0),
       },
       annotations: {
+        // `readOnlyHint` stays true although this now writes `lastSeenAt`, and
+        // the write is shaped so that stays honest. Hosts use this hint to call
+        // a tool without asking the human, and this is the poll loop: a hint
+        // that made every sync prompt would make the product unusable. The
+        // write is a member stamping its own record, it is refused for a
+        // closed room, a frozen one and a member that has left, and the only
+        // thing it can do is keep that member present — it can never remove
+        // anybody or change what any caller reads. Removal lives on
+        // bellman_confirm, which is marked as the write it is.
         readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
       },
     },
@@ -734,6 +802,18 @@ Always pass the returned cursor next time — even an empty events list can adva
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
+
+      // This is the liveness signal, and the reason #103 needs no heartbeat
+      // tool: a watching member long-polls here every ~25 seconds already. It
+      // goes BEFORE the wait — the member is alive now, not in 25 seconds — and
+      // before `waitForEvents`, so nothing awaits between that call reading the
+      // event list and registering its waiter.
+      //
+      // Guarded, because this tool is otherwise free of guards on purpose:
+      // reads stay open to a closed room, a frozen one, and a member who has
+      // left. Writing on those paths would have a departed member's watcher
+      // rewriting a closed room's record every 25 seconds forever.
+      await touchMember(s, session, me);
 
       const all = await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000);
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;

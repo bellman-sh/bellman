@@ -19,6 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import { JOIN_CODE_TTL, isActiveMember, type BellmanStore } from "./store.js";
+import { STALE_AFTER_MS, lastSeen, presentMembers, staleMembers } from "./presence.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -69,6 +70,172 @@ export const FROZEN =
 
 export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
+}
+
+/**
+ * Members whose seat a capacity check should count: present, not merely
+ * undeparted. See src/presence.ts for why this is a second reading of the
+ * roster rather than a change to `activeMembers`.
+ */
+export function seatedMembers(s: StoredSession, now: number = Date.now()): Member[] {
+  return presentMembers(s.members, now);
+}
+
+/**
+ * Record that this member is alive, from a call it was making anyway.
+ *
+ * Fire-and-forget on purpose: it is a side effect of somebody else's
+ * operation, and a `bellman_sync` that returned the peer's message must not
+ * fail because the liveness write did. The cost of losing one is that the
+ * member looks quiet for another 25 seconds, which the window absorbs many
+ * times over.
+ *
+ * Takes the member, not a `memberId`, so the guards can be read off it. Callers
+ * pass what `findMember` resolved, which is already restricted to a handle the
+ * caller's identity owns — so this cannot be used to make somebody else look
+ * alive.
+ *
+ * Written at most once every half-window. In the Durable Objects store an
+ * `updateMember` is a read-modify-write of the whole session blob — every
+ * member with its brief, every join code, the manifest — so a write on each
+ * 25-second poll would cost more than the per-beat event row this design
+ * rejects as the wrong home for liveness. Half the window keeps `lastSeenAt` at
+ * worst five minutes behind inside a ten-minute window, which is never the
+ * difference between present and stale, at a twelfth of the writes.
+ *
+ * Refused for a closed room, a frozen one, and a member who has left, because
+ * `bellman_sync` has none of those guards on purpose: reads stay open to all
+ * three. Without them a reaped member's watcher would rewrite a closed room's
+ * record every 25 seconds for as long as it ran.
+ */
+export async function touchMember(
+  store: BellmanStore,
+  session: StoredSession,
+  me: Member,
+  now: number = Date.now(),
+): Promise<void> {
+  if (session.closed || session.frozenAt !== null) return;
+  if (!isActiveMember(me)) return;
+  if (now - lastSeen(me) < STALE_AFTER_MS / 2) return;
+  try {
+    await store.updateMember(session.id, me.memberId, { lastSeenAt: now });
+  } catch {
+    // Deliberately swallowed. See above.
+  }
+}
+
+/**
+ * Turn stale seats into departed ones, so a room whose members' sessions died
+ * can be joined again.
+ *
+ * **One call site.** `bellman_confirm`, and nothing else. An earlier shape
+ * reaped from `bellman_connect` and `issueInvite` too, and that made this an
+ * unauthorized removal path: `evictMember` is creator-only and outside the verb
+ * set on purpose, while `bellman_connect` is reachable by anyone holding a join
+ * code without joining at all, and never consumes the code — so one preview
+ * call, repeatable for the code's 15 minutes, could empty a quiet 25-seat hub
+ * room of every member including its creator. Seat-wanting paths that are not
+ * about to seat anybody therefore only *count* with `seatedMembers`, which
+ * already excludes stale members and writes nothing. The reap belongs where a
+ * seat is actually being taken, by a caller holding a valid connect token,
+ * behind the frozen and closed guards that path already has.
+ *
+ * **One seat, not every stale seat.** A joiner needs one, so exactly enough
+ * are freed to seat it, longest-quiet first. Reaping all of them instead is
+ * what turned a quiet hub room into a wipe: the blast radius has to be the size
+ * of the request. The next joiner reaps the next one.
+ *
+ * **Only when the seat is contested.** A room with a spare seat reaps nobody,
+ * however long they have been quiet: the joiner can have the free seat, so
+ * there is no question to force. The test is `activeMembers(session).length >=
+ * maxMembers` — precisely the capacity check that used to refuse — because
+ * present and stale together are exactly the undeparted members.
+ *
+ * The removal is then final. A reaped member can still read its history and
+ * must redeem a fresh code to write again, the same position an evicted one is
+ * in. Making it reversible instead would mean a `pair` room could hold three
+ * writers the moment the vanished peer reopened its laptop.
+ *
+ * Unlike an eviction this retires no join code — freeing the seat is the whole
+ * point — and it never closes the room, even when it empties it. A room is
+ * reaped because a joiner is waiting directly behind the call; closing it over
+ * them would be the gap `closeSessionIfEmpty` exists to avoid.
+ *
+ * Frozen rooms are refused. `updateMember` has no frozen guard and
+ * `appendEvent` returns null, so reaping a frozen room would remove members
+ * permanently and *silently* — their watchers would never see the event that
+ * stops them — and a freeze is meant to be reversible without costing anyone
+ * their place. "A frozen room's roster cannot change" is what
+ * tests/tools/freeze.test.ts pins by name.
+ */
+export async function reclaimStaleSeats(
+  store: BellmanStore,
+  session: StoredSession,
+  actor: Identity,
+  now: number = Date.now(),
+): Promise<Member[]> {
+  if (session.closed || session.frozenAt !== null) return [];
+
+  // Re-read before deciding. The caller's copy predates any concurrent reap,
+  // and a member already departed by one must not be departed again: two
+  // `member_timed_out` events for one removal is what evictMember's
+  // `target.leftAt !== null` early return exists to prevent.
+  const fresh = (await store.getSession(session.id)) ?? session;
+  if (fresh.closed || fresh.frozenAt !== null) return [];
+
+  // Exactly the capacity check that would otherwise refuse this joiner. Below
+  // it the room has a seat going spare and nobody has to lose theirs.
+  const needed = activeMembers(fresh).length - fresh.maxMembers + 1;
+  if (needed <= 0) return [];
+
+  // Longest-quiet first: if only one seat has to go, it is the one whose member
+  // has been gone longest.
+  const victims = staleMembers(fresh.members, now)
+    .sort((a, b) => lastSeen(a) - lastSeen(b))
+    .slice(0, needed);
+
+  for (const m of victims) {
+    await store.updateMember(session.id, m.memberId, { leftAt: now });
+    // The departure first, then the announcement, as leaveRoom and evictMember
+    // both order it: the member is out from `updateMember` on, and a room that
+    // froze in the gap swallowing the event must not keep the seat occupied.
+    await store.appendEvent(session.id, {
+      type: "member_timed_out",
+      // "system" for the same reason member_evicted uses it: no member handle
+      // authored this, and the member it is about is named in the payload. The
+      // reaped member's own user and label go in fromUserId/fromLabel so the
+      // event reads as being about them.
+      fromMemberId: "system",
+      fromUserId: m.userId,
+      fromLabel: m.label,
+      payload: {
+        member_id: m.memberId,
+        label: m.label,
+        room_role: m.roomRole,
+        last_seen_at: new Date(lastSeen(m)).toISOString(),
+      },
+      refId: null,
+    });
+    // `alsoOrgs` for the reason evictMember passes it: the member losing access
+    // may be in neither the room's org nor the joiner's, and that org's admins
+    // are the ones who need to see their engineer leave a room.
+    //
+    // `actor` is the joiner taking the seat, because the audit trail has to name
+    // a real identity — but the action is `member_timed_out`, not
+    // `member_evicted`, so the row says the seat timed out rather than that this
+    // person removed anybody. Omitting the row entirely, which an earlier shape
+    // did, left an org reconciling a lost room with a silent gap.
+    await audit(
+      store, fresh, actor, "member_timed_out",
+      {
+        member_id: m.memberId, user_id: m.userId, room_role: m.roomRole,
+        last_seen_at: new Date(lastSeen(m)).toISOString(),
+        seat_taken_by: actor.userId,
+      },
+      [m.orgId]
+    );
+  }
+  return victims;
 }
 
 export function findMember(s: StoredSession, memberId: string, identity: Identity): Member | undefined {
@@ -291,7 +458,12 @@ export async function issueInvite(
 
   const bad = unknownRole(session, role);
   if (bad) return bad;
-  if (activeMembers(session).length >= session.maxMembers) {
+  // Seated, not active: a room held full by a session that died must still be
+  // able to mint the code that replaces it, which is the confusion #103 opens
+  // with. This only counts — the seat is actually reclaimed by the
+  // bellman_confirm that redeems this code, which is the one caller authorized
+  // to remove anybody. The `invite` verb is not the `evict` authority.
+  if (seatedMembers(session).length >= session.maxMembers) {
     return refuse(
       "conflict",
       `session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`

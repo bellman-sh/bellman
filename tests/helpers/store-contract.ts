@@ -257,6 +257,22 @@ export function describeStoreContract(
       expect(fresh.members[0].label).toBe("jesse@codenerd");
     });
 
+    it("updateMember patches lastSeenAt on its own", async () => {
+      // The liveness write, and the only one of these a store sees on every
+      // bellman_sync. A store that dropped it would read every member as stale
+      // and reap the room out from under itself (#103), so both must apply it.
+      const s = session({ members: [member({ lastSeenAt: 1 })] });
+      (await store.createSession(s));
+
+      (await store.updateMember(s.id, "m_creator", { lastSeenAt: 1_700_000_000_000 }));
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members[0].lastSeenAt).toBe(1_700_000_000_000);
+      // Going quiet and leaving are separate facts: a touch must not revive a
+      // member that left, and must not mark a present one as gone.
+      expect(fresh.members[0].leftAt).toBeNull();
+    });
+
     it("updateMember ignores unknown members and sessions", async () => {
       const s = session();
       (await store.createSession(s));

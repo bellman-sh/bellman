@@ -12,7 +12,7 @@ const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
-export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt">>;
+export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt">>;
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -428,6 +428,7 @@ export class MemoryStore implements BellmanStore {
     if (patch.brief !== undefined) m.brief = detach(patch.brief);
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
+    if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
   }
 
   async closeSession(sessionId: string): Promise<void> {

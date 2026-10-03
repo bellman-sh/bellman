@@ -319,6 +319,88 @@ Why the split is shaped that way:
   streams, and each side must see only the crossings that touched its own
   boundary.
 
+### Presence is derived, membership is stored
+
+A member has three readings, and only two of them are written down:
+
+| | `leftAt` | Last heard from | Holds a seat |
+|---|---|---|---|
+| **present** | null | inside the window | yes |
+| **stale** | null | outside the window | only until contested |
+| **departed** | set | — | no |
+
+`leftAt` records a goodbye — a `bellman_leave`, an eviction, a reaped seat — and
+a crashed session never says one. So a `pair` room whose peer's laptop closed
+used to read as full for the rest of its TTL, with no removal path anywhere in
+the store (#103). `Member.lastSeenAt` is the second signal, and it costs no new
+traffic: `bellman_sync` long-polls every ~25 seconds, so a watching member is
+already announcing itself, and `touchMember` stops throwing that away.
+`bellman_send` touches it too.
+
+It is a field and not a `heartbeat` event on purpose. Liveness carries nothing
+and arrives on a timer, so a row per beat in the durable, replayable event log
+is the worst available home for it — that is the cost curve #99 and #25 exist to
+flatten. Progress updates — "still working, currently on the migration script" —
+are the opposite case and *are* events (#111): they exist to reach a peer, and
+they have no timer.
+
+Staleness is reversible because nothing is written when a member goes quiet: it
+calls anything, `lastSeenAt` moves, and it is present again with the same
+`memberId` and the same history. The single moment staleness becomes a write is
+when a seat is **contested** — a joiner wants in and the room has none spare —
+and then `reclaimStaleSeats` turns stale into departed and announces
+`member_timed_out`. A room with a spare seat reaps nobody, however long they
+have been quiet. The reap retires no join code, because freeing the seat is the
+point, and never closes the room, because a joiner is waiting directly behind
+the call.
+
+Removing a member is authority, so the reap is confined accordingly:
+
+- **One call site: `bellman_confirm`.** It is the only path where somebody is
+  actually taking a seat, and it is reached only with a valid connect token,
+  behind the closed and frozen guards it already had. `bellman_connect` and
+  `issueInvite` want seats too, so they *count* with `seatedMembers` and write
+  nothing. That matters because `bellman_connect` is reachable by anyone holding
+  a join code without joining, and never consumes the code — a reap there would
+  have let one caller empty a quiet 25-seat hub room of every member, creator
+  included, repeatedly for the code's 15 minutes. `evictMember` is creator-only
+  and deliberately outside the verb set; a second removal path must not be
+  looser than the first.
+- **One seat, longest-quiet first.** The blast radius is the size of the
+  request. The next joiner reaps the next one.
+- **Never in a frozen room.** `updateMember` has no frozen guard and
+  `appendEvent` returns null, so reaping a frozen room would remove members
+  permanently *and* silently, and their watchers would never see the event that
+  stops them. A freeze must cost nobody their place.
+- **Audited to the removed member's org**, which may be neither the room's nor
+  the joiner's, with the action named `member_timed_out` rather than
+  `member_evicted` so the row says the seat timed out, not that a person
+  removed anybody.
+
+The liveness write is throttled to once per half-window. In the Durable Objects
+store an `updateMember` is a read-modify-write of the whole session blob, so a
+write on every 25-second poll would cost more than the per-beat event row this
+design rejects; half the window leaves `lastSeenAt` at worst five minutes behind
+inside a ten-minute window, which is never the difference between present and
+stale.
+
+`activeMembers` (`leftAt === null`) and `seatedMembers` (present only) are two
+readings of one roster, deliberately. The stores decide a room has emptied from
+the first; folding staleness into it would make a room whose members all went
+quiet close itself, destroying the history the returning session came back for.
+Departure is permanent and may close a room. Staleness is reversible and must
+never.
+
+**A gap this leaves open.** #99's hibernating WebSocket has already landed:
+`SessionDO` accepts sockets, handles `webSocketClose`, and `SocketAttachment`
+carries the member ids — so the object holds a hard fact about who is connected,
+which beats any timeout because it is being told rather than inferring.
+Presence consults none of it. That is latent only while every client still
+long-polls `bellman_sync`; the first one that prefers the socket stops touching
+`lastSeenAt` and looks stale with a live connection. Closing it means touching
+the attached member ids on accept and consulting the open sockets in
+`presenceOf`, which changes a `SessionDO` path the seat bug does not.
+
 ## 6. Identity, plans and entitlements
 
 A human signs in with GitHub or Google. Bellman is its own authorization server:
@@ -680,6 +762,17 @@ pull request.
 5. **`main` moves only through merges.** The repo is colocated
    [jj](https://jj-vcs.github.io); a detached git HEAD is normal.
 6. **Push is never a dependency.** Every surface must work by polling.
+7. **Presence is derived, never stored** — not in a field, and not in an event
+   payload, which is replayed and would read as present hours after the member
+   went. Going quiet writes nothing, so it is reversible; only a contested seat
+   turns stale into departed. `activeMembers` decides when a room has emptied
+   and `seatedMembers` decides who holds a seat, and those two readings must not
+   be merged.
+8. **A member is removed only by an authorized caller.** `bellman_leave` for
+   oneself, `evictMember` for the creator, `reclaimStaleSeats` from
+   `bellman_confirm` alone. A path that merely wants to know whether a seat is
+   free must count, not write. See
+   [presence](#presence-is-derived-membership-is-stored).
 
 ## 11. What connecting costs
 

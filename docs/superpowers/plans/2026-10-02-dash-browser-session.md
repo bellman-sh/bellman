@@ -1984,6 +1984,47 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     expect(await other.json()).toMatchObject({ user_id: BYSTANDER.userId, plan: "pro" });
   });
 
+  // The sign-out lands while the plan is being re-resolved. replanOnRefresh awaits
+  // the grant lookup, so deleting the session from inside that lookup puts the
+  // sign-out between the touch and the write-back, which is the gap replanSession
+  // exists for. The request is refused and the session stays gone.
+  it("refuses the request, and the session stays gone, when it ended during the re-resolve", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "ended-mid-resolve", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000); // stale: this request re-resolves
+    const realGetGrant = cfg.plans!.getGrant.bind(cfg.plans);
+    cfg.plans!.getGrant = async (key: string) => {
+      await cfg.store.deleteSession(sid); // the human signs out while the lookup is in flight
+      return realGetGrant(key);
+    };
+    const ask = () => route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
+
+    expect((await ask()).status).toBe(401);
+    // A write-back that recreated the session would answer the next request.
+    expect((await ask()).status).toBe(401);
+  });
+
+  // A write-back that FAILS says nothing about whether the session is still there:
+  // the request is served, with the plan it re-resolved. The route logs the
+  // failure, so a "could not store" line in the test output is expected.
+  it("still serves the request when the write-back itself fails", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "write-fails", {
+      identity: { ...PANEL_IDENTITY, plan: "pro" }, plan_source: "grant", replanned_at: now,
+    });
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+    cfg.store.replanSession = () => Promise.reject(new Error("auth store unreachable"));
+
+    const res = await route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
+
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { plan: string }).plan).toBe("free");
+  });
+
   // Review Focus 5 — a record whose replanned_at is absent or non-finite.
   it("re-resolves immediately when replanned_at is absent", async () => {
     const now = Date.now();
@@ -2168,9 +2209,9 @@ Restore `replannedAt`, which is correct under either phrasing.
 Temporarily move the cookie branch above the bearer branch. Re-run.
 Expected: "prefers a bearer token when both are present" FAILS. Restore.
 
-- [ ] **Step 8: Prove the bystander assertions can fail**
+- [ ] **Step 8: Prove the bystander and write-back assertions can fail**
 
-Three mutations, one at a time, restoring between them.
+Six mutations, one at a time, restoring between them. The first three are for the bystander assertions.
 
 Make `MemoryAuthStore.replanSession` merge into every session instead of the one named: loop over `this.sessions` and set each to `{ ...s, identity, plan_source: planSource, replanned_at: now }`. Re-run.
 Expected: "drops a revoked grant once the window closes, for that session only" FAILS on its last assertion — the bystander's `/account` now answers as the wrong human on the wrong plan — and so does the store's own `touchSession and replanSession change only the session they name`, the same defect seen from beneath. Restore.
@@ -2182,6 +2223,23 @@ Make `sessionCaller` answer from the last identity it served: keep a module-leve
 Expected: "answers each cookie with its own record, after a touch that wrote" FAILS on its second read, which comes back as the first human. Restore.
 
 The route tests assert the behaviour end to end, so they fail for either of the first two faults whether it sits in `caller` or beneath it; the store's own tests say which.
+
+The last three are in `sessionCaller` itself, on what it does with the answer from its write-back.
+
+Delete `if (!merged) return null;`. Re-run.
+Expected: "refuses the request, and the session stays gone, when it ended during the re-resolve" FAILS on its first assertion — 200 where it expects 401, because the request that began before the sign-out is served — and nothing else fails. Restore.
+
+Replace the `replanSession` call with a whole-record upsert, leaving `merged` as it is:
+
+```ts
+  await config.store.putSession(id, { ...stored, identity: current.identity, plan_source: current.source, replanned_at: now });
+```
+
+Re-run.
+Expected: the same test FAILS on the same assertion, and nothing else does. The upsert recreated the session the human had just ended, which is the bug `replanSession` exists to prevent and which no other test in this task can see. Restore.
+
+Append `.catch(() => false)` to the `replanSession` call. Re-run.
+Expected: "still serves the request when the write-back itself fails" FAILS — 401 where it expects 200, because a rejected write now reads as a session that is gone, and an outage of the auth store would sign everyone out. Nothing else fails. Restore.
 
 - [ ] **Step 9: Verify and commit**
 
@@ -2215,6 +2273,12 @@ the request with a 401 instead of finishing it: a session is stored so that
 sign-out takes effect now, and one more authenticated response after it
 would give that back. A write that merely fails is logged and the request
 carries on, since it says nothing about whether the session is still there.
+
+Both outcomes have a test. One deletes the session from inside the grant
+lookup, which lands the sign-out in the gap, and expects a refusal that
+stays a refusal; the other makes the write itself fail and expects the
+request served. Ignoring the answer, upserting instead of merging, and
+reading a failed write as 'gone' each passed every other test.
 
 replannedAt reads an absent field as 0 rather than comparing against
 undefined. Both plausible phrasings of that comparison make NaN mean
@@ -3034,12 +3098,20 @@ describe("/admin stays bearer-only", () => {
     }));
 
     expect(res.status).toBe(401);
+    // The refusal has to be the whole of what happened. A route that stored the
+    // grant and then answered 401 passes the line above, and would have handed
+    // a customer session the operator's write.
+    expect(await cfg.plans!.getGrant("github:999")).toBeUndefined();
   });
 
   /**
    * The same identity over a bearer token still works. Without this the two
    * tests above would pass for a trivially wrong reason — /admin/grants broken
    * for everyone.
+   *
+   * It is also the control for the `getGrant` line in the write test: here the
+   * same call has to find the grant, so a `getGrant` that read the wrong place
+   * would fail this test instead of letting that line pass for every route.
    */
   it("still accepts the identical identity over a bearer token", async () => {
     const token = await signJwt(
@@ -3055,6 +3127,9 @@ describe("/admin stays bearer-only", () => {
     }));
 
     expect(res.status).toBe(201);
+    expect(await cfg.plans!.getGrant("github:999")).toMatchObject({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+    });
   });
 
   it("grants no CORS on /admin, so a browser cannot even read the refusal", async () => {
@@ -3106,6 +3181,8 @@ describe("CSRF through the real routes", () => {
 
 Run: `npx vitest run tests/browser-safety.test.ts`
 Expected: FAIL — no `OPTIONS` handling; `/admin/grants` accepts a cookie; `/account` carries no CORS.
+
+The bearer test passes here, because nothing in it depends on this task. Its `getGrant("github:999")` assertion is what confirms that call reads the grant the route stored; if that test fails, correct the call before reading anything into the `toBeUndefined()` in the refused write test.
 
 - [ ] **Step 3: Add preflight handling**
 
@@ -3200,6 +3277,9 @@ Expected: PASS, every file.
 Temporarily remove the `who.via === "cookie"` guard. Re-run.
 Expected: both "refuses a cookie-authenticated…" tests FAIL, with 201 and 200. Restore, and confirm the bearer test still passes — that pairing is what distinguishes "cookies refused" from "endpoint broken".
 
+Then move the guard instead of removing it: cut it from the top of the branch and paste it just before `return json({ granted: grant }, 201);`, so the grant is written and the refusal comes after. Re-run.
+Expected: "refuses a cookie-authenticated grant write" FAILS on its last assertion — the response is 401, as it should be, and the grant is stored. The status line cannot see that; the `getGrant` line can. The read test fails as well, with 200, because the guard no longer covers a GET. Restore.
+
 - [ ] **Step 8: Verify and commit**
 
 ```bash
@@ -3226,7 +3306,9 @@ is nothing there for the panel to do with it yet.
 
 The refusal is tested against the identical identity over a bearer
 token, which is what tells 'cookies refused' apart from 'endpoint
-broken'."
+broken'. It is also asserted to have written nothing: a route that stored
+the grant and then answered 401 passed the status check alone, and the
+bearer write is the control that the check can see a write."
 ```
 
 ---

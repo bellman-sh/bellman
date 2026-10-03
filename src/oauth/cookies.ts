@@ -60,18 +60,41 @@ export function clearedSessionCookie(secure: boolean): string {
 }
 
 /**
+ * Trims space and tab, the WSP of RFC 6265, rather than String.prototype.trim,
+ * which also strips non-breaking and Unicode spaces.
+ *
+ * The difference is a way round `__Host-`. A browser applies that prefix's rules
+ * only to a name that starts with it, so `\u2000__Host-bellman_session` is an
+ * ordinary name to the browser, outside the rules, and a sibling subdomain can
+ * set it with Domain=.bellman.sh. The Workers runtime decodes header bytes as
+ * UTF-8, so that space reaches readSessionCookie as a single character, and
+ * trim() would hand the name back as exactly ours: the cookie the prefix exists
+ * to keep out, selected by whoever set it. Trimming only what the grammar allows
+ * leaves such a name as what it is, a cookie we do not read.
+ */
+function trimOws(text: string): string {
+  return text.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+/**
  * The session id from a request's Cookie header, or undefined.
  *
  * Hand-parsed rather than `split(";").find(…)`, because that form gets three
- * things wrong: it matches a name that merely ends with ours, it treats a bare
- * name with no `=` as a match with an undefined value, and it silently picks one
- * of two cookies with the same name.
+ * things wrong: it matches a name that merely begins or ends with ours, it takes
+ * a bare name with no `=` for a match with an undefined value, which then hides
+ * a real cookie after it, and it silently picks one of two cookies with the same
+ * name.
  *
  * A duplicate name is refused outright rather than resolved. __Host- stops a
  * sibling subdomain from setting this name, so seeing it twice is not an
  * ambiguity to break sensibly — it is a signal that something set it that should
  * not have been able to. Picking either one hands the choice to whoever tossed
- * the second, since cookie order is not specified. Refusing costs one sign-in.
+ * the second, since cookie order is not specified.
+ *
+ * Refusing is not free. A duplicate that differs in Domain or Path survives
+ * sign-out and sign-in, because the Set-Cookie for ours cannot overwrite it, so
+ * the user stays refused until it expires or they clear it. That is accepted
+ * because the alternative lets whoever set the duplicate pick the session.
  */
 export function readSessionCookie(request: Request, secure: boolean): string | undefined {
   const header = request.headers.get("cookie");
@@ -83,10 +106,10 @@ export function readSessionCookie(request: Request, secure: boolean): string | u
     const equals = part.indexOf("=");
     // No '=' at all is not a cookie; "=x" has no name.
     if (equals <= 0) continue;
-    if (part.slice(0, equals).trim() !== name) continue;
+    if (trimOws(part.slice(0, equals)) !== name) continue;
     // Seen twice. See the note above: refuse, do not choose.
     if (found !== undefined) return undefined;
-    found = part.slice(equals + 1).trim();
+    found = trimOws(part.slice(equals + 1));
   }
   return found ? found : undefined;
 }

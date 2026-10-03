@@ -61,7 +61,7 @@ Three new source files rather than growing `routes.ts`, which is already 997 lin
 
 ### Task 1: The session record, its predicate, and the in-memory store
 
-> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `2e4fc68`, `c61e3be`, `a22c64a`, `6436419`, `b568ad7`. The blocks record what was originally asked for, which is why they are kept rather than rewritten. Commits that edit this plan itself (`0477237`, `9ee8742`, `a2d5f06`, `0a0ee61`) are not listed — they change the blocks, they do not supersede them.
+> The committed implementation diverges from the code blocks below. The **code** commits are authoritative: `2e4fc68`, `c61e3be`, `a22c64a`, `6436419`, `b568ad7`, `ee5518e`. The blocks are what was originally asked for, with false rationale and predictions corrected in place; where a block and a code commit differ, the commit wins. Commits that edit this plan itself (`0477237`, `9ee8742`, `a2d5f06`, `0a0ee61`, `c2e6664`) are not listed — they change the blocks, they do not supersede them.
 
 **Files:**
 - Modify: `src/oauth/storage.ts` (add alongside `RefreshToken` and `hasLapsed`)
@@ -141,6 +141,8 @@ Expected: FAIL — `sessionDead` is not exported from `src/oauth/storage.js`.
 - [ ] **Step 3: Add the shape, the constants and the predicate**
 
 Append to `src/oauth/storage.ts`, after `RefreshToken`:
+
+> **Do not copy `sessionDead` from this block.** Its body was found to fail open on non-finite input (NaN as a time or the clock, and `Infinity`); the correct body is the one in `b568ad7`.
 
 ```ts
 /**

@@ -19,6 +19,15 @@
  *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
  *                     Launch with --dangerously-load-development-channels server:<name>.
  *                     "hook": queue them for the Bellman Stop hook and bellman_wait.
+ *   BELLMAN_BUS       "on" (default) or "off". On, the bridges on a machine share one
+ *                     connection per room, over a Unix socket under ~/.claude/bellman/bus,
+ *                     where each used to long-poll for every member it watches. "off" is
+ *                     the way back to that: this bridge polls for its own members and
+ *                     makes no socket. 0, false and no also mean off, and so does any
+ *                     value this does not recognise, which is logged: a switch for
+ *                     turning something off should not leave it on over a spelling.
+ *                     Read at launch, and per bridge: one with it off does not stop the
+ *                     others sharing a bus among themselves.
  *
  * The sign-in is NOT lazy, and it is worth being plain about it. Claude Code
  * lists a server's tools as soon as it connects, the bridge proxies tools/list
@@ -35,6 +44,7 @@
 import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, type Delivery, type Remote, type WhoAmI } from "./bridge.js";
+import { busCredentials } from "./credentials.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
@@ -42,6 +52,19 @@ const key = process.env.BELLMAN_KEY;
 const url = process.env.BELLMAN_URL ?? "https://mcp.bellman.sh/mcp";
 const delivery: Delivery = process.env.BELLMAN_DELIVERY === "hook" ? "hook" : "channel";
 const log = (message: string) => console.error(`[bellman] ${message}`);
+
+/**
+ * The kill switch for the local bus (see BELLMAN_BUS above). A value that is neither on nor off is read as off and said
+ * so, not read as on: the switch exists to be turned off, so a spelling it does not know ("disabled") must not leave
+ * the bus running in front of a person who has just tried to stop it, and off costs only what the bus saves.
+ */
+const BUS_ON = ["", "on", "1", "true", "yes"];
+const BUS_OFF = ["off", "0", "false", "no"];
+const busValue = (process.env.BELLMAN_BUS ?? "").trim().toLowerCase();
+const busOn = BUS_ON.includes(busValue);
+if (!busOn && !BUS_OFF.includes(busValue)) {
+  log(`BELLMAN_BUS=${JSON.stringify(process.env.BELLMAN_BUS)} is not on or off, so it is read as off`);
+}
 
 /**
  * Ends a sign-in that is waiting on a human. shutdown() below awaits
@@ -100,6 +123,15 @@ const bridge = createBridge({
   inboxDir,
   remote: connect,
   whoami,
+  /**
+   * One upstream connection per room, shared by every bridge on this machine (#43, #99). It is asked for when the
+   * first membership is armed and not before, so nothing is read and no socket made at launch: a signed-in bridge
+   * has no identity to name a bus after until it has signed in. A BELLMAN_KEY names the bus and signs a room's
+   * upgrade; signed in, the person (not the token, which changes every ten minutes) names it and whatever token
+   * the credential file holds signs it. Where the bus cannot be had the bridge polls as it always did, and with
+   * BELLMAN_BUS off it is never asked for: no option at all is what a bridge had before the bus.
+   */
+  ...(busOn ? { bus: { url, ...busCredentials(url, key) } } : {}),
   log,
 });
 
@@ -110,6 +142,8 @@ async function shutdown(): Promise<void> {
   // Before close(), not after. close() awaits the connect in flight, and a
   // sign-in is the one that can hold for as long as a human takes.
   signingIn.abort();
+  // close() also closes the local bus, and that is what removes this bridge's socket file if it was the
+  // coordinator. The bridges that were its subscribers race again and one takes over, each from its own cursor.
   await bridge.close().catch(() => undefined);
   if (inboxDir) rmSync(inboxDir, { recursive: true, force: true });
   /**
@@ -136,5 +170,7 @@ await bridge.server.connect(new StdioServerTransport());
 const state = whoami().source;
 log(
   `ready: ${delivery} delivery via ${url} ` +
-    (state === "env" ? "(BELLMAN_KEY)" : state === "oauth" ? "(signed in)" : "(not signed in yet)")
+    (state === "env" ? "(BELLMAN_KEY)" : state === "oauth" ? "(signed in)" : "(not signed in yet)") +
+    // Said when it is off and not when it is on, which is what every bridge did before there was a switch to say.
+    (busOn ? "" : `; local bus off (BELLMAN_BUS=${process.env.BELLMAN_BUS})`)
 );

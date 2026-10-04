@@ -8,7 +8,7 @@ import type {
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
 } from "./store.js";
-import { creditReport, isActiveMember, seatVictims } from "./store.js";
+import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -59,19 +59,24 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
  * What a hibernating socket remembers. The runtime rejects more than 16 KB;
  * fetch says how close this can get.
  *
- * Nothing reads `memberIds` today. wake() reads only `cursor` and carries the
- * rest along unchanged, and every member of a room receives every event (spec
- * D1a), so delivery does not depend on whose socket it is. It is kept for what
- * has to find a socket by member, the use in view being to close the sockets of
- * a member who has left. Nothing does that yet.
+ * Two things read it. wake() reads `cursor` and carries the rest along
+ * unchanged, and every member of a room receives every event (spec D1a), so
+ * delivery does not depend on whose socket it is. Presence reads `memberIds`
+ * (#146): they find the identity that opened the socket, and every undeparted
+ * member of that identity counts as connected while the socket is open, which
+ * `connectedAmong` in store.ts explains (the ids are a snapshot, so they are a
+ * starting point and not the whole answer). What else could read it is what has
+ * to find a socket by member, the use in view being to close the sockets of a
+ * member who has left. Nothing does that yet.
  *
- * Whatever reads it first can trust it, because of where it comes from:
- * membersOf answered it, and fetch received it in a request the Worker built
- * (see the /ws route in worker.ts), never in a header the client sent. A
- * forged x-bellman-members reaches nothing. tests/worker-ws.test.ts pins that
- * the Worker never forwards a caller's request; it guards the day this field is
- * read, not a path that is exploitable now. If the field is removed, that test
- * can go with it; until then, keep both.
+ * Whatever reads it can trust it, because of where it comes from: membersOf
+ * answered it, and fetch received it in a request the Worker built (see the
+ * /ws route in worker.ts), never in a header the client sent. A forged
+ * x-bellman-members reaches nothing. That matters now that presence reads it: a
+ * list naming a member would keep that member's whole identity out of every
+ * reclaim for as long as the socket stayed open. tests/worker-ws.test.ts pins
+ * that the Worker never forwards a caller's request, and stays for as long as
+ * this field is read.
  */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 
@@ -83,6 +88,19 @@ type SocketAttachment = { memberIds: string[]; cursor: number };
  */
 const WS_CLOSING = 2;
 const WS_CLOSED = 3;
+
+/**
+ * Whether a socket the runtime lists is one a peer can still be reached on.
+ * Exactly CLOSING and CLOSED are not, so a reading nobody expected counts as
+ * open: wake() would rather send to it than go silent, and presence would
+ * rather hold a seat than free one. One definition for both, so "a live socket"
+ * cannot mean one thing to delivery and another to presence. The runtime goes
+ * on listing a socket this object has closed until its peer acknowledges
+ * (still listed 23 s on, for a peer that never did; see wake()), which is why
+ * a listing is not enough.
+ */
+const isOpen = (ws: WebSocket): boolean =>
+  ws.readyState !== WS_CLOSING && ws.readyState !== WS_CLOSED;
 
 /**
  * What a join-code change owes the registry's index, as outbox intents.
@@ -173,6 +191,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * for that reason, and what a revival costs is the spec's unmeasured billing
    * risk. Any frame that is not that text reaches webSocketMessage and is
    * closed, so a client's keepalive has to be exactly that.
+   *
+   * The client that sends it is the keepalive in src/room-socket.ts, whose
+   * `PING` has to equal the first literal in the call below (its `PONG` the
+   * second, though it only keeps the reply out of that module's log). These are
+   * literals here and a constant there, and nothing compiles or runs the two
+   * together: the wiring test pins this registration, and the room-socket tests
+   * pin the client's text against a fake that carries its own copy. Change one
+   * side and update only its own test, and every test stays green while the
+   * client is closed 1003 at its first keepalive, which looks like a server-side
+   * drop. Measured with that client at its default cadence: see the comment on
+   * `PING` there.
    *
    * Where to register was settled against workerd 1.20260926.1 at compat date
    * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
@@ -351,6 +380,55 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
       closed: s.closed || Date.now() > s.expiresAt,
     };
+  }
+
+  /**
+   * The member ids the sockets open to this room carry, from their attachments.
+   *
+   * Synchronous, as wake() is: getWebSockets and deserializeAttachment are, so
+   * seatMember can call this inside its transaction and decide against the
+   * sockets as they are while that transaction holds the object. An await here
+   * would put a gap between reading them and deciding.
+   *
+   * A socket this object is closing is skipped (`isOpen`). One with no
+   * attachment, or one that does not read as a list, names nobody. fetch
+   * attaches before it accepts, so every accepted socket has one. A workerd that
+   * stopped persisting a pre-accept attachment would hand every socket back
+   * without one: delivery would go quiet (wake fails closed, see fetch) and this
+   * would answer nobody, so presence would fall back to the window alone.
+   * worker-tests/presence-sockets.test.ts goes red in that case.
+   *
+   * `#private`, since a Durable Object answers RPC for every method on its class
+   * (#126) and nothing outside needs this: connectedMembers is the answer a
+   * caller can have.
+   */
+  #attachedIds(): string[] {
+    const ids: string[] = [];
+    for (const ws of this.ctx.getWebSockets()) {
+      if (!isOpen(ws)) continue;
+      const memberIds = (ws.deserializeAttachment() as Partial<SocketAttachment> | null)?.memberIds;
+      if (Array.isArray(memberIds)) ids.push(...memberIds);
+    }
+    return ids;
+  }
+
+  /**
+   * The members of this room that a live socket vouches for, as ids (#146).
+   * `BellmanStore.connectedMembers` is the contract and this is SessionDO's
+   * answer to it, from the sockets it holds; `connectedAmong` says which members
+   * that is.
+   *
+   * It answers RPC like every method on this class. What it adds to getSession
+   * is which members have a socket open, which every member of the room already
+   * reads as `presence`, less precisely, and only code holding the SESSION
+   * binding can ask. Like membersOf it writes nothing and does not expire the
+   * room, because it is a question about who is connected and not a reason to
+   * change the room.
+   */
+  async connectedMembers(): Promise<string[]> {
+    const s = await this.stored();
+    if (!s) return [];
+    return [...connectedAmong(s.members, this.#attachedIds())];
   }
 
   /**
@@ -656,7 +734,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.closed) return { refused: "closed", reclaimed: [] };
       if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
 
-      const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+      // The sockets as they are now, read here and not passed in. It is
+      // synchronous and inside the transaction, so the decision is made against
+      // the sockets that exist while this holds the object. A set fetched by the
+      // caller first could not promise that: a member can connect in the gap, and
+      // reclaiming it is final.
+      const connected = connectedAmong(s.members, this.#attachedIds());
+      const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
       if (victims === null) return { refused: "full", reclaimed: [] };
 
       const departed = new Set(victims.map((v) => v.memberId));
@@ -988,7 +1072,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // gone from getWebSockets() afterwards, so wake() has not been seen to
         // meet a CLOSED socket. The arm stays because a send to one cannot
         // succeed.
-        if (ws.readyState === WS_CLOSING || ws.readyState === WS_CLOSED) continue;
+        if (!isOpen(ws)) continue;
         const att = ws.deserializeAttachment() as SocketAttachment | null;
         // Fail closed on a missing attachment. fetch() attaches before it sends,
         // so every accepted socket has one; a null here means something is
@@ -1882,6 +1966,10 @@ export class DurableObjectStore implements BellmanStore {
         this.registry.indexMembership(member.userId, sessionId));
     }
     return seated;
+  }
+
+  async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {
+    return new Set(await this.session(sessionId).connectedMembers());
   }
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {

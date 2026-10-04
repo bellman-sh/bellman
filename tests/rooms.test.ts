@@ -475,6 +475,24 @@ describe("evictMember", () => {
     });
   };
 
+  /**
+   * A swarm room of three: the creator, a watcher in `observer`, and a helper in
+   * the default seat. The watcher is the one these tests remove, and
+   * `targetIdentity` is who they are, for the cases where they leave first.
+   *
+   * Both seats hold a live code, so an eviction here has a door to shut and
+   * announces twice, `member_evicted` and then `invite_revoked`. That is what
+   * lets a test tell the cut at the announcement from a cut at the room's last
+   * event, which a one-event room could not.
+   */
+  const roomWithThree = async () => {
+    const room = swarmRoom({ ...oneCode("BELL-HELPER-01", "helper"), ...oneCode("BELL-WATCH-01", "observer") });
+    room.members.push(member({ memberId: "m_helper", userId: "u_helper", label: "helper@codenerd", roomRole: "helper" }));
+    await store.createSession(room);
+    const target = room.members.find((m) => m.memberId === "m_watcher")!;
+    return { store, creator: jesse, session: room, target, targetIdentity: peer };
+  };
+
   it("removes the member, retires their seat's code, and says so", async () => {
     await store.createSession(peopled());
 
@@ -576,7 +594,7 @@ describe("evictMember", () => {
 
   // The early return heals, it does not merely return.
   it("closes a room an interrupted eviction left empty and open", async () => {
-    // The state an eviction that died between updateMember and the close leaves
+    // The state an eviction that died between its append and the close leaves
     // behind: the target is out, nobody is active, the room is open. Its door is
     // already shut, because an eviction shuts it before it records the member out,
     // so there is no code here for the early return to retire.
@@ -918,26 +936,96 @@ describe("evictMember", () => {
     expect(r.code).toBe("frozen");
   });
 
+  it("records the evicted member out at the announcement's own cursor", async () => {
+    const { store, creator, session, target } = await roomWithThree();
+
+    const out = await evictMember(store, creator, session.id, target.memberId);
+    expect(out.ok).toBe(true);
+
+    const after = (await store.getSession(session.id))!;
+    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    const announcement = (await store.eventsAfter(session.id, 0))
+      .filter((e) => e.type === "member_evicted")
+      .at(-1)!;
+    // The cut names the event that announced it, so an evictee's last readable
+    // event is the one telling them why (#113 R4).
+    expect(m.removedAtCursor).toBe(announcement.cursor);
+  });
+
+  // The freeze lands inside the append: after the guard has read an unfrozen room
+  // and before the write, the gap the old ordering resolved by leaving the member
+  // out and unannounced. Freezing BEFORE the call does not reach it. The guard
+  // refuses a frozen room itself, so the append is never attempted, and that test
+  // passes with the append's refusal deleted.
+  it("leaves the member in, not half out, when the append is refused", async () => {
+    const { store, creator, session, target } = await roomWithThree();
+    const append = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sid, e, extras) => {
+      await store.freezeSession(sid, Date.now());
+      return append(sid, e, extras);
+    });
+
+    const out = await evictMember(store, creator, session.id, target.memberId);
+
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.code).toBe("frozen");
+    const after = (await store.getSession(session.id))!;
+    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    // Consistent either way: in with no cut, or out with one. Never out
+    // without a cut, which is the state that leaves the feed open.
+    expect(m.leftAt).toBeNull();
+    expect(m.removedAtCursor).toBeUndefined();
+  });
+
+  it("does not record a cut for a member who already left", async () => {
+    const { store, creator, session, target, targetIdentity } = await roomWithThree();
+    await leaveRoom(store, targetIdentity, session.id, target.memberId);
+
+    const out = await evictMember(store, creator, session.id, target.memberId);
+    expect(out.ok).toBe(true);
+
+    const after = (await store.getSession(session.id))!;
+    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    // Spec D6: the cut rides the announcement, and the early return writes
+    // none. A voluntary leaver keeps the open feed (R2); the late eviction is
+    // about the door, not their reading.
+    expect(m.removedAtCursor).toBeUndefined();
+  });
+
   /**
-   * REVIEW FOCUS 1 — a freeze landing between the guard and the append.
+   * REVIEW FOCUS 1 — a freeze landing after the removal.
    *
-   * appendEvent returns null once frozen and the member is already out, so the
-   * operation completes rather than throwing: an announced removal that did
-   * not happen would be worse than a removal that was not announced.
+   * The removal is the append that announces it, so by the time the room freezes
+   * it has committed, and what the freeze refuses is the door's own announcement.
+   * The code is already retired, so that refusal is tolerated rather than
+   * unwound: the operation completes, with the member out and their cut recorded.
+   * A freeze before the removal is the other window, and it refuses instead; see
+   * "leaves the member in, not half out, when the append is refused".
+   *
+   * This used to wrap `updateMember`, which was where the removal happened. Once
+   * the removal moved into the append, that wrapper never fired and the test
+   * passed without a freeze in it.
    */
   it("completes when the room freezes after the member was removed", async () => {
     await store.createSession(peopled());
-    const real = store.updateMember.bind(store);
-    store.updateMember = async (sid, mid, patch) => {
-      await real(sid, mid, patch);
+    const append = store.appendEvent.bind(store);
+    vi.spyOn(store, "appendEvent").mockImplementation(async (sid, e, extras) => {
+      const stored = await append(sid, e, extras);
       await store.freezeSession(sid, Date.now());
-    };
+      return stored;
+    });
 
     const r = await evictMember(store, jesse, "qs_test", "m_peer");
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     const after = await store.getSession("qs_test");
-    expect(after?.members.find((m) => m.memberId === "m_peer")?.leftAt).not.toBeNull();
+    const m = after?.members.find((mm) => mm.memberId === "m_peer");
+    expect(m?.leftAt).not.toBeNull();
+    expect(m?.removedAtCursor).toBeDefined();
+    // The freeze did land between the two announcements: the door's was refused.
+    // Without this the hook could miss and the test would still pass.
+    expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
   });
 
   it("reports not_found for a member_id nobody in the room holds", async () => {
@@ -1029,9 +1117,11 @@ describe("evictMember", () => {
   // finds the code already gone, so the record is thin, and that is accepted.
   it("finishes the eviction on a retry when it died after shutting the door", async () => {
     await store.createSession(peopled());
-    vi.spyOn(store, "updateMember").mockRejectedValueOnce(new Error("update failed"));
+    // The member write rides the announcement's append, so that append is where
+    // the removal dies.
+    vi.spyOn(store, "appendEvent").mockRejectedValueOnce(new Error("append failed"));
 
-    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("update failed");
+    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("append failed");
 
     const mid = await store.getSession("qs_test");
     expect(mid?.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
@@ -1111,7 +1201,7 @@ describe("evictMember", () => {
     expect(rows[0].detail).toMatchObject({ member_id: "m_a", user_id: "u_peer" });
   });
 
-  // The eviction is a fact from updateMember on, so its audit row is written then
+  // The eviction is a fact from its append on, so its audit row is written then
   // and not behind the closing: an eviction that dies at the close keeps its
   // record, which the retry has no way to write. This builds that state by
   // failing the real close.

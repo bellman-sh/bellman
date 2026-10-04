@@ -431,6 +431,43 @@ Residual: the name is absent for microseconds between the two renames.
 
 Linux is unmeasured.
 
+**What this decision does and does not cover (#142).** D8 rejects liveness
+heuristics for deciding **ownership**, and that is its whole scope.
+Connectability decides who the coordinator is, and nothing else may. Whether a
+connection is being *served* is a different question, which the subscribe
+acknowledgement bound has always answered, and which a coordinator frozen after
+acknowledging made unavoidable: no events flowed, nothing reported it, and the
+next `subscribe` was the only thing that would notice. That is silent
+non-delivery, the worst failure this feature has.
+
+So the subscriber keeps two deadlines, and both answer that second question
+rather than the first:
+
+- **The ack bound** — this subscribe went unanswered. Per subscription, so it
+  still fires on a connection busy with another member's events.
+- **The idle bound** — this connection has sent nothing at all. Per connection,
+  renewed by any frame, which is what the coordinator's periodic keepalive is
+  for. Local only, so a quiet room still costs nothing upstream.
+
+**Authority, when they disagree.** The election is authoritative for ownership
+and the deadlines have no say in it. A subscriber that gives up ends its
+subscriptions, falls back to polling, and **never unlinks the socket and never
+claims the bus** — so a frozen coordinator keeps it, and every subscriber simply
+stops depending on it until the next election. No liveness heuristic removes a
+coordinator, which is the property D8 exists to protect. The count of mechanisms
+is therefore two, not three: ownership, and whether this connection serves me.
+
+**Both deadlines measure time the subscriber was LISTENING, not elapsed time.**
+`readLines` pauses the socket and awaits each line's handler, so while an
+`onEvent` runs nothing is read — including another subscription's
+acknowledgement and including a keepalive. Wall-clock deadlines therefore
+counted the subscriber's own work as the coordinator's silence, and a slow
+consumer looked like a frozen coordinator (measured; it was #142's second
+finding). Deadlines are held for the duration of a handler and resume with what
+they had left, and one created inside a handler does not start until that handler
+returns. The push is by time spent and not a fresh bound, so a subscribe that is
+never answered is still given up on however busy the subscriber is.
+
 ### D9 — The bus delivers a gapless ordered stream from the cursor you named.
 
 NDJSON framing. A subscriber sends `{ subscribe, session_id, member_id, cursor }`

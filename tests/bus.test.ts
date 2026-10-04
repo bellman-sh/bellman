@@ -1748,3 +1748,107 @@ describe("ending a room", () => {
     expect(slow.events).toEqual([]); // what the server answered arrived after it was ended
   });
 });
+
+/**
+ * #142: a coordinator that freezes AFTER acknowledging, while its subscribers sit
+ * idle, was not noticed until the next `subscribe`. No events flowed and nothing
+ * reported it — silent non-delivery, which is the worst failure this feature has.
+ *
+ * The ack bound catches a freeze AT subscribe. These cover the freeze after it, and
+ * they are the same question — "is this connection being served" — asked at a second
+ * moment, so the mechanism count stays at two. The election is untouched: it decides
+ * ownership, and a subscriber that gives up here falls back to polling without ever
+ * unlinking the socket or claiming the bus (D8).
+ */
+
+/** A coordinator that answers the subscribe and then says nothing, which is a freeze mid-life. */
+async function acksThenGoesSilent() {
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const sockets: net.Socket[] = [];
+  const server = net.createServer((socket) => {
+    sockets.push(socket);
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (d: string) => {
+      buffer += d;
+      for (let end = buffer.indexOf("\n"); end !== -1; end = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        if (line.length === 0) continue;
+        const r = JSON.parse(line) as { op?: string; session_id?: string; member_id?: string };
+        // Acknowledge, and then never speak again: no events, and no keepalive.
+        if (r.op === "subscribe") {
+          socket.write(JSON.stringify({
+            op: "subscribed", session_id: r.session_id, member_id: r.member_id,
+          }) + "\n");
+        }
+      }
+    });
+    socket.on("error", () => undefined);
+  });
+  await new Promise<void>((resolve) => server.listen(socketPath(), resolve));
+  cleanups.push(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+}
+
+describe("a subscriber gives up on a coordinator that goes quiet mid-life (#142)", () => {
+  it("ends the subscriptions of a coordinator that acknowledged and then froze", async () => {
+    await acksThenGoesSilent();
+    const via = await open({ idleTimeoutMs: 200 });
+    const a = recorder();
+    via.subscribe(ROOM, "m_a", 0, a.handlers);
+
+    // The ack lands, so the ack bound is satisfied and today nothing else ever asks.
+    await vi.waitFor(() => expect(a.ended).toHaveLength(1), { timeout: 3000 });
+    expect(a.ended[0]).toBeInstanceOf(BusUnavailableError);
+    expect(a.ended[0]).toMatchObject({ reason: "unresponsive" });
+    // Same reason the ack bound uses, so bus-link's existing fallback already handles it.
+    await expect(via.closed).resolves.toBeUndefined();
+  });
+
+  it("stays subscribed to a real coordinator, whose keepalive renews the deadline", async () => {
+    // The keepalive has to be well inside the bound or a healthy bus is abandoned.
+    const { coord, via } = await rig(
+      "subscriber", { keepaliveIntervalMs: 40 }, { idleTimeoutMs: 300 },
+    );
+    const a = recorder();
+    await attach(coord, via, "m_a", 0, a.handlers, 1);
+
+    await pause(900); // three times the bound, with nothing but keepalives arriving
+    expect(a.ended).toEqual([]);
+    coord.ingest(peerEvent(1));
+    await vi.waitFor(() => expect(a.cursors()).toEqual([1]));
+  });
+
+  it("does not mistake a slow handler of ours for a coordinator that stopped", async () => {
+    // The issue's second finding. `readLines` calls socket.pause() and AWAITS the line
+    // handler (src/bus.ts), so while onEvent runs nothing is read — including another
+    // subscription's acknowledgement. Measured before the fix: m_b was ended
+    // "unresponsive" while the coordinator was healthy and had already acked it.
+    const { room, coord, via } = await rig(
+      "subscriber", { keepaliveIntervalMs: 40 }, { ackTimeoutMs: 150, idleTimeoutMs: 200 },
+    );
+    void room;
+    const a = recorder();
+    let release = (): void => {};
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const slow: Handlers = {
+      onEvent: async () => { await blocked; },
+      onEnd: (reason) => { a.ended.push(reason); },
+    };
+    await attach(coord, via, "m_a", 0, slow, 1);
+
+    coord.ingest(peerEvent(1));          // m_a's handler starts and blocks
+    await pause(30);
+    const b = recorder();
+    via.subscribe(ROOM, "m_b", 0, b.handlers);  // its ack cannot be read while we block
+    await pause(500);                    // past both bounds, while still working
+
+    expect(b.ended).toEqual([]);         // the coordinator is healthy; we were busy
+    expect(a.ended).toEqual([]);
+    release();
+    await vi.waitFor(() => expect(coord.stats().rooms[ROOM]?.subscribers).toBe(2));
+  });
+});

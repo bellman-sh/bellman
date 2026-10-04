@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { busPath } from "../src/bus.js";
+import { ignoreResets } from "./helpers/upgrade-socket.js";
 
 /**
  * channel.ts as Claude Code runs it, with the local bus.
@@ -86,7 +87,9 @@ async function bellman(): Promise<Bellman> {
   });
   // Every room's socket is refused: a room is polled, and the process still has to deliver.
   server.on("upgrade", (_req, socket) => {
-    socket.end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    // ignoreResets FIRST: afterEach SIGKILLs the bridge, and a socket handed over by
+    // 'upgrade' carries none of http.Server's own error handling.
+    ignoreResets(socket).end("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

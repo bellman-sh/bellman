@@ -1,5 +1,6 @@
 import http from "node:http";
 import type { Duplex } from "node:stream";
+import { ignoreResets } from "./upgrade-socket.js";
 import { resolveIdentity } from "../../src/auth.js";
 import {
   handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig,
@@ -577,6 +578,10 @@ async function serveRooms(config: OAuthConfig, options: FakeRoomsOptions = {}): 
     connection.on("close", () => connections.delete(connection));
   });
   server.on("upgrade", (req, socket) => {
+    // The .catch below handles onUpgrade REJECTING. It does not handle an 'error' on
+    // the socket, which after 'upgrade' has no listener of http.Server's left, so a
+    // peer that resets takes the whole run down (see ignoreResets).
+    ignoreResets(socket);
     onUpgrade(req, socket).catch(() => socket.destroy());
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

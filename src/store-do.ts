@@ -144,6 +144,29 @@ function reportRow(
   return members ? { session: { ...s, members } } : null;
 }
 
+/**
+ * Past its TTL. `#expireIfDue`'s rule for whether there is expiring to do, and the
+ * one definition of it, because `membersOf`, `fetch` and `#tickIfDue` all have to
+ * reach the same verdict as the alarm about a room whose expiry has arrived and
+ * whose alarm has not fired yet. Two copies of `now > s.expiresAt` and the four
+ * disagree the first time one of them is edited.
+ */
+const pastTtl = (s: StoredSession, now: number): boolean => now > s.expiresAt;
+
+/**
+ * Whether a room reads as closed, deciding it without writing: closed outright, or
+ * past its TTL with the alarm still to come. A row that is gone reads closed, which
+ * is the answer an unknown room has always had.
+ *
+ * Every read that refuses a closed room goes through here, so the rule and the
+ * refusals cannot drift apart. `membersOf` authorizes a watch with it and `fetch`
+ * rechecks it before accepting the socket — one rule asked twice, which is what #133
+ * was missing: with no recheck, a close landing between the two calls left a socket
+ * on a closed room and nothing to close it.
+ */
+const readsClosed = (s: StoredSession | undefined, now: number): boolean =>
+  !s || s.closed || pastTtl(s, now);
+
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -369,15 +392,20 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The second reason carries an obligation. The two paths must still agree
    * on "closed", or a room past its TTL whose alarm has not fired yet reads
    * as open here while bellman_sync, through getSession, reads it as closed.
-   * So `closed` is computed by expireIfDue's own rule (now past expiresAt)
-   * and not written. Change that rule in one place and it must change in both.
+   * So `closed` comes from `readsClosed`, expireIfDue's own rule, and is not
+   * written. That predicate is where the rule lives for all of its readers.
+   *
+   * What this answer does NOT settle is whether the room is still open by the
+   * time the socket is accepted: that is a second invocation, and `fetch` asks
+   * `readsClosed` again for itself (#133). This one is what distinguishes 403
+   * from 404 without telling a stranger which, and it spares an upgrade for a
+   * caller who owns nothing here.
    */
   async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
     const s = await this.stored();
-    if (!s) return { memberIds: [], closed: true };
     return {
-      memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
-      closed: s.closed || Date.now() > s.expiresAt,
+      memberIds: s ? s.members.filter((m) => m.userId === userId).map((m) => m.memberId) : [],
+      closed: readsClosed(s, Date.now()),
     };
   }
 
@@ -435,13 +463,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and asked membersOf who they are; this request is one the Worker BUILT,
    * so nothing on it came from the client (see the /ws route in worker.ts).
    *
-   * Read, attach, accept and send happen in this one invocation, and, its
-   * only await being a storage read, the input gate holds every other request
-   * to this object for its duration. That is CLAUDE.md's read-and-register
+   * Recheck, read, attach, accept and send happen in this one invocation, and,
+   * every await in it being a storage read, the input gate holds every other
+   * request to this object for its duration. That is CLAUDE.md's read-and-register
    * rule, not an exemption from it: an event appended between the read and
    * the accept would otherwise be delivered to nobody and skipped by the
    * cursor. So the order is waitForEvents' own: await the read FIRST, then
    * register with no await between.
+   *
+   * The recheck of `closed` is in this invocation for the same reason and not a
+   * second one (#133). The Worker asked membersOf before it built this request,
+   * and a close committed in the gap would otherwise be answered with an accepted
+   * socket that nothing is left to close.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
@@ -483,7 +516,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const memberIds = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
-    // The only await. From here to the return nothing yields.
+    // The recheck (#133). The Worker's membersOf said open, but that was a second
+    // invocation of this object and the input gate spans neither it nor the gap
+    // after it: a close, or the TTL alarm, lands there and the socket is accepted
+    // onto a room nothing will ever close, because the close already happened. So
+    // the guard is asked HERE, where the registration is, and the two are one
+    // invocation — the read-and-register rule again, with "closed" as the thing
+    // read instead of the cursor.
+    //
+    // It comes before the event read and the accept, so a refusal reads nothing more
+    // and accepts nothing. The Worker returns this response unchanged, and its own
+    // pre-check answers the same 409 with the same body for a room already closed
+    // when it looked.
+    if (readsClosed(await this.stored(), Date.now())) {
+      return new Response("This room is closed", { status: 409 });
+    }
+
+    // The last await, and both of them are storage reads, so the gate holds from
+    // the recheck to the return. From here nothing yields.
     const missed = await this.events(cursor);
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
@@ -1262,8 +1312,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * SESSION binding rewrite a room and reach into the registry's index.
    */
   async #expireIfDue(s: StoredSession, now: number): Promise<void> {
-    // membersOf is the other half of this rule: it answers "closed" the same way, without writing.
-    if (s.closed || now <= s.expiresAt) return;
+    // Already closed, so there is nothing to expire; not lapsed, so there is nothing
+    // to expire yet. `pastTtl` is the second half, shared with the three readers that
+    // answer "closed" from it without writing (see readsClosed).
+    if (s.closed || !pastTtl(s, now)) return;
     // The write below clears the session's codes, so their rows leave the registry's
     // index with it, in the same transaction. Otherwise an expired room's codes stay
     // there for good. They are already inert, because getSessionByJoinCode refuses a
@@ -1317,8 +1369,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *   two are not. `dueNames` sorts the due handlers, "heartbeat" sorts before
    *   "ttl", and a firing delayed past `expiresAt` finds both due — so the tick
    *   ran, appended and woke every watcher on a room the very next iteration of
-   *   that loop was about to close. `now > s.expiresAt` is `#expireIfDue`'s own
-   *   test for lapsed, read here rather than reordering the handlers: a guard is
+   *   that loop was about to close. `pastTtl` is `#expireIfDue`'s own test for
+   *   lapsed, read here rather than reordering the handlers: a guard is
    *   checkable where a name's place in an alphabet is an accident.
    *
    * **One transaction, for the reason `stored()` gives, and it is what makes the
@@ -1343,7 +1395,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return null;
-      if (s.closed || s.frozenAt !== null || now > s.expiresAt) return null;
+      if (s.closed || s.frozenAt !== null || pastTtl(s, now)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
       const due = dueMembers(s, now);

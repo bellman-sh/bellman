@@ -273,6 +273,22 @@ below). The rule governs both paths and only the registration mechanism
 differs, a waiter pushed onto an in-memory list or a cursor attached to a socket
 the runtime holds. `wake()` is synchronous for the same reason.
 
+**And the guard belongs in the same invocation as the accept.** `/ws` is *two*
+invocations of one object — `membersOf`, then the upgrade — and the input gate
+covers each but not the pair. So a close, or the TTL alarm, lands between them,
+and `fetch` accepted the socket onto a closed room where nothing was left to
+close it: the close had already happened ([#133](../../../issues/133)). The
+Worker's check could not be moved and could not be trusted alone; `fetch`
+rechecks `closed` for itself, before the event read and the accept, and refuses
+with 409. One rule asked twice, from `readsClosed` in `store-do.ts`, which is
+also what the TTL alarm expires a room by. The Worker's check stays because it is
+what tells 403 from 404 without naming the room to a stranger, and what spares an
+upgrade for a caller who owns nothing here. This is read-and-register again with
+a guard in place of the cursor, and it is the same family as
+[#118](../../../issues/118), [#120](../../../issues/120) and
+[#124](../../../issues/124): a value read in one invocation and acted on in
+another.
+
 **One socket per (machine, room).** A socket binds to one `SessionDO`, so a
 machine watching three rooms holds three. That is already fewer than per-member
 polls hold, because a room socket carries every event in the room and the
@@ -932,7 +948,9 @@ pull request.
    waiter**, or an event arriving in the gap wakes an empty list. `SessionDO.fetch`
    obeys it for a socket: read first, then attach and accept with nothing
    yielding between. Guarded writes obey the same rule through a synchronous
-   read.
+   read. **A guard read in another invocation does not bind the registration in
+   this one**, so `fetch` rechecks `closed` itself rather than resting on the
+   Worker's `membersOf` ([#133](../../../issues/133)).
 3. **Peer content is untrusted everywhere** and stays wrapped to the model.
 4. **Reads return detached copies.** Nothing relies on shared references.
 5. **`main` moves only through merges.** The repo is colocated

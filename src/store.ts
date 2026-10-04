@@ -145,11 +145,23 @@ export const isRemovedMember = (m: Member): boolean => m.removedAtCursor !== und
  * than half out. `creditReport` above carries the argument for why a member
  * write that must agree with an event belongs in the event's own transaction.
  *
- * `null` for a member the roster does not name — `updateMember`'s rule, an
- * unknown member is a no-op and not a throw — and `null` for one already
- * carrying a cursor. The second is not merely an optimisation: without it a
- * creator evicting the same member twice would move the cut forward and widen
- * the window the first eviction closed.
+ * `null` in three cases, and none of them is merely an optimisation.
+ *
+ * A member the roster does not name: `updateMember`'s rule, an unknown member is
+ * a no-op and not a throw.
+ *
+ * A member already carrying a cursor. Without this a creator evicting the same
+ * member twice would move the cut forward and widen the window the first
+ * eviction closed.
+ *
+ * A member who has already left (#113, D6). `evictMember` returns early for one,
+ * but it reads the roster once and appends later, and a voluntary leave can land
+ * in between: `leaveRoom` sets `leftAt` through `updateMember`, and
+ * `removedAtCursor` is not patchable, so neither bail-out above sees it. Without
+ * this one that member would be handed a cut and have its own `leftAt`
+ * overwritten, and a member who chose to go is the one R2 gives the open feed.
+ * It is a `null` and not `leftAt: members[i].leftAt ?? at`, which would keep the
+ * leave time and still write the cut — the part D6 forbids.
  *
  * Here beside `creditReport` and `isActiveMember`, and the direction is theirs:
  * this is applied INSIDE both stores, so it can live in neither.
@@ -163,6 +175,7 @@ export function markRemoved(
   const i = members.findIndex((m) => m.memberId === memberId);
   if (i < 0) return null;
   if (members[i].removedAtCursor !== undefined) return null;
+  if (members[i].leftAt !== null) return null;
   const next = [...members];
   next[i] = { ...next[i], leftAt: at, removedAtCursor: cursor };
   return next;

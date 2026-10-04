@@ -1404,8 +1404,8 @@ export function describeStoreContract(
      * is not observable from outside the store. What they pin is what a caller
      * CAN see, and what both stores have to say identically: the member lands out
      * at the event's own cursor, nobody else moves, an unknown member is a
-     * no-op, a cut already recorded stays put, and a refused append records
-     * nothing.
+     * no-op, a cut already recorded stays put, a member who already left is not
+     * cut, and a refused append records nothing.
      */
     describe("recording a member out at an event's cursor", () => {
       /** A creator and one peer, created in the store. */
@@ -1489,6 +1489,38 @@ export function describeStoreContract(
         const m = after.members.find((mm) => mm.memberId === target)!;
         // Otherwise a second eviction widens the window the first one closed.
         expect(m.removedAtCursor).toBe(first.cursor);
+      });
+
+      /**
+       * D6 at the store. `evictMember` returns early for a member who already
+       * left, but it reads the roster once and appends later, and a voluntary
+       * leave can land in between. `leaveRoom` writes `leftAt` through
+       * `updateMember`, which is what stands in for it here, and `removedAtCursor`
+       * is not patchable — so that member reaches `markRemoved` with neither of
+       * its first two bail-outs clear. Without a third it would be handed a cut
+       * and have its own leave time overwritten, and a member who chose to go is
+       * the one R2 gives the open feed.
+       *
+       * `leftAt` is set far from the event's `at`, so a store that rewrote it
+       * cannot land on the same value by coincidence.
+       */
+      it("does not cut a member who already left, and leaves their leftAt alone", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const leftAt = 12_345;
+        await store.updateMember(s.id, target, { leftAt });
+
+        const event = await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        });
+
+        // The announcement still lands, as it does for an unknown member: the
+        // rule declines to write the member, and nothing about the append.
+        expect(event).not.toBeNull();
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBe(leftAt);
       });
 
       it("records nothing when the room is frozen and the append is refused", async () => {

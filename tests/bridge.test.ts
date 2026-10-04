@@ -317,9 +317,9 @@ describe("channel delivery", () => {
 
     await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
 
-    // The event reaches the human first. Nothing else would: bellman_sync
-    // keeps answering a member who is out, because reads stay open to them,
-    // and the room is not closed.
+    // The event reaches the human first. Nothing else would stop the watcher:
+    // bellman_sync keeps answering a member who is out, with nothing new, and
+    // the room is not closed.
     await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
     await until(() => b.bridge.watching().length === 0);
   });

@@ -1228,10 +1228,13 @@ describe("fetch: websocket upgrade", () => {
     // look at how fetch awaits the read first. Hook whatever fetch awaits
     // directly.
     //
-    // events() is the one thing fetch awaits, and the server socket does not
-    // exist until fetch builds the pair, so the hooks go on events() and on the
-    // WebSocketPair constructor (restored after). The attach comes before the
-    // accept, so a hook installed at accept would never see it.
+    // events() is the last thing fetch awaits. The roster is read just ahead of
+    // it (#113), which is not hooked: the question here is what happens between
+    // the events read and the accept, and an await added after the events read is
+    // what this goes red on. The server socket does not exist until fetch builds
+    // the pair, so the hooks go on events() and on the WebSocketPair constructor
+    // (restored after). The attach comes before the accept, so a hook installed
+    // at accept would never see it.
     const { doi, ctx } = await world(2);
     const calls: string[] = [];
 

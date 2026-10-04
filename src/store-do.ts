@@ -75,7 +75,8 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
  *
  * Whatever reads it can trust it, because of where it comes from: membersOf
  * answered it, and fetch received it in a request the Worker built (see the
- * /ws route in worker.ts), never in a header the client sent. A forged
+ * /ws route in worker.ts), never in a header the client sent, and cut it down
+ * by the roster as it stood when the socket was accepted (#113). A forged
  * x-bellman-members reaches nothing. That matters now that presence reads it: a
  * list naming a member would keep that member's whole identity out of every
  * reclaim for as long as the socket stayed open. tests/worker-ws.test.ts pins
@@ -463,12 +464,26 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * so nothing on it came from the client (see the /ws route in worker.ts).
    *
    * Read, attach, accept and send happen in this one invocation, and, its
-   * only await being a storage read, the input gate holds every other request
+   * only awaits being storage reads, the input gate holds every other request
    * to this object for its duration. That is CLAUDE.md's read-and-register
    * rule, not an exemption from it: an event appended between the read and
    * the accept would otherwise be delivered to nobody and skipped by the
    * cursor. So the order is waitForEvents' own: await the read FIRST, then
    * register with no await between.
+   *
+   * **The roster is read again here, and the list the Worker sent is cut down
+   * by it (#113).** The Worker asked membersOf and then sent this request: two
+   * calls, and a removal can commit between them. The list this request
+   * carries was true when it was made and is not now, and a socket accepted on
+   * it would hold the open feed of a member already cut, which
+   * `#closeCutSockets` cannot undo because it ran before the socket existed.
+   * So the ids of members the roster has since cut are dropped, and a request
+   * left with none is refused 403, the answer the route gives an identity that
+   * owns nothing here. An id the roster does not hold is kept: it is neither
+   * entitled nor condemned, as `#closeCutSockets` reads it. The roster is read
+   * BEFORE the events, so the events read stays the last await ahead of the
+   * attach, and both are storage reads, which is what keeps the gate closed
+   * across the pair.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
@@ -508,10 +523,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     }
     const url = new URL(request.url);
     const cursor = Number(url.searchParams.get("cursor"));
-    const memberIds = (request.headers.get("x-bellman-members") ?? "")
+    const asked = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
-    // The only await. From here to the return nothing yields.
+    // The roster first, then the events: two storage reads, and the second is the last
+    // await. See the docblock for what the roster is read for.
+    const s = await this.stored();
+    const cut = new Set<string>(s?.members.filter(isRemovedMember).map((m) => m.memberId));
+    const memberIds = asked.filter((id) => !cut.has(id));
+    if (asked.length > 0 && memberIds.length === 0) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // The last await. From here to the return nothing yields.
     const missed = await this.events(cursor);
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 

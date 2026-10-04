@@ -607,3 +607,54 @@ describe("a creator removes a member who holds a socket", () => {
     expect(cut.removedAtCursor).toBe(event!.cursor);
   });
 });
+
+describe("an upgrade the Worker authorized just before a removal", () => {
+  /**
+   * The route asks membersOf who the caller is and then hands the object a request built
+   * from the answer. That is two calls, and a removal can commit between them, which leaves
+   * the object holding a member list that was true when it was made. Neither of the other
+   * two checks can close that: membersOf has already answered, and the close pass ran before
+   * this socket existed, so it never sees it. A socket accepted on the stale list would hold
+   * the open feed of a member already cut, which is the bug this issue is about.
+   *
+   * So fetch looks at the roster again, in the invocation that accepts, where nothing yields
+   * between the look and the accept. These cases hand the object the stale list directly,
+   * which is what the Worker would have handed it, so the race is a fixed order and not a
+   * hope.
+   */
+  const upgradeNaming = (stub: DurableObjectStub, memberIds: string[]) =>
+    stub.fetch(new Request("https://session/ws?cursor=0", {
+      headers: { upgrade: "websocket", "x-bellman-members": memberIds.join(",") },
+    }));
+
+  it("refuses a socket whose members were all removed after the list was made", async () => {
+    const { id, store, stub } = await roomOf(mine("m_target"));
+    const asked = (await stub.membersOf("u_jesse")).memberIds;
+    expect(asked, "arrangement: the Worker's answer, before the removal").toEqual(["m_target"]);
+
+    await evictThrough(store, id, "m_target");
+    const res = await upgradeNaming(stub, asked);
+
+    expect(res.status).toBe(403);
+    expect(res.webSocket ?? null).toBeNull();
+    expect(await attachments(stub)).toEqual([]);
+  });
+
+  it("drops only the removed member from the list, and keeps a socket the others entitle", async () => {
+    const { id, store, stub } = await roomOf(mine("m_target"), mine("m_second"));
+    const asked = (await stub.membersOf("u_jesse")).memberIds;
+    expect(asked, "arrangement: the Worker's answer, before the removal").toEqual(["m_target", "m_second"]);
+
+    await evictThrough(store, id, "m_target");
+    const res = await upgradeNaming(stub, asked);
+
+    expect(res.status).toBe(101);
+    const watcher = watch(res);
+    expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_second"] })]);
+    // Live, and not just accepted: the pass that ran at the removal did not see this socket,
+    // and a later removal must find it entitled by the handle that is still in.
+    await say(store, id, "after");
+    await vi.waitFor(() => expect(watcher.trail).toContain("message:after"), { timeout: 3000 });
+    expect(watcher.ws.readyState).toBe(1); // OPEN
+  });
+});

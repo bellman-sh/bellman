@@ -16,7 +16,7 @@ import {
 } from "./rooms.js";
 import { STALE_AFTER_MS, presenceOf } from "./presence.js";
 import {
-  CONNECT_TOKEN_TTL, JOIN_CODE_TTL,
+  CONNECT_TOKEN_TTL, JOIN_CODE_TTL, isActiveMember,
   type AppendExtras, type BellmanStore, type EventWrite,
 } from "./store.js";
 import {
@@ -965,9 +965,48 @@ If a room's creator has removed you, you still get the history up to and includi
       // against a room it cannot read. There is nothing coming: its feed has a
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
-      const all = cut === undefined
+      const read = cut === undefined
         ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000)
         : (await s.eventsAfter(session_id, since_cursor)).filter((e) => e.cursor <= cut);
+
+      // A removal that committed after `me` was read is not on `me`. The record,
+      // `touchMember` and the event read above are separate calls, and on Workers
+      // each is an RPC, so a creator's `bellman_evict` can land between the first
+      // and the last and leave this poll on the arm that has no cap. A poll that
+      // waits is not exposed: it is resolved with the event that woke it and
+      // never reads again. This one finds the removal already stored, so the read
+      // returns everything past `since_cursor` and registers no waiter, and the
+      // member is handed the room past the cut, peer content included.
+      //
+      // The slice says so itself. Every cursor this member holds predates the
+      // removal, and the removal's event is numbered after all of them, so a poll
+      // that can leak has `since_cursor` below the cut and the slice holds this
+      // member's own `member_evicted`. That event carries the cursor the record
+      // would have. It is the event and not a second `getSession`: read before
+      // the events, a second record leaves the same window one call later, and
+      // read after them it closes it but costs a round trip on every poll to
+      // guard a gap of milliseconds. The event is already in hand. Only the
+      // server writes `member_evicted` (a peer cannot send one; see SEND_KINDS),
+      // so what is read off its payload is the server's.
+      //
+      // Only for a member `me` shows still IN the room. A cut member is never
+      // active, since the cut sets `leftAt` in the same write, so the arm above
+      // has already answered for them. One who left of their own accord, or whose
+      // seat timed out, keeps the open feed (R2), and the event does not prove a
+      // cut for them: `markRemoved` declines a member who has left, so a leave
+      // landing between `evictMember` reading the roster and appending leaves a
+      // `member_evicted` in the log naming someone with no `removedAtCursor`
+      // (spec D3). No handler clears `leftAt` once it is set, so a record that
+      // shows it set cannot belong to a member cut after it, and skipping those
+      // costs the leak nothing.
+      const removal = isActiveMember(me)
+        ? read.find(
+            (e) =>
+              e.type === "member_evicted" &&
+              (e.payload as { member_id?: string } | null)?.member_id === member_id
+          )
+        : undefined;
+      const all = removal === undefined ? read : read.filter((e) => e.cursor <= removal.cursor);
       // `since_cursor` and not the cut when the slice is empty: a caller that
       // asked from past its cut gets its own cursor back, so round-tripping it
       // stays put instead of re-requesting the same empty range forever.

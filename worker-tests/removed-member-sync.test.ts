@@ -118,9 +118,10 @@ describe("a removed member's bellman_sync on the real object", () => {
      * run once both are stored. A handler that re-read would return the message too. Today
      * none does: the poll is answered with the event that woke it, which is the removal.
      *
-     * It matters because the cap is applied only to a member who is already cut when the call
-     * starts. A poll begun before the removal has no cap, and what keeps it inside the cut is
-     * that it never reads again.
+     * It matters because the record's cap is applied only to a member who is already cut when
+     * the call starts. A poll begun before the removal has no cap from the record, and what
+     * keeps a poll that waits inside the cut is that it never reads again. A poll that does
+     * not wait has no such protection, and the case after this one is about it.
      */
     const { id, store, stub, asMember } = await room();
     const polling = asMember.call("bellman_sync", {
@@ -153,6 +154,145 @@ describe("a removed member's bellman_sync on the real object", () => {
     expect(types).toEqual(["member_evicted"]);
     // Both are stored, so the message is past the cut and was there to be returned.
     expect((await store.eventsAfter(id, 0)).map((e) => e.type)).toEqual(["member_evicted", "message"]);
+  });
+
+  it("caps a poll whose member record was read before the removal committed", async () => {
+    /**
+     * The two cases above are polls that wait. This one does not, and it is the half of the
+     * boundary they cannot reach. The handler reads the member's record first and the room's
+     * events after, with `touchMember` and the call that reads the events between them, and
+     * on this path each of those is an RPC. A removal that commits in that gap leaves the
+     * handler holding a record that shows the member still in, so the cap that record would
+     * have applied is not applied. By the time the events are read the removal is stored:
+     * `waitForEvents` finds events past the cursor, returns them at once and registers no
+     * waiter. What the cases above lean on, that a woken poll never reads again, has nothing
+     * to say about a poll that never slept.
+     *
+     * The race is a fixed order here, as it is for the socket in ws-delivery.test.ts: the
+     * record is read before the removal and handed to the poll after it, which is what the
+     * handler holds when the removal commits a moment after its read. The rest is the real
+     * thing: the removal is the creator's bellman_evict, the events are the object's, and
+     * the poll is bellman_sync as the member makes it.
+     *
+     * The event past the cut is a message because that is peer content, which is what the
+     * cut exists to keep from the member. A seat with a live code would put something past
+     * the cut with no sender at all: `evictMember` follows `member_evicted` with an
+     * `invite_revoked`, so a poll in this window gets the door notice at the least.
+     */
+    const { id, store, asMember, asCreator } = await room();
+
+    // The record as the poll would have read it an instant before the removal.
+    const before = await store.getSession(id);
+    expect(before!.members.find((m) => m.memberId === "m_target")!.removedAtCursor,
+      "arrangement: the record the poll will hold shows no cut").toBeUndefined();
+
+    const removal = await asCreator.call("bellman_evict", { session_id: id, member_id: "m_target" });
+    expect(removal.isError, removal.text).toBe(false);
+    await store.appendEvent(id, {
+      type: "message", fromMemberId: "m_boss", fromUserId: "u_boss",
+      fromLabel: "boss@elsewhere", payload: { text: "PAST THE CUT" }, refId: null,
+    });
+
+    // Both are committed before the poll starts, so its read finds events past its cursor
+    // and returns them at once. No waiter is registered, which is the path this is for.
+    const cut = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!.removedAtCursor;
+    expect(cut, "arrangement: the removal is committed").toBeDefined();
+    expect((await store.eventsAfter(id, 0)).map((e) => e.type)).toEqual(["member_evicted", "message"]);
+
+    // Handed to the poll's one read of the record, and to nothing else: the removal and the
+    // message above have already read theirs.
+    const read = vi.spyOn(store, "getSession").mockResolvedValueOnce(before);
+    const answer = await asMember.call("bellman_sync", {
+      session_id: id, member_id: "m_target", since_cursor: 0, wait_seconds: 20,
+    });
+    // The control this case stands on. If the handler stopped reading its record through the
+    // object replaced above, it would be answering from a fresh one, the cut arm would
+    // apply, and everything below would pass for nothing.
+    expect(read, "the poll read its record through the interposed store").toHaveBeenCalledTimes(1);
+
+    expect(answer.isError, answer.text).toBe(false);
+    const events = envelopes(answer.data.events).map((e) => e.data as { cursor: number; type: string });
+    expect(events.map((e) => e.type)).toEqual(["member_evicted"]);
+    expect(events[0].cursor).toBe(cut);
+    // The cut, so the next poll, which reads a fresh record, starts from it.
+    expect(answer.data.cursor).toBe(cut);
+  });
+
+  it("does not cap a member who left, though a removal naming them is in the log", async () => {
+    /**
+     * The limit of the case above, which caps a poll on the removal it finds in the events.
+     * That event alone does not prove a cut. `markRemoved` declines a member who has already
+     * left, so a leave that lands between `evictMember` reading the roster and its append
+     * leaves a `member_evicted` in the log naming someone with no `removedAtCursor`, and a
+     * member who left of their own accord keeps the open feed (R2). Capping on the event
+     * there would hand them a cut the store refused to record.
+     *
+     * This builds the end state of that race directly, through the append `evictMember`
+     * makes: the member leaves, the removal is appended after, and the store declines to cut
+     * them. The record is read fresh and shows the leave, which is what the handler holds
+     * for such a member on every poll that follows.
+     */
+    const { id, store, asMember } = await room();
+    const left = await asMember.call("bellman_leave", { session_id: id, member_id: "m_target" });
+    expect(left.isError, left.text).toBe(false);
+
+    await store.appendEvent(id, {
+      type: "member_evicted", fromMemberId: "system", fromUserId: "u_boss", fromLabel: "boss@elsewhere",
+      payload: { member_id: "m_target", label: "jesse@codenerd", room_role: "peer_b" }, refId: null,
+    }, { markRemoved: "m_target" });
+    await store.appendEvent(id, {
+      type: "message", fromMemberId: "m_boss", fromUserId: "u_boss",
+      fromLabel: "boss@elsewhere", payload: { text: "after the announcement" }, refId: null,
+    });
+
+    // The state this case is about, read from the record: they left, the store declined to
+    // cut them, and the removal is in the log all the same.
+    const record = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!;
+    expect(record.leftAt, "arrangement: they left").not.toBeNull();
+    expect(record.removedAtCursor, "arrangement: the store declined the cut").toBeUndefined();
+    const stored = await store.eventsAfter(id, 0);
+    expect(stored.map((e) => e.type)).toEqual(["member_left", "member_evicted", "message"]);
+
+    const answer = await asMember.call("bellman_sync", {
+      session_id: id, member_id: "m_target", since_cursor: 0, wait_seconds: 0,
+    });
+
+    expect(answer.isError, answer.text).toBe(false);
+    // Their own departure is dropped as theirs. The removal and the message after it are
+    // both there: the feed is open, and the cursor is the end of it.
+    expect(envelopes(answer.data.events).map((e) => (e.data as { type: string }).type))
+      .toEqual(["member_evicted", "message"]);
+    expect(answer.data.cursor).toBe(stored[stored.length - 1].cursor);
+  });
+
+  it("does not take a peer's message naming them for their own removal", async () => {
+    /**
+     * The other limit of the stale-record case, and the one a peer can reach. The handler
+     * looks for the member's own `member_evicted` in what it read, and a message's payload is
+     * whatever its sender wrote: every member's id is on the roster `bellman_confirm` returns,
+     * so a peer can put this member's id in a message. Matched on the payload alone, that
+     * message would stand in for a removal and cap the poll at itself, and a peer could hold
+     * back what the room says to a member nobody removed. The kind is checked first because
+     * only the server writes a `member_evicted`, and a peer cannot send one.
+     */
+    const { id, store, asMember } = await room();
+    await store.appendEvent(id, {
+      type: "message", fromMemberId: "m_boss", fromUserId: "u_boss", fromLabel: "boss@elsewhere",
+      payload: { member_id: "m_target", text: "names them" }, refId: null,
+    });
+    await store.appendEvent(id, {
+      type: "message", fromMemberId: "m_boss", fromUserId: "u_boss", fromLabel: "boss@elsewhere",
+      payload: { text: "and then this" }, refId: null,
+    });
+
+    const answer = await asMember.call("bellman_sync", {
+      session_id: id, member_id: "m_target", since_cursor: 0, wait_seconds: 0,
+    });
+
+    expect(answer.isError, answer.text).toBe(false);
+    const texts = envelopes(answer.data.events)
+      .map((e) => (e.data as { payload: { text?: string } }).payload.text);
+    expect(texts).toEqual(["names them", "and then this"]);
   });
 
   it("answers the next poll at once, and shows nothing past the cut", async () => {

@@ -1391,6 +1391,191 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------ a removed member's cut cursor
+    /**
+     * An eviction leaves two facts behind — the `member_evicted` event, and the
+     * target's own `removedAtCursor`, the cursor its feed is cut at (#113). The
+     * second names the first, so they have to commit together: recorded
+     * separately, a reader can be refused at a cursor no stored event carries, or
+     * admitted past one that is already written.
+     *
+     * So the cut is an argument to the append, as `creditReport` is, and not a
+     * call after it. **These cases do not claim to prove the atomicity**, which
+     * is not observable from outside the store. What they pin is what a caller
+     * CAN see, and what both stores have to say identically: the member lands out
+     * at the event's own cursor, nobody else moves, an unknown member is a
+     * no-op, a cut already recorded stays put, and a refused append records
+     * nothing.
+     */
+    describe("recording a member out at an event's cursor", () => {
+      /** A creator and one peer, created in the store. */
+      const roomOfTwo = async () => {
+        const s = session({
+          members: [
+            member(),
+            member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" }),
+          ],
+        });
+        await store.createSession(s);
+        return s;
+      };
+      const TARGET = "m_peer";
+
+      /** The eviction announcement, as evictMember writes it. */
+      const removal = (memberId: string) => ({
+        type: "member_evicted" as const,
+        fromMemberId: "system",
+        fromUserId: "u_jesse",
+        fromLabel: "jesse",
+        payload: { member_id: memberId },
+        refId: null,
+      });
+
+      it("sets leftAt and removedAtCursor together, at the event's own cursor", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const event = (await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        }))!;
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        // One write, not two: a store that set only one of these is the bug
+        // this rides in the transaction to prevent.
+        expect(m.removedAtCursor).toBe(event.cursor);
+        expect(m.leftAt).not.toBeNull();
+      });
+
+      it("leaves every other member untouched", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const other = "m_creator";
+
+        await store.appendEvent(s.id, removal(target), { markRemoved: target });
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === other)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBeNull();
+      });
+
+      it("writes nothing for a member the roster does not name", async () => {
+        const s = await roomOfTwo();
+        const before = (await store.getSession(s.id))!;
+
+        const event = await store.appendEvent(s.id, removal("m_nobody"), {
+          markRemoved: "m_nobody",
+        });
+
+        // The event still lands. An unknown member is a no-op, not a throw —
+        // updateMember's rule, and creditReport's.
+        expect(event).not.toBeNull();
+        const after = (await store.getSession(s.id))!;
+        expect(after.members.map((m) => m.removedAtCursor))
+          .toEqual(before.members.map((m) => m.removedAtCursor));
+      });
+
+      it("does not move a cut that is already recorded", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const first = (await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        }))!;
+
+        await store.appendEvent(s.id, removal(target), { markRemoved: target });
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        // Otherwise a second eviction widens the window the first one closed.
+        expect(m.removedAtCursor).toBe(first.cursor);
+      });
+
+      it("records nothing when the room is frozen and the append is refused", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        await store.freezeSession(s.id, Date.now());
+
+        const event = await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        });
+
+        // The two go together or the design's atomicity claim is false.
+        expect(event).toBeNull();
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBeNull();
+      });
+
+      it("records the member out on a keyed append too", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const write = await store.appendEventOnce(
+          s.id, removal(target), "evict-0001", { markRemoved: target },
+        );
+
+        expect(write.outcome).toBe("appended");
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBe(write.outcome === "appended" ? write.event.cursor : -1);
+      });
+
+      /**
+       * A replay re-asserts the cut, at the ORIGINAL event's cursor. The first
+       * attempt below asks for no cut, which stands in for however the cut came
+       * to be missing — an attempt interrupted before it landed, or a row written
+       * by a build that did not have the field. What the case pins is where the
+       * retry puts it: on the event the key names, and not on a cursor the retry
+       * has no event at. A replay that dropped its extras would leave the member
+       * in the room.
+       */
+      it("records the member out on a replay, at the original event's cursor", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const first = await store.appendEventOnce(s.id, removal(target), "evict-0001");
+        if (first.outcome !== "appended") throw new Error(`first append said ${first.outcome}`);
+
+        const retry = await store.appendEventOnce(
+          s.id, removal(target), "evict-0001", { markRemoved: target },
+        );
+
+        expect(retry.outcome).toBe("replayed");
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBe(first.event.cursor);
+        expect(m.leftAt).not.toBeNull();
+        // And still one event: the repair is a cut, not a second append.
+        expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+      });
+
+      /**
+       * Both rules rewrite the same member array, so an append that asks for both
+       * is where applying them as two writes would lose one. No handler asks for
+       * both today — a `progress` send credits its sender, and an eviction names
+       * its target — which is why nothing else exercises the pair. The sender here
+       * is a real member, so the credit has somewhere to land.
+       */
+      it("applies a report credit and a removal from one append", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const event = (await store.appendEvent(
+          s.id,
+          { ...removal(target), fromMemberId: "m_creator" },
+          { creditReport: true, markRemoved: target },
+        ))!;
+
+        const after = (await store.getSession(s.id))!;
+        const sender = after.members.find((mm) => mm.memberId === "m_creator")!;
+        const removed = after.members.find((mm) => mm.memberId === target)!;
+        expect(sender.lastReportAt).toBe(event.at);
+        expect(removed.removedAtCursor).toBe(event.cursor);
+        expect(removed.leftAt).not.toBeNull();
+      });
+    });
+
     // ------------------------------------------------------------- long-poll
     it("waitForEvents returns immediately when events already exist", async () => {
       const s = session();

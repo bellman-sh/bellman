@@ -8,7 +8,7 @@ import type {
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
 } from "./store.js";
-import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./store.js";
+import { connectedAmong, creditReport, isActiveMember, markRemoved, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -119,29 +119,38 @@ const dropCodeIntent = (code: string): OutboxIntent => ({
 });
 
 /**
- * The `session` row an append writes to credit the sender's report, or null when
- * it writes none — the append did not ask for a credit, or the stamp already
- * sits forward of this event.
+ * The extra storage rows an append owes, as one put.
  *
- * A row rather than a put, so the caller folds it into the put it was already
- * making: `#writeEvent`'s whole argument is that an event and the rows that
- * belong with it commit in ONE write, and a credit committed separately is the
- * split this fix exists to remove.
+ * One function for both rules, and one `session` row: written as two builders
+ * each returning `{ session: ... }`, the second would overwrite the first's
+ * member array and silently drop its write.
  *
- * Module-level and pure. Not a method, because a Durable Object answers RPC for
- * every method on its class — a writing helper reachable from outside would let a
- * plain stub forge a report into any room — and because the rule it applies
- * (`creditReport`) is shared with MemoryStore and belongs to neither.
+ * Empty when the append owes nothing — it asked for no extras, the stamp already
+ * sits forward of this event, the cut is already recorded, or the member is not
+ * on the roster. The caller folds the rows into the put it was already making:
+ * `#writeEvent`'s whole argument is that an event and the rows that belong with
+ * it commit in ONE write, and a member write committed separately is the split
+ * this exists to remove.
+ *
+ * A free function and not a method on the class: a Durable Object answers RPC for
+ * every method on its class, so a writing helper reachable from outside would let
+ * a plain stub forge one of these into any room. The rules it applies
+ * (`creditReport`, `markRemoved`) are shared with MemoryStore and belong to
+ * neither store.
  */
-function reportRow(
+function memberRow(
   s: StoredSession,
-  memberId: string,
-  at: number,
+  event: SessionEvent,
   extras: AppendExtras,
-): Record<string, unknown> | null {
-  if (!extras.creditReport) return null;
-  const members = creditReport(s.members, memberId, at);
-  return members ? { session: { ...s, members } } : null;
+): Record<string, unknown> {
+  let members = s.members;
+  if (extras.creditReport) {
+    members = creditReport(members, event.fromMemberId, event.at) ?? members;
+  }
+  if (extras.markRemoved !== undefined) {
+    members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
+  }
+  return members === s.members ? {} : { session: { ...s, members } };
 }
 
 // ---------------------------------------------------------------------------
@@ -946,11 +955,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * stale stamp still named that member silent. Folded in here the stamp and the
    * event commit together or not at all, and the wake still waits for both.
    *
+   * **`extras.markRemoved` rides in that same put, for the same reason.** The
+   * cut a member's feed is capped at has to commit with the event whose cursor
+   * it names, or a reader can be refused at a cursor no stored event carries,
+   * or admitted past one that is already written (#113).
+   *
    * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
-   * ever moves a member's deadline LATER. An alarm already armed is then early —
-   * it fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()`
-   * points it at the right time. One wake spent, and the tick it produces is
-   * correct.
+   * ever moves a member's deadline LATER, and a removal only takes a member off
+   * the roster, which cannot bring the soonest one forward either. An alarm
+   * already armed is then early — it fires, finds nobody due, advances
+   * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
+   * spent, and the tick it produces is correct.
    */
   async appendEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -961,7 +976,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      await this.#writeEvent(txn, next, reportRow(s, e.fromMemberId, next.at, extras) ?? {});
+      await this.#writeEvent(txn, next, memberRow(s, next, extras));
       return next;
     });
     if (event) this.#wake(event);
@@ -1002,14 +1017,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!original) {
           throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
         }
-        // The replay credits too, in this transaction. A retry cannot know
-        // whether the first attempt landed the stamp, and skipping it here is
+        // The replay applies its extras too, in this transaction. A retry cannot
+        // know whether the first attempt landed the stamp, and skipping it here is
         // what made a stamp the first attempt never wrote permanent rather than
-        // late. `creditReport` is monotonic, so this is a repair or a no-op and
-        // never a regression — and it writes nothing at all when the stamp is
-        // already forward of the original event.
-        const credit = reportRow(s, e.fromMemberId, original.at, extras);
-        if (credit) await txn.put<unknown>(credit);
+        // late. `creditReport` is monotonic and `markRemoved` leaves a recorded
+        // cut where it is, so this is a repair or a no-op and never a regression
+        // — and it writes nothing at all when there is nothing to repair, which is
+        // why the put is guarded on the row being empty. `original` and not `e`,
+        // because `markRemoved` records the cut at the cursor the key names and
+        // `e` has none.
+        const owed = memberRow(s, original, extras);
+        if (Object.keys(owed).length > 0) await txn.put<unknown>(owed);
         return { outcome: "replayed", event: original };
       }
 
@@ -1023,7 +1041,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
       await this.#writeEvent(txn, event, {
         [storageKey]: stored,
-        ...reportRow(s, e.fromMemberId, event.at, extras),
+        ...memberRow(s, event, extras),
       });
       return { outcome: "appended", event };
     });

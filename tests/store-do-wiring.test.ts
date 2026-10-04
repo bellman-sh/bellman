@@ -806,6 +806,87 @@ describe("SessionDO.appendEventOnce", () => {
     expect(legacyStorage.puts - putsBefore).toBe(1);
   });
 
+  /** A creator and one peer, as the session row stores them. */
+  const withPeer = () => currentRow({
+    members: [
+      member(),
+      member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" }),
+    ],
+  });
+  const eviction = () => keyed({
+    type: "member_evicted", fromMemberId: "system", payload: { member_id: "m_peer" },
+  });
+
+  /**
+   * The cut joins them too (#113), and this is the case the contract suite cannot
+   * make for it: that suite proves the member lands out at the event's cursor,
+   * which a second put satisfies just as well. Only the invocation count can tell
+   * them apart.
+   *
+   * A cut committed after the event, in a call of its own, is the split the design
+   * rules out: a reader can be refused at a cursor no stored event carries, or
+   * admitted past one that is already written.
+   */
+  it("writes the cut in the same put as the event and its key", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, withPeer());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const write = await store.appendEventOnce(
+      LEGACY_ID, eviction(), "evict-0001", { markRemoved: "m_peer" },
+    );
+
+    // The event, the cursor, the key row and the session record.
+    expect(legacyStorage.writes - before).toBe(4);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+
+    if (write.outcome !== "appended") throw new Error(`eviction said ${write.outcome}`);
+    const row = legacyStorage.snapshot().session as { members: Member[] };
+    const peer = row.members.find((m) => m.memberId === "m_peer")!;
+    expect(peer.removedAtCursor).toBe(write.event.cursor);
+    expect(peer.leftAt).not.toBeNull();
+  });
+
+  /** And the unkeyed append, which is the one `evictMember` makes. */
+  it("writes the cut in the same put as an unkeyed append's event", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, withPeer());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const event = (await store.appendEvent(LEGACY_ID, eviction(), { markRemoved: "m_peer" }))!;
+
+    // The event, the cursor and the session record.
+    expect(legacyStorage.writes - before).toBe(3);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+
+    const row = legacyStorage.snapshot().session as { members: Member[] };
+    const peer = row.members.find((m) => m.memberId === "m_peer")!;
+    expect(peer.removedAtCursor).toBe(event.cursor);
+    expect(peer.leftAt).not.toBeNull();
+  });
+
+  /**
+   * A replay with nothing to repair writes nothing, and not an empty put. The cut
+   * is already recorded, so `markRemoved` answers null and the row is empty; a put
+   * of it is a storage call that does no work, and every retry of an eviction
+   * would pay for one. `appendEventOnce` guards on the row being empty, and
+   * nothing but this case would notice that guard go.
+   */
+  it("writes nothing for a replay whose cut is already recorded", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, withPeer());
+    await store.appendEventOnce(LEGACY_ID, eviction(), "evict-0001", { markRemoved: "m_peer" });
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const again = await store.appendEventOnce(
+      LEGACY_ID, eviction(), "evict-0001", { markRemoved: "m_peer" },
+    );
+
+    expect(again.outcome).toBe("replayed");
+    expect(legacyStorage.puts - putsBefore).toBe(0);
+    expect(legacyStorage.writes - before).toBe(0);
+  });
+
   it("namespaces the key row per member", async () => {
     const { store, legacyStorage } = await worldOn(storeDo, currentRow());
 

@@ -168,6 +168,17 @@ feed has a last event, and that event is already in the past.
 The returned `cursor` is the capped one, so a client that round-trips it stays
 put rather than skipping ahead to events it will never be shown.
 
+**A record read before the removal** — the handler reads the record ahead of
+the events, with two awaits between them, and a removal can commit in that gap.
+The poll then finds the removal stored and would be handed the room past the
+cut, so when the record shows no cut the handler caps at the cursor of the
+member's own `member_evicted` in the slice it has already read, with the same
+`<=`. The cut comes from the event in hand and not from a second RPC to read
+the member again. It applies only while the record still shows the member
+active: one who left of their own accord can have a `member_evicted` in the log
+and no cut recorded (D3), and R2 gives that member the open feed (see
+Amendments after review).
+
 ### D5 — An evictee gets no socket, and loses the one it has.
 
 The poll is history; the socket is the future. An evictee keeps the first and
@@ -301,6 +312,14 @@ bellman_sync(session_id, member_id, since_cursor, wait_seconds)
   |                        |
   waitForEvents(...)       events up to removedAtCursor, no wait   (D4)
   |                        |
+  record shows me active,  |
+  and the slice holds my   |
+  own member_evicted ?     |
+  |                        |
+  | yes: cap at its cursor |
+  |      (D4, amended)     |
+  | no: as read            |
+  |                        |
   +--------- filter own events, wrap untrusted, return ------------+
 ```
 
@@ -360,8 +379,9 @@ Every test is to be run against a broken implementation before it is trusted.
 
 ## Amendments after review
 
-Two changes were made after this design was written, both found while
-implementing it, recorded here because each alters a decision above.
+Three changes were made after this design was written, the first two found
+while implementing it and the third by the final review, recorded here because
+each alters a decision above.
 
 **D3 names three cases where `null` means nothing to write, not two.**
 `markRemoved` also returns `null` for a member who has already left. D6 has
@@ -389,3 +409,44 @@ the roster has cut, and answers 403 when none is left, which is the answer the
 route already gives. A member the roster does not hold is kept, as the closing
 step reads it. `worker-tests/ws-delivery.test.ts` pins this by handing the object
 the stale list directly.
+
+**D4 gains a second source for the cut.** D4 caps a member at their
+`removedAtCursor`, which holds for a poll that starts after the removal commits
+and not for one that straddles it. `bellman_sync` reads the member, then calls
+`touchMember`, then reads the events, and on Workers each is an RPC, so a
+removal can commit after the first and before the last. The record then shows no
+cut and the poll takes the arm with no cap. A poll that waits is not exposed: it
+is resolved with the one event that woke it, and does not read again. One that
+finds the removal already stored registers no waiter and returns the whole
+slice, past the cut. Nothing contrived is needed to get there: when the seat's
+code was live, `evictMember` follows `member_evicted` with `invite_revoked`, so
+the door notice is past the cut by itself.
+
+The slice already holds the cut. Every cursor a member holds predates the
+removal, so a poll that can leak starts below it and reads the member's own
+`member_evicted`, whose cursor is the one the record would have held. The
+handler caps there, which costs a `find` over events it has already read. A
+second `getSession` would cost an RPC on every poll and, taken before the
+events, would leave the same window one call later.
+
+Two conditions keep the event from proving more than it does. The record must
+still show the member active, because `markRemoved` declines a member who has
+already left (the third case under D3). A leave landing between `evictMember`'s
+roster read and its append leaves the announcement in the log and no cut on the
+record, and a cap on the event alone would hand that member a cut the store
+refused to write, which R2 rules out. A record that shows `leftAt` was read
+after that leave, and nothing clears `leftAt`, so it cannot belong to a member
+cut later; skipping it costs the stale-record case nothing. And only a
+`member_evicted` counts, matched on `payload.member_id`, because a message's
+payload is its sender's and a peer can write any member's id into one. Only the
+server writes `member_evicted`.
+
+`worker-tests/removed-member-sync.test.ts` pins the fallback and both
+conditions.
+"caps a poll whose member record was read before the removal committed" hands
+the poll a record read before the removal, as `ws-delivery.test.ts` hands the
+object a stale list.
+"does not cap a member who left, though a removal naming them is in the log"
+builds the leave-then-announce end state through the append `evictMember` makes.
+"does not take a peer's message naming them for their own removal" holds the
+kind check.

@@ -441,6 +441,17 @@ cut later; skipping it costs the stale-record case nothing. And only a
 payload is its sender's and a peer can write any member's id into one. Only the
 server writes `member_evicted`.
 
+The active-record condition narrows that hole rather than closing it. A member
+polling while leaving while being evicted still reaches it: the poll reads a
+record showing `leftAt` null, the leave commits, the append declines to write a
+cut, and the poll then finds its own `member_evicted` with the condition
+satisfied by a snapshot taken before the leave. It caps a member R2 gives the
+open feed, for one poll — the returned cursor is the announcement's, the next
+poll reads a record showing `leftAt`, and the feed reopens. Closing it needs the
+second `getSession` this decision declines, to buy a false positive that costs
+one poll with an RPC on every poll. The condition is kept for the case it does
+close, where a cap would otherwise persist until the member stopped asking.
+
 `worker-tests/removed-member-sync.test.ts` pins the fallback and both
 conditions.
 "caps a poll whose member record was read before the removal committed" hands

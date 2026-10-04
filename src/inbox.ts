@@ -27,6 +27,12 @@ export interface PeerEvent {
   ref_id: string | null;
   at: string; // ISO-8601
   payload: unknown;
+  /**
+   * The server said this event should not interrupt (#111). Read it rather than
+   * naming types: attention is declared once, in src/attention.ts, and carried
+   * by publicEvent so that every client reads one answer.
+   */
+  ambient?: boolean;
 }
 
 export interface Membership {
@@ -45,6 +51,7 @@ export interface WireEnvelope {
     payload: unknown;
     ref_id: string | null;
     at: string;
+    ambient?: boolean;
   };
 }
 
@@ -59,6 +66,7 @@ export function fromEnvelope(m: Membership, env: WireEnvelope): PeerEvent {
     ref_id: env.data.ref_id,
     at: env.data.at,
     payload: env.data.payload,
+    ambient: env.data.ambient,
   };
 }
 

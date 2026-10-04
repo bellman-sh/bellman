@@ -631,6 +631,14 @@ describe("negative control: the same calls with the guard removed", () => {
    * and it stops being true the day the expiry tolerates a row with no `joinCodes`, which is
    * when the guard is the only thing keeping the alarm from rewriting it. With the field the
    * alarm gets past that read and does the thing the guard exists to stop: it expires the row.
+   *
+   * The row carries a second field no pre-manifest row had, for the same reason: `manifest`,
+   * holding only a null cadence. Since #111 the alarm's derived due times read
+   * `manifest.heartbeatOnMs` before the expiry is reached, and on a row with no manifest at all
+   * that read is the TypeError the guard exists to prevent, so the unguarded alarm would stop
+   * there and never show the harm this test is about. The stub has no `roles`, so the real
+   * guard still reads the row as gone, and the cadence is null, so `nextTickAt` asks nothing
+   * further of it.
    */
   it("lets a mutator rewrite it and a due alarm expire it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
@@ -640,7 +648,7 @@ describe("negative control: the same calls with the guard removed", () => {
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
     const viaAlarm = await worldOn(unguarded, {
-      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {},
+      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {}, manifest: { heartbeatOnMs: null },
     });
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
@@ -739,6 +747,62 @@ describe("SessionDO.appendEventOnce", () => {
     const ik = Object.keys(rows).filter((k) => k.startsWith("ik:"));
     expect(ik).toHaveLength(1);
     expect(rows[ik[0]]).toMatchObject({ cursor: 1 });
+  });
+
+  /**
+   * The report stamp joins them, for the same reason one layer up.
+   *
+   * It used to be a second `s.updateMember(...)` call in `bellman_send`, AFTER
+   * the append returned — a second Durable Object RPC into a second transaction,
+   * with `#wake` firing between the two. A due alarm could therefore read the
+   * committed progress event while the stale stamp still named that member
+   * silent, and a retry skipped the patch outright, so a stamp the first attempt
+   * never landed was lost for good.
+   *
+   * Four keys in ONE call is the assertion, and it is the one the contract suite
+   * cannot make: that suite proves the stamp is THERE afterwards, which a second
+   * put satisfies just as well. Only the invocation count can tell them apart.
+   */
+  it("writes the report stamp in the same put as the event and its key", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const write = await store.appendEventOnce(
+      LEGACY_ID,
+      keyed({ type: "progress", payload: { note: "on the migration" } }),
+      "send-0001",
+      { creditReport: true },
+    );
+
+    // The event, the cursor, the key row and the session record.
+    expect(legacyStorage.writes - before).toBe(4);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+
+    if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+    const row = legacyStorage.snapshot().session as {
+      members: { memberId: string; lastReportAt?: number }[];
+    };
+    expect(row.members.find((m) => m.memberId === "m_creator")?.lastReportAt)
+      .toBe(write.event.at);
+  });
+
+  /**
+   * And an append nobody asked to credit writes no session row at all. Three
+   * keys, as the case above this block has it — the stamp is not a cost every
+   * send pays, and the store does not read the event's type to decide.
+   */
+  it("writes no session row for an append that asks for no credit", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, currentRow());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    await store.appendEventOnce(
+      LEGACY_ID, keyed({ type: "progress", payload: { note: "unasked" } }), "send-0001",
+    );
+
+    expect(legacyStorage.writes - before).toBe(3);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
   });
 
   it("namespaces the key row per member", async () => {

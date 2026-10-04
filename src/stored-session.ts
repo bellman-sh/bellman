@@ -1,4 +1,4 @@
-import type { Session } from "./types.js";
+import type { RoomManifest, Session } from "./types.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
 // exists only inside workerd, so a test can load it only by stubbing that module, and
@@ -6,13 +6,36 @@ import type { Session } from "./types.js";
 // a plain test has to reach lives here, with no Cloudflare imports.
 
 /** The session record as stored — events live under their own keys. */
-export type StoredSession = Omit<Session, "events">;
+export interface StoredSession extends Omit<Session, "events"> {
+  /**
+   * When the heartbeat alarm last fired for this room (#111).
+   *
+   * **A floor under the tick's due time, not the clock it runs on.** A tick does
+   * not move any member's `lastReportAt`, so a due time computed from member
+   * reports alone stays in the past for a member that never answers, and
+   * `reArm()` would point the alarm back at it indefinitely — the hazard
+   * `alarm()`'s comment records for `due:outbox`. This strictly advances on every
+   * firing, written or not, so a due time resting on it does too.
+   *
+   * It is a floor and not the clock because a clock loses the other half: every
+   * member anchored on one firing means a member that reported just after a tick
+   * waits nearly two cadences to be asked. `nextTickAt` therefore gives each
+   * member its own deadline and applies this only to the members that firing
+   * actually asked — the ones already due at it. `askAt` in heartbeat.ts carries
+   * the argument and the two properties it has to keep.
+   *
+   * Absent until the first firing, and `nextTickAt` needs no floor until then:
+   * nothing has been asked yet, so every member simply owes its own deadline,
+   * which `lastReport` dates from `joinedAt` for one that has never answered.
+   */
+  lastTickAt?: number;
+}
 
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Three fields were added after the sessions now in production were written, and
- * they want different treatment:
+ * Four changes to the stored shape landed after the sessions now in production
+ * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
  *   would put words in the creator's mouth — while a read of
@@ -29,8 +52,15 @@ export type StoredSession = Omit<Session, "events">;
  *   string is the index key, so it resolves as written and expires naturally.
  *   Read-time rather than a bulk migration because there is no list of sessions
  *   to iterate — the registry indexes by creator and by code, never by "all".
+ * - **manifest.heartbeatOnMs / manifest.roles[].reports** (#111) default to
+ *   `null` and `false`: the room as it was run until now, with no cadence and no
+ *   seat asked to report. That is not the first bullet's mistake, because a
+ *   manifest that never mentioned a cadence declares none, so the default
+ *   invents nothing. Left alone, both read as `undefined`, which is neither: a
+ *   guard written `=== null` misses the cadence and goes on to do arithmetic with
+ *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
  *
- * All three live here, in one gate, rather than in separate functions that could drift.
+ * All four live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -45,9 +75,29 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
   return {
     ...row,
+    manifest: withHeartbeatDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),
+  };
+}
+
+/**
+ * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
+ * null, and `reports` a boolean on every role.
+ *
+ * The types already say so, because every row written since the heartbeat has
+ * both. The `??` is for the rows that predate it. New objects all the way down
+ * rather than assignments into the row, so the gate stays a pure function of what
+ * it was handed.
+ */
+function withHeartbeatDefaults(m: RoomManifest): RoomManifest {
+  return {
+    ...m,
+    heartbeatOnMs: m.heartbeatOnMs ?? null,
+    roles: Object.fromEntries(
+      Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false }]),
+    ),
   };
 }

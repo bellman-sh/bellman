@@ -4,6 +4,7 @@ import type {
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
+import { mustReport } from "./roles.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -12,7 +13,9 @@ const CONNECT_TOKEN_TTL_MS = 10 * 60 * 1000;
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
-export type MemberPatch = Partial<Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt">>;
+export type MemberPatch = Partial<
+  Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
+>;
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -77,6 +80,82 @@ export function connectedAmong(
     if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
   }
   return connected;
+}
+
+/**
+ * Whether the room asks this member for reports.
+ *
+ * Here beside `isActiveMember`, and not in heartbeat.ts, because `freezeSession`
+ * applies `clearSilence` inside the store and that reads this — heartbeat.ts
+ * imports this module, so the other direction would be a cycle. One that works
+ * only while every use sits inside a function body: the first at module
+ * evaluation fails at import under the Worker's load order, and neither tsc
+ * program reports it.
+ */
+export const asked = (s: StoredSession, m: Member): boolean =>
+  isActiveMember(m) && mustReport(s.manifest, m.roomRole);
+
+/**
+ * The roster with one member's report stamp moved forward to `at`, or null when
+ * nothing moves.
+ *
+ * **Monotonic, and that is the whole rule.** `lastReportAt` only ever moves
+ * later. A credit replayed from an older event, or one arriving out of order
+ * behind a fresher report, would otherwise un-credit an answer the member had
+ * already given — and the next tick would name it silent for having reported.
+ * There is no reading of "it last reported earlier than we thought" that helps
+ * anybody.
+ *
+ * Null for "no write needed" rather than an unchanged roster, so both stores
+ * agree on WHEN a credit writes at all: a replay whose stamp is already forward
+ * of the event touches no storage. A member the roster does not name is the same
+ * answer, for `updateMember`'s reason — an unknown member is a no-op, not a
+ * throw.
+ *
+ * Here beside `asked` and `clearSilence`, and the direction is the same: this is
+ * applied INSIDE both stores, and heartbeat.ts imports this module, so the other
+ * way round would be a cycle.
+ */
+export function creditReport(
+  members: Member[],
+  memberId: string,
+  at: number,
+): Member[] | null {
+  const i = members.findIndex((m) => m.memberId === memberId);
+  if (i < 0) return null;
+  const was = members[i].lastReportAt;
+  if (was !== undefined && was >= at) return null;
+  const next = [...members];
+  next[i] = { ...next[i], lastReportAt: at };
+  return next;
+}
+
+/**
+ * The roster a thaw writes back: every seat the room asks is credited with a
+ * report at `now`.
+ *
+ * Spec D10. "A member cannot report its way out of a frozen room, so none may be
+ * named silent in one. A freeze must cost nobody their standing." `#tickIfDue`
+ * honours the letter by writing no tick while frozen, but that is not enough on
+ * its own: `silent_for_seconds` is measured from `lastReport`, which the freeze
+ * stopped anybody from moving. A room frozen for an hour on a 5m cadence would
+ * otherwise produce, on its first tick after the thaw, `silent: true` for every
+ * member — a measurement of the freeze, not of anyone's behaviour, and exactly
+ * the false silent D10 is written to avoid.
+ *
+ * What this loses is the pre-freeze report age, which after an outage long enough
+ * to freeze a room is not something a peer can act on anyway. The faithful
+ * alternative — carrying the frozen interval on the session and subtracting it in
+ * `snapshotOf` — buys that back for a stored field and a second clock to keep
+ * consistent with the first.
+ *
+ * Pure: it takes `now` rather than reading the clock, so the store contributes the
+ * moment of the thaw and nothing else. Here for the reason `asked` gives. Who the
+ * room asks is `asked`'s rule, and a store that filtered the roster itself would
+ * be a second copy of it.
+ */
+export function clearSilence(s: StoredSession, now: number): Member[] {
+  return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
 }
 
 /**
@@ -186,6 +265,31 @@ export type EventWrite =
   | { outcome: "replayed"; event: SessionEvent }
   | { outcome: "frozen" }
   | { outcome: "conflict" };
+
+/**
+ * What an append writes BESIDES the event, in the event's own transaction.
+ *
+ * An explicit argument rather than the store reading `e.type`: nothing in either
+ * store branches on an event's kind, and this is the one write that would have
+ * made it. The caller already knows it is handling a `progress` send — it checked
+ * the verb and validated the payload to get there — so saying so costs it a flag
+ * and leaves the store a log that does not interpret what it logs.
+ *
+ * It is not an optimisation. The stamp and the event have to commit together or
+ * a due tick can read one without the other; see `creditReport` and
+ * `SessionDO.appendEvent`.
+ */
+export interface AppendExtras {
+  /**
+   * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
+   *
+   * Applied on an append AND on an idempotent replay. A replay re-asserts the
+   * stamp because a caller retrying has no way to know whether the first attempt
+   * landed it, and skipping the credit there is what made a lost stamp permanent
+   * rather than late.
+   */
+  creditReport?: boolean;
+}
 
 export interface BellmanStore {
   createSession(s: Session): Promise<void>;
@@ -373,10 +477,16 @@ export interface BellmanStore {
    */
   sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
 
-  /** Append an event. Null means the session is frozen, for the same reason. */
+  /**
+   * Append an event. Null means the session is frozen, for the same reason.
+   *
+   * `extras` names what else the append writes, in the same operation; see
+   * `AppendExtras`.
+   */
   appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras?: AppendExtras
   ): Promise<SessionEvent | null>;
   /**
    * Append an event unless this member has already used this key.
@@ -399,7 +509,8 @@ export interface BellmanStore {
   appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras?: AppendExtras
   ): Promise<EventWrite>;
   eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
   /**
@@ -641,6 +752,7 @@ export class MemoryStore implements BellmanStore {
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
     if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
+    if (patch.lastReportAt !== undefined) m.lastReportAt = patch.lastReportAt;
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -676,10 +788,29 @@ export class MemoryStore implements BellmanStore {
     s.joinCodes = {};
   }
 
+  /**
+   * Freeze the room, or thaw it with null.
+   *
+   * The thaw credits every reporting seat with a report: spec D10, and
+   * `clearSilence` carries the argument. Here as well as in `SessionDO` because it
+   * is what a thaw MEANS rather than anything the alarm does — `lastReportAt` is
+   * read back through `getSession`, so a store that left it alone would report
+   * every member silent for the length of the outage. The contract suite has the
+   * case, and that is what keeps the two implementations saying the same thing.
+   *
+   * **The credit is paid on the TRANSITION, not on the argument.** A `null` on a
+   * room that is already thawed thaws nothing, and crediting on it stamps every
+   * reporting seat with a report nobody made — so a caller retrying this
+   * idempotent call keeps resetting every member's clock and nobody is ever due
+   * again. `wasFrozen` is read before the assignment below, because that
+   * assignment is what destroys the answer.
+   */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    const wasFrozen = s.frozenAt !== null;
     s.frozenAt = frozenAt;
+    if (frozenAt === null && wasFrozen) s.members = clearSilence(s, Date.now());
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
@@ -692,18 +823,43 @@ export class MemoryStore implements BellmanStore {
 
   async appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {}
   ): Promise<SessionEvent | null> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     if (s.frozenAt !== null) return null;
-    return detach(this.appendNow(s, e));
+    // Synchronous from here, so the event and the credit land together. The
+    // Durable Objects store gets that from a transaction; here it is the absence
+    // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
+    const event = this.appendNow(s, e);
+    this.credit(s, e.fromMemberId, event.at, extras);
+    return detach(event);
+  }
+
+  /**
+   * Apply an append's `creditReport`, if it asked for one. The rule is
+   * `creditReport` in this module, shared with `SessionDO` so the two stores
+   * cannot disagree about when a stamp moves.
+   *
+   * No awaits, for appendEvent's reason above.
+   */
+  private credit(
+    s: Session,
+    memberId: string,
+    at: number,
+    extras: AppendExtras,
+  ): void {
+    if (!extras.creditReport) return;
+    const members = creditReport(s.members, memberId, at);
+    if (members) s.members = members;
   }
 
   async appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {}
   ): Promise<EventWrite> {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
@@ -727,6 +883,10 @@ export class MemoryStore implements BellmanStore {
           `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
         );
       }
+      // The replay credits too. A retry cannot know whether the first attempt
+      // landed the stamp, and `creditReport` is monotonic, so re-asserting it is
+      // either a repair or a no-op and never a regression.
+      this.credit(s, e.fromMemberId, original.at, extras);
       return { outcome: "replayed", event: detach(original) };
     }
 
@@ -736,6 +896,7 @@ export class MemoryStore implements BellmanStore {
     const map = seen ?? new Map<string, IdempotencyRecord>();
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
+    this.credit(s, e.fromMemberId, event.at, extras);
     return { outcome: "appended", event: detach(event) };
   }
 

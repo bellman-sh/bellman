@@ -835,9 +835,22 @@ export function createBridge(opts: BridgeOptions) {
 
   async function deliver(event: PeerEvent): Promise<void> {
     if (delivery === "hook") {
+      // Ambient events are queued like any other. Hook delivery drains at the
+      // END of a turn, so it does not interrupt by construction — and skipping
+      // the enqueue here would mean a hook-mode member never saw a progress
+      // report at all, rather than seeing it a little later.
       enqueue(inboxDir!, event);
       return;
     }
+    /**
+     * A channel push lands mid-turn, which is the interruption. A heartbeat tick
+     * earns one: being asked where you are IS the feature, and a tick nobody
+     * reads produces no report. A reply does not: a member that cares is already
+     * looking, and progress notes arriving every few minutes are worse than
+     * silence. It stays in the room's log and arrives with the next
+     * bellman_sync the agent makes.
+     */
+    if (event.ambient) return;
     const meta: Record<string, string> = {
       session_id: event.session_id,
       member_id: event.member_id,

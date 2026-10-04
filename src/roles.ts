@@ -2,7 +2,8 @@ import type { Member, RoomManifest, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 
 /**
- * The verbs a role holds — the only place `manifest.roles` is indexed.
+ * The verbs a role holds — one of the two places `manifest.roles` is indexed;
+ * `mustReport` below is the other.
  *
  * Fails closed: a role the manifest does not define holds nothing. No tool path
  * produces that today, because both seats are assigned from `creatorRole` and
@@ -17,6 +18,20 @@ import type { StoredSession } from "./stored-session.js";
  */
 export function verbsOfRole(manifest: RoomManifest, role: string): readonly Verb[] {
   return Object.hasOwn(manifest.roles, role) ? manifest.roles[role].can : [];
+}
+
+/**
+ * Whether this seat must answer the room's heartbeat tick — the other place
+ * `manifest.roles` is indexed, and it fails closed for the same reason
+ * `verbsOfRole` does: a role the manifest does not define is asked for nothing.
+ *
+ * `Object.hasOwn` rather than a bare lookup, so the accessor stays total under a
+ * rewrite. `roles["constructor"]` on a plain object is the inherited Object
+ * function, which has no `reports`, but relying on that is relying on the shape
+ * of something else.
+ */
+export function mustReport(manifest: RoomManifest, role: string): boolean {
+  return Object.hasOwn(manifest.roles, role) ? manifest.roles[role].reports : false;
 }
 
 /**

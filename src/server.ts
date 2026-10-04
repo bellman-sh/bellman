@@ -9,13 +9,16 @@ import {
   generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
 } from "./codes.js";
 import { MAX_ROLE_KEY_LENGTH, ManifestError, ManifestShape, resolveManifest } from "./manifest.js";
-import { denyVerb, verbsOfRole } from "./roles.js";
+import { denyVerb, mustReport, verbsOfRole } from "./roles.js";
 import {
   FROZEN, activeMembers, announceReclaimed, audit, evictMember, findMember, issueInvite,
   leaveRoom, revokeInvite, seatedMembers, sessionStatus, touchMember,
 } from "./rooms.js";
 import { STALE_AFTER_MS, presenceOf } from "./presence.js";
-import { CONNECT_TOKEN_TTL, JOIN_CODE_TTL, type BellmanStore, type EventWrite } from "./store.js";
+import {
+  CONNECT_TOKEN_TTL, JOIN_CODE_TTL,
+  type AppendExtras, type BellmanStore, type EventWrite,
+} from "./store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -26,12 +29,14 @@ const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeou
 const MAX_PAYLOAD_CHARS = 20_000;
 
 /** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
-const SEND_KINDS = ["message", "artifact", "action_request", "action_response", "brief_update"] as const;
+const SEND_KINDS = [
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress",
+] as const;
 type SendKind = (typeof SEND_KINDS)[number];
 
 /**
  * Which verb each send kind needs. A Record rather than a ternary with a default
- * arm: a sixth kind must declare its verb here or this stops compiling. A default
+ * arm: a new kind must declare its verb here or this stops compiling. A default
  * would hand it `send` silently, and a closed enum exists so that every guard is
  * one somebody chose.
  *
@@ -45,6 +50,13 @@ const SEND_VERB = {
   // peer's context. A seat that may not speak may not restate itself either —
   // which is exactly what `observer` promises its readers.
   brief_update: "send",
+  /**
+   * A reply to the room's heartbeat tick. `send` and not a new verb: manifest.ts
+   * is explicit that a verb lands only in the PR that adds its operation, and a
+   * seat that may not speak may not report either — brief_update's reasoning.
+   * `RoleDef.reports` already answers who is asked.
+   */
+  progress: "send",
   action_request: "request_actions",
   action_response: "respond_actions",
 } as const satisfies Record<SendKind, Verb>;
@@ -78,6 +90,18 @@ const CapabilitiesShape = z
   .describe(
     "What you ALLOW peers to do to you. request_actions must be explicitly granted."
   );
+
+/**
+ * A heartbeat reply. `strictObject`, so every key the shape does not name is
+ * refused — which is how `status`, `alive`, `present` and `healthy` are kept out
+ * without a denylist that falls behind the first name somebody forgets. The
+ * payload is a claim about when it was sent, never about now (invariant 7).
+ */
+const ProgressShape = z.strictObject({
+  note: z.string().min(1).max(500),
+  step: z.string().max(40).optional(),
+  eta_seconds: z.number().int().nonnegative().max(86_400).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -156,9 +180,10 @@ function publicMember(m: Member, connected: ReadonlySet<string>) {
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
- * The spine (preset, mode, role keys, verbs) is server-validated — role keys
- * match a short snake_case regex and verbs come from a closed enum — so it
- * ships as fact, and all it can carry is identifiers and enum values. The skin
+ * The spine (preset, mode, role keys, verbs, cadence, whether this seat reports)
+ * is server-validated — role keys match a short snake_case regex, verbs come
+ * from a closed enum, and the cadence is a parsed number — so it ships as fact,
+ * and all it can carry is identifiers, enum values, a number and a boolean. The skin
  * (room, purpose, descriptions) is creator-authored prose and goes inside the
  * same untrusted envelope as a brief, because it reaches the joiner's model
  * before their human has approved anything.
@@ -201,6 +226,26 @@ function roomPreview(session: StoredSession, viewerRole: string) {
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: verbsOfRole(m, viewerRole),
+    /**
+     * The obligation, shown before a joiner's human accepts the seat. This is
+     * the consent point: a member that will be named silent in a tick has to be
+     * able to see that before joining, the same reason `your_verbs` is here.
+     *
+     * Through mustReport, which is what the tick itself calls, so what a joiner
+     * is SHOWN and what is ASKED are one computation and cannot drift apart.
+     *
+     * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
+     * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
+     * to answer. `mustReport` alone said `true` there and promised a joiner's
+     * human an obligation that never fires — and this is the consent surface, the
+     * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
+     * the same null-cadence check for themselves; this was the surface that did
+     * not. resolveManifest refuses the other half of the pair, a reporting seat
+     * that cannot send, so the only `reports: true` that reaches here is one a
+     * cadence would make real.
+     */
+    heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
+    you_report: m.heartbeatOnMs !== null && mustReport(m, viewerRole),
     creator_role: m.creatorRole,
     roles,
     text: untrusted(
@@ -229,9 +274,10 @@ class FrozenError extends Error {
 async function appendOrFrozen(
   s: BellmanStore,
   sessionId: string,
-  e: Parameters<BellmanStore["appendEvent"]>[1]
+  e: Parameters<BellmanStore["appendEvent"]>[1],
+  extras?: AppendExtras
 ): Promise<SessionEvent> {
-  const event = await s.appendEvent(sessionId, e);
+  const event = await s.appendEvent(sessionId, e, extras);
   if (!event) throw new FrozenError();
   return event;
 }
@@ -262,7 +308,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
@@ -368,7 +414,7 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
@@ -618,7 +664,7 @@ Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room 
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, or brief update to every other member of the room.
+      description: `Send a message, artifact, action request, action response, brief update, or progress report to the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm
@@ -628,6 +674,7 @@ Args:
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
+      "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized
   - ref_id: required for action_response
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
@@ -670,8 +717,23 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         return fail(`payload too large (${serialized.length} chars, limit ${MAX_PAYLOAD_CHARS}). Send a summary and offer details on request.`);
       }
 
+      // Hoisted past the guard, not moved into it: the capability checks below,
+      // and `delivered_to` in the result, read it on every kind.
       const others = activeMembers(session).filter((m) => m.memberId !== member_id);
-      if (others.length === 0) return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
+      // A progress report answers the SERVER's tick, not a peer. Its readers are the
+      // room's log and the next tick's snapshot, both of which exist with nobody
+      // else in the room — and the tick asks for it whether or not anyone has
+      // joined, because D7 makes the cadence observable rather than conditional on
+      // an audience: the startup window is exactly when a human wants to know the
+      // lone agent is alive. Refusing it here would interrupt a member every
+      // cadence with an instruction this same server then rejects, forever.
+      //
+      // Type-aware rather than dropped: the other five kinds are addressed TO the
+      // room, and a member sending one into an empty room has misunderstood where
+      // it is. Only the refusal is conditional.
+      if (type !== "progress" && others.length === 0) {
+        return fail("no other active members yet — share the join code and wait for a bellman_confirm (watch via bellman_sync).");
+      }
 
       if (type === "message" || type === "artifact") {
         const deaf = others.filter((m) => !m.capabilities.includes("receive_messages"));
@@ -709,6 +771,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (!parsed.success) return fail(`brief_update payload must be a full Brief object: ${parsed.error.issues[0]?.message}`);
         updatedBrief = parsed.data as Brief;
       }
+      // Validated for the same reason, and refused before the append: a payload the
+      // shape rejects must leave neither an event nor a stamp behind.
+      if (type === "progress") {
+        const parsed = ProgressShape.safeParse(payload);
+        if (!parsed.success) {
+          return fail(`progress payload must be { note, step?, eta_seconds? }: ${parsed.error.issues[0]?.message}`);
+        }
+      }
 
       const draft = {
         type,
@@ -719,12 +789,32 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         refId: ref_id ?? null,
       };
 
+      /**
+       * A `progress` send credits this member's own `lastReportAt`, in the
+       * append's own operation.
+       *
+       * It was a second `s.updateMember(...)` call after the append, which is two
+       * Durable Object RPCs into two transactions — and `appendEvent` wakes
+       * listeners before the second one runs, so a due alarm could read the
+       * committed progress event while the stale stamp still named this member
+       * silent. Worse, the patch sat inside the `if (!replayed)` block below, so
+       * an idempotent retry skipped it outright: a stamp the first attempt never
+       * landed was lost for good rather than merely late.
+       *
+       * A flag rather than the store reading `draft.type`: nothing in either
+       * store branches on an event's kind, and this is the one write that would
+       * have made it. The decision stays here, beside the verb check and the
+       * payload validation that already established what this send is.
+       */
+      const extras: AppendExtras | undefined =
+        type === "progress" ? { creditReport: true } : undefined;
+
       let event: SessionEvent;
       let replayed = false;
       if (idempotency_key) {
         let write: EventWrite;
         try {
-          write = await s.appendEventOnce(session_id, draft, idempotency_key);
+          write = await s.appendEventOnce(session_id, draft, idempotency_key, extras);
         } catch (err) {
           // An idempotency key means the payload has to be fingerprinted, and a
           // payload this deeply nested cannot be. Said here rather than left to
@@ -748,7 +838,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         event = write.event;
         replayed = write.outcome === "replayed";
       } else {
-        event = await appendOrFrozen(s, session_id, draft);
+        event = await appendOrFrozen(s, session_id, draft, extras);
       }
 
       // Nothing below happens twice. A replay's original call did all of it,
@@ -758,6 +848,9 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         if (updatedBrief) {
           await s.updateMember(session_id, member_id, { brief: updatedBrief });
         }
+        // The report stamp is NOT here. It rides in the append, for the reason
+        // `extras` above gives — including that this block is skipped on a
+        // replay, which is exactly where it went missing.
         await audit(s, session, identity, `sent_${type}`, {
           chars: serialized.length,
           ...(ref_id ? { ref_id } : {}),

@@ -5,13 +5,16 @@ import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
-import type { BellmanStore, EventWrite, MemberPatch, SeatOutcome } from "./store.js";
-import { connectedAmong, isActiveMember, seatVictims } from "./store.js";
+import type {
+  AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
+} from "./store.js";
+import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -44,6 +47,11 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
  * nothing prunes the entries.
  */
 const deliveredKey = (intentId: string) => `d:${intentId}`;
+/**
+ * The alarm handler that asks the room's members where they are (#111). A name
+ * only: its due time is derived, never stored under `due:`. See derivedDue().
+ */
+const HEARTBEAT_HANDLER = "heartbeat";
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -109,6 +117,32 @@ const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
 });
 
+/**
+ * The `session` row an append writes to credit the sender's report, or null when
+ * it writes none — the append did not ask for a credit, or the stamp already
+ * sits forward of this event.
+ *
+ * A row rather than a put, so the caller folds it into the put it was already
+ * making: `#writeEvent`'s whole argument is that an event and the rows that
+ * belong with it commit in ONE write, and a credit committed separately is the
+ * split this fix exists to remove.
+ *
+ * Module-level and pure. Not a method, because a Durable Object answers RPC for
+ * every method on its class — a writing helper reachable from outside would let a
+ * plain stub forge a report into any room — and because the rule it applies
+ * (`creditReport`) is shared with MemoryStore and belongs to neither.
+ */
+function reportRow(
+  s: StoredSession,
+  memberId: string,
+  at: number,
+  extras: AppendExtras,
+): Record<string, unknown> | null {
+  if (!extras.creditReport) return null;
+  const members = creditReport(s.members, memberId, at);
+  return members ? { session: { ...s, members } } : null;
+}
+
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
 // ---------------------------------------------------------------------------
@@ -119,7 +153,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
-   * are due and points the alarm at the soonest. Two handlers use it.
+   * are due and points the alarm at the soonest. Three handlers use it.
    *
    * "outbox" delivers what a join-code change owes the registry. A code lives in two
    * objects, here and in the registry's index, so the two writes cannot share a
@@ -133,6 +167,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * stored as a `due:` row, because sessions written before named alarms have no row
    * and an alarm re-armed from stored rows alone would leave every one of them with
    * no expiry. See derivedDue().
+   *
+   * "heartbeat" asks the room's members where they are, when the room declared a
+   * cadence and one of them owes an answer (#111). Derived like "ttl", and for a
+   * firmer reason: a stored row that an older build never consumes is the spin
+   * alarm() warns about. See derivedDue() and #tickIfDue().
    */
   private driver = new OutboxDriver(
     this.ctx.storage,
@@ -199,7 +238,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * through here, so hydrateStoredSession's rules reach all of it: getSession
    * (and the facade's getSession and getSessionByJoinCode with it), every
    * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
-   * one predating frozenAt reads as not frozen. Nothing rewrites either.
+   * one predating frozenAt reads as not frozen; one predating the heartbeat reads
+   * as asking for none. Nothing rewrites any of them.
    *
    * A mutator reads through its own transaction, so the check and the write it
    * guards are one unit rather than two that rely on nothing getting between them.
@@ -613,9 +653,34 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * One transaction, for the reason stored() gives. Closed is the other half of
    * closeSessionIfEmpty, as it is in seatMember: that keeps a close from landing on
    * an occupied room, and this keeps a join from landing on a closed one.
+   *
+   * **The rule the heartbeat's derived alarm imposes on every mutator here, stated
+   * once: a write that can flip `nextTickAt` from null to non-null must `reArm()`
+   * once it has committed.**
+   *
+   * `nextTickAt` returns null for four reasons — no cadence, the room is closed,
+   * the room is frozen, or no active member holds a reporting seat. While it is
+   * null nothing is armed for the tick, so there is no firing left to notice the
+   * state that made it non-null: the answer cannot correct itself. Adding a member
+   * is one such write (this and `seatMember`), and so is clearing `frozenAt`
+   * (`freezeSession`). The other direction needs nothing: the armed alarm fires
+   * once, finds nobody due, and the reArm() that ends `alarm()` drops the tick.
+   *
+   * After the transaction has COMMITTED, never inside its closure.
+   * ARCHITECTURE.md §9: everything awaited in a closure holds every other call to
+   * this object until it commits, and reArm() reads `derivedDue()`, which reads
+   * `stored()`. `OutboxDriver.enqueue` arming from inside a caller's closure is
+   * the one deliberate exception, and it is a bare `setAlarm` with nothing to read.
+   *
+   * Guarded on the write having landed, where it used to be unconditional: the
+   * transaction now reports whether it committed, and a refusal commits nothing,
+   * so a join that did not land arms nothing. reArm() is still idempotent, so the
+   * guard is about saying what this method means rather than about the cost.
+   * `createSession`'s "only when nothing was queued" guard does NOT transfer here
+   * — see seatMember.
    */
   async addMember(member: Member): Promise<boolean> {
-    return this.ctx.storage.transaction(async (txn) => {
+    const added = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.frozenAt !== null) return false;
@@ -623,6 +688,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await txn.put("session", { ...s, members: [...s.members, member] });
       return true;
     });
+    if (added) await this.driver.reArm();
+    return added;
   }
 
   /**
@@ -637,9 +704,31 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * victim and then wrote would be handed exactly the window two concurrent joiners
    * need to overfill the room. See stored() for what a transaction adds to the input
    * gate's hold on a read and then a put.
+   *
+   * The reArm() is addMember's rule — seating the member the room asks for reports
+   * is the write that flips `nextTickAt` off null, and the room this feature exists
+   * for is exactly the one whose creator does not report. It runs AFTER the
+   * transaction has committed, never inside the closure, which is both ARCHITECTURE
+   * §9's rule and what makes it safe: it does not reopen invariant 9, because the
+   * seat is already committed and nothing it does can refuse or undo it. A reArm()
+   * that failed would leave the seat standing and the arming missed, which is what
+   * this method did before it was here.
+   *
+   * Only on a successful seating, so a room that refused "full", "closed" or
+   * "frozen" arms nothing it did not change.
+   *
+   * `createSession` deliberately skips reArm() when it queued outbox intents,
+   * because `enqueue` arms for the queue's marker — dated now — and a reArm()
+   * would bring the alarm in behind the commit to race the inline delivery. That
+   * guard is about a method's OWN enqueue and does not transfer: this one queues
+   * nothing, so the only due times reArm() can see are the TTL, the tick, and an
+   * outbox marker some earlier call left behind — and a marker still present means
+   * a delivery genuinely is owed, so arming for it is recovery rather than a race.
+   * `bellman_confirm`'s `clearJoinCodes`, which runs after this, arms the alarm
+   * itself inside its own transaction and so overwrites whatever this set.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
-    return this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
+    const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { refused: "not_found", reclaimed: [] };
       if (s.closed) return { refused: "closed", reclaimed: [] };
@@ -665,6 +754,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await txn.put("session", { ...s, members: [...members, member] });
       return { refused: null, reclaimed };
     });
+    if (outcome.refused === null) await this.driver.reArm();
+    return outcome;
   }
 
   // updateMember, closeSession and freezeSession below still read and then put.
@@ -679,9 +770,28 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
       if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
       if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
+      if (patch.lastReportAt !== undefined) next.lastReportAt = patch.lastReportAt;
       return next;
     });
     await this.ctx.storage.put("session", { ...s, members });
+    // addMember's rule, and `leftAt` is the only field in MemberPatch that can
+    // flip nextTickAt off null: clearing it returns a departed member to the
+    // roster. Nothing calls it that way today — every caller sets a time — but
+    // MemberPatch permits it, and the predicate is about what a write CAN do.
+    //
+    // Deliberately narrow, where the three above are unconditional: this is the
+    // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
+    // here, and that one reaches nextTickAt not at all.
+    //
+    // `lastReportAt` DOES reach it, since each member's deadline is its own
+    // report plus the cadence — and it still needs no reArm, because a fresh
+    // stamp only ever moves that deadline LATER. The armed alarm is then early:
+    // it fires, finds nobody due, advances `lastTickAt`, and the closing reArm()
+    // points it at the right time. One wake spent, and the tick that comes out of
+    // it is correct — the same self-healing path a member leaving takes. Arming
+    // here would save that wake and cost a storage read on every sync, which is
+    // a trade about cost and not about correctness.
+    if (patch.leftAt === null) await this.driver.reArm();
   }
 
   async closeSession(): Promise<void> {
@@ -719,10 +829,44 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
   }
 
+  /**
+   * Freeze the room, or thaw it with null.
+   *
+   * The reArm() is addMember's rule: a thaw is the write that flips `nextTickAt`
+   * off null for a room whose cadence and roster were there all along, and without
+   * it a thawed room never ticks again.
+   *
+   * It earns its place on the freeze too, and is unconditional for that reason. A
+   * freeze does not disarm anything — the alarm stays pointed at the tick time it
+   * already held — so without this, a frozen room wakes once at that time to be
+   * refused by #tickIfDue, and only then re-arms to the TTL. Re-arming here moves
+   * it out to the TTL at the freeze and spends that wake on nothing.
+   *
+   * The thaw also credits every reporting seat with a report, so the interval
+   * nobody was allowed to report in costs nobody their standing — spec D10, and
+   * `clearSilence` carries the whole argument. The rule belongs to heartbeat.ts;
+   * this picks the moment to apply it.
+   *
+   * **The moment is the TRANSITION, not the argument.** `frozenAt === null` alone
+   * credits on a call that thawed nothing, because the room was already thawed —
+   * handing every reporting seat a fresh stamp with nobody having reported. A
+   * caller retrying this idempotent call on a schedule would reset every member's
+   * clock for good: nobody ever due, no tick ever asking, `silent` never true, and
+   * nothing in the log to say why. So the credit is paid only when the record as
+   * read was frozen, which pays a freeze-then-thaw once however many thaws follow.
+   *
+   * The reArm() stays unconditional, and the two are not the same question. It
+   * costs one derived read and points the alarm where it already was, and it has to
+   * run on the thaw that matters; the credit writes member state, so it needs the
+   * transition.
+   */
   async freezeSession(frozenAt: number | null): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    await this.ctx.storage.put("session", { ...s, frozenAt });
+    const thawing = frozenAt === null && s.frozenAt !== null;
+    const members = thawing ? clearSilence(s, Date.now()) : s.members;
+    await this.ctx.storage.put("session", { ...s, frozenAt, members });
+    await this.driver.reArm();
   }
 
   /**
@@ -732,14 +876,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and the write are one unit, so two appends take two cursors and neither event
    * overwrites the other. The wake comes after the commit, so nobody hears of an event
    * that did not land, and the wiring tests fail a wake that goes out before it.
+   *
+   * **`extras.creditReport` rides in that same put, and it has to.** The handler
+   * used to stamp `lastReportAt` with an `updateMember` call AFTER this returned,
+   * which is a second RPC into a second transaction — and `#wake` above fires
+   * before it, so a due alarm could read the committed progress event while the
+   * stale stamp still named that member silent. Folded in here the stamp and the
+   * event commit together or not at all, and the wake still waits for both.
+   *
+   * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
+   * ever moves a member's deadline LATER. An alarm already armed is then early —
+   * it fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()`
+   * points it at the right time. One wake spent, and the tick it produces is
+   * correct.
    */
-  async appendEvent(e: Omit<SessionEvent, "cursor" | "at">): Promise<SessionEvent | null> {
+  async appendEvent(
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {},
+  ): Promise<SessionEvent | null> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      await this.#writeEvent(txn, next);
+      await this.#writeEvent(txn, next, reportRow(s, e.fromMemberId, next.at, extras) ?? {});
       return next;
     });
     if (event) this.#wake(event);
@@ -762,7 +922,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {},
   ): Promise<EventWrite> {
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
@@ -779,6 +940,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!original) {
           throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
         }
+        // The replay credits too, in this transaction. A retry cannot know
+        // whether the first attempt landed the stamp, and skipping it here is
+        // what made a stamp the first attempt never wrote permanent rather than
+        // late. `creditReport` is monotonic, so this is a repair or a no-op and
+        // never a regression — and it writes nothing at all when the stamp is
+        // already forward of the original event.
+        const credit = reportRow(s, e.fromMemberId, original.at, extras);
+        if (credit) await txn.put<unknown>(credit);
         return { outcome: "replayed", event: original };
       }
 
@@ -790,7 +959,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // interruption leaves the event stored with no key naming it, and the
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
-      await this.#writeEvent(txn, event, { [storageKey]: stored });
+      await this.#writeEvent(txn, event, {
+        [storageKey]: stored,
+        ...reportRow(s, e.fromMemberId, event.at, extras),
+      });
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -951,7 +1123,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * alarm is retried instead of forgotten. The outbox's drain moves its own marker,
    * deleting it when the queue is empty and dating it ahead after a failure. The
    * TTL's handler is idempotent: expireIfDue does nothing to a session that is
-   * closed or not yet past its expiry.
+   * closed or not yet past its expiry. The heartbeat's moves its own clock:
+   * #tickIfDue advances `lastTickAt` on every firing, written or not, so the time
+   * derivedDue returns next is in the future.
+   *
+   * **The loop's order is `dueNames`' alphabet, which is not a priority.** A firing
+   * delayed past `expiresAt` finds "heartbeat" and "ttl" both due and runs the tick
+   * first, because "h" sorts before "t". Each handler therefore reads the state it
+   * needs for itself rather than relying on its place here: #tickIfDue refuses a
+   * room already past its expiry, with the same `now > expiresAt` test #expireIfDue
+   * uses. Reordering the names would fix this one pair and leave the next one to be
+   * discovered, and the handler that reads its own precondition is the one a reader
+   * can check.
+   *
+   * Each handler reads the session itself, inside the transaction it writes in, so
+   * nothing is passed down from here: a record read in this loop and written by a
+   * later iteration would be the stale snapshot #tickIfDue's own comment is about.
    *
    * Every name the driver can report needs a branch below. A name with none is never
    * consumed, and the closing reArm() points the alarm straight back at its due time,
@@ -981,6 +1168,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         const s = await this.stored();
         if (s) await this.#expireIfDue(s, now);
       }
+      if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
     }
     await this.driver.reArm();
   }
@@ -988,11 +1176,21 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /**
    * Due times this object computes rather than stores. A closed session has no TTL
    * left to enforce: deriving one for it would re-arm the alarm to a time already
-   * past, and it would fire again for as long as the session existed.
+   * past, and it would fire again for as long as the session existed. It has no
+   * tick to send either, which is why the early return covers both.
    */
   private async derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
-    return s && !s.closed ? new Map([["ttl", s.expiresAt]]) : new Map();
+    if (!s || s.closed) return new Map();
+    const due = new Map([["ttl", s.expiresAt]]);
+    // Derived rather than a stored `due:` row, deliberately. A name the driver
+    // can report with no branch below is never consumed, and the closing reArm()
+    // fires the alarm back to back for good — the rollback hazard this object's
+    // alarm() comment records for `due:outbox`. A build that does not know this
+    // name does not compute it either, so rolling back strands nothing.
+    const tick = nextTickAt(s);
+    if (tick !== null) due.set(HEARTBEAT_HANDLER, tick);
+    return due;
   }
 
   /**
@@ -1035,6 +1233,82 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // alarm and from any read that finds the session lapsed, and both drain here
     // rather than leave the rows for the next alarm.
     if (intents.length > 0) await this.driver.deliverNow();
+  }
+
+  /**
+   * Ask the room's members where they are, if any of them owes an answer.
+   *
+   * `#private` for the reason every writing method on this class is: a Durable
+   * Object answers RPC for every method on it and TypeScript's `private` is
+   * erased, so a plain stub could otherwise forge a tick into any room.
+   *
+   * **The guards are the point of this method, not a formality.** It writes
+   * through `#writeEvent`, as `#expireIfDue` does, which means it does NOT
+   * inherit `appendEvent`'s frozen check. Without them:
+   *
+   * - A **frozen** room gets ticks naming members silent who cannot report out
+   *   of it, and a freeze must cost nobody their standing — the same rule that
+   *   keeps `reclaimStaleSeats` out of a frozen room.
+   * - A **closed** room gets a tick nobody can answer, because every send into
+   *   it is refused.
+   * - A room **past its TTL** gets the same, and it is reachable where the other
+   *   two are not. `dueNames` sorts the due handlers, "heartbeat" sorts before
+   *   "ttl", and a firing delayed past `expiresAt` finds both due — so the tick
+   *   ran, appended and woke every watcher on a room the very next iteration of
+   *   that loop was about to close. `now > s.expiresAt` is `#expireIfDue`'s own
+   *   test for lapsed, read here rather than reordering the handlers: a guard is
+   *   checkable where a name's place in an alphabet is an accident.
+   *
+   * **One transaction, for the reason `stored()` gives, and it is what makes the
+   * clock safe to advance.** The session read, the cursor read and the write are
+   * one unit, so the record this writes back is the record it decided on. Read
+   * outside, the whole snapshot went back in — reverting anything that landed in
+   * between, a freeze and a member's own `lastReportAt` stamp included, which is
+   * the one write a tick must never lose, since losing it keeps the member named
+   * silent for having answered. `#wake` comes after the commit, so nobody hears
+   * of a tick that did not land.
+   *
+   * `#tickIfDue` makes no cross-object call, so the closure stays within
+   * ARCHITECTURE.md §9 runtime fact 2: everything awaited in it is this object's
+   * storage.
+   *
+   * `lastTickAt` advances whether or not an event is written, which is what
+   * stops the alarm spinning: the clock has to move even on a firing that found
+   * nobody due, or `derivedDue` returns the same past time and `reArm()` points
+   * the alarm straight back at it.
+   */
+  async #tickIfDue(now: number): Promise<void> {
+    const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return null;
+      if (s.closed || s.frozenAt !== null || now > s.expiresAt) return null;
+      if (s.manifest.heartbeatOnMs === null) return null;
+
+      const due = dueMembers(s, now);
+      if (due.length === 0) {
+        // Nothing to ask, but the clock still moves. See the comment above.
+        await txn.put<unknown>({ session: { ...s, lastTickAt: now } });
+        return null;
+      }
+
+      const tick: SessionEvent = {
+        cursor: await this.nextCursor(txn),
+        type: "heartbeat" as EventType,
+        // The server is not a member and holds no role, so it needs no verb.
+        fromMemberId: "system",
+        fromUserId: "system",
+        fromLabel: "bellman",
+        payload: snapshotOf(s, now),
+        refId: null,
+        at: now,
+      };
+      // The event, its cursor and the advanced clock in one put. Committed
+      // separately, an interruption between them leaves a tick stored with the
+      // clock unmoved, and the next firing writes the same tick again.
+      await this.#writeEvent(txn, tick, { session: { ...s, lastTickAt: now } });
+      return tick;
+    });
+    if (event) this.#wake(event);
   }
 }
 
@@ -1740,17 +2014,19 @@ export class DurableObjectStore implements BellmanStore {
 
   async appendEvent(
     sessionId: string,
-    e: Omit<SessionEvent, "cursor" | "at">
+    e: Omit<SessionEvent, "cursor" | "at">,
+    extras: AppendExtras = {}
   ): Promise<SessionEvent | null> {
-    return this.session(sessionId).appendEvent(e);
+    return this.session(sessionId).appendEvent(e, extras);
   }
 
   async appendEventOnce(
     sessionId: string,
     e: Omit<SessionEvent, "cursor" | "at">,
-    key: string
+    key: string,
+    extras: AppendExtras = {}
   ): Promise<EventWrite> {
-    return this.session(sessionId).appendEventOnce(e, key);
+    return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
   async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {

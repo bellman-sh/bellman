@@ -1,11 +1,12 @@
+import { isAmbient } from "./attention.js";
 import type { SessionEvent } from "./types.js";
 
 // Deliberately in neither server.ts nor store-do.ts. store-do.ts imports
 // `cloudflare:workers`, so the Node program cannot import it (tsconfig.json
 // excludes it), and importing server.ts from the Durable Object would pull the
 // whole tool layer into it. What both must agree on lives here, with no import
-// beyond a type, as stored-session.ts does for the shape store-do.ts and the
-// tests share.
+// beyond a type or another runtime-free module, as stored-session.ts does for
+// the shape store-do.ts and the tests share.
 
 /**
  * An event as a member is shown it: the one shape that leaves the server, over
@@ -29,5 +30,8 @@ export function publicEvent(e: SessionEvent) {
     payload: e.payload,
     ref_id: e.refId,
     at: new Date(e.at).toISOString(),
+    // Only when true. Omission costs nothing for the twelve types that predate
+    // #111, and a client that has never heard of `progress` keeps working.
+    ...(isAmbient(e.type) ? { ambient: true as const } : {}),
   };
 }

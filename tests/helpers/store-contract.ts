@@ -37,15 +37,20 @@ import { member, oneCode, roomManifest, session } from "./fixtures.js";
  */
 export interface StoreContractDivergences {
   /**
-   * `instanceof` across a Durable Object RPC boundary. workerd reconstructs a
-   * thrown error in the caller's realm: name, message and own properties
-   * survive, the prototype does not.
+   * EMPTY, and that is the goal state: both stores pass every case identically.
    *
-   * Tracked as #101, and a production bug rather than a test artefact —
-   * src/server.ts:765 branches on exactly this `instanceof` and so never fires
-   * under Durable Objects. Delete this entry when #101 closes.
+   * It held one entry, `errorIdentityAcrossRpc`, from #12's first run of this suite
+   * inside workerd until #101 closed it — `instanceof` across a Durable Object RPC
+   * boundary, where workerd reconstructs a thrown error with its name and own
+   * properties but not its prototype. `DurableObjectStore` now revives at the seam
+   * (src/rpc-error.ts), so the case is an ordinary `it` for both.
+   *
+   * The mechanism stays for the next one. Add a field here, named for the behaviour
+   * rather than the store, with the reason as its type's doc — then pass it at the
+   * call site. The case keeps running under `it.fails`, so it goes red the moment the
+   * hole is fixed and tells you to delete the entry.
    */
-  errorIdentityAcrossRpc?: string;
+  readonly __none__?: never;
 }
 
 export function describeStoreContract(
@@ -56,7 +61,13 @@ export function describeStoreContract(
   describe(`BellmanStore contract: ${name}`, () => {
     let store: BellmanStore;
 
-    /** `it`, unless this store has an argued reason it cannot pass the case. */
+    /**
+     * `it`, unless this store has an argued reason it cannot pass the case.
+     *
+     * Unused while `StoreContractDivergences` is empty, which is the goal state. Kept
+     * because it IS the mechanism described there: a divergence is recorded by passing
+     * a reason, and this is what turns that reason into a case that still runs.
+     */
     const caseFor = (reason: string | undefined) => (reason ? it.fails : it);
 
     beforeEach(() => {
@@ -1253,14 +1264,22 @@ export function describeStoreContract(
     });
 
     /**
-     * A payload too deep to fingerprint must leave nothing behind.
+     * A payload too deep to fingerprint must leave nothing behind, and must say so
+     * as the class it is.
      *
      * `fingerprint` throws, and `appendEventOnce` calls it before it mutates
      * anything, so the throw has to reach the caller with no event appended and
      * no key recorded. A store that wrote first and fingerprinted second would
      * satisfy every other case in this block.
+     *
+     * `toThrow(PayloadTooDeepError)` is an `instanceof`, and that is the second half
+     * of the case rather than incidental to it. Under Durable Objects the throw
+     * crosses an RPC boundary, where workerd rebuilds it without its prototype — so
+     * this was the suite's one divergence until #101, and it is the assertion that
+     * holds `src/rpc-error.ts` in place. A store that reported the right message with
+     * the wrong class would pass a `toThrow(/nests deeper/)` written instead.
      */
-    caseFor(divergences.errorIdentityAcrossRpc)(
+    it(
       "throws on a payload too deep to fingerprint, and writes nothing",
       async () => {
         const s = session();

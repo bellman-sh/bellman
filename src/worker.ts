@@ -10,6 +10,7 @@ import { parseOverrides, type ProviderCredentials, type ProviderName } from "./o
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
+import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 
 /**
  * Cloudflare Workers entry point.
@@ -216,8 +217,14 @@ export default {
       if (request.method !== "GET") {
         return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
       }
-      if (request.headers.get("upgrade") !== "websocket") {
-        return new Response("Expected a WebSocket upgrade", { status: 426 });
+      // Case-insensitively, and tolerating a list: `Upgrade: WebSocket` is a valid
+      // handshake this refused 426 until #132, and the 426 now names the protocol it
+      // wants rather than leaving a client to guess. Both rules are in upgrade.ts.
+      if (!wantsWebSocket(request.headers.get("upgrade"))) {
+        return new Response(UPGRADE_REQUIRED.body, {
+          status: UPGRADE_REQUIRED.status,
+          headers: UPGRADE_REQUIRED.headers,
+        });
       }
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;

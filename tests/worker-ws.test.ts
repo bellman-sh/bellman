@@ -150,11 +150,28 @@ describe("GET /ws", () => {
     expect(reached).toEqual([]);
   });
 
-  it("refuses a request that is not an upgrade", async () => {
+  it("refuses a request that is not an upgrade, and says what it wants", async () => {
     const { call, reached } = await world(OK);
     const res = await call(ROOM, { ...AUTH, upgrade: "" });
     expect(res.status).toBe(426);
+    // RFC 9110 section 15.5.22: a 426 carries the protocol, or a client has only the
+    // status and a sentence of prose it cannot read (#132).
+    expect(res.headers.get("upgrade"), "the 426 names the protocol").toBe("websocket");
     expect(reached).toEqual([]);
+  });
+
+  it("serves an upgrade whose token is not lowercase", async () => {
+    // The field NAME is normalised by Headers; the VALUE is not, and RFC 9110 makes
+    // the protocol token case-insensitive. `Upgrade: WebSocket` is valid and some
+    // stacks send it; it was refused 426 until #132, because every client this repo
+    // drives happens to send lowercase. `websocket, h2c` is the list form, legal in
+    // the same field and equally refused by a string comparison.
+    for (const upgrade of ["WebSocket", "WEBSOCKET", "websocket, h2c", "h2c, WebSocket"]) {
+      const { call, reached } = await world(OK);
+      const res = await call(ROOM, { ...AUTH, upgrade });
+      expect(res.status, upgrade).toBe(101);
+      expect(reached, upgrade).toEqual(["membersOf qs_1 u1", "fetch qs_1"]);
+    }
   });
 
   it("refuses a method other than GET before the object is reached", async () => {

@@ -458,7 +458,7 @@ describe("the CSRF rule", () => {
   });
 });
 
-describe("parsing BELLMAN_PANEL_ORIGINS", () => {
+describe("parsing BELLMAN_PANELS", () => {
   it("reads one origin", () => {
     expect(parsePanelOrigins("https://dash.bellman.sh")).toEqual(["https://dash.bellman.sh"]);
   });
@@ -522,5 +522,258 @@ describe("parsing BELLMAN_PANEL_ORIGINS", () => {
 
     expect(allowedOrigin(from("https://dash.bellman.sh"), origins)).toBe("https://dash.bellman.sh");
     expect(allowedOrigin(from("https://other.example"), origins)).toBe("https://other.example");
+  });
+});
+
+
+// ---- Task 9: CORS, /admin refusing cookies, CSRF through the real routes ----
+
+import { beforeEach } from "vitest";
+import { handleOAuth, type OAuthConfig } from "../src/oauth/routes.js";
+import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
+import {
+  BYSTANDER, COOKIE, IDENTITY, ISSUER, panelConfig, routeWith, seedBystander, seedSession,
+} from "./helpers/panel.js";
+
+
+describe("CORS through the real routes", () => {
+  let cfg: OAuthConfig;
+  let route: (r: Request) => Promise<Response>;
+
+  beforeEach(() => {
+    cfg = panelConfig();
+    route = routeWith(cfg);
+  });
+
+  it("answers a preflight on /auth/session", async () => {
+    const res = await route(new Request(`${ISSUER}/auth/session`, {
+      method: "OPTIONS",
+      headers: { origin: PANEL, "access-control-request-method": "GET" },
+    }));
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(res.headers.get("vary")).toBe("Origin");
+  });
+
+  it("answers a preflight on /auth/signout", async () => {
+    const res = await route(new Request(`${ISSUER}/auth/signout`, {
+      method: "OPTIONS",
+      headers: { origin: PANEL, "access-control-request-method": "POST" },
+    }));
+
+    expect(res.headers.get("access-control-allow-methods")).toContain("POST");
+  });
+
+  it("answers a preflight on /account", async () => {
+    const res = await route(new Request(`${ISSUER}/account`, {
+      method: "OPTIONS",
+      headers: { origin: PANEL, "access-control-request-method": "GET" },
+    }));
+
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
+  it("grants no CORS to a stranger's preflight", async () => {
+    const res = await route(new Request(`${ISSUER}/auth/session`, {
+      method: "OPTIONS",
+      headers: { origin: "https://evil.example" },
+    }));
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("puts CORS on a real /account response", async () => {
+    const sid = await seedSession(cfg);
+    const res = await route(new Request(`${ISSUER}/account`, {
+      headers: { accept: "application/json", origin: PANEL, cookie: `${COOKIE}=${sid}` },
+    }));
+
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(res.headers.get("vary")).toBe("Origin");
+  });
+
+  it("does not answer a preflight on /mcp — MCP clients are not browsers", async () => {
+    const res = await handleOAuth(
+      new Request(`${ISSUER}/mcp`, { method: "OPTIONS", headers: { origin: PANEL } }),
+      cfg
+    );
+
+    expect(res).toBeUndefined();
+  });
+});
+
+describe("/admin stays bearer-only", () => {
+  let cfg: OAuthConfig;
+  let route: (r: Request) => Promise<Response>;
+
+  /** A team admin the operator granted — the only identity that may write grants. */
+  const OPERATOR_ADMIN = {
+    ...IDENTITY, orgId: "acme", plan: "team" as const, role: "admin" as const,
+  };
+
+  const grantBody = JSON.stringify({
+    key: "github:999", plan: "pro", role: "member", orgId: "acme",
+  });
+
+  /** A grant for the revocation tests to act on, written as the operator would. */
+  const seedGrant = () =>
+    cfg.plans!.putGrant({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+      source: "operator", grantedAt: Date.now(), grantedBy: OPERATOR_ADMIN.userId, expiresAt: null,
+    });
+
+  beforeEach(() => {
+    cfg = panelConfig();
+    route = routeWith(cfg);
+  });
+
+  it("refuses a cookie-authenticated read of the grant list", async () => {
+    const sid = await seedSession(cfg, "admin-sid", {
+      identity: OPERATOR_ADMIN, plan_source: "operator",
+    });
+
+    const res = await route(new Request(`${ISSUER}/admin/grants`, {
+      headers: { cookie: `${COOKIE}=${sid}`, origin: PANEL },
+    }));
+
+    expect(res.status).toBe(401);
+  });
+
+  it("refuses a cookie-authenticated grant write", async () => {
+    const sid = await seedSession(cfg, "admin-sid", {
+      identity: OPERATOR_ADMIN, plan_source: "operator",
+    });
+
+    const res = await route(new Request(`${ISSUER}/admin/grants`, {
+      method: "POST",
+      headers: {
+        cookie: `${COOKIE}=${sid}`, origin: PANEL, "content-type": "application/json",
+      },
+      body: grantBody,
+    }));
+
+    expect(res.status).toBe(401);
+    // The refusal has to be the whole of what happened. A route that stored the
+    // grant and then answered 401 passes the line above, and would have handed
+    // a customer session the operator's write.
+    expect(await cfg.plans!.getGrant("github:999")).toBeUndefined();
+  });
+
+  /**
+   * The same identity over a bearer token still works. Without this the two
+   * tests above would pass for a trivially wrong reason — /admin/grants broken
+   * for everyone.
+   *
+   * It is also the control for the `getGrant` line in the write test: here the
+   * same call has to find the grant, so a `getGrant` that read the wrong place
+   * would fail this test instead of letting that line pass for every route.
+   */
+  it("still accepts the identical identity over a bearer token", async () => {
+    const token = await signJwt(
+      { iss: ISSUER, sub: OPERATOR_ADMIN.userId, aud: cfg.resource,
+        bellman: OPERATOR_ADMIN, plan_source: "operator" },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS
+    );
+
+    const res = await route(new Request(`${ISSUER}/admin/grants`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: grantBody,
+    }));
+
+    expect(res.status).toBe(201);
+    expect(await cfg.plans!.getGrant("github:999")).toMatchObject({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+    });
+  });
+
+  // A revocation is a write like the grant is. The guard names no method, and one
+  // written to skip a method would leave a cookie able to take a grant away.
+  it("refuses a cookie-authenticated revocation, and the grant stays", async () => {
+    await seedGrant();
+    const sid = await seedSession(cfg, "admin-sid", {
+      identity: OPERATOR_ADMIN, plan_source: "operator",
+    });
+
+    const res = await route(new Request(`${ISSUER}/admin/grants?key=github:999`, {
+      method: "DELETE",
+      headers: { cookie: `${COOKIE}=${sid}`, origin: PANEL },
+    }));
+
+    expect(res.status).toBe(401);
+    expect(await cfg.plans!.getGrant("github:999")).toMatchObject({
+      key: "github:999", plan: "pro", role: "member", orgId: "acme",
+    });
+  });
+
+  // The control for the revocation above: the same identity over a bearer token
+  // revokes, so the grant staying is the refusal and not DELETE broken for everyone.
+  it("still accepts the identical identity revoking over a bearer token", async () => {
+    await seedGrant();
+    const token = await signJwt(
+      { iss: ISSUER, sub: OPERATOR_ADMIN.userId, aud: cfg.resource,
+        bellman: OPERATOR_ADMIN, plan_source: "operator" },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS
+    );
+
+    const res = await route(new Request(`${ISSUER}/admin/grants?key=github:999`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    }));
+
+    expect(res.status).toBe(200);
+    expect(await cfg.plans!.getGrant("github:999")).toBeUndefined();
+  });
+
+  it("grants no CORS on /admin, so a browser cannot even read the refusal", async () => {
+    const res = await route(new Request(`${ISSUER}/admin/grants`, {
+      headers: { origin: PANEL },
+    }));
+
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+describe("CSRF through the real routes", () => {
+  let cfg: OAuthConfig;
+  let route: (r: Request) => Promise<Response>;
+
+  beforeEach(() => {
+    cfg = panelConfig();
+    route = routeWith(cfg);
+  });
+
+  it("refuses a cookie POST to /auth/signout with no Origin, and the session survives", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(new Request(`${ISSUER}/auth/signout`, {
+      method: "POST",
+      headers: { cookie: `${COOKIE}=${sid}` },
+    }));
+
+    expect(res.status).toBe(403);
+    expect((await route(new Request(`${ISSUER}/auth/session`, {
+      headers: { cookie: `${COOKIE}=${sid}` },
+    }))).status).toBe(200);
+  });
+
+  // The same strength as the test above, for the other way into the same rule. A
+  // refusal that deleted first would let a page on any origin sign a human out and
+  // be told 403 about it.
+  it("refuses a cookie POST from an origin off the list, and the session survives", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(new Request(`${ISSUER}/auth/signout`, {
+      method: "POST",
+      headers: { cookie: `${COOKIE}=${sid}`, origin: "https://evil.example" },
+    }));
+
+    expect(res.status).toBe(403);
+    expect((await route(new Request(`${ISSUER}/auth/session`, {
+      headers: { cookie: `${COOKIE}=${sid}` },
+    }))).status).toBe(200);
   });
 });

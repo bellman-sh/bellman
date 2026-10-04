@@ -3,7 +3,7 @@ import type { OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import {
   BYSTANDER, COOKIE, IDENTITY as PANEL_IDENTITY, ISSUER, PANEL, RESOURCE,
-  panelConfig, routeWith, seedBystander, seedSession, withCookie,
+  fakeFetch, panelConfig, routeWith, seedBystander, seedSession, withCookie,
 } from "./helpers/panel.js";
 import {
   MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
@@ -633,5 +633,283 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     }));
 
     expect(((await res.json()) as { plan: string }).plan).toBe("free");
+  });
+});
+
+
+// ---- Task 7: /auth/signin and the session callback ----
+
+describe("signing in to the panel", () => {
+  /**
+   * Walk /auth/signin → provider hand-off → callback, and return the callback
+   * response. The hand-off is asserted on the way: it takes its own list of
+   * audiences, apart from the callback's, so a response stepped over here would
+   * let a hand-off that refused SESSION_AUDIENCE return a 400 nobody reads, and
+   * the callback below would still pass.
+   */
+  async function signIn(returnTo?: string) {
+    const query = returnTo === undefined ? "" : `?return_to=${encodeURIComponent(returnTo)}`;
+    const chooser = await route(new Request(`${ISSUER}/auth/signin${query}`));
+    const req = decodeURIComponent(
+      /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
+    );
+    const handoff = await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
+    expect(handoff.status).toBe(302);
+    expect(handoff.headers.get("location")).toContain("github.com/login/oauth/authorize");
+    return route(new Request(
+      `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`
+    ));
+  }
+
+  it("offers the configured providers", async () => {
+    const page = await (await route(new Request(`${ISSUER}/auth/signin`))).text();
+
+    expect(page).toContain("/authorize/github?req=");
+  });
+
+  it("sets the session cookie on the way back", async () => {
+    const res = await signIn(`${PANEL}/rooms`);
+    const header = res.headers.get("set-cookie") ?? "";
+
+    expect(res.status).toBe(302);
+    expect(header).toContain(`${COOKIE}=`);
+    expect(header).toContain("HttpOnly");
+    expect(header).toContain("Secure");
+    expect(header).toContain("SameSite=Lax");
+    expect(header).toContain("Path=/");
+    expect(header).not.toContain("Domain");
+  });
+
+  it("does not hand the callback URL on in a Referer", async () => {
+    // That URL holds the provider's authorization code.
+    expect((await signIn(PANEL)).headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("redirects to the requested destination on the panel", async () => {
+    expect((await signIn(`${PANEL}/rooms`)).headers.get("location")).toBe(`${PANEL}/rooms`);
+  });
+
+  it("the cookie it set actually works", async () => {
+    const res = await signIn(PANEL);
+    const id = /__Host-bellman_session=([^;]+)/.exec(res.headers.get("set-cookie")!)![1];
+
+    const account = await route(withCookie("/account", id, {
+      headers: { accept: "application/json" },
+    }));
+
+    expect(account.status).toBe(200);
+    expect(((await account.json()) as { user_id: string }).user_id).toBe("u_github_4242");
+  });
+
+  // The rule's "creates" case. Sign-in mints a session id, and an id minted once
+  // and reused would hand the second human the first's session, or the first
+  // cookie the second's. Two humans sign in to one store, with the ids asserted
+  // different and each cookie answering as its own, read alternately.
+  it("gives each sign-in its own session, and each cookie answers as its own human", async () => {
+    const idOf = (res: Response) =>
+      /__Host-bellman_session=([^;]+)/.exec(res.headers.get("set-cookie")!)![1];
+    const first = idOf(await signIn(PANEL));
+    // GitHub answers as someone else for the second sign-in.
+    cfg.fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) =>
+      String(input) === "https://api.github.com/user"
+        ? Response.json({ id: 9999, login: "sam", email: null })
+        : fakeFetch(input, init)) as typeof fetch;
+    const second = idOf(await signIn(PANEL));
+
+    expect(second).not.toBe(first);
+    const who = async (id: string) =>
+      ((await (await route(withCookie("/account", id, {
+        headers: { accept: "application/json" },
+      }))).json()) as { user_id: string }).user_id;
+    expect(await who(first)).toBe("u_github_4242");
+    expect(await who(second)).toBe("u_github_9999");
+    expect(await who(first)).toBe("u_github_4242");
+  });
+
+  it("falls back to the panel origin when return_to is absent", async () => {
+    expect((await signIn()).headers.get("location")).toBe(PANEL);
+  });
+
+  // Review Focus 2 — return_to that is not an absolute http(s) URL on the panel.
+  it("ignores a return_to on a foreign origin", async () => {
+    expect((await signIn("https://evil.example/steal")).headers.get("location")).toBe(PANEL);
+  });
+
+  it("ignores a return_to that merely prefixes the panel origin", async () => {
+    expect((await signIn(`${PANEL}.evil.example/steal`)).headers.get("location")).toBe(PANEL);
+  });
+
+  it("ignores a javascript: return_to rather than redirecting to it", async () => {
+    const location = (await signIn("javascript:alert(document.cookie)")).headers.get("location");
+
+    expect(location).toBe(PANEL);
+    expect(location).not.toContain("javascript:");
+  });
+
+  it("ignores a relative return_to rather than throwing", async () => {
+    expect((await signIn("/rooms")).headers.get("location")).toBe(PANEL);
+  });
+
+  it("ignores a protocol-relative return_to", async () => {
+    expect((await signIn("//evil.example/steal")).headers.get("location")).toBe(PANEL);
+  });
+
+  it("refuses to start a sign-in with no panel configured", async () => {
+    cfg.panelOrigins = [];
+
+    expect((await route(new Request(`${ISSUER}/auth/signin`))).status).toBe(503);
+  });
+});
+
+
+// ---- Task 8: /auth/session and /auth/signout ----
+
+describe("/auth/session", () => {
+  it("returns the identity for a live cookie", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(withCookie("/auth/session", sid));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({
+      user_id: "u_github_4242",
+      label: "jesse@example.dev",
+      plan: "free",
+      role: "member",
+      org_id: null,
+    });
+  });
+
+  it("is 401 with no cookie", async () => {
+    expect((await route(new Request(`${ISSUER}/auth/session`))).status).toBe(401);
+  });
+
+  it("sends no WWW-Authenticate, which a browser cannot act on", async () => {
+    const res = await route(new Request(`${ISSUER}/auth/session`));
+
+    expect(res.headers.get("www-authenticate")).toBeNull();
+  });
+
+  /**
+   * It is the panel's boot call, made on every load. /account additionally
+   * computes entitlements and counts this month's creates, which is a round
+   * trip to the registry object; deciding whether to render the app does not
+   * need either. Asserted against a store that throws, so "cheaper" is a
+   * property rather than an intention.
+   */
+  it("does not reach countCreatesThisMonth", async () => {
+    const sid = await seedSession(cfg);
+    cfg.plans = {
+      ...cfg.plans!,
+      countCreatesThisMonth: () => Promise.reject(new Error("must not be called")),
+    } as typeof cfg.plans;
+
+    expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
+  });
+
+  it("is 401 once the session is dead, and drops that one only", async () => {
+    const sid = await seedSession(cfg, "expired", {
+      last_used_at: Date.now() - SESSION_IDLE_MS - 1,
+    });
+    const yours = await seedBystander(cfg);
+
+    expect((await route(withCookie("/auth/session", sid))).status).toBe(401);
+
+    // The drop is an error-path cleanup. Someone else, signed in, still answers
+    // as themselves after it.
+    const res = await route(withCookie("/auth/session", yours));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { user_id: string }).user_id).toBe(BYSTANDER.userId);
+  });
+
+  // Cookies are keys. Two humans read alternately, with nothing written between
+  // the reads: a route that answers from the last record it served gives itself
+  // away on the second, which one session cannot show.
+  it("answers each cookie with its own identity", async () => {
+    const mine = await seedSession(cfg, "mine");
+    const yours = await seedBystander(cfg);
+    const userOf = async (id: string) =>
+      ((await (await route(withCookie("/auth/session", id))).json()) as { user_id: string }).user_id;
+
+    expect(await userOf(mine)).toBe(PANEL_IDENTITY.userId);
+    expect(await userOf(yours)).toBe(BYSTANDER.userId);
+    expect(await userOf(mine)).toBe(PANEL_IDENTITY.userId);
+  });
+});
+
+describe("/auth/signout", () => {
+  const signout = (id: string | undefined) =>
+    route(new Request(`${ISSUER}/auth/signout`, {
+      method: "POST",
+      headers: {
+        origin: PANEL,
+        ...(id === undefined ? {} : { cookie: `${COOKIE}=${id}` }),
+      },
+    }));
+
+  it("invalidates the session server-side, and only that one", async () => {
+    const mine = await seedSession(cfg, "mine");
+    const yours = await seedBystander(cfg, "yours");
+    const read = async (id: string) => {
+      const res = await route(withCookie("/auth/session", id));
+      return {
+        status: res.status,
+        user: res.status === 200 ? ((await res.json()) as { user_id: string }).user_id : null,
+      };
+    };
+
+    // Alternating, with nothing written between: a route that answers from the
+    // last record it served gives itself away on the second read. These come
+    // before the sign-out, which is a write and would clear such a cache.
+    expect(await read(mine)).toEqual({ status: 200, user: PANEL_IDENTITY.userId });
+    expect(await read(yours)).toEqual({ status: 200, user: BYSTANDER.userId });
+    expect(await read(mine)).toEqual({ status: 200, user: PANEL_IDENTITY.userId });
+
+    expect((await signout(mine)).status).toBe(204);
+
+    expect(await read(mine)).toEqual({ status: 401, user: null });
+    // Another browser, signed in as someone else, stays signed in as them. A test
+    // with a single session to end passes a sign-out that ends every session.
+    expect(await read(yours)).toEqual({ status: 200, user: BYSTANDER.userId });
+  });
+
+  it("clears the cookie with every attribute that set it", async () => {
+    const header = (await signout(await seedSession(cfg))).headers.get("set-cookie") ?? "";
+
+    expect(header).toContain(`${COOKIE}=`);
+    expect(header).toContain("Max-Age=0");
+    expect(header).toContain("Path=/");
+    expect(header).toContain("SameSite=Lax");
+    expect(header).toContain("HttpOnly");
+    expect(header).toContain("Secure");
+  });
+
+  it("is idempotent", async () => {
+    const sid = await seedSession(cfg);
+    await signout(sid);
+
+    expect((await signout(sid)).status).toBe(204);
+  });
+
+  it("succeeds and still clears with no cookie at all", async () => {
+    const res = await signout(undefined);
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+
+  // The request carries a cookie on purpose. SameSite=Lax sends the cookie on a
+  // top-level GET navigation, so a link someone follows would sign the human out if
+  // GET did, and a 405 sent after the delete would be cosmetic. With no cookie
+  // there is nothing to delete, and the test passes either way.
+  it("refuses anything but POST, and the session survives", async () => {
+    const sid = await seedSession(cfg);
+
+    const res = await route(withCookie("/auth/signout", sid, { method: "GET" }));
+
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("POST");
+    expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
   });
 });

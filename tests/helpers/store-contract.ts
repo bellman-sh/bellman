@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/idempotency.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { member, oneCode, roomManifest, session } from "./fixtures.js";
 

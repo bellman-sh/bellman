@@ -805,6 +805,10 @@ bus), new `tests/bus.test.ts`, `tests/helpers/fake-bellman.ts`,
   unkeyed send is capped at 20,000 characters and not at depth. Measured in
   Node 22 and unmeasured in workerd. A depth cap beside the char cap in
   `bellman_send` would close it at the door, which is the right place.
+  **Closed** by #136: `assertPayloadDepth` (`src/payload.ts`) runs in
+  `bellman_send` before the char cap, on every send rather than only keyed
+  ones. `fetch` still has no per-event guard, for the reason above — what
+  changed is that no payload it cannot project can be stored any more.
 - **The two delivery paths carry the same content, not the same packaging.**
   The long poll is permanent, for clients that cannot reach a local process,
   and any change to what a watcher sees has to land in both arms of `wake()`.

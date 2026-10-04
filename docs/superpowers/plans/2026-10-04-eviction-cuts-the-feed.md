@@ -88,10 +88,29 @@ reading of the spec, not a replacement for it.
 
 - [ ] **Step 1: Write the failing contract tests**
 
-Add to `tests/helpers/store-contract.ts`, directly after the `describe("crediting the sender's report", ...)` block that ends near line 1395. `freshSession` and `store` are the suite's existing fixtures; follow the surrounding blocks for how a session is made.
+Add to `tests/helpers/store-contract.ts`, directly after the `describe("crediting the sender's report", ...)` block that ends near line 1395.
+
+**The suite has no ready-made session fixture.** It builds one with `session()`
+and `member()` from `tests/helpers/fixtures.ts` and then calls
+`store.createSession(s)` — see the `creditReport` block's `unstamped()` for the
+pattern. `member()` defaults to a single `m_creator`, so a two-member roster has
+to be spelled out. `store` is the suite's existing fixture.
 
 ```ts
     describe("recording a member out at an event's cursor", () => {
+      /** A creator and one peer, created in the store. */
+      const roomOfTwo = async () => {
+        const s = session({
+          members: [
+            member(),
+            member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" }),
+          ],
+        });
+        await store.createSession(s);
+        return s;
+      };
+      const TARGET = "m_peer";
+
       /** The eviction announcement, as evictMember writes it. */
       const removal = (memberId: string) => ({
         type: "member_evicted" as const,
@@ -103,8 +122,8 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("sets leftAt and removedAtCursor together, at the event's own cursor", async () => {
-        const s = await freshSession();
-        const target = s.members[1].memberId;
+        const s = await roomOfTwo();
+        const target = TARGET;
 
         const event = (await store.appendEvent(s.id, removal(target), {
           markRemoved: target,
@@ -119,9 +138,9 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("leaves every other member untouched", async () => {
-        const s = await freshSession();
-        const target = s.members[1].memberId;
-        const other = s.members[0].memberId;
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const other = "m_creator";
 
         await store.appendEvent(s.id, removal(target), { markRemoved: target });
 
@@ -132,7 +151,7 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("writes nothing for a member the roster does not name", async () => {
-        const s = await freshSession();
+        const s = await roomOfTwo();
         const before = (await store.getSession(s.id))!;
 
         const event = await store.appendEvent(s.id, removal("m_nobody"), {
@@ -148,8 +167,8 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("does not move a cut that is already recorded", async () => {
-        const s = await freshSession();
-        const target = s.members[1].memberId;
+        const s = await roomOfTwo();
+        const target = TARGET;
         const first = (await store.appendEvent(s.id, removal(target), {
           markRemoved: target,
         }))!;
@@ -163,8 +182,8 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("records nothing when the room is frozen and the append is refused", async () => {
-        const s = await freshSession();
-        const target = s.members[1].memberId;
+        const s = await roomOfTwo();
+        const target = TARGET;
         await store.freezeSession(s.id, Date.now());
 
         const event = await store.appendEvent(s.id, removal(target), {
@@ -180,8 +199,8 @@ Add to `tests/helpers/store-contract.ts`, directly after the `describe("creditin
       });
 
       it("records the member out on a keyed append too", async () => {
-        const s = await freshSession();
-        const target = s.members[1].memberId;
+        const s = await roomOfTwo();
+        const target = TARGET;
 
         const write = await store.appendEventOnce(
           s.id, removal(target), "evict-0001", { markRemoved: target },
@@ -696,13 +715,15 @@ Same file, same `describe` block. These are the input classes the happy path doe
         payload: { text: "after the removal" },
       });
 
+      // No `role`, and the field is `join_code` — both match the `joinThird`
+      // helper at the top of this file. The swarm preset's roles are lead,
+      // helper and observer; there is no "member" role to ask for.
       const invited = await s.creator.call("bellman_invite", {
         session_id: s.sessionId,
         member_id: s.creatorMemberId,
-        role: "member",
       });
       expect(invited.isError, invited.text).toBe(false);
-      const rejoined = await join(third.peer, invited.data.code);
+      const rejoined = await join(third.peer, invited.data.join_code);
       expect(rejoined.isError, rejoined.text).toBe(false);
 
       const fresh = await third.peer.call("bellman_sync", {
@@ -730,8 +751,10 @@ Same file, same `describe` block. These are the input classes the happy path doe
     it("caps the cut handle while the same person's live handle reads on", async () => {
       const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
       const first = await joinThird(s);
-      // The SAME peer joins a second time: one identity, two handles.
-      const second = await joinAgain(s, first.peer);
+      // joinThird connects DEV_KEY.outsider every time, and one bearer key is
+      // one userId — so a second call gives the SAME identity a second member
+      // handle, which is exactly the input this test needs.
+      const second = await joinThird(s);
       await s.creator.call("bellman_evict", {
         session_id: s.sessionId,
         member_id: first.memberId,
@@ -782,7 +805,14 @@ Same file, same `describe` block. These are the input classes the happy path doe
     });
 ```
 
-**`joinAgain` does not exist yet.** Write it beside `joinThird` at the top of the file: issue a fresh invite from the creator, then run the existing two-phase `join` helper for the peer given, returning `{ memberId, cursor, peer }` in `joinThird`'s shape. It must take the peer as an argument so the same identity gets a second handle — that is the whole point of the test.
+**No new helper is needed.** `joinThird` connects `DEV_KEY.outsider` and joins
+on a fresh invite, so calling it twice seats two handles for one identity —
+`u_outsider`. That premise is what makes the test meaningful, and it is pinned
+where it is natural to pin: Task 4's `membersOf` test reads `userId` directly.
+Do not add a helper, a tool or a fixture module here.
+
+A swarm room created by `DEV_KEY.jesse` (team plan) holds 25 members — see the
+entitlement table in `src/auth.ts` — so seating four is within capacity.
 
 - [ ] **Step 3: Add the two R2 guard tests**
 
@@ -1042,7 +1072,30 @@ git commit -m "Cut an evicted member's feed at the removal, and stop long-pollin
   });
 ```
 
-Write `roomWithASocketMember`, `roomWithTwoHandles`, `roomWithAStaleAttachment` and `evictThrough` from the file's existing helpers. `evictThrough` appends a `member_evicted` with `{ markRemoved: memberId }` through the stub, which is what `evictMember` now does. The `2`/`3` literals match how `store-do.ts` justifies using them over `WebSocket.CLOSING`/`CLOSED` — the program may have either WebSocket global.
+Write `roomWithASocketMember`, `roomWithTwoHandles`, `roomWithAStaleAttachment`
+and `evictThrough` from the file's existing helpers.
+
+**Two layers, and this file already uses both.** `evictThrough` appends through
+the **store wrapper** — `store.appendEvent(sessionId, event, { markRemoved })`,
+as that file's existing setup does — because `SessionDO.appendEvent` takes no
+`sessionId`; only the wrapper does. `membersOf` is read off the **DO stub**,
+obtained the way the file already obtains one:
+
+```ts
+    const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
+    await store.appendEvent(sessionId, removalEvent(target.memberId), {
+      markRemoved: target.memberId,
+    });
+    const { memberIds } = await stub.membersOf(target.userId);
+```
+
+The `2`/`3` readyState literals match how `store-do.ts` justifies them over
+`WebSocket.CLOSING`/`CLOSED` — the program may have either WebSocket global.
+
+**Do not change this file's teardown.** It is `evictAllDurableObjects()`, not
+`abortAllDurableObjects()`, and its header explains at length why: abort closes
+every accepted socket, so a test asserting a socket is still OPEN would pass or
+fail on the teardown rather than on the code under test.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 

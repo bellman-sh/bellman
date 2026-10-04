@@ -352,10 +352,23 @@ function sameFile(a: FileId, b: FileId): boolean {
  * happen: eight real processes racing at one stale path, on macOS, elected two
  * coordinators in 1 of 160 trials, and in none of 80 at an empty one.
  */
-function removeStale(path: string, tested: FileId | undefined): "removed" | "gone" | "replaced" {
+function removeStale(path: string, tested: FileId | undefined): "removed" | "gone" | "replaced" | "not-a-socket" {
   const now = identify(path);
   if (!now) return "gone"; // another opener already removed it
   if (!tested || !sameFile(tested, now)) return "replaced";
+  /**
+   * Refuse to unlink anything that is not a socket, whatever the connect said.
+   *
+   * probe() treats ECONNREFUSED as "a socket file nobody is listening on" and names
+   * ENOTSOCK as a path we must not touch — which is right on macOS and wrong on Linux,
+   * where connecting to a REGULAR FILE also gives ECONNREFUSED. So on Linux the errno
+   * alone cannot tell a dead socket from somebody's document, and the branch that
+   * unlinks a stale socket would delete the document. CI caught this; macOS never
+   * could.
+   *
+   * The file type can tell them apart, so it decides rather than the errno.
+   */
+  if (!lstatSync(path, { throwIfNoEntry: false })?.isSocket()) return "not-a-socket";
   try {
     unlinkSync(path);
     return "removed";
@@ -578,6 +591,12 @@ async function elect(opts: BusOptions): Promise<Bus> {
     if (found.kind === "stale") {
       const outcome = removeStale(path, tested);
       if (outcome === "replaced") continue; // someone else is already electing
+      if (outcome === "not-a-socket") {
+        // Linux answers a connect to a regular file with ECONNREFUSED, the same code a
+        // dead socket gives, so probe() cannot tell them apart and this is where the
+        // difference is made. Leave the file; the bus is simply not available here.
+        throw unavailable("filesystem", `${path} exists and is not a socket`);
+      }
       if (outcome === "removed") log(`bus: removed a stale socket at ${path}`);
     }
 

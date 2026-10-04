@@ -1088,11 +1088,28 @@ describe("fetch: websocket upgrade", () => {
       .toEqual({ memberIds: ["m1"], cursor: 2 });
   });
 
-  it("refuses a request that is not an upgrade", async () => {
+  it("refuses a request that is not an upgrade, and says what it wants", async () => {
     const { doi, ctx } = await world();
     const res = await doi.fetch(new Request("https://do/ws?cursor=0"));
     expect(res.status).toBe(426);
+    // The same 426 the route sends, from the same place (#132).
+    expect(res.headers.get("upgrade"), "the 426 names the protocol").toBe("websocket");
     expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("serves an upgrade whose token is not lowercase", async () => {
+    // The Worker builds this request and writes the header itself, so nothing reaches
+    // here cased or listed today. The rule is shared with the route rather than
+    // copied (src/upgrade.ts), and this is what holds this copy to it: a second
+    // comparison reintroduced here would pass every other case in this block.
+    const { doi, ctx } = await world();
+    const res = await doi.fetch(
+      new Request("https://do/ws?cursor=0", {
+        headers: { upgrade: "WebSocket", "x-bellman-members": "m1" },
+      }),
+    );
+    expect(res.status).toBe(101);
+    expect(ctx.sockets).toHaveLength(1);
   });
 
   it("accepts no socket when reading the missed events fails", async () => {

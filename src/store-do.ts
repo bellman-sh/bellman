@@ -16,6 +16,7 @@ import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -508,8 +509,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * of the cap.
    */
   async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("upgrade") !== "websocket") {
-      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    // The same reading as the route's, from the same module (#132). The Worker builds
+    // this request and sets the header itself, so nothing reaches here with `WebSocket`
+    // or a list today — which is the reason to share the rule rather than let a second
+    // copy of it sit here being quietly wrong.
+    if (!wantsWebSocket(request.headers.get("upgrade"))) {
+      return new Response(UPGRADE_REQUIRED.body, {
+        status: UPGRADE_REQUIRED.status,
+        headers: UPGRADE_REQUIRED.headers,
+      });
     }
     const url = new URL(request.url);
     const cursor = Number(url.searchParams.get("cursor"));

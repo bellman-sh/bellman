@@ -141,8 +141,9 @@ door open behind someone who believes it shut".
 
 A `markRemoved(members, memberId, cursor): Member[] | null` beside
 `creditReport`, for its reason: the rule is shared with `MemoryStore` and
-belongs to neither store. `null` means "nothing to write" — an unknown member,
-or one already carrying a cursor, so a replay or a repeat touches no storage.
+belongs to neither store. `null` means "nothing to write" — an unknown member;
+one already carrying a cursor, so a replay or a repeat touches no storage; or,
+added in review, one who has already left (see Amendments after review).
 
 Idempotent on the cursor it already holds, not merely on presence: a second
 eviction of the same member must not move the cut forward, or a creator could
@@ -355,3 +356,35 @@ Every test is to be run against a broken implementation before it is trusted.
   reads stay open to.
 - `delivered_to`'s comment in `bellman_send` (R3).
 - `docs/ARCHITECTURE.md` if it states the membership predicate.
+
+## Amendments after review
+
+Two changes were made after this design was written, both found while
+implementing it, recorded here because each alters a decision above.
+
+**D3 names three cases where `null` means nothing to write, not two.**
+`markRemoved` also returns `null` for a member who has already left. D6 has
+`evictMember` return early for a member whose `leftAt` is set, but that check
+reads the roster once and the append happens later, and a voluntary leave can
+land in between: `leaveRoom` sets `leftAt` through `updateMember`, and
+`removedAtCursor` is not patchable, so neither of the first two cases sees it.
+Without the third, that member would be handed a cut and have its own `leftAt`
+overwritten, which R2 and D6 rule out for a member who chose to go. The guard
+costs the normal path nothing, because `evictMember` only reaches the append when
+`target.leftAt === null`, and it exists for that race. It returns `null` and not
+`leftAt: members[i].leftAt ?? at`, which would keep the leave time and still
+write the cut. The store contract pins it for both stores.
+
+**D5 gains a refusal path, inside the object.** D5 shuts the door on new sockets
+through `membersOf` alone and says there is "no new refusal path to get right".
+That holds for an upgrade that arrives after the removal, and not for one that
+straddles it. The route makes two calls, `membersOf` and then `SessionDO.fetch`
+with the member list in a header, and a removal can commit between them. `fetch`
+would accept a socket on a list that was true when it was made, naming a member
+who is already cut, and nothing would ever close it: the socket-closing step ran
+before the socket existed, and `#wake` delivers to every socket it finds. So
+`fetch` reads the roster itself, in the invocation that accepts, drops any member
+the roster has cut, and answers 403 when none is left, which is the answer the
+route already gives. A member the roster does not hold is kept, as the closing
+step reads it. `worker-tests/ws-delivery.test.ts` pins this by handing the object
+the stale list directly.

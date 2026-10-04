@@ -176,7 +176,8 @@ loses the second.
 **New sockets** — `membersOf` filters members carrying a `removedAtCursor` out
 of `memberIds`. An evictee with no other handle in the room then gets
 `memberIds.length === 0`, which the Worker already answers 403 Forbidden. No
-Worker change, and no new refusal path to get right.
+Worker change, and no new refusal path to get right — review added one, inside
+the object (see Amendments after review).
 
 It filters on `removedAtCursor`, **not** on `isActiveMember`: R2 gives a
 voluntary leaver and a timed-out seat the open feed, and both have `leftAt` set.

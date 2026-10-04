@@ -1,4 +1,4 @@
-import { it, expect, afterEach } from "vitest";
+import { it, expect, afterEach, vi } from "vitest";
 import {
   env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
@@ -513,33 +513,30 @@ it("delivers every queued entry, in the order they were queued", async () => {
     await store.putGrantIfOwned(grant({ key }), "org_mine", { actorUserId: "u_admin" });
   }
   // The second and third write find the first one's marker still due, and the earliest
-  // due time wins, so they arm the alarm for now. It would fire on its own and race the
-  // explicit run below, which then finds nothing scheduled. Park it far ahead; the test
-  // is the one to fire it.
+  // due time wins, so they arm the alarm for now. Left there it fires on its own, and
+  // the drain it runs is the REAL one — `deliveryOff` stubs only the inline attempt — so
+  // it delivers all three rows and leaves nothing scheduled, and the explicit run below
+  // then returns false. Park it far ahead; the test is the one to fire it.
+  //
+  // PARKED UNTIL IT STICKS, which a single setAlarm does not guarantee. `reArm` sets the
+  // earliest due time unconditionally (src/outbox.ts) and these rows' marker is dated
+  // now, so a re-arm landing after the park puts the alarm back to now. CI caught exactly
+  // that: the alarm read 59,997 ms earlier than the park, which is #131, and a park that
+  // is silently lost is what made #131 surface three lines down as
+  // `expected false to be true`. Re-parking converges because the enqueues that arm it
+  // have all returned by here; if it ever stops converging this fails on the park rather
+  // than on the delivery, which is the whole point.
   const parkedAt = Date.now() + 60_000;
-  await runInDurableObject(registry(), (_i: RegistryDO, ctx) => ctx.storage.setAlarm(parkedAt));
-  // #131: this case has been seen failing as `expected false to be true` on the run
-  // below, which is the symptom a park that never landed and an alarm that already
-  // fired SHARE — the run returns false either way. This says which, so the next
-  // sighting starts from a fact.
-  //
-  // Deliberately before the abort and not after, which is what #131 asked for. A read
-  // after it would revive the object inside the very window under suspicion, and
-  // reviving to ask a question can change the answer.
-  //
-  // #131 proposed wrapping the setAlarm in a transaction, on the reasoning that a bare
-  // one carries no guarantee against an abort on its heels. That was measured here on
-  // the versions it names (pool 0.22.0, workerd 1.20260926.1) and is NOT the mechanism:
-  // a bare park survived abortAllDurableObjects() in three runs, survived in three more
-  // where it overwrote an already-committed earlier alarm (no revert to it), and the
-  // transaction form behaved identically. Six overlapping worker programs were all
-  // green. So the cause is still unknown and the transaction was not applied — it would
-  // have implied a finding that does not hold.
-  // The exact time, not merely non-null: the enqueue already armed this alarm for now,
-  // so `not.toBeNull()` would pass on THAT and say nothing about whether the park
-  // landed. Checked by removing the park, which reddens this with the enqueue's own
-  // due time rather than leaving the failure three lines down.
-  expect(await armedAlarm()).toBe(parkedAt);
+  await vi.waitFor(async () => {
+    await runInDurableObject(registry(), (_i: RegistryDO, ctx) => ctx.storage.setAlarm(parkedAt));
+    expect(await armedAlarm()).toBe(parkedAt);
+  }, { timeout: 3000 });
+  // #131 also proposed wrapping the setAlarm in a transaction, reasoning that a bare one
+  // carries no guarantee against an abort on its heels. Measured on the versions it names
+  // (pool 0.22.0, workerd 1.20260926.1), that is not the mechanism: a bare park survived
+  // abortAllDurableObjects() in three runs, survived three more where it overwrote an
+  // already-committed earlier alarm, and the transaction form behaved identically. It is
+  // `reArm` racing the park, and a transaction would not have stopped that either.
   expect(await queued()).toHaveLength(3);
   await abortAllDurableObjects();
 

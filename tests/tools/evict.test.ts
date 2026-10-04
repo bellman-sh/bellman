@@ -4,8 +4,10 @@ import { brief } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
 
 /**
- * A creator removing a member. Reads stay open to the person removed — the
- * history was theirs too — so what changes is writing, and the room's roster.
+ * A creator removing a member. The history stays open to the person removed — it
+ * was theirs too — and the feed stops: what the room says after their removal
+ * does not reach them, and a poll of theirs does not wait for it (#113). Writing
+ * stops as well, and the room's roster changes.
  */
 let h: Harness;
 
@@ -214,11 +216,12 @@ describe("bellman_evict", () => {
     });
   });
 
-  // The description makes two promises about the person removed, and both are
-  // pinned by what happens rather than by the words, so whoever changes the
+  // The description makes promises about the person removed — the history stays
+  // theirs, what follows does not reach them, and removal is not a ban — and each
+  // is pinned by what happens rather than by the words, so whoever changes the
   // behaviour has to come back and change the sentence: these fail when they do.
-  describe("what the person removed keeps", () => {
-    it("keeps returning new events to them, including what is said after", async () => {
+  describe("what the person removed keeps, and what stops", () => {
+    it("stops returning new events to them, while the history stays theirs", async () => {
       const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
       const third = await joinThird(s);
       const out = await s.creator.call("bellman_evict", {
@@ -226,14 +229,6 @@ describe("bellman_evict", () => {
         member_id: third.memberId,
       });
       expect(out.isError, out.text).toBe(false);
-      // The control: they really are out. Writing stopped, and reading is the claim.
-      const refused = await third.peer.call("bellman_send", {
-        session_id: s.sessionId,
-        member_id: third.memberId,
-        type: "message",
-        payload: { text: "still here?" },
-      });
-      expect(refused.isError).toBe(true);
 
       const sent = await s.creator.call("bellman_send", {
         session_id: s.sessionId,
@@ -254,7 +249,291 @@ describe("bellman_evict", () => {
         .map((e) => e.data as { type: string; payload: { text?: string } })
         .filter((d) => d.type === "message")
         .map((d) => d.payload.text);
-      expect(said).toEqual(["said after you were removed"]);
+      // The room went on talking; none of it reaches them.
+      expect(said).toEqual([]);
+
+      // The history is still theirs, including the event that removed them —
+      // so the feed itself says why it stopped (#113 R4).
+      const history = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+        since_cursor: 0,
+        wait_seconds: 0,
+      });
+      expect(history.isError, history.text).toBe(false);
+      const kinds = envelopes(history.data.events).map((e) => (e.data as { type: string }).type);
+      expect(kinds).toContain("member_evicted");
+      expect(kinds).not.toContain("message");
+    });
+
+    it("does not hold their long poll open, because there is nothing coming", async () => {
+      // A pair room, because nothing may follow the removal. In a swarm room the
+      // seat's door is shut after `member_evicted`, and that is announced as an
+      // `invite_revoked` of its own: past the cut and hidden from the member,
+      // but still there for a poll from the cut to find, so every implementation
+      // answers at once — the one that waits as well as the one that does not.
+      const s = await pairUp(h);
+      await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: s.joinerMemberId,
+      });
+
+      // Read up to the cut first, because the poll under test has to START
+      // there. From `joinerCursor` the member_evicted event is still ahead of
+      // it, and the same is true: any implementation answers at once.
+      const upToCut = await s.joiner.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: s.joinerMemberId,
+        since_cursor: s.joinerCursor,
+        wait_seconds: 0,
+      });
+      expect(upToCut.isError, upToCut.text).toBe(false);
+      // The controls: that read did reach the removal, and the record holds
+      // nothing past the cursor it returned, so there is genuinely nothing for
+      // the poll below to wait for. Without them a pass would only show that
+      // something was already waiting.
+      expect(envelopes(upToCut.data.events).map((e) => (e.data as { type: string }).type))
+        .toContain("member_evicted");
+      const cutCursor = Number(upToCut.data.cursor);
+      expect(await h.store.eventsAfter(s.sessionId, cutCursor)).toEqual([]);
+
+      const t0 = Date.now();
+      const synced = await s.joiner.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: s.joinerMemberId,
+        since_cursor: cutCursor,
+        wait_seconds: 3,
+      });
+      const waited = Date.now() - t0;
+
+      expect(synced.isError, synced.text).toBe(false);
+      expect(synced.data.events).toEqual([]);
+      // A cut member that still waited would wake on every append it then
+      // hides — a busy loop against a room it cannot read. Held for its three
+      // seconds it reads as about 3000; answered at once, a few milliseconds.
+      expect(waited).toBeLessThan(1_000);
+    });
+
+    // Review Focus 1.
+    it("does not move their cursor backwards when they ask from past the cut", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+      });
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+        type: "message",
+        payload: { text: "well past their cut" },
+      });
+
+      const ahead = 9_999;
+      const synced = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+        since_cursor: ahead,
+        wait_seconds: 0,
+      });
+
+      expect(synced.isError, synced.text).toBe(false);
+      expect(synced.data.events).toEqual([]);
+      // Capping the RETURNED cursor to the cut would make a client that
+      // round-trips it re-request the same empty range forever.
+      expect(synced.data.cursor).toBe(ahead);
+    });
+
+    // Review Focus 3.
+    it("cuts the old handle only: a fresh code reads the room again", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+      });
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+        type: "message",
+        payload: { text: "after the removal" },
+      });
+
+      // No `role`, and the field is `join_code` — both match the `joinThird`
+      // helper at the top of this file. The swarm preset's roles are lead,
+      // helper and observer; there is no "member" role to ask for.
+      const invited = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+      });
+      expect(invited.isError, invited.text).toBe(false);
+      const rejoined = await join(third.peer, invited.data.join_code);
+      expect(rejoined.isError, rejoined.text).toBe(false);
+
+      const fresh = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: String(rejoined.data.member_id),
+        since_cursor: 0,
+        wait_seconds: 0,
+      });
+      const freshKinds = envelopes(fresh.data.events).map((e) => (e.data as { type: string }).type);
+      expect(freshKinds).toContain("message");
+
+      // The cut is on the handle, not the person. R1: removal is not a ban.
+      const old = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: third.memberId,
+        since_cursor: third.cursor,
+        wait_seconds: 0,
+      });
+      expect(envelopes(old.data.events)
+        .map((e) => (e.data as { type: string }).type)
+        .filter((t) => t === "message")).toEqual([]);
+    });
+
+    // Review Focus 2, the poll half. The socket half is Task 4.
+    it("caps the cut handle while the same person's live handle reads on", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const first = await joinThird(s);
+      // joinThird connects DEV_KEY.outsider every time, and one bearer key is
+      // one userId — so a second call gives the SAME identity a second member
+      // handle, which is exactly the input this test needs.
+      const second = await joinThird(s);
+      // The control for that premise, read from the record: two handles, one
+      // person. Without it a room that quietly gave the second join the first's
+      // seat would turn this into a test of nothing.
+      expect(second.memberId).not.toBe(first.memberId);
+      const room = await h.store.getSession(s.sessionId);
+      const owners = room!.members
+        .filter((m) => m.memberId === first.memberId || m.memberId === second.memberId)
+        .map((m) => m.userId);
+      expect(owners).toHaveLength(2);
+      expect(new Set(owners).size).toBe(1);
+      await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: first.memberId,
+      });
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+        type: "message",
+        payload: { text: "to whoever is left" },
+      });
+
+      const onCut = await first.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: first.memberId,
+        since_cursor: first.cursor, wait_seconds: 0,
+      });
+      const onLive = await first.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: second.memberId,
+        since_cursor: second.cursor, wait_seconds: 0,
+      });
+
+      const texts = (r: typeof onCut) => envelopes(r.data.events)
+        .map((e) => e.data as { type: string; payload: { text?: string } })
+        .filter((d) => d.type === "message").map((d) => d.payload.text);
+      expect(texts(onCut)).toEqual([]);
+      expect(texts(onLive)).toEqual(["to whoever is left"]);
+    });
+
+    // Review Focus 5.
+    it("still serves their history after the removal closed the room", async () => {
+      // A pair room closes when its last active member goes, and the creator is
+      // active until they leave: removing the joiner alone leaves the room open.
+      // So the creator leaves first, as in the closing case above, and the
+      // removal is then what empties the room. bellman_sync has no closed guard
+      // on reads.
+      const s = await pairUp(h);
+      const left = await s.creator.call("bellman_leave", {
+        session_id: s.sessionId,
+        member_id: s.creatorMemberId,
+      });
+      // The control: the joiner is still in, so the closing below is the
+      // removal's doing and not the creator's leave.
+      expect(left.data.session_status).toBe("active");
+      const out = await s.creator.call("bellman_evict", {
+        session_id: s.sessionId,
+        member_id: s.joinerMemberId,
+      });
+      expect(out.data.session_status).toBe("closed");
+
+      const history = await s.joiner.call("bellman_sync", {
+        session_id: s.sessionId,
+        member_id: s.joinerMemberId,
+        since_cursor: 0,
+        wait_seconds: 0,
+      });
+
+      expect(history.isError, history.text).toBe(false);
+      expect(history.data.session_status).toBe("closed");
+      // The removal itself, not merely some event: the cut keeps its own
+      // announcement, and a closed room does not change that.
+      expect(envelopes(history.data.events).map((e) => (e.data as { type: string }).type))
+        .toContain("member_evicted");
+    });
+
+    it("leaves a member who LEFT reading the room, feed and all", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      await third.peer.call("bellman_leave", {
+        session_id: s.sessionId, member_id: third.memberId,
+      });
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId, member_id: s.creatorMemberId,
+        type: "message", payload: { text: "after they left of their own accord" },
+      });
+
+      const synced = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: third.memberId,
+        since_cursor: third.cursor, wait_seconds: 0,
+      });
+      // R2: leaving is a choice, and the open feed is deliberate there.
+      expect(envelopes(synced.data.events)
+        .map((e) => e.data as { type: string; payload: { text?: string } })
+        .filter((d) => d.type === "message")
+        .map((d) => d.payload.text)).toEqual(["after they left of their own accord"]);
+    });
+
+    it("does not tell the room which cursor cut a member", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      const out = await s.creator.call("bellman_evict", {
+        session_id: s.sessionId, member_id: third.memberId,
+      });
+      expect(out.isError, out.text).toBe(false);
+
+      // The one surface that ships a member's CURRENT record is a confirm's
+      // roster, which lists everyone the room has held, departed included — so
+      // it takes a joiner after the removal for the removed handle to be on it
+      // with its cut already recorded. Not `bellman_whoami`, which is the
+      // bridge's own tool and answers about the caller, and not a replayed
+      // member_joined payload, which is a snapshot taken before any cut exists.
+      const invited = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId, member_id: s.creatorMemberId,
+      });
+      expect(invited.isError, invited.text).toBe(false);
+      const rejoined = await join(third.peer, invited.data.join_code);
+      expect(rejoined.isError, rejoined.text).toBe(false);
+      const roster = rejoined.data.members as Record<string, unknown>[];
+
+      const removed = roster.find((m) => m.member_id === third.memberId);
+      const live = roster.find((m) => m.member_id === s.creatorMemberId);
+      // The controls: the removed handle is on this roster, and as departed, so
+      // what is absent below is about its cut and not about a roster that left
+      // it out.
+      expect(removed, "the removed member is on the roster").toBeDefined();
+      expect(removed!.active).toBe(false);
+      expect(live, "a member still in is on the roster").toBeDefined();
+
+      // The point is not secrecy for its own sake: the roster already says a
+      // member is departed. It is that no client needs the exact cursor at
+      // which another member stopped being able to read (#113 D8).
+      const serialized = JSON.stringify(rejoined.data);
+      expect(serialized).not.toContain("removedAtCursor");
+      expect(serialized).not.toContain("removed_at_cursor");
+      // A leak need not be called either of those, so the shape is compared as
+      // well: a removed member's entry carries nothing a live one's does not.
+      expect(Object.keys(removed!).sort()).toEqual(Object.keys(live!).sort());
     });
 
     it("is not a ban: a fresh code seats them again, under a new handle", async () => {
@@ -328,6 +607,28 @@ describe("bellman_evict", () => {
 
       expect(doc).toContain("Remove someone from a room you created");
       expect(doc).toContain("retires the join code for that member's seat");
+    });
+
+    it("no longer promises the person removed the room's new events", async () => {
+      const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+      const doc = tools.find((t) => t.name === "bellman_evict")!.description!.replace(/\s+/g, " ");
+
+      expect(doc).toContain("The history stays readable to the person removed");
+      expect(doc).toContain("new events do not reach them");
+      // The sentence #112 shipped. It was true then and is false now.
+      expect(doc).not.toContain("keeps returning new events");
+      expect(doc).not.toContain("removal does not keep later messages from them");
+    });
+
+    // The other half of the same promise, from the side of the agent it is made
+    // about: a removed member's own bellman_sync is where the feed stops, and the
+    // description it reads there should say so, including that waiting is pointless.
+    it("tells a removed member's agent, in bellman_sync's own description, that the feed stops", async () => {
+      const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+      const doc = tools.find((t) => t.name === "bellman_sync")!.description!.replace(/\s+/g, " ");
+
+      expect(doc).toContain("up to and including the member_evicted event that removed you");
+      expect(doc).toContain("wait_seconds does not hold the request then");
     });
 
     // The description once said this path "changes nothing". It shuts a live door:

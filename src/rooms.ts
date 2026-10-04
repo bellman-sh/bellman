@@ -158,10 +158,12 @@ export async function touchMember(
  * included. `evictMember` is creator-only and deliberately outside the verb
  * set, and a second removal path must not be looser than the first.
  *
- * The removal is final. A reclaimed member can still read its history and must
- * redeem a fresh code to write again, the same position an evicted one is in.
- * Making it reversible instead would mean a `pair` room could hold three
- * writers the moment the vanished peer reopened its laptop.
+ * The removal is final. A reclaimed member reads on and must redeem a fresh code
+ * to write again. An evicted one is in the same position for writing and no
+ * further: a creator's removal also cuts what it reads after the removal (#113),
+ * and a timeout, being the server's guess, does not (R2). Making it reversible
+ * instead would mean a `pair` room could hold three writers the moment the
+ * vanished peer reopened its laptop.
  *
  * Unlike an eviction this retires no join code — freeing the seat is the whole
  * point — and it never closes the room: the joiner that caused it is already
@@ -178,6 +180,11 @@ export async function announceReclaimed(
     // unwound, as evictMember tolerates it: the seat is already given. The
     // store refuses to seat into a frozen room at all, so reaching here frozen
     // means the room froze in the gap after the seating.
+    //
+    // No `markRemoved` on this append, on purpose (#113, R2): a timeout is the
+    // server guessing a member is gone, not a creator deciding they should be
+    // out, so the seat's old occupant keeps the open feed. Only `member_evicted`
+    // cuts, and nobody should add a cut here for symmetry with it.
     await store.appendEvent(session.id, {
       type: "member_timed_out",
       // "system" for the same reason member_evicted uses it: no member handle

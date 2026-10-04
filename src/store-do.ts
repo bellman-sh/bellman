@@ -561,7 +561,70 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and replying to a socket already closed does not throw (measured).
    */
   async webSocketClose(ws: WebSocket, _code: number, _reason: string, _wasClean: boolean): Promise<void> {
+    // The answer first, and the stamp after. Completing the peer's close is what
+    // this handler is FOR, it takes milliseconds, and a stamp that threw before
+    // it would cost the client the 10 s wait and an unclean 1006 described above.
     ws.close(1000, "closing");
+    await this.#stampClosing(ws);
+  }
+
+  /**
+   * Record that the members this socket carried were here, as it goes (#152).
+   *
+   * Presence has three signals and this is the seam between two of them. While
+   * the socket is open `connectedMembers` answers for it, and that beats the
+   * window. The instant it closes the socket stops vouching — correctly, since
+   * reading the live list is the whole design — and the member falls back to
+   * `lastSeenAt`. For a member fed by this socket or by the local bus that field
+   * has not moved since it joined, because nothing it does calls `bellman_sync`
+   * or `bellman_send`, the only two things that touch it (src/server.ts). So it
+   * read stale the moment its socket dropped, with its window already spent, and
+   * the next contested `bellman_confirm` took its seat.
+   *
+   * Here rather than on the upgrade, which was the other candidate. This covers a
+   * socket that has been open for hours, where a stamp at connect buys one window
+   * and then expires; and it records a fact rather than predicting one, because
+   * the member demonstrably was there a moment ago. A DROP reaches this handler
+   * too, as 1006 with wasClean false, so it is not only polite closes. What it
+   * cannot cover is a socket the runtime never reports at all, which would need
+   * the upgrade stamp as well.
+   *
+   * `connectedAmong` and not the attachment's ids directly, so this stamps
+   * exactly whom the socket was vouching FOR. The attachment is a snapshot taken
+   * at upgrade, and a member that joined the room later is served by the same
+   * socket without being named in it — the reason that function exists.
+   *
+   * Closed and frozen rooms are skipped, `touchMember`'s rule (src/rooms.ts). A
+   * closed room's record is over, and a freeze is meant to cost nobody their
+   * place so nobody needs defending during one.
+   *
+   * One put for every member, not one each: this is a read-modify-write of the
+   * whole session blob, and a socket serving several members would otherwise pay
+   * it several times. No reArm, for `updateMember`'s reason — `lastSeenAt`
+   * reaches `nextTickAt` not at all.
+   *
+   * Swallowed on failure, `touchMember`'s rule again: this rides on somebody
+   * else's teardown, and a liveness write that failed must not turn a close into
+   * an error. The cost of losing one is the member looking quiet, which is the
+   * behaviour before this existed.
+   */
+  async #stampClosing(ws: WebSocket): Promise<void> {
+    try {
+      const att = ws.deserializeAttachment() as Partial<SocketAttachment> | null;
+      const ids = att?.memberIds;
+      if (!Array.isArray(ids) || ids.length === 0) return;
+      const s = await this.stored();
+      if (!s || s.closed || s.frozenAt !== null) return;
+      const stamped = connectedAmong(s.members, ids);
+      if (stamped.size === 0) return;
+      const now = Date.now();
+      await this.ctx.storage.put("session", {
+        ...s,
+        members: s.members.map((m) => (stamped.has(m.memberId) ? { ...m, lastSeenAt: now } : m)),
+      });
+    } catch (err) {
+      console.error("socket close stamp failed:", err);
+    }
   }
 
   /**

@@ -513,12 +513,28 @@ vouches for it.
   definition of a live socket, shared with `wake()`: the runtime keeps listing a
   socket this object has closed until its peer acknowledges.
 
-What the window still covers for a socket-fed member is the gap after its socket
-drops. The object stops listing the socket at once, `lastSeenAt` is whatever it
-last was, and the member reads stale until its client reconnects; a contested
-join landing in that gap would take the seat. Stamping `lastSeenAt` when a
-socket closes would narrow it, at one session-record write per close, and is not
-done.
+**The gap after a socket drops is closed (#152).** The object stops listing the
+socket at once, which is correct — only a listed socket says a member is there
+*now* — but `lastSeenAt` was then whatever it last was, and for a member that
+only listens that can be its join. It read stale the instant its socket went,
+with no window at all where a polling member has ten minutes, and a contested
+join landing there took the seat.
+
+`SessionDO.webSocketClose` now stamps `lastSeenAt` for the members the closing
+socket was vouching for, so a drop leaves a full window behind it. Three things
+make that the right hook rather than the upgrade: a DROP arrives there too, as
+1006 with `wasClean` false, so it is not only polite closes; the handler already
+ran and already woke the object to answer the close, so the cost is one
+session-record write per teardown; and it covers a socket held for hours, where
+a stamp at connect would have expired. It stamps `connectedAmong`'s answer and
+not the attachment's ids, so a member that joined after the upgrade — served by
+the same socket, absent from its snapshot — is stamped too. Closed and frozen
+rooms are skipped, `touchMember`'s rule.
+
+The stamp says the member WAS there, which is a fact about a moment that has
+passed; presence stays derived, and only a listed socket says it is there now.
+What remains uncovered is a socket the runtime never reports at all, which would
+need the upgrade stamp as well and is not done.
 
 ## 6. Identity, plans and entitlements
 

@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
+import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
 
 let h: Harness;
 
@@ -370,6 +371,59 @@ describe("send / sync / leave mechanics", () => {
     expect(res.isError).toBe(true);
     expect(res.text).toContain("payload too large");
     expect(res.text).toContain("Send a summary");
+  });
+
+  /**
+   * #136: the depth bound applies to EVERY send, not only a keyed one.
+   *
+   * MAX_PAYLOAD_CHARS does not close this: six characters a level means a
+   * payload can stay well under 20,000 and still nest deeper than a projected
+   * event's own JSON.stringify can serialize. Such a row is durable, so every
+   * later socket replay that crosses its cursor fails again — the room goes
+   * permanently unwatchable over /ws, and the only symptom is an upgrade that
+   * keeps failing. Closed at the door, which is the only place a fix does not
+   * have to choose between a partial replay and a migration.
+   */
+  it("rejects a payload nested past the depth bound, with or without a key", async () => {
+    const p = await pairUp(h);
+    const deep = (levels: number): Record<string, unknown> => {
+      let inner: unknown = 1;
+      for (let i = 0; i < levels; i++) inner = { a: inner };
+      return inner as Record<string, unknown>;
+    };
+    const send = (extra: Record<string, unknown>) => p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "message", payload: deep(MAX_PAYLOAD_DEPTH + 1), ...extra,
+    });
+
+    for (const extra of [{}, { idempotency_key: "deep-0001" }]) {
+      const res = await send(extra);
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain(String(MAX_PAYLOAD_DEPTH));
+      expect(res.text).toMatch(/nests deeper|flatten/i);
+    }
+
+    // Refused at the door, so nothing landed to poison a later replay.
+    const sync = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    const messages = envelopes(sync.data.events)
+      .map((e) => e.data as { type: string })
+      .filter((e) => e.type === "message");
+    expect(messages).toHaveLength(0);
+  });
+
+  /** One level shallower is ordinary content and still gets through. */
+  it("accepts a payload at exactly the depth bound", async () => {
+    const p = await pairUp(h);
+    let inner: unknown = 1;
+    for (let i = 0; i < MAX_PAYLOAD_DEPTH; i++) inner = { a: inner };
+
+    const res = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "message", payload: inner as Record<string, unknown>,
+    });
+    expect(res.isError).toBe(false);
   });
 
   it("holds a long-poll open and resolves it the moment an event lands", async () => {

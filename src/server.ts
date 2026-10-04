@@ -19,14 +19,15 @@ import {
   CONNECT_TOKEN_TTL, JOIN_CODE_TTL,
   type AppendExtras, type BellmanStore, type EventWrite,
 } from "./store.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./idempotency.js";
+import {
+  assertPayloadDepth, MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError,
+} from "./payload.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 
 const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call timeouts
-const MAX_PAYLOAD_CHARS = 20_000;
 
 /** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
 const SEND_KINDS = [
@@ -675,7 +676,7 @@ Args:
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
-  - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized
+  - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Both bounds matter: a deeply nested payload can be small and still be undeliverable, so flatten rather than nest.
   - ref_id: required for action_response
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
@@ -711,6 +712,33 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // each kind needs is SEND_VERB's business, at the top of the file.
       const denial = denyVerb(session, me, SEND_VERB[type]);
       if (denial) return fail(denial);
+
+      // Depth before length, because length cannot stand in for it: `{"a":`
+      // costs about six characters a level, so a payload can pass the length
+      // bound and still nest past where a projected event's own JSON.stringify
+      // overflows — one level deeper than this handler's, inside publicEvent's
+      // wrapper. Such a row is durable, and SessionDO.fetch projects every
+      // missed event with no per-event guard, so one of them makes the room
+      // unwatchable over /ws forever: every later connect from before its
+      // cursor replays it and fails again (#136). The door is the only place a
+      // fix does not have to choose between shipping a partial replay and
+      // migrating stored rows.
+      //
+      // Applied to every send. It used to ride along with the fingerprint,
+      // which runs only for a keyed one, and the asymmetry was recorded as a
+      // ruling — read as costing the sender a retry, when it cost the room its
+      // replay.
+      try {
+        assertPayloadDepth(payload);
+      } catch (err) {
+        if (err instanceof PayloadTooDeepError) {
+          return fail(
+            `payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels, which cannot be delivered or replayed. ` +
+            `Flatten it — send the deep part as text, or as an artifact that names where it came from.`
+          );
+        }
+        throw err;
+      }
 
       const serialized = JSON.stringify(payload);
       if (serialized.length > MAX_PAYLOAD_CHARS) {
@@ -812,22 +840,14 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       let event: SessionEvent;
       let replayed = false;
       if (idempotency_key) {
-        let write: EventWrite;
-        try {
-          write = await s.appendEventOnce(session_id, draft, idempotency_key, extras);
-        } catch (err) {
-          // An idempotency key means the payload has to be fingerprinted, and a
-          // payload this deeply nested cannot be. Said here rather than left to
-          // surface raw, because the caller can act on it: flatten the payload,
-          // or send without a key and lose only the retry protection.
-          if (err instanceof PayloadTooDeepError) {
-            return fail(
-              `payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels, so it cannot be fingerprinted for idempotency. ` +
-              `Flatten it, or send without idempotency_key.`
-            );
-          }
-          throw err;
-        }
+        // No PayloadTooDeepError catch here any more. `appendEventOnce`
+        // fingerprints, `canonical` throws that on a payload past the bound,
+        // and this used to translate it — which is how the bound came to be
+        // enforced only on keyed sends. The door above now refuses every such
+        // payload before the append, and tests/payload.test.ts holds the two
+        // walks to the same bound, so this branch can no longer see one.
+        const write: EventWrite =
+          await s.appendEventOnce(session_id, draft, idempotency_key, extras);
         if (write.outcome === "conflict") {
           return fail(
             `idempotency_key "${idempotency_key}" was already used for a different message. ` +

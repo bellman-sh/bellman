@@ -3,12 +3,8 @@
  * reached — it imports `cloudflare:workers`. Same reason grant-index.ts exists.
  */
 import { describe, it, expect } from "vitest";
-import {
-  fingerprint,
-  idempotencyKey,
-  MAX_PAYLOAD_DEPTH,
-  PayloadTooDeepError,
-} from "../src/idempotency.js";
+import { fingerprint, idempotencyKey } from "../src/idempotency.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 import type { SessionEvent } from "../src/types.js";
 
 const draft = (over: Partial<Omit<SessionEvent, "cursor" | "at">> = {}) => ({

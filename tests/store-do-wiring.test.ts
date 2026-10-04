@@ -75,7 +75,7 @@ vi.stubGlobal("Response", class extends NodeResponse {
 import * as storeDo from "../src/store-do.js";
 import type { BellmanEnv } from "../src/store-do.js";
 import type { Member, Session } from "../src/types.js";
-import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/idempotency.js";
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 import { publicEvent } from "../src/public-event.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 

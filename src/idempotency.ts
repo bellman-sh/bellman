@@ -1,3 +1,4 @@
+import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "./payload.js";
 import type { SessionEvent } from "./types.js";
 
 /**
@@ -45,6 +46,12 @@ export const idempotencyKey = (memberId: string, key: string): string =>
  * print with `0` because JSON cannot tell them apart. A payload nested deeper
  * than `MAX_PAYLOAD_DEPTH` throws `PayloadTooDeepError`.
  *
+ * That bound and that error live in payload.ts, because `bellman_send` applies
+ * the same bound at the door on every send, keyed or not — this walk runs only
+ * where a print is wanted, and an unkeyed send that skipped it could store a
+ * payload no projected event could serialize (#136). The two walks must refuse
+ * the same payloads; tests/payload.test.ts is what holds them to it.
+ *
  * The print is stored, and a change to canonicalization invalidates every one
  * already written, so retries in flight across that deploy would read as
  * conflicts — such a change needs a deliberate migration decision, not a
@@ -53,32 +60,6 @@ export const idempotencyKey = (memberId: string, key: string): string =>
  */
 export function fingerprint(e: Omit<SessionEvent, "cursor" | "at">): string {
   return JSON.stringify([e.type, e.fromMemberId, e.refId, canonical(e.payload)]);
-}
-
-/**
- * Deep enough that no brief, message or artifact reaches it, and far below the
- * stack floor of any runtime this runs on — an unguarded canonical() throws
- * from about depth 2,120 on Node 22, and Workers' V8 differs.
- */
-export const MAX_PAYLOAD_DEPTH = 64;
-
-/**
- * A payload nested deeper than `MAX_PAYLOAD_DEPTH`.
- *
- * Typed, rather than the `RangeError` an unguarded recursion would raise: the
- * tool layer has to tell this apart from a genuine bug to refuse the send with
- * a message that says what to change. Thrown, never truncated — a print that
- * silently dropped everything below some depth would make two different
- * payloads agree, which is the collision this whole module exists to avoid.
- */
-export class PayloadTooDeepError extends Error {
-  readonly depth: number;
-
-  constructor(depth: number) {
-    super(`payload nests deeper than ${MAX_PAYLOAD_DEPTH} levels`);
-    this.name = "PayloadTooDeepError";
-    this.depth = depth;
-  }
 }
 
 /**

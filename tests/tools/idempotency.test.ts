@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
-import { MAX_PAYLOAD_DEPTH } from "../../src/idempotency.js";
+import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
 
 let h: Harness;
 
@@ -178,40 +178,44 @@ describe("bellman_send with an idempotency_key", () => {
   });
 
   /**
-   * The addition this task's brief does not contain. `fingerprint` (Task 1)
-   * throws `PayloadTooDeepError` on a payload nested past `MAX_PAYLOAD_DEPTH`,
-   * and `appendEventOnce` calls it before any write, so the throw would
-   * otherwise surface raw from a keyed send. The handler turns it into a
-   * refusal the caller can act on: flatten the payload, or drop the key.
+   * `fingerprint` throws `PayloadTooDeepError` on a payload nested past
+   * `MAX_PAYLOAD_DEPTH`, and `appendEventOnce` calls it before any write, so
+   * the throw would otherwise surface raw from a keyed send. The handler turns
+   * it into a refusal the caller can act on.
    *
-   * The asymmetry the next test pins is deliberate, not an oversight: WITH a
-   * key the payload must be fingerprinted and this one cannot be, so it is
-   * refused; WITHOUT a key there is nothing to fingerprint, so the identical
-   * payload is accepted. That is a ruling, not something to smooth over.
+   * The asymmetry these two tests used to pin — refused WITH a key, accepted
+   * WITHOUT one — was a ruling, and #136 overturned it. It was made on the
+   * reading that an unprojectable payload costs only its sender a retry. It
+   * costs the room its replay: the row is durable, and every later socket
+   * connect from before its cursor fails on it again. Both halves are refused
+   * now, and the depth bound is applied at the door for every send rather than
+   * only where a fingerprint happens to need it.
+   *
+   * One message for both paths now, where there used to be a refusal on one
+   * and a delivery on the other. The key stops being part of the remedy: the
+   * old text offered "send without idempotency_key", which worked only while
+   * the unkeyed send was the one that got through.
    */
-  it("refuses a too-deep payload sent WITH a key, naming the depth", async () => {
+  it("refuses a too-deep payload identically with and without a key", async () => {
     const p = await pairUp(h);
-    const res = await p.joiner.call("bellman_send", {
+    const send = (extra: Record<string, unknown>) => p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "message", payload: deepPayload(MAX_PAYLOAD_DEPTH + 1),
-      idempotency_key: KEY,
+      type: "message", payload: deepPayload(MAX_PAYLOAD_DEPTH + 1), ...extra,
     });
 
-    expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/flatten|depth/i);
-    expect(res.text).toContain(String(MAX_PAYLOAD_DEPTH));
+    const keyed = await send({ idempotency_key: KEY });
+    const unkeyed = await send({});
+
+    for (const res of [keyed, unkeyed]) {
+      expect(res.isError).toBe(true);
+      expect(res.text).toContain(String(MAX_PAYLOAD_DEPTH));
+      expect(res.text).toMatch(/flatten/i);
+      // Dropping the key is no longer a way through, so it must not be offered.
+      expect(res.text).not.toMatch(/idempotency_key/);
+    }
+    expect(unkeyed.text).toBe(keyed.text);
   });
 
-  /** The other half of the asymmetry: no key means nothing to fingerprint. */
-  it("accepts the same too-deep payload sent WITHOUT a key", async () => {
-    const p = await pairUp(h);
-    const res = await p.joiner.call("bellman_send", {
-      session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "message", payload: deepPayload(MAX_PAYLOAD_DEPTH + 1),
-    });
-
-    expect(res.isError).toBe(false);
-  });
 
   /**
    * REVIEW FOCUS 5: the guards run before the append, so a retry into an empty

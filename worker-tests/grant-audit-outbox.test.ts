@@ -516,8 +516,30 @@ it("delivers every queued entry, in the order they were queued", async () => {
   // due time wins, so they arm the alarm for now. It would fire on its own and race the
   // explicit run below, which then finds nothing scheduled. Park it far ahead; the test
   // is the one to fire it.
-  await runInDurableObject(registry(), (_i: RegistryDO, ctx) =>
-    ctx.storage.setAlarm(Date.now() + 60_000));
+  const parkedAt = Date.now() + 60_000;
+  await runInDurableObject(registry(), (_i: RegistryDO, ctx) => ctx.storage.setAlarm(parkedAt));
+  // #131: this case has been seen failing as `expected false to be true` on the run
+  // below, which is the symptom a park that never landed and an alarm that already
+  // fired SHARE — the run returns false either way. This says which, so the next
+  // sighting starts from a fact.
+  //
+  // Deliberately before the abort and not after, which is what #131 asked for. A read
+  // after it would revive the object inside the very window under suspicion, and
+  // reviving to ask a question can change the answer.
+  //
+  // #131 proposed wrapping the setAlarm in a transaction, on the reasoning that a bare
+  // one carries no guarantee against an abort on its heels. That was measured here on
+  // the versions it names (pool 0.22.0, workerd 1.20260926.1) and is NOT the mechanism:
+  // a bare park survived abortAllDurableObjects() in three runs, survived in three more
+  // where it overwrote an already-committed earlier alarm (no revert to it), and the
+  // transaction form behaved identically. Six overlapping worker programs were all
+  // green. So the cause is still unknown and the transaction was not applied — it would
+  // have implied a finding that does not hold.
+  // The exact time, not merely non-null: the enqueue already armed this alarm for now,
+  // so `not.toBeNull()` would pass on THAT and say nothing about whether the park
+  // landed. Checked by removing the park, which reddens this with the enqueue's own
+  // due time rather than leaving the failure three lines down.
+  expect(await armedAlarm()).toBe(parkedAt);
   expect(await queued()).toHaveLength(3);
   await abortAllDurableObjects();
 

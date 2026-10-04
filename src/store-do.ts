@@ -17,6 +17,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
+import { reviving } from "./rpc-error.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -1945,16 +1946,26 @@ export interface BellmanEnv {
 export class DurableObjectStore implements BellmanStore {
   constructor(private env: BellmanEnv) {}
 
+  /**
+   * The three ways into a Durable Object, and every one of them `reviving`.
+   *
+   * This is the whole seam between the Worker's realm and the objects', so wrapping
+   * it here covers every method on this facade — including ones added later, which a
+   * per-method wrapper would not. workerd reconstructs a thrown error without its
+   * prototype, so without this an `instanceof` outside an object never matches a
+   * class thrown inside one (#101). `reviving` is a no-op on anything that does not
+   * need it, so there is no call it is wrong for.
+   */
   private session(id: string) {
-    return this.env.SESSION.get(this.env.SESSION.idFromName(id));
+    return reviving(this.env.SESSION.get(this.env.SESSION.idFromName(id)));
   }
 
   private get registry() {
-    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+    return reviving(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry")));
   }
 
   private audit(orgId: string) {
-    return this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId));
+    return reviving(this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId)));
   }
 
   /**

@@ -6,6 +6,9 @@
  */
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  openRoomSocket, type RoomSocketState, type WebSocketConstructor, type Why,
+} from "../src/room-socket.js";
 
 // Defaults to the local Node server; point BELLMAN_URL at a wrangler dev
 // instance or the deployed Worker to run the same proof against those.
@@ -37,6 +40,16 @@ async function call(c: Client, name: string, args: Record<string, unknown>): Pro
 function assert(cond: boolean, label: string): void {
   console.log(`${cond ? "✅" : "❌"} ${label}`);
   if (!cond) process.exitCode = 1;
+}
+
+/** Whether `check` came true within `ms`. */
+async function until(check: () => boolean, ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return true;
 }
 
 const jesseBrief = {
@@ -133,7 +146,7 @@ async function main(): Promise<void> {
   if (runtime !== "workers") {
     console.log("\n— /ws delivery across eviction — skipped: needs Durable Objects (wrangler dev or a deployment)");
   } else {
-    console.log("\n— /ws delivery across eviction —");
+    console.log("\n— /ws delivery across eviction, with the keepalive —");
     const wsBase = new URL(URL_.toString());
     wsBase.protocol = wsBase.protocol === "https:" ? "wss:" : "ws:";
     wsBase.pathname = "/ws";
@@ -151,24 +164,51 @@ async function main(): Promise<void> {
         sock.addEventListener("error", () => resolve(false), { once: true });
       });
 
-    const nextFrame = (sock: WebSocket, ms: number): Promise<{ payload?: { text?: string } } | undefined> =>
-      new Promise((resolve) => {
-        const t = setTimeout(() => resolve(undefined), ms);
-        sock.addEventListener("message", (e) => {
-          clearTimeout(t);
-          resolve(JSON.parse(String((e as MessageEvent).data)));
-        }, { once: true });
-      });
-
     // A bad bearer is refused at the handshake; no socket opens.
     const bad = openSocket("qk_not_a_real_key", jSession, 0);
     const badOpened = await opens(bad);
     if (badOpened) bad.close();
     assert(!badOpened, "/ws refuses a bad bearer");
 
+    // The socket a bridge holds is room-socket.ts's, and it is the one driven here, at its default tuning. A raw
+    // WebSocket cannot be what is tested: sent nothing for the whole idle below, it would exercise no keepalive, and
+    // an "it still delivers" check on it would pass with the server's `ping` changed to anything. The same goes for
+    // sending "ping" by hand, which would check the server against a fourth copy of the literal and not against the
+    // one in src/room-socket.ts. So Node's WebSocket is wrapped only to record the text frames each way, and the
+    // module does the rest.
+    const frames = { sent: [] as string[], received: [] as string[] };
+    const NodeWebSocket = globalThis.WebSocket as unknown as WebSocketConstructor;
+    class RecordingWebSocket extends NodeWebSocket {
+      constructor(url: string, init: { headers: Record<string, string> }) {
+        super(url, init);
+        this.addEventListener("message", (e: { data?: unknown }) => frames.received.push(String(e.data)));
+      }
+      override send(data: string): void {
+        frames.sent.push(data);
+        super.send(data);
+      }
+    }
+    const states: Array<[RoomSocketState, Why]> = [];
+    const heard: Array<{ cursor: number; text?: string }> = [];
+    let polled = 0;
     // Opened at the cursor jesse has read to, so nothing is replayed.
-    const ws = openSocket("qk_dev_jesse", jSession, jCursor);
-    const opened = await opens(ws);
+    const room = openRoomSocket({
+      url: URL_.toString(),
+      credential: "qk_dev_jesse",
+      sessionId: jSession,
+      cursor: jCursor,
+      onEvent: (event) => heard.push({ cursor: event.cursor, text: (event.payload as { text?: string } | null)?.text }),
+      // The fallback is required and is not wanted: a socket that needed it did not do what this leg is for. It
+      // fails, which the socket retries and this counts.
+      poll: async () => {
+        polled += 1;
+        throw new Error("smoke: this room should not need polling");
+      },
+      onState: (state, why) => states.push([state, why]),
+      tuning: { WebSocket: RecordingWebSocket },
+    });
+
+    const opened = await until(() => room.state === "open", 10_000);
     assert(opened, "/ws upgrades a member");
 
     if (opened) {
@@ -177,24 +217,45 @@ async function main(): Promise<void> {
       // test (worker-tests/ws-delivery.test.ts) proves the mechanism; this
       // proves it against a real deployment.
       //
-      // 30 s, not the ~10 s Cloudflare documents for production. Under
+      // 35 s: past the 30 s `wrangler dev` needs to evict an idle object, and past this module's first keepalive,
+      // which it sends after 30 s of silence. Not the ~10 s Cloudflare documents for production: under
       // `wrangler dev` an idle object was still the same instance after 15 s
       // (its constructor ran once, counted from the log) and a new one after
       // 25 s and after 30 s, so 15 s would pass here without any eviction
-      // having happened.
-      await new Promise((r) => setTimeout(r, 30_000));
+      // having happened. The runtime answers the ping without waking the object, so it falls inside the idle
+      // and does not end it.
+      await new Promise((r) => setTimeout(r, 35_000));
 
-      const arriving = nextFrame(ws, 10_000);
+      // What a drifted literal looks like: the server closes the socket with 1003 at the first "ping" (or
+      // never answers it), and the module reports `connecting (dropped)` or `(silent)` and reconnects. A
+      // delivery check alone cannot see that, because the reconnect replays and the event still arrives.
+      // Asserted separately, so each says what it is.
+      assert(
+        frames.sent.length === 1 && frames.sent[0] === "ping",
+        `the keepalive was sent once, and as "ping" (sent: ${JSON.stringify(frames.sent)})`
+      );
+      assert(
+        frames.received.length === 1 && frames.received[0] === "pong",
+        `and was answered "pong" by the server (received: ${JSON.stringify(frames.received)})`
+      );
+      assert(
+        states.length === 1 && states[0][0] === "open" && room.state === "open" && polled === 0,
+        `the connection never left open through the idle (states: ${JSON.stringify(states)}, polls: ${polled})`
+      );
+
       await call(peer, "bellman_send", {
         session_id: jSession, member_id: pMember, type: "message",
         payload: { text: "after eviction" },
       });
-      const frame = await arriving;
-      const delivered = frame?.payload?.text === "after eviction";
+      const delivered = await until(() => heard.some((e) => e.text === "after eviction"), 10_000);
       assert(delivered, "/ws delivers after the object was evicted and revived");
-      if (!delivered) console.log(`   got: ${frame ? JSON.stringify(frame) : "no frame within 10s"}`);
-      ws.close();
+      if (!delivered) console.log(`   heard: ${JSON.stringify(heard)}`);
+      assert(
+        states.length === 1 && room.state === "open",
+        `and on the same connection, not a reconnect that replayed it (states: ${JSON.stringify(states)})`
+      );
     }
+    await room.close();
   }
 
   console.log("\n— action request / human-approval loop —");

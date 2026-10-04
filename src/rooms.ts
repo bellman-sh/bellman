@@ -19,7 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import { JOIN_CODE_TTL, isActiveMember, type BellmanStore } from "./store.js";
-import { STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
+import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -76,9 +76,18 @@ export function activeMembers(s: StoredSession): Member[] {
  * Members whose seat a capacity check should count: present, not merely
  * undeparted. See src/presence.ts for why this is a second reading of the
  * roster rather than a change to `activeMembers`.
+ *
+ * `connected` is `BellmanStore.connectedMembers`, and a caller that is deciding
+ * whether a room is full has to pass it. Without it a member on a socket that
+ * has been quiet for ten minutes does not count, and the room reads as having
+ * room that `seatMember` will then refuse to give.
  */
-export function seatedMembers(s: StoredSession, now: number = Date.now()): Member[] {
-  return presentMembers(s.members, now);
+export function seatedMembers(
+  s: StoredSession,
+  now: number = Date.now(),
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): Member[] {
+  return presentMembers(s.members, now, connected);
 }
 
 /**
@@ -440,8 +449,10 @@ export async function issueInvite(
   // able to mint the code that replaces it, which is the confusion #103 opens
   // with. This only counts — the seat is actually reclaimed by the
   // bellman_confirm that redeems this code, which is the one caller authorized
-  // to remove anybody. The `invite` verb is not the `evict` authority.
-  if (seatedMembers(session).length >= session.maxMembers) {
+  // to remove anybody. The `invite` verb is not the `evict` authority. Members on
+  // a socket are counted for the same reason `seatMember` will not reclaim them.
+  const connected = await store.connectedMembers(session.id);
+  if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
     return refuse(
       "conflict",
       `session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`

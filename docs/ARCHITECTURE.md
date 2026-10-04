@@ -62,6 +62,7 @@ flowchart TB
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
         MCP["/mcp<br/>nine MCP tools"]
+        WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
     end
@@ -76,6 +77,7 @@ flowchart TB
 
     CCT --> BRIDGE
     BRIDGE --> MCP
+    BRIDGE -->|"one per room"| WS
     BRIDGE -.-> HOOK
     CCC --> MCP
     DESK --> MCP
@@ -83,6 +85,7 @@ flowchart TB
 
     AS --> AUTH
     MCP --> SDO
+    WS --> SDO
     MCP --> RDO
     MCP --> ADO
     BILL --> AUTH
@@ -154,9 +157,15 @@ process; it is under [two delivery paths](#two-delivery-paths) below.)
 ```mermaid
 flowchart TB
     EVENT["a peer appends an event"] --> SDO["SessionDO"]
+    SDO --> WSK["/ws room socket<br/>one per room, per machine"]
     SDO --> POLL["bellman_sync<br/>long poll, up to 25s"]
 
-    POLL --> B["the bridge holds the poll"]
+    WSK --> CO["the coordinator bridge"]
+    CO --> BUS["local bus<br/>Unix socket"]
+    BUS --> B["every bridge<br/>on the machine"]
+    POLL -.->|"no socket: the<br/>coordinator polls"| CO
+    POLL -.->|"no bus: each<br/>bridge polls"| B
+
     B --> CH["channel notification<br/>pushed into the session"]
     B --> IQ["inbox queue on disk"]
     IQ --> SH["Stop hook drains it<br/>at end of turn"]
@@ -176,15 +185,15 @@ flowchart TB
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync` until MCP Apps ([#28](../../../issues/28)) |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
-Two consequences worth stating plainly:
+Two consequences:
 
 - **Push is an optimisation, never a dependency.** Every surface degrades to
   polling, and a bridge that fails to start must not cost anyone their messages.
-- **The bridge is per-session today, which does not scale on one machine.** Five
-  sessions in a room means five processes each holding a poll for the same
-  events. [#43](../../../issues/43) elects one bridge as coordinator and fans
-  out over a local socket — no new daemon, and it falls back to independent
-  polling when the lock or socket cannot be created.
+- **Every session spawns its own bridge, and that used to cost a poll each.**
+  Five sessions in a room meant five processes holding a poll for the same
+  events. [#43](../../../issues/43) shares one upstream connection per room
+  between them, over a local socket — no new daemon, and every bridge polls as
+  before where that cannot be had ([the local bus](#the-local-bus)).
 
 ### Two delivery paths
 
@@ -199,7 +208,7 @@ socket. The decisions, and what was measured to reach them, are in the
 
 | | `bellman_sync` long poll | `/ws` room socket |
 |---|---|---|
-| For | remote MCP clients: ChatGPT connectors, Claude's web connector | clients that can reach a local process: the bridge, once [#43](../../../issues/43) lands |
+| For | remote MCP clients: ChatGPT connectors, Claude's web connector | clients that can reach a local process: the bridge, through [the local bus](#the-local-bus) |
 | Held as | an in-flight request, so the object stays resident | a socket the runtime holds, so the object hibernates |
 | Scope | one member | the whole room |
 | The member's own events | dropped | included |
@@ -213,8 +222,8 @@ peer's events, so the stored event would hand one user another's upstream
 identity. Everything around the event differs, because a poll is per member and
 a socket is per room. The poll is permanent, so a change to what a watcher sees
 has to land on both. And a socket frame carries no wrapper, so whatever reads it
-must frame it as untrusted and escape `<` before a model sees it, as the
-bridge's `renderEvent` does for poll results today.
+must frame it as untrusted and escape `<` before a model sees it. The bridge does
+that in `renderEvent` (`src/inbox.ts`), whichever path brought the event.
 
 **Why the socket is cheaper.** A long poll is an in-flight request, an in-flight
 request keeps the object resident, and a resident object bills duration for its
@@ -267,11 +276,65 @@ the runtime holds. `wake()` is synchronous for the same reason.
 **One socket per (machine, room).** A socket binds to one `SessionDO`, so a
 machine watching three rooms holds three. That is already fewer than per-member
 polls hold, because a room socket carries every event in the room and the
-members of one room on one machine can share it. But the server half only makes
-that possible. The client half, [#43](../../../issues/43) in plan 2 of the spec,
-is what makes it one per machine per room rather than one per member per
-session: one bridge holds the sockets and fans out locally. Until it lands the
-bridge still long-polls, and no shipped client opens `/ws`.
+members of one room on one machine can share it. The server half only made that
+possible. The client half ([#43](../../../issues/43), plan 2 of the spec) is what
+does it: one bridge holds the sockets and the rest read from it, as
+[the local bus](#the-local-bus) describes.
+
+### The local bus
+
+A machine used to hold one long poll per member per session, so five sessions in
+one room held five polls for the same events. It now holds **one upstream
+connection per room**. Every session still spawns its own bridge, and a bridge
+either holds that connection or subscribes to the one a sibling holds, over a
+Unix socket at `~/.claude/bellman/bus/<hash>.sock`. The hash covers the server
+URL and the identity (the `BELLMAN_KEY`, or the signed-in person), so two
+identities on one machine never share a bus. The bus shares a connection and is
+not where a room lives: the room stays on the server
+([section 3](#3-why-the-server-is-remote-first)), so a session with no bridge, a
+cloud one for instance, still takes part over `/mcp` as before.
+
+The bridge that holds the connections is the *coordinator*. It keeps each room's
+recent events in a bounded window and serves every subscriber from it, in order
+and without gaps; a subscriber that has fallen behind the window gets what it
+missed from the server, as the member it is. It is also where a room's stream
+becomes each member's: every event is addressed to each subscribing member, less
+that member's own. Delivery itself did not move. Each bridge still writes its
+own session's channel or inbox, so what is shared is the connection and not the
+writer. `src/bus.ts` holds the election, the wire and the window,
+`src/room-socket.ts` the upstream socket, and `src/bus-link.ts` what a bridge
+asks of them.
+
+**The socket is the election.** A bridge connects to the bus path. If something
+answers, it subscribes. If nothing does, because the path is absent or holds a
+socket nobody listens at, it binds and becomes the coordinator, and a bridge
+that loses the bind connects to the winner. Being connectable stands in for
+being alive, so the election needs no lock file and no pid check: a coordinator
+that was killed leaves a socket nobody can connect to, which the next bridge
+removes, and one that exits cleanly removes its own. The stand-in has two known
+gaps. A coordinator that is stopped but not dead still accepts connections, so a
+subscriber gives up on one that does not acknowledge its subscribe and polls for
+that member instead. And with no lock, two bridges racing can both win (1 race
+in 160 in the spec's measurement, eight processes on macOS);
+[D8](superpowers/specs/2026-09-29-room-delivery-design.md) records what that
+costs.
+
+**The fallback is mandatory, in two layers.** Where a room's socket cannot be had
+or will not stay, the coordinator long-polls the room itself and keeps serving
+the bus, going back to the socket when one opens, and its subscribers cannot
+tell. Where the bus cannot be had (Windows, a socket path past the operating
+system's limit, a directory that cannot be made) or stops answering, each bridge
+polls for its own members with the same `watch()` loop it ran before there was a
+bus. So a socket that fails does not undo the collapse into one connection per
+room, and a bus that fails does not cost anyone their messages. Neither is a
+dependency (invariant 6 below).
+
+And it can be chosen rather than waited for: `BELLMAN_BUS=off` makes every
+bridge poll as it did before there was a bus. A delivery path with no way out
+is a bad trade, so the escape hatch is a variable rather than a code change.
+An unrecognised value reads as off, deliberately unlike `BELLMAN_DELIVERY`'s
+unknown-means-default: a typo should leave a room on the path that has been
+in production for months, not move it onto the new one.
 
 ## 5. Storage
 
@@ -325,8 +388,8 @@ A member has three readings, and only two of them are written down:
 
 | | `leftAt` | Last heard from | Holds a seat |
 |---|---|---|---|
-| **present** | null | inside the window | yes |
-| **stale** | null | outside the window | only until contested |
+| **present** | null | inside the window, or on a live socket | yes |
+| **stale** | null | outside the window, and on no socket | only until contested |
 | **departed** | set | — | no |
 
 `leftAt` records a goodbye — a `bellman_leave`, an eviction, a reaped seat — and
@@ -417,16 +480,45 @@ quiet close itself, destroying the history the returning session came back for.
 Departure is permanent and may close a room. Staleness is reversible and must
 never.
 
-**A gap this leaves open: #140.** #99's hibernating WebSocket has already
-landed, and `SocketAttachment` carries the member ids — so the object holds a
-hard fact about who is connected, which beats any timeout because it is being
-told rather than inferring. Presence consults none of it. That is latent only
-while every client still long-polls `bellman_sync`; the first one that prefers
-the socket stops touching `lastSeenAt`, looks stale with a live connection, and
-is then the quietest member in the room by construction, so the next joiner
-takes its seat. Closing it means stamping `lastSeenAt` when the socket is
-accepted and excluding connected members from `seatVictims` inside the object,
-which changes a `SessionDO` path the seat bug does not.
+**An open socket is liveness (#146, #140).** A member fed by the local bus or by
+the room's hibernating WebSocket never calls `bellman_sync`, so nothing writes
+its `lastSeenAt`, and a listen-only member — an agent waiting for a peer's reply
+— sends nothing either. On the window alone it would read stale after ten
+minutes with its connection open, and the next contested join would take its
+seat. The object holds a better fact than the window: `ctx.getWebSockets()` is
+the sockets it has accepted, and each one's `SocketAttachment` names the members
+its identity owned when it was accepted. So a member is present when `leftAt` is
+null and either `lastSeenAt` is inside the window or a live socket in the room
+vouches for it.
+
+- **A socket vouches for an identity, not for the ids it names.** The attachment
+  is a snapshot, and the bus serves every session of an identity on a machine
+  through one socket per room, so a member that joins after the socket was
+  accepted is carried by it without being named in it. `connectedAmong` widens
+  the named ids to every undeparted member of the users they belong to. A member
+  of that identity whose session died stays present while another of its members
+  holds a socket in the room, which holds a seat too long, the direction #139
+  prefers.
+- **The reclaim reads the sockets inside `seatMember`**, in the same transaction
+  as the decision, and is not handed a set. A set fetched first is old by the
+  time it is used, and the reclaim is final. `seatVictims` takes the set as an
+  argument so the seat rule stays one function for both stores; `MemoryStore`
+  has no sockets and supplies none.
+- **Everything that only counts reads `BellmanStore.connectedMembers`**: the
+  preview in `bellman_connect`, the capacity check in `issueInvite`, whether
+  `bellman_confirm` retires the codes of a full room, and the roster's
+  `presence`. The reclaim is still confined to `bellman_confirm`, and none of
+  these removes anybody.
+- **A socket this object is closing does not count.** `isOpen` is the one
+  definition of a live socket, shared with `wake()`: the runtime keeps listing a
+  socket this object has closed until its peer acknowledges.
+
+What the window still covers for a socket-fed member is the gap after its socket
+drops. The object stops listing the socket at once, `lastSeenAt` is whatever it
+last was, and the member reads stale until its client reconnects; a contested
+join landing in that gap would take the seat. Stamping `lastSeenAt` when a
+socket closes would narrow it, at one session-record write per close, and is not
+done.
 
 ## 6. Identity, plans and entitlements
 
@@ -503,10 +595,10 @@ sequenceDiagram
     participant YH as You
 
     PA->>W: bellman_send (type, payload)
-    Note over W: identity comes from the bearer token;<br/>a sender cannot name itself
+    Note over W: identity comes from the bearer token#59;<br/>a sender cannot name itself
     W->>SDO: appendEvent, stamped with<br/>member, user, label, cursor
-    SDO-->>BR: the long poll returns the event
-    Note over BR: wrapped as trust untrusted, origin, data;<br/>the less-than character is escaped,<br/>so it cannot close the channel tag
+    SDO-->>BR: the room socket sends the event,<br/>or a long poll returns it
+    Note over BR: renderEvent wraps it as untrusted and escapes<br/>the less-than character, so it cannot<br/>close the channel tag
     BR->>YA: channel notification, wrapper intact
     alt type is action_request
         YA->>YH: show it, do not act
@@ -522,6 +614,11 @@ loud:
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
   instead, so the client that reads it does the wrapping and owns this rule.
+  The bridge is that client: `renderEvent` (`src/inbox.ts`) does the wrapping,
+  after the bus. `deliver` (`src/bridge.ts`) calls it for a channel push, and the
+  Stop hook and `bellman_wait` call it, through `renderBatch`, for the events
+  `deliver` queued. An event is escaped and framed as untrusted whichever path
+  brought it, and it does not become trusted by passing through a local process.
 - **`<` is escaped to `<`** so a payload cannot close the `<channel>` tag
   and impersonate the harness.
 - **An `action_request` is approved by the receiving human**, never by the

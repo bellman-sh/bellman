@@ -244,6 +244,81 @@ export function tokensUsable(tokens: StoredTokens | undefined, now = Date.now())
   return tokens.expires_at - EXPIRY_SKEW_MS > now;
 }
 
+/**
+ * The access token the file holds for this server right now, or undefined when it holds none.
+ *
+ * What a connection that is not the MCP client presents. A room's upgrade carries it as a bearer header, and
+ * nothing keeps it fresh there: the client's own transport refreshes through its auth provider on a 401, and
+ * this is not that transport. So it is read from the file each time it is wanted, because every bridge on a
+ * machine shares the file and whichever one refreshes writes the new token into it.
+ *
+ * It does not ask whether the token is still spendable (`tokensUsable`), and that is on purpose. One that has
+ * expired is refused with a 401, which the room socket reads as "this credential is not accepted": it polls the
+ * room through the MCP connection and tries the credential again as soon as it has changed
+ * (tests/room-socket.test.ts). The MCP transport refreshes an expired token on a 401 of its own and writes the new
+ * one to this file (src/signin.ts), so the file is where a fresher token turns up, including one that another
+ * bridge refreshed. That chain is built from those two tested halves and has not been run end to end against a
+ * real expiry. Throwing here instead would turn a refusal that is handled at once into a credential that "could
+ * not be read", which waits three failures before the room is polled at all.
+ */
+export function storedAccessToken(dir: string, serverUrl: string): string | undefined {
+  const token = readServer(dir, serverUrl).tokens?.access_token;
+  return typeof token === "string" && token !== "" ? token : undefined;
+}
+
+/**
+ * Who the stored sign-in is, as the user id in its access token's claim, or undefined when that cannot be said.
+ *
+ * It is read off the token and not off the `identity` stored beside it, for the reason `withIdentityFromTokens`
+ * (src/signin.ts) gives: an identity is a fact about the access token it was decoded from, and carried past a
+ * change of tokens it names one account while the file signs in as another.
+ *
+ * THIS IS NOT VERIFIED, as `decodeIdentity` says, and must never gate anything. It names a socket path on this
+ * machine (the bus a bridge shares) and nothing else; the server decides who a token is on every request. Unlike
+ * the token itself it does not change when the token is refreshed, which is what lets it name something that has
+ * to stay the same for as long as the person does.
+ */
+export function storedUserId(dir: string, serverUrl: string): string | undefined {
+  const token = readServer(dir, serverUrl).tokens?.access_token;
+  const userId = decodeIdentity(token as string)?.userId;
+  return typeof userId === "string" && userId !== "" ? userId : undefined;
+}
+
+/**
+ * What the local bus needs from a credential, as two questions a bridge asks when it needs the answer and not before.
+ *
+ * `identity` names the bus: it is hashed into the socket path (`busPath`) together with the server URL, so it has to
+ * stay the same for as long as the person does. `bearer` is what a room's upgrade presents, and it has to be the
+ * current token, read again for every attempt. They are different things and must not be given the same value:
+ * an access token as the identity would give every refresh a new bus, and the old coordinator would go on serving
+ * the old one.
+ *
+ * A BELLMAN_KEY is both, since it never changes. Signed in, `identity` is the user (undefined until there is a
+ * sign-in to read, in which case there is no bus to name and the caller polls) and `bearer` is the token the
+ * credential file holds, which throws when it holds none. Nothing is read when this is built: the file does not
+ * exist until the bridge has signed in, and the bridge is built before that.
+ */
+export interface BusCredentials {
+  identity(): string | undefined;
+  bearer(): string;
+}
+
+export function busCredentials(
+  serverUrl: string,
+  key: string | undefined,
+  dir: () => string = credentialsDir
+): BusCredentials {
+  if (key) return { identity: () => key, bearer: () => key };
+  return {
+    identity: () => storedUserId(dir(), serverUrl),
+    bearer: () => {
+      const token = storedAccessToken(dir(), serverUrl);
+      if (token === undefined) throw new Error("no signed-in access token is cached to present");
+      return token;
+    },
+  };
+}
+
 export const LOCK_FILE = "credentials.lock";
 
 const HEARTBEAT_MS = 15_000;

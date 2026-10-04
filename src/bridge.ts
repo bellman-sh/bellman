@@ -13,6 +13,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
+import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -36,7 +37,11 @@ import type { EventType } from "./types.js";
  *     honours the schema it is shown would otherwise never make that call.
  *   - It watches the tool results go by. Whenever a call reveals a membership
  *     (start, confirm, or a send/sync after a restart), it arms a watcher that
- *     long-polls bellman_sync for that member.
+ *     long-polls bellman_sync for that member. Given a `bus` it asks the local
+ *     bus for that member's events instead: one upstream connection per room,
+ *     shared by every bridge on the machine (#43, #99). The long poll is what it
+ *     does whenever the bus cannot be had, and it is the code that was there
+ *     before the bus, unchanged.
  *   - It delivers each peer event one of two ways:
  *       channel — push it into the session as notifications/claude/channel
  *       hook    — queue it on disk for the Bellman Stop hook and bellman_wait
@@ -127,8 +132,26 @@ export interface BridgeOptions {
   pollWaitSeconds?: number;
   /** Who this bridge signed in as. Absent means a static BELLMAN_KEY. */
   whoami?: () => WhoAmI;
+  /**
+   * Share one upstream connection per room with every other bridge on this machine, through a local bus (src/bus.ts,
+   * src/bus-link.ts). Absent, every member is long-polled by this bridge on its own, as it was before the bus
+   * existed. That is also what happens, member by member, whenever the bus cannot be had or stops being usable for
+   * one: the bus is an optimisation, and nothing here depends on it.
+   */
+  bus?: BridgeBus;
   log?: (message: string) => void;
 }
+
+/**
+ * What the bridge is given of the bus: where Bellman is, who this bridge is (what names the bus: it must stay the same
+ * for as long as the person does), and what a room's socket presents (read again for every attempt). The rest is for
+ * tests. See `BusLinkOptions`, which says what each one is.
+ */
+export type BridgeBus = Pick<
+  BusLinkOptions,
+  "url" | "identity" | "bearer" | "root" | "platform" | "ackTimeoutMs" | "window" | "roomSocket"
+  | "cooldownMs" | "maxLosses" | "lossWindowMs"
+>;
 
 const CHANNEL_INSTRUCTIONS =
   "Bellman peer events are pushed into this session as <channel> events from this server, " +
@@ -197,6 +220,8 @@ interface Watch {
   /** Highest cursor delivered to, or already seen by, the agent. */
   delivered: number;
   active: boolean;
+  /** Ends the bus's delivery for this member, while the bus is what delivers. Set only on the bus path. */
+  release?: () => void;
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -412,6 +437,20 @@ export function createBridge(opts: BridgeOptions) {
   let remotePromise: Promise<Remote> | undefined;
   /** What remotePromise last resolved to. Lets a retire check identity without awaiting. */
   let live: Remote | undefined;
+  /**
+   * The local bus, when this bridge was given one. It reads this bridge's state and never changes it: its poll
+   * reuses the cached connection and never makes one (a background poll must not be what opens a browser), and it
+   * skips every handle in `departed`.
+   */
+  const link = opts.bus
+    ? createBusLink({
+        ...opts.bus,
+        connection: () => remotePromise,
+        departed: (memberId) => departed.has(memberId),
+        pollWaitSeconds: pollWait,
+        log,
+      })
+    : undefined;
 
   function remote(): Promise<Remote> {
     remotePromise ??= opts.remote().then(
@@ -574,7 +613,9 @@ export function createBridge(opts: BridgeOptions) {
     const w: Watch = { sessionId, memberId, delivered: cursor, active: true };
     watches.set(memberId, w);
     persistMemberships();
-    void watch(w);
+    // The bus when there is one; the long poll when there is not, and for any member the bus cannot serve.
+    if (link) viaBus(w);
+    else void watch(w);
   }
 
   /** The agent saw these events through a manual bellman_sync — don't deliver them again. */
@@ -589,6 +630,7 @@ export function createBridge(opts: BridgeOptions) {
     const w = watches.get(memberId);
     if (!w) return;
     w.active = false;
+    w.release?.();
     watches.delete(memberId);
     persistMemberships();
   }
@@ -748,6 +790,49 @@ export function createBridge(opts: BridgeOptions) {
     }
   }
 
+  /**
+   * Deliver this member's events through the local bus, and not by a long poll of its own.
+   *
+   * What reaches `deliver` is the same event from a different source, and the same two guards stand in front of it as
+   * in `watch`. The cursor: a manual bellman_sync moves `delivered` out of band, and the bus, which has no gaps, does
+   * not know it. And the eviction, read by `showsEvictionOf`, the one definition the poll uses too. The bus already
+   * leaves out this member's own events, so nothing here does.
+   *
+   * `onFallback` is D11 for one member. The bus cannot serve it any more, so the unchanged `watch` polls for it, from
+   * `delivered`, which is the one cursor both paths advance: that is why the hand-over loses and repeats nothing.
+   *
+   * Nothing is called after `release` (a member that is disarmed or has departed) or after the bridge closes: the link
+   * finishes the member when it is stopped, and says so once, which tests/bus-link.test.ts pins. That is why neither
+   * function below asks whether the member is still wanted, and why a departed handle cannot be polled for here:
+   * `watch` is only ever started from `onFallback`, and `onFallback` is only ever called for a member that is live.
+   */
+  function viaBus(w: Watch): void {
+    const watching = link!.watch({
+      sessionId: w.sessionId,
+      memberId: w.memberId,
+      cursor: () => w.delivered,
+      onEvent: (event) => onBusEvent(w, event),
+      onFallback: (why) => {
+        w.release = undefined;
+        log(`polling for ${w.memberId} instead of using the local bus: ${why}`);
+        void watch(w);
+      },
+    });
+    w.release = watching.stop;
+  }
+
+  /** One event from the bus, through the cursor guard and the eviction check, and then the same `deliver` as ever. */
+  async function onBusEvent(w: Watch, event: PeerEvent): Promise<void> {
+    // A manual bellman_sync may have moved the cursor past this event while it was on its way.
+    if (event.cursor <= w.delivered) return;
+    w.delivered = event.cursor;
+    await deliver(event);
+    // Evicted: the event is delivered, so the human knows why this stops, and the membership is over.
+    if (showsEvictionOf([{ data: { type: event.type, payload: event.payload } }], w.memberId)) {
+      markDeparted(w.memberId);
+    }
+  }
+
   async function deliver(event: PeerEvent): Promise<void> {
     if (delivery === "hook") {
       // Ambient events are queued like any other. Hook delivery drains at the
@@ -895,6 +980,9 @@ export function createBridge(opts: BridgeOptions) {
     for (const w of watches.values()) w.active = false;
     watches.clear();
     persistMemberships();
+    // Before the connection: a coordinator's socket file is removed by this, and a connect that is still in
+    // flight (a sign-in waiting on a human) must not be what holds that up.
+    await link?.close();
     const connected = await remotePromise?.catch(() => undefined);
     // Nothing is live once this returns, so a rejection still on its way from
     // the connection being closed cannot log a retirement into a shutdown.
@@ -913,5 +1001,7 @@ export function createBridge(opts: BridgeOptions) {
         member_id: w.memberId,
         delivered: w.delivered,
       })),
+    /** Which part this bridge plays on the local bus, for tests and diagnostics: undefined when it has none. */
+    busRole: (): "coordinator" | "subscriber" | undefined => link?.role(),
   };
 }

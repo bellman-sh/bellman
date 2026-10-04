@@ -152,13 +152,16 @@ function storedMember(m: Member) {
  * A member on a live roster, which is the only place `presence` belongs: it is
  * read off the clock, so a stored copy goes wrong the moment it is replayed.
  *
- * No `now` parameter, deliberately. This is passed straight to `Array.map`,
+ * No `now` parameter, deliberately. This was passed straight to `Array.map`,
  * which supplies the index as a second argument — an optional `now` here was
  * silently read as `now = 0` for every member in the roster, and every one of
  * them came back "present". The type system cannot catch it: `number` matches
- * `number`. `presenceOf` takes its own default instead.
+ * `number`. `presenceOf` takes its own default instead. `connected` is required
+ * and is a set, so a bare `.map(publicMember)` no longer compiles, and a caller
+ * that forgets the sockets is a compile error and not a roster that calls every
+ * member on a socket stale.
  */
-function publicMember(m: Member) {
+function publicMember(m: Member, connected: ReadonlySet<string>) {
   return {
     ...storedMember(m),
     /**
@@ -166,9 +169,10 @@ function publicMember(m: Member) {
      * old meaning — has not departed — because a client reading `active` should
      * not have its roster change shape under it. `presence` is the finer
      * answer: a `stale` member has not left, but has not been heard from, and
-     * that is the distinction #66, #81 and #82 all need. See src/presence.ts.
+     * that is the distinction #66, #81 and #82 all need. A member on a live
+     * socket is present whatever it last said (#146). See src/presence.ts.
      */
-    presence: presenceOf(m),
+    presence: presenceOf(m, Date.now(), connected),
   };
 }
 
@@ -433,8 +437,10 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       // (#103). This only counts. The stale seat is reclaimed by the
       // bellman_confirm that follows, so this tool stays as read-only as its
       // annotation promises — a preview any holder of a join code can make,
-      // repeatedly, must not be able to remove anybody.
-      if (seatedMembers(session).length >= session.maxMembers) {
+      // repeatedly, must not be able to remove anybody. A member on a socket is
+      // counted, because the confirm that follows will not reclaim it either.
+      const connected = await s.connectedMembers(session.id);
+      if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
         return fail("session is full.");
       }
       const creator = session.members[0];
@@ -563,9 +569,12 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
+      // Who is on a socket, for the two readings of presence below. Advisory:
+      // the reclaim was decided inside seatMember, against the sockets then.
+      const connected = await s.connectedMembers(joined.id);
 
       // A full pair session has no seat for ANY role, so every code goes.
-      if (seatedMembers(joined).length >= joined.maxMembers) {
+      if (seatedMembers(joined, Date.now(), connected).length >= joined.maxMembers) {
         await s.clearJoinCodes(joined.id);
       }
 
@@ -592,7 +601,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           session_id: session.id,
           member_id: memberId,
           cursor: joinEvent.cursor,
-          members: joined.members.map(publicMember),
+          members: joined.members.map((m) => publicMember(m, connected)),
           room: roomPreview(joined, roomRole),
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)

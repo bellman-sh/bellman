@@ -3,7 +3,10 @@
 Issues: [#99 Room delivery over a hibernating WebSocket](https://github.com/bellman-sh/bellman/issues/99),
 [#43 Bridge: one long-poll per member, shared by every local session](https://github.com/bellman-sh/bellman/issues/43),
 [#25 SessionDO.getSession loads every event on every call](https://github.com/bellman-sh/bellman/issues/25)
-Status: approved design, pending implementation plan
+Status: implemented, in two parts. The server half merged in #127; the client
+half is on `mcfearsome/room-delivery-client-half`. Plans:
+`docs/superpowers/plans/2026-09-29-room-delivery-server.md` and
+`docs/superpowers/plans/2026-10-03-room-delivery-client.md`.
 Supersedes: [Pricing Re-tier](2026-09-29-pricing-re-tier-design.md), superseded before implementation
 Related: #12 (the store contract against the DO store), #18 (room inactivity),
 #26, #27 (surfaces that exercise delivery), #48 (a browser-authenticated dash)
@@ -167,6 +170,39 @@ So the client half needs no new runtime dependency. The `headers` option is
 outside the WHATWG spec, which is a real dependency on non-standard behaviour;
 the third line is the fallback if a future Node drops it, and it is recorded
 here so that a later maintainer finds the answer rather than the surprise.
+
+**What that API will not give you is the refusal's status.** Measured on Node
+22.16 (undici 6.21.2) and 25.8.2 (undici 7.24.4): 400, 401, 403, 404, 409, 426,
+500 and 503 all arrive as one bare `error` event with the status nowhere
+readable. This matters because the route's codes are deliberately different
+answers — 409 means the room is closed and retrying is pointless, 401 means the
+credential is gone and retrying is harmful — and a client that cannot tell them
+apart must treat every refusal the same.
+
+The way out is a second request: after a failed handshake, ask again with
+`node:http`, same URL and headers, purely to read the status. It has to carry
+the upgrade headers, because a non-upgrade request is answered 426 before any
+of the interesting checks run — which means the probe can itself be answered
+101, so whatever socket that hands back must be destroyed rather than leaked.
+
+**Two more behaviours of the same API.** On Node 22 a refused handshake
+emits `error` and then no `close` at all, and `readyState` stays 0: the failure
+is reported, but a client that waits for `close` waits for ever (a first
+measurement waited two minutes for one). Node 25 follows the `error` with a
+`close`. And a server that accepts TCP and never answers the handshake leaves
+the client with no event for five minutes: both Nodes fire `error` at 301 s
+(Node 25 then closes 1006, Node 22 says nothing more). A room cannot go unserved
+that long, so a connect timeout of the client's own is what ends that attempt.
+
+**Three more, from building the client.** `fetch` cannot be the second request:
+it refuses an `Upgrade` header (a TypeError whose cause is "invalid upgrade
+header", on both Nodes), which is why the probe uses `node:http`. Node 25's
+WebSocket sends a refused upgrade a second time by itself when the status is 401
+(two identical requests; a 409 or a 503 gets one, and Node 22.16 sends one every
+time), so a refused credential is presented three times per attempt there. And
+closing a connection whose peer never answers frees nothing from the client's
+side: the socket was still CLOSING 30 s later on both Nodes, so an abandoned
+connection holds its file descriptor until the operating system gives up on it.
 
 ### D3 — The Worker never forwards the client's `Request` to the object.
 
@@ -362,8 +398,38 @@ use `$XDG_CONFIG_HOME/bellman` (`src/credentials.ts:47`) and inboxes use
 `~/.claude/bellman/inbox` (`src/inbox.ts:121`). This is runtime state, so it
 belongs beside the inbox.
 
-`sun_path` caps around 104 bytes on macOS. That is a genuine fallback trigger
-under a long home directory, not a theoretical one, and D11 is what catches it.
+`sun_path` caps around 104 bytes on macOS, a genuine fallback trigger under a
+long home directory rather than a theoretical one. **It is also a correctness
+boundary, not tidiness.** Node 22 *truncates* an over-long socket path; Node 25
+refuses it with `EINVAL`. Truncation is the dangerous half: two identities whose
+hashes differ only past the cut would silently share a bus, which is precisely
+what hashing the credential into the path exists to prevent. So the length check
+is what keeps identities apart, and D11 catches the refusal.
+
+**Measured correction: macOS gives the bind loser `EEXIST`, not
+`EADDRINUSE`.** The paragraph above names the POSIX code; the platform we
+develop on does not use it. 31 of 40 race trials failed before both codes were
+handled. Treat either as "someone won, connect instead".
+
+**Residual: this election can still produce two coordinators.** Measured at
+about 1 in 160 real-process races (8 racers, macOS). No event is lost — a
+subscriber that loses its bus races again and catches up from its own cursor —
+and only a lock would close it, which this decision rejects. What *was* fixed is
+the harm: a replaced coordinator's shutdown used to unlink its successor's
+socket, turning a rare race into an outage caused by cleanup. The obvious mitigation — stat
+the path and unlink only on an inode match — **cannot work**, and finding out
+why is worth recording: libuv unlinks by *name*, inside `server.close()`,
+synchronously. There is no point at which a guard could run between the check
+and the removal.
+
+So a coordinator records the file it bound at `listen()`, and on close, if the
+name now refers to someone else's socket, it renames that file aside, closes
+(letting libuv unlink the name it no longer owns), and renames it back — all in
+one turn. It is strange-looking code and it is the only shape that works where
+the unlink actually happens. Do not simplify it back to a plain `close()`.
+Residual: the name is absent for microseconds between the two renames.
+
+Linux is unmeasured.
 
 ### D9 — The bus delivers a gapless ordered stream from the cursor you named.
 
@@ -414,6 +480,24 @@ unchanged; subscribers cannot tell. So #99 failing never costs #43's collapse,
 and #43 failing never costs anyone their messages.
 
 This is an optimisation, never a dependency.
+
+**In code (client half).** `openRoomSocket` takes the long poll as a required
+`poll`, because a fallback that is mandatory is a parameter and not something a
+caller is trusted to remember. After `degradeAfter` (3) failed attempts in a row
+the room is polled through it, and what it returns reaches the same `ingest`
+through the same one cursor guard as the socket's frames, so the bus cannot tell
+which path an event came by. When a socket opens again the poll is cancelled and
+the socket replays from the cursor reached.
+
+Two statuses are not waited out. A 409 stops it, after one poll with no wait for
+what the room said before it closed: the 409 comes instead of the replay that
+reconnect was about to be sent. A 401 stops attempts with that credential, which
+is read again for every attempt because an access token lasts ten minutes
+(`ACCESS_TOKEN_TTL_SECONDS`), and leaves the room to the poll until the
+credential changes. Everything else is full-jitter backoff. A keepalive, the text
+the object answers itself (D5), is what tells a connection gone half-dead from a
+room that is quiet in seconds, rather than whenever the operating system gives up
+on it.
 
 ### D12 — `getSession` returns `StoredSession`; the one history caller gets `eventAt`.
 

@@ -12,6 +12,7 @@ import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./sto
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
+import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
@@ -192,16 +193,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * risk. Any frame that is not that text reaches webSocketMessage and is
    * closed, so a client's keepalive has to be exactly that.
    *
-   * The client that sends it is the keepalive in src/room-socket.ts, whose
-   * `PING` has to equal the first literal in the call below (its `PONG` the
-   * second, though it only keeps the reply out of that module's log). These are
-   * literals here and a constant there, and nothing compiles or runs the two
-   * together: the wiring test pins this registration, and the room-socket tests
-   * pin the client's text against a fake that carries its own copy. Change one
-   * side and update only its own test, and every test stays green while the
-   * client is closed 1003 at its first keepalive, which looks like a server-side
-   * drop. Measured with that client at its default cadence: see the comment on
-   * `PING` there.
+   * The text comes from src/keepalive.ts, which is the only place it is written
+   * (#144). The client that sends it (src/room-socket.ts) and the fake server
+   * the end-to-end tests run against (tests/helpers/fake-bellman.ts) import the
+   * same two constants, so the three cannot drift. They each held their own copy
+   * until #144, tied together only by comments, and nothing compiled or ran any
+   * two of them together — so changing one side left every test green while the
+   * client was closed 1003 at its first keepalive, which looks from the client
+   * like a server-side drop.
    *
    * Where to register was settled against workerd 1.20260926.1 at compat date
    * 2026-09-01, with a throwaway Worker, Node's WebSocket client, and objects
@@ -230,7 +229,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   constructor(ctx: DurableObjectState, env: BellmanEnv) {
     super(ctx, env);
-    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+    this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
   }
 
   /**

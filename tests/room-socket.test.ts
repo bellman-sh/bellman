@@ -11,6 +11,7 @@ import {
   type Poll, type PollRequest, type RoomSocket, type RoomSocketOptions, type RoomSocketState, type Why,
   type WebSocketLike,
 } from "../src/room-socket.js";
+import { PING } from "../src/keepalive.js";
 import type { Identity, SessionEvent } from "../src/types.js";
 import { fakeBellman, type FakeRoom, type FakeRooms } from "./helpers/fake-bellman.js";
 
@@ -1091,7 +1092,7 @@ describe("the keepalive", () => {
     // Counted across every connection: a client that sends the wrong text is closed on and
     // reconnects, and each of its sockets would have heard only one frame.
     await until(() => rooms.received.length >= 2, "two keepalives");
-    expect(rooms.received.every((frame) => frame === "ping")).toBe(true);
+    expect(rooms.received.every((frame) => frame === PING)).toBe(true);
     expect(socket.state).toBe("open");
     expect(attempts()).toHaveLength(1);
   });
@@ -1130,7 +1131,7 @@ describe("the keepalive", () => {
     room.silence(true);
     room.append();
     const [quiet] = rooms.sockets;
-    await until(() => quiet.received.includes("ping"), "a keepalive into the quiet");
+    await until(() => quiet.received.includes(PING), "a keepalive into the quiet");
     room.silence(false);
     await until(() => events.length === 2, "the event it never heard, by replay on a new connection", 5000);
     expect(cursors(events)).toEqual([1, 2]);

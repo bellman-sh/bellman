@@ -73,11 +73,23 @@ export { NO_SOCKETS, connectedAmong, lastSeen };
  * for a socket-fed member is the time after its socket drops. The object stops
  * listing the socket at once, `lastSeenAt` is whatever it last was (a member
  * that only listens may never have written it since joining), and the member
- * reads stale until its client reconnects, which `room-socket.ts` does after a
- * wait of up to a second at first, doubling to a cap of thirty seconds while the
- * socket keeps failing. A contested join landing in that gap would take the
- * seat. Stamping `lastSeenAt` when a socket closes would narrow it, at one
- * session-record write per close, and is not done.
+ * would read stale until its client reconnected, which `room-socket.ts` does
+ * after a wait of up to a second at first, doubling to a cap of thirty seconds
+ * while the socket keeps failing — and a contested join landing in that gap took
+ * the seat, with no window at all where a polling member has ten minutes.
+ *
+ * **#152 closed that**: `SessionDO.webSocketClose` stamps `lastSeenAt` for the
+ * members the closing socket was vouching for, so a drop leaves a full window
+ * behind it instead of nothing. A DROP reaches that handler too, as 1006 with
+ * wasClean false, so it is not only polite closes; the handler already ran and
+ * already woke the object to answer the close, so the cost is one session-record
+ * write per teardown. The stamp records that the member WAS there, which is a
+ * fact; only a listed socket says it is there now.
+ *
+ * What remains uncovered is a socket the runtime never reports at all, where the
+ * member falls back to a `lastSeenAt` that may be as old as its join. Stamping on
+ * the upgrade as well would give it one window from connect and is not done — it
+ * expires on a socket held for hours, which is the case this hook covers instead.
  */
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 

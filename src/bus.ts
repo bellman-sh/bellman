@@ -98,10 +98,39 @@ export interface BusOptions {
    * Subscriber only. How long to wait for the coordinator to acknowledge a subscribe
    * before treating the bus as unavailable. Defaults to `DEFAULT_ACK_TIMEOUT_MS`.
    *
-   * A handler on this connection that holds the line for longer than this delays the
-   * acknowledgement too, because lines are read one at a time, and trips it.
+   * Measured in time this process was NOT itself holding the line. `readLines` pauses
+   * the socket and awaits each line's handler, so a slow `onEvent` used to delay an
+   * acknowledgement and then trip this bound against a coordinator that had already
+   * answered (#142). Every deadline here is now pushed back by the time spent in a
+   * handler, so a slow consumer can no longer look like a frozen coordinator.
    */
   ackTimeoutMs?: number;
+  /**
+   * Subscriber only. How long the coordinator may send NOTHING before this connection
+   * is treated as unavailable. Defaults to `DEFAULT_IDLE_TIMEOUT_MS`; 0 turns it off.
+   *
+   * The ack bound catches a coordinator frozen AT subscribe. This catches one that
+   * froze after answering, which was silent non-delivery: no events flowed and nothing
+   * reported it until the next subscribe (#142). Both ask the same question — is this
+   * connection being served — so this is that question at a second moment and not a
+   * third mechanism. Renewed by ANY frame, which is what the coordinator's keepalive
+   * is for; a quiet room renews it without upstream traffic.
+   *
+   * It decides only whether THIS subscriber keeps using THIS connection. The election
+   * decides ownership and nothing else, so giving up here falls back to polling and
+   * never unlinks the socket or claims the bus (D8).
+   */
+  idleTimeoutMs?: number;
+  /**
+   * Coordinator only. How often to send a keepalive frame to every connected
+   * subscriber, so an idle connection still proves itself. Defaults to
+   * `DEFAULT_KEEPALIVE_INTERVAL_MS`; 0 turns it off.
+   *
+   * Must stay well inside a subscriber's `idleTimeoutMs` or a healthy bus is abandoned.
+   * Local only: it costs one line per connection per interval over a Unix socket and
+   * nothing upstream, so "a quiet room costs nothing" still holds.
+   */
+  keepaliveIntervalMs?: number;
   /** Where the sockets live. Defaults to `busRoot()`. */
   root?: string;
   /** Overridable so the Windows fallback is testable on the platform running the tests. */
@@ -226,6 +255,26 @@ export class BusUnavailableError extends Error {
  * after answering, while its subscribers sit idle, is not noticed until the next subscribe.
  */
 export const DEFAULT_ACK_TIMEOUT_MS = 10_000;
+
+/**
+ * How often a coordinator says something to an idle connection, and how long a
+ * subscriber lets one stay silent (#142).
+ *
+ * The ratio is the choice: three intervals, so two frames may be lost or late before a
+ * healthy bus is abandoned. A false alarm costs one bridge its share of the collapse
+ * and it falls back to polling, which is the behaviour before the bus existed — so this
+ * errs long, as the ack bound does.
+ */
+export const DEFAULT_KEEPALIVE_INTERVAL_MS = 15_000;
+export const DEFAULT_IDLE_TIMEOUT_MS = 45_000;
+
+/** A positive override, or the default. 0 and nonsense both mean "use the default". */
+const boundOr = (value: number | undefined, fallbackMs: number): number =>
+  Number.isFinite(value) && (value as number) > 0 ? (value as number) : fallbackMs;
+
+/** As above, but 0 is a deliberate "off" rather than a request for the default. */
+const boundOrOff = (value: number | undefined, fallbackMs: number): number =>
+  value === 0 ? 0 : boundOr(value, fallbackMs);
 
 /**
  * The longest socket path, in bytes, that is safe to hand to Node.
@@ -580,10 +629,12 @@ async function elect(opts: BusOptions): Promise<Bus> {
 
     if (found.kind === "connected") {
       log(`bus: subscribing through ${path}`);
-      const bound = Number.isFinite(opts.ackTimeoutMs) && (opts.ackTimeoutMs as number) > 0
-        ? (opts.ackTimeoutMs as number)
-        : DEFAULT_ACK_TIMEOUT_MS;
-      return subscriberOver(found.socket, log, bound);
+      return subscriberOver(
+        found.socket,
+        log,
+        boundOr(opts.ackTimeoutMs, DEFAULT_ACK_TIMEOUT_MS),
+        boundOrOff(opts.idleTimeoutMs, DEFAULT_IDLE_TIMEOUT_MS),
+      );
     }
     if (found.kind === "blocked") {
       throw unavailable("filesystem", `cannot use ${path}: ${found.error.message}`, found.error);
@@ -870,6 +921,28 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
   const local: Conn = { subs: new Map() };
   let closed = false;
 
+  /**
+   * Say something to every connection on a timer, so an idle one proves itself (#142).
+   *
+   * Without it a connection carrying no events is indistinguishable from a coordinator
+   * that froze after acknowledging, and a subscriber had nothing to time out against.
+   *
+   * `local` is deliberately not sent to: it has no socket, and this process cannot go
+   * quiet on itself. Best effort per connection, like the `end` frame below — a dead
+   * socket has no one to tell, and its own close handler is what reports it.
+   *
+   * unref, because a keepalive is never a reason to keep a process alive.
+   */
+  const keepaliveMs = boundOrOff(opts.keepaliveIntervalMs, DEFAULT_KEEPALIVE_INTERVAL_MS);
+  const keepalive = keepaliveMs > 0
+    ? setInterval(() => {
+        for (const conn of remotes) {
+          if (conn.socket) void writeLine(conn.socket, { op: "keepalive" }).catch(() => undefined);
+        }
+      }, keepaliveMs)
+    : undefined;
+  keepalive?.unref();
+
   /** A hook is the caller's code, and a throw in it must not leave the registry half-updated. */
   const hook = (name: string, call: () => void): void => {
     try {
@@ -1142,6 +1215,7 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
     close() {
       closing ??= (async () => {
         closed = true;
+        if (keepalive) clearInterval(keepalive);
         for (const conn of remotes) conn.socket?.destroy();
         for (const room of [...rooms.values()]) {
           rooms.delete(room.id);
@@ -1170,18 +1244,66 @@ function coordinatorOver(server: net.Server, path: string, opts: BusOptions, cla
 // The subscriber
 // ---------------------------------------------------------------------------
 
-function subscriberOver(socket: net.Socket, log: (message: string) => void, ackTimeoutMs: number): Subscriber {
+/**
+ * A moment this connection is judged at, and the timer that will judge it.
+ *
+ * The deadline is absolute so it can be PUSHED BACK by time this process spent inside
+ * a handler. `readLines` pauses the socket and awaits each line, so while an `onEvent`
+ * runs nothing is read — including another subscription's acknowledgement, and
+ * including a keepalive. A wall-clock timer therefore measured our own work as the
+ * coordinator's silence, which is #142's second finding: a slow consumer looked like a
+ * frozen coordinator. Every deadline here measures time we were LISTENING.
+ */
+type Deadline = {
+  /** Listening time still owed before this fires. Counted down only while armed. */
+  left: number;
+  /** When the live timer was set, so `hold` can work out what is left. */
+  startedAt: number;
+  timer?: NodeJS.Timeout;
+  readonly fire: () => void;
+};
+
+function subscriberOver(
+  socket: net.Socket,
+  log: (message: string) => void,
+  ackTimeoutMs: number,
+  idleTimeoutMs: number,
+): Subscriber {
   const handlers = new Map<string, Handlers>();
-  /** Subscribes the coordinator has not acknowledged yet, each with the timer that will give up on it. */
-  const waiting = new Map<string, NodeJS.Timeout>();
+  /** Subscribes the coordinator has not acknowledged yet, each with the deadline that will give up on it. */
+  const waiting = new Map<string, Deadline>();
   let dead = false;
   let closedByUs = false;
   /** Why the bus was abandoned, when it was this side that abandoned it: handed to every later subscribe too. */
   let abandoned: Error | undefined;
 
+  /**
+   * How deep we are inside handlers. While it is above zero no deadline runs, and a
+   * deadline created in that window waits for the resume rather than starting live —
+   * a subscribe made from inside an `onEvent` would otherwise be judged against time
+   * that same handler was spending.
+   */
+  let busy = 0;
+
+  /** Start counting, unless we are the one holding the line. */
+  const arm = (d: Deadline): void => {
+    if (busy > 0) return; // the resume in whileBusy arms it
+    d.startedAt = Date.now();
+    d.timer = setTimeout(d.fire, Math.max(0, d.left));
+    d.timer.unref(); // a deadline is never a reason to keep a process alive
+  };
+
+  /** Stop counting, keeping what is left so the resume can carry on from it. */
+  const hold = (d: Deadline): void => {
+    if (!d.timer) return;
+    clearTimeout(d.timer);
+    d.timer = undefined;
+    d.left = Math.max(0, d.left - (Date.now() - d.startedAt));
+  };
+
   const stopWaiting = (key: string): void => {
-    const timer = waiting.get(key);
-    if (timer) clearTimeout(timer);
+    const d = waiting.get(key);
+    if (d) clearTimeout(d.timer);
     waiting.delete(key);
   };
 
@@ -1199,12 +1321,72 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void, ackT
     socket.destroy();
   };
 
+  /**
+   * The coordinator has sent nothing at all for the whole bound: it accepted the
+   * connection, answered what it was asked, and then stopped (#142). Everything on this
+   * connection depends on it, so the connection goes and every subscription on it ends
+   * with the same reason the ack bound uses — which is what makes bus-link's existing
+   * `unresponsive` fallback cover this case without a second recovery path.
+   *
+   * It does NOT touch the socket file or the election. A frozen coordinator keeps the
+   * bus; this subscriber stops depending on it and polls (D8).
+   */
+  const wentQuiet = (): void => {
+    abandoned = new BusUnavailableError(
+      "unresponsive",
+      `the bus coordinator sent nothing for ${idleTimeoutMs} ms`
+    );
+    log(`bus: ${abandoned.message}`);
+    socket.destroy();
+  };
+
+  /** Silence is measured from the last frame, so any frame renews it — events and keepalives alike. */
+  let idle: Deadline | undefined;
+  if (idleTimeoutMs > 0) {
+    idle = { left: idleTimeoutMs, startedAt: 0, fire: wentQuiet };
+    arm(idle);
+  }
+  const renewIdle = (): void => {
+    if (!idle) return;
+    hold(idle);
+    idle.left = idleTimeoutMs;
+    arm(idle);
+  };
+
+  /**
+   * Stop judging the coordinator while WE are the one holding the line, and return the
+   * resume that pushes every deadline back by the time it took. Without this the idle
+   * bound would fire mid-handler on a healthy bus, and the ack bound would go on tripping
+   * as it does today — generalising the timer without this would make that bug continuous
+   * rather than confined to a subscribe.
+   *
+   * The push is by the time spent and not a fresh bound, so a subscribe the coordinator
+   * never answers is still given up on however busy this process is. That is the
+   * capability a single renewed-on-every-frame deadline would have lost: frames arriving
+   * for one member would have vouched for another member's unanswered subscribe.
+   */
+  const whileBusy = (): (() => void) => {
+    busy += 1;
+    for (const d of waiting.values()) hold(d);
+    if (idle) hold(idle);
+    let resumed = false;
+    return () => {
+      if (resumed) return; // one resume per fence, however it is reached
+      resumed = true;
+      busy -= 1;
+      if (busy > 0 || dead) return;
+      for (const d of waiting.values()) arm(d);
+      if (idle) arm(idle);
+    };
+  };
+
   const closed = new Promise<void>((resolve) => socket.once("close", () => resolve()));
   socket.on("error", () => undefined); // a close always follows; that is where it is handled
   socket.once("close", () => {
     dead = true;
-    for (const timer of waiting.values()) clearTimeout(timer);
+    for (const d of waiting.values()) clearTimeout(d.timer);
     waiting.clear();
+    if (idle) clearTimeout(idle.timer);
     const orphaned = [...handlers.values()];
     handlers.clear();
     // A close the owner asked for is not news to it.
@@ -1217,6 +1399,9 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void, ackT
   readLines(
     socket,
     async (line) => {
+      // Before the parse: a line ARRIVING is the evidence that the coordinator is
+      // serving this connection, whatever it turns out to say.
+      renewIdle();
       const message: unknown = JSON.parse(line);
       const m = message as Record<string, unknown> | null;
       if (m && typeof m === "object" && m.op === "subscribed" && typeof m.session_id === "string" && typeof m.member_id === "string") {
@@ -1233,16 +1418,23 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void, ackT
         }
         return;
       }
+      // Carries nothing and is not logged: the renewal above was the whole point of it.
+      if (m && typeof m === "object" && m.op === "keepalive") return;
       if (!isPeerEvent(message)) {
         log("bus: ignoring a line from the coordinator that is not an event");
         return;
       }
       const h = handlers.get(subKey(message.session_id, message.member_id));
       if (!h) return; // unsubscribed while this was on its way
+      // Fenced, so the time this handler takes is not counted against the coordinator.
+      // `finally`, because a throwing handler is still time we spent and not silence.
+      const resume = whileBusy();
       try {
         await h.onEvent(message);
       } catch (error) {
         log(`bus: handler for ${message.member_id} failed on ${message.cursor}: ${messageOf(error)}`);
+      } finally {
+        resume();
       }
     },
     (why) => {
@@ -1263,9 +1455,9 @@ function subscriberOver(socket: net.Socket, log: (message: string) => void, ackT
       const key = subKey(sessionId, memberId);
       handlers.set(key, h); // the coordinator replaces an earlier one for this member in the same way
       stopWaiting(key); // a replacement starts its own wait
-      const timer = setTimeout(() => unresponsive(memberId), ackTimeoutMs);
-      timer.unref(); // waiting for an answer is never a reason to keep a process alive
-      waiting.set(key, timer);
+      const d: Deadline = { left: ackTimeoutMs, startedAt: 0, fire: () => unresponsive(memberId) };
+      waiting.set(key, d);
+      arm(d);
       void writeLine(socket, { op: "subscribe", session_id: sessionId, member_id: memberId, cursor })
         .catch(() => undefined); // a dead socket's close event is what tells the handler
       return {

@@ -22,6 +22,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { serialize } from "node:v8";
+import { PING, PONG } from "../src/keepalive.js";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
 // a DurableObject is just something that holds its ctx and env.
@@ -1570,7 +1571,11 @@ describe("receive-only", () => {
     const ctx = fakeCtx(fakeStorage({ session: currentRow(), cursor: 0 }));
     new storeDo.SessionDO(ctx as never, {} as never);
     expect(ctx.autoResponses).toHaveLength(1);
-    expect(ctx.autoResponses[0]).toMatchObject({ request: "ping", response: "pong" });
+    // The shared constants, not a fourth copy of the literals (#144). What this
+    // still catches is the registration being dropped or given a different pair;
+    // that the pair's VALUE is the text the runtime matches is pinned once, in
+    // tests/keepalive.test.ts, because that value is not ours to change.
+    expect(ctx.autoResponses[0]).toMatchObject({ request: PING, response: PONG });
   });
 
   describe("wake() and a socket that webSocketMessage has closed", () => {

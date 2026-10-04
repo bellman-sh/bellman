@@ -6,6 +6,7 @@ import {
 } from "../../src/oauth/routes.js";
 import { MemoryAuthStore } from "../../src/oauth/storage.js";
 import { signJwt } from "../../src/oauth/tokens.js";
+import { PING, PONG } from "../../src/keepalive.js";
 import { publicEvent } from "../../src/public-event.js";
 import type { Identity, SessionEvent } from "../../src/types.js";
 import { ClientFrames, OPCODE, binaryFrame, closeCodeOf, closeFrame, handshake, textFrame } from "./ws-wire.js";
@@ -189,8 +190,8 @@ export function fakeBellman({ overrides = {}, origin = ISSUER }: FakeBellmanOpti
 // closed or unknown room, 409 for a closed room that it does own a member in. A
 // room then behaves as SessionDO does: it replays what the client missed and
 // registers the socket in the same turn, sends each later event to every socket
-// that is behind it, answers the text "ping" with "pong" without any handler
-// running, and closes a socket that sends anything else with 1003.
+// that is behind it, answers PING with PONG without any handler running, and
+// closes a socket that sends anything else with 1003.
 //
 // What it is not. The route logic is a copy, not the Worker: src/worker.ts
 // imports `cloudflare:workers` and cannot be loaded into this program, so
@@ -351,11 +352,13 @@ class Peer implements FakeSocket {
         this.received.push(text);
         this.everything.push(text);
         if (this.room.silent) continue;
-        // setWebSocketAutoResponse("ping", "pong"): the runtime answers that exact
+        // setWebSocketAutoResponse(PING, PONG): the runtime answers that exact
         // text. Any other frame reaches webSocketMessage, which closes a
-        // receive-only socket with 1003. These literals copy the registration in
-        // SessionDO's constructor (src/store-do.ts), and nothing ties them to it.
-        if (text === "ping") this.send("pong");
+        // receive-only socket with 1003. These are the SAME constants SessionDO
+        // registers (src/keepalive.ts, #144), so this fake can no longer go on
+        // agreeing with the client while the real server drifts — which it
+        // would have, when each file held its own copy.
+        if (text === PING) this.send(PONG);
         else this.write(closeFrame(1003, "This socket is receive-only."));
       } else if (frame.opcode === OPCODE.close) {
         this.closedByClient = { code: closeCodeOf(frame.payload) };

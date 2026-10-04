@@ -1,6 +1,7 @@
 import http from "node:http";
 import https from "node:https";
 import type { RoomEvent } from "./bus.js";
+import { PING, PONG } from "./keepalive.js";
 
 /**
  * The upstream half of room delivery: one WebSocket to one room's Durable Object,
@@ -200,24 +201,20 @@ const POLL_WAIT_SECONDS = 25;
 const POLL_FLOOR_MS = 1_000;
 
 /**
- * The keepalive's two texts, which are half of a pair whose other half is in another file. SessionDO's
- * constructor (src/store-do.ts) registers `new WebSocketRequestResponsePair("ping", "pong")`: literals,
- * with no constant to import, so nothing compiles or runs the two files together. The runtime answers
- * a frame that equals the first string exactly, with no JavaScript running and the object not
- * constructed. Any other text reaches `webSocketMessage`, which closes the socket with 1003 (D1);
- * "ping ", "Ping" and "ping\n" each did, in the measurement below. So PING must stay equal to that
- * first literal: a client that drifted from it would be what kills the connection at its first
- * keepalive, and from here that looks like a server-side drop. PONG matters less: any frame counts as
- * proof of life, and it only keeps the reply out of the log.
+ * The keepalive's two texts come from src/keepalive.ts, which is the only place they are written
+ * (#144). SessionDO's constructor registers the same two with `setWebSocketAutoResponse`, and the fake
+ * server the end-to-end tests run against answers the same, so the three cannot drift — each held its
+ * own copy until #144, tied together only by comments.
  *
- * Measured in `wrangler dev` (workerd 1.20260915.1) against SessionDO with a log line added to each of
- * its constructions, with this module at its default cadence of 30 s of silence per ping: six
- * keepalives, each answered "pong", and nothing reached the object from the first to the last (no
- * construction, no frame at webSocketMessage); a real event sent a second after them did construct it,
- * so it had been hibernating. Local workerd only. What a ping costs on a bill is not measured.
+ * What that module cannot say, and this one must: the cadence and the timeout below are THIS client's
+ * policy, not the protocol. The runtime answers a frame equal to `PING` exactly, with no JavaScript
+ * running and the object not constructed; anything else reaches `webSocketMessage`, which closes the
+ * socket 1003 (D1). Measured in `wrangler dev` (workerd 1.20260915.1) against SessionDO with a log
+ * line added to each of its constructions, at the 30 s cadence below: six keepalives, each answered
+ * `PONG`, and nothing reached the object from the first to the last; a real event sent a second after
+ * them did construct it, so it had been hibernating. Local workerd only. What a ping costs on a bill
+ * is not measured.
  */
-const PING = "ping";
-const PONG = "pong";
 
 /** Says on the probe's own requests that they are probes, so a server's log can tell them from sockets. */
 const PROBE_USER_AGENT = "bellman-room-socket/probe";

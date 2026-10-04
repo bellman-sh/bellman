@@ -38,6 +38,47 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
 
+/** Nobody is on a socket. What every reading of presence assumes until it is told otherwise. */
+export const NO_SOCKETS: ReadonlySet<string> = new Set();
+
+/**
+ * Which of these members a live socket vouches for, given the member ids that
+ * the sockets open in this room carry (their attachments, #146).
+ *
+ * A socket is authenticated as one identity, and its attachment lists the
+ * members that identity owned in the room when the socket was accepted. That is
+ * a snapshot, and the identity is what the socket vouches for, so this widens
+ * the ids to every undeparted member of the users they belong to. The bus is
+ * why: it serves every session of an identity on a machine through one socket
+ * per room, so a member that joins after the socket was accepted is carried by
+ * that socket and cannot be named in it. Read literally, the ids would leave
+ * that member stale after ten minutes, and it never calls `bellman_sync` to say
+ * otherwise.
+ *
+ * The cost is in one direction. A member of the identity whose session died
+ * stays present for as long as another of its members holds a socket here,
+ * because the socket does not say which of them it is for. That holds a seat too
+ * long, which #139 prefers to the opposite: reaping too early removes a live
+ * member, and the removal is final.
+ *
+ * Here beside `seatVictims`, and not in presence.ts, because `seatMember` runs
+ * it inside the store and presence.ts imports this module.
+ */
+export function connectedAmong(
+  members: readonly Member[],
+  attached: Iterable<string>,
+): ReadonlySet<string> {
+  const named = new Set(attached);
+  if (named.size === 0) return NO_SOCKETS;
+  const users = new Set<string>();
+  for (const m of members) if (named.has(m.memberId)) users.add(m.userId);
+  const connected = new Set<string>();
+  for (const m of members) {
+    if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
+  }
+  return connected;
+}
+
 /**
  * What `seatMember` did. `refused` is null exactly when the member is seated.
  *
@@ -61,6 +102,14 @@ export interface SeatOutcome {
  * all it knows is that a member last heard from before `staleBefore` may lose
  * its seat.
  *
+ * `connected` is the members a live socket vouches for (`connectedAmong`), and
+ * none of them is reclaimable, however long it has been quiet: the socket is
+ * the stronger evidence that it is there. It is an argument and not something
+ * read here because only one store has sockets. SessionDO supplies it from the
+ * sockets it holds, inside the transaction that makes the decision, and
+ * MemoryStore from a hook that is empty unless a test says otherwise. The rule
+ * stays one function, and the contract suite still holds both to it.
+ *
  * `null` means refuse: the room is full of members that are not reclaimable.
  * An empty array means seat them with nobody removed.
  */
@@ -68,6 +117,7 @@ export function seatVictims(
   members: Member[],
   maxMembers: number,
   staleBefore: number,
+  connected: ReadonlySet<string> = NO_SOCKETS,
 ): Member[] | null {
   const active = members.filter(isActiveMember);
   const needed = active.length - maxMembers + 1;
@@ -75,7 +125,7 @@ export function seatVictims(
   // Longest-quiet first: if only one seat has to go, it is the one whose member
   // has been gone longest.
   const victims = active
-    .filter((m) => lastSeen(m) < staleBefore)
+    .filter((m) => lastSeen(m) < staleBefore && !connected.has(m.memberId))
     .sort((a, b) => lastSeen(a) - lastSeen(b))
     .slice(0, needed);
   return victims.length < needed ? null : victims;
@@ -220,6 +270,23 @@ export interface BellmanStore {
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
+  /**
+   * The members of this room that a live socket vouches for right now (#146).
+   * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
+   * the room's WebSocket never calls `bellman_sync`, so it never says anything
+   * and would read stale after ten minutes with its connection open. See
+   * `connectedAmong` for which members a socket vouches for, and what that
+   * costs. An unknown session answers nobody.
+   *
+   * For reading: a preview, a roster, a capacity count. Nobody is removed from
+   * this answer. `seatMember` decides that, and reads the sockets itself inside
+   * the operation, because an answer fetched first is old by the time it is
+   * used, and a member can connect or drop in the gap.
+   *
+   * MemoryStore has no socket to a room and answers nobody. SessionDO answers
+   * from the sockets it holds.
+   */
+  connectedMembers(sessionId: string): Promise<ReadonlySet<string>>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /**
@@ -528,7 +595,8 @@ export class MemoryStore implements BellmanStore {
     if (s.closed) return { refused: "closed", reclaimed: [] };
     if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
 
-    const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+    const connected = connectedAmong(s.members, this.attachedTo(sessionId));
+    const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
     if (victims === null) return { refused: "full", reclaimed: [] };
 
     const reclaimed: Member[] = [];
@@ -541,6 +609,23 @@ export class MemoryStore implements BellmanStore {
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
     return { refused: null, reclaimed };
+  }
+
+  /**
+   * The member ids the sockets open to this room carry. None: the Node server
+   * holds no socket to a room, so nobody is connected through this store. A
+   * subclass standing in for SessionDO says otherwise by overriding this, and
+   * `connectedMembers` and `seatMember` both read it, so the two cannot answer
+   * from different sources the way a store with a separate cache could.
+   */
+  protected attachedTo(_sessionId: string): Iterable<string> {
+    return [];
+  }
+
+  async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return NO_SOCKETS;
+    return connectedAmong(s.members, this.attachedTo(sessionId));
   }
 
   async updateMember(

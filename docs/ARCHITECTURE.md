@@ -388,8 +388,8 @@ A member has three readings, and only two of them are written down:
 
 | | `leftAt` | Last heard from | Holds a seat |
 |---|---|---|---|
-| **present** | null | inside the window | yes |
-| **stale** | null | outside the window | only until contested |
+| **present** | null | inside the window, or on a live socket | yes |
+| **stale** | null | outside the window, and on no socket | only until contested |
 | **departed** | set | — | no |
 
 `leftAt` records a goodbye — a `bellman_leave`, an eviction, a reaped seat — and
@@ -469,16 +469,45 @@ quiet close itself, destroying the history the returning session came back for.
 Departure is permanent and may close a room. Staleness is reversible and must
 never.
 
-**A gap this leaves open: #140.** #99's hibernating WebSocket has already
-landed, and `SocketAttachment` carries the member ids — so the object holds a
-hard fact about who is connected, which beats any timeout because it is being
-told rather than inferring. Presence consults none of it. That is latent only
-while every client still long-polls `bellman_sync`; the first one that prefers
-the socket stops touching `lastSeenAt`, looks stale with a live connection, and
-is then the quietest member in the room by construction, so the next joiner
-takes its seat. Closing it means stamping `lastSeenAt` when the socket is
-accepted and excluding connected members from `seatVictims` inside the object,
-which changes a `SessionDO` path the seat bug does not.
+**An open socket is liveness (#146, #140).** A member fed by the local bus or by
+the room's hibernating WebSocket never calls `bellman_sync`, so nothing writes
+its `lastSeenAt`, and a listen-only member — an agent waiting for a peer's reply
+— sends nothing either. On the window alone it would read stale after ten
+minutes with its connection open, and the next contested join would take its
+seat. The object holds a better fact than the window: `ctx.getWebSockets()` is
+the sockets it has accepted, and each one's `SocketAttachment` names the members
+its identity owned when it was accepted. So a member is present when `leftAt` is
+null and either `lastSeenAt` is inside the window or a live socket in the room
+vouches for it.
+
+- **A socket vouches for an identity, not for the ids it names.** The attachment
+  is a snapshot, and the bus serves every session of an identity on a machine
+  through one socket per room, so a member that joins after the socket was
+  accepted is carried by it without being named in it. `connectedAmong` widens
+  the named ids to every undeparted member of the users they belong to. A member
+  of that identity whose session died stays present while another of its members
+  holds a socket in the room, which holds a seat too long, the direction #139
+  prefers.
+- **The reclaim reads the sockets inside `seatMember`**, in the same transaction
+  as the decision, and is not handed a set. A set fetched first is old by the
+  time it is used, and the reclaim is final. `seatVictims` takes the set as an
+  argument so the seat rule stays one function for both stores; `MemoryStore`
+  has no sockets and supplies none.
+- **Everything that only counts reads `BellmanStore.connectedMembers`**: the
+  preview in `bellman_connect`, the capacity check in `issueInvite`, whether
+  `bellman_confirm` retires the codes of a full room, and the roster's
+  `presence`. The reclaim is still confined to `bellman_confirm`, and none of
+  these removes anybody.
+- **A socket this object is closing does not count.** `isOpen` is the one
+  definition of a live socket, shared with `wake()`: the runtime keeps listing a
+  socket this object has closed until its peer acknowledges.
+
+What the window still covers for a socket-fed member is the gap after its socket
+drops. The object stops listing the socket at once, `lastSeenAt` is whatever it
+last was, and the member reads stale until its client reconnects; a contested
+join landing in that gap would take the seat. Stamping `lastSeenAt` when a
+socket closes would narrow it, at one session-record write per close, and is not
+done.
 
 ## 6. Identity, plans and entitlements
 

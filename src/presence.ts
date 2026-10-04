@@ -17,9 +17,19 @@
  *
  * Presence is DERIVED, never stored:
  *
- *   present   not departed, heard from inside the window
- *   stale     not departed, not heard from inside the window
+ *   present   not departed, and heard from inside the window or on a live socket
+ *   stale     not departed, and neither
  *   departed  `leftAt` set — by a leave, an eviction, or a reaped seat
+ *
+ * "On a live socket" is the second way to be present, and the reason is who
+ * does not poll. A member fed by the local bus or by the room's hibernating
+ * WebSocket never calls `bellman_sync`, so nothing writes its `lastSeenAt`, and
+ * a listen-only member — an agent waiting for a peer's reply — sends nothing
+ * either. Left to the window alone it would read stale after ten minutes with
+ * its connection open, and the next contested join would take its seat (#146).
+ * The object holds a better fact than the window: which sockets it has accepted
+ * right now. That is a set of member ids, and this module is handed it rather
+ * than looking it up, because it cannot call a Durable Object.
  *
  * Stale is reversible on purpose. A reopened laptop calls `bellman_sync`, its
  * `lastSeenAt` moves, and it is present again with the same `memberId` and the
@@ -32,10 +42,11 @@
  * directly or transitively (see src/oauth/storage.ts for the same rule).
  */
 import type { Member } from "./types.js";
-// `lastSeen` lives in store.ts beside `isActiveMember`, because `seatMember`
-// reads it inside the store and this module imports that one.
-import { isActiveMember, lastSeen } from "./store.js";
-export { lastSeen };
+// `lastSeen` and the socket derivation live in store.ts beside `isActiveMember`,
+// because `seatMember` reads them inside the store and this module imports that
+// one.
+import { NO_SOCKETS, connectedAmong, isActiveMember, lastSeen } from "./store.js";
+export { NO_SOCKETS, connectedAmong, lastSeen };
 
 /**
  * How long a member may go unheard from before its seat is reclaimable.
@@ -51,25 +62,36 @@ export { lastSeen };
  * a live member mid-conversation, and only one of those is recoverable by
  * waiting.
  *
- * **A gap this leaves open: #140.** The hibernating WebSocket of #99 has
- * already landed, and `SocketAttachment` carries the member ids
- * (`store-do.ts`), so the object holds a hard fact about who is connected —
- * better than any timeout, because it is being told rather than inferring.
- * Nothing here consults it. That is latent only while every client still
- * long-polls `bellman_sync`: the first one that prefers the socket stops
- * touching `lastSeenAt` and looks stale with a live connection, and is then the
- * quietest member in the room by construction, so the next joiner takes its
- * seat. Closing it means stamping `lastSeenAt` when the socket is accepted and
- * excluding connected members from `seatVictims` inside the object — not
- * `webSocketClose`, which `store-do.ts` records as the wrong hook because the
- * runtime drops a closed socket from `getWebSockets()` on its own.
+ * The window is for a member that polls. A member on a live socket does not
+ * depend on it: `presenceOf` is handed the members a socket vouches for, which
+ * is what closed the gap #140 and #146 describe. What the window cannot cover
+ * for a socket-fed member is the time after its socket drops. The object stops
+ * listing the socket at once, `lastSeenAt` is whatever it last was (a member
+ * that only listens may never have written it since joining), and the member
+ * reads stale until its client reconnects, which `room-socket.ts` does after a
+ * wait of up to a second at first, doubling to a cap of thirty seconds while the
+ * socket keeps failing. A contested join landing in that gap would take the
+ * seat. Stamping `lastSeenAt` when a socket closes would narrow it, at one
+ * session-record write per close, and is not done.
  */
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 
 export type Presence = "present" | "stale" | "departed";
 
-export function presenceOf(m: Member, now: number = Date.now()): Presence {
+/**
+ * `connected` is the members a live socket vouches for (`connectedAmong`),
+ * which the caller gets from `BellmanStore.connectedMembers`. A member in it is
+ * present whatever `lastSeenAt` says, unless it has left: `leftAt` is the one
+ * fact a socket cannot undo, and a departed member's identity can still be
+ * holding a socket for another of its sessions.
+ */
+export function presenceOf(
+  m: Member,
+  now: number = Date.now(),
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): Presence {
   if (!isActiveMember(m)) return "departed";
+  if (connected.has(m.memberId)) return "present";
   return now - lastSeen(m) >= STALE_AFTER_MS ? "stale" : "present";
 }
 
@@ -84,8 +106,14 @@ export function presenceOf(m: Member, now: number = Date.now()): Presence {
  * close a room; staleness is reversible and must never. Two readings, because
  * they answer two questions.
  */
-export const presentMembers = (members: Member[], now: number = Date.now()): Member[] =>
-  members.filter((m) => presenceOf(m, now) === "present");
+export const presentMembers = (
+  members: Member[],
+  now: number = Date.now(),
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): Member[] => members.filter((m) => presenceOf(m, now, connected) === "present");
 
-export const staleMembers = (members: Member[], now: number = Date.now()): Member[] =>
-  members.filter((m) => presenceOf(m, now) === "stale");
+export const staleMembers = (
+  members: Member[],
+  now: number = Date.now(),
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): Member[] => members.filter((m) => presenceOf(m, now, connected) === "stale");

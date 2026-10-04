@@ -142,19 +142,42 @@ export interface SeatOutcome {
  *
  * `null` means refuse: the room is full of members that are not reclaimable.
  * An empty array means seat them with nobody removed.
+ *
+ * `connected` is the members an open socket is carrying right now, and it
+ * OVERRIDES the cutoff: such a member is present by observation, so it is never
+ * a victim however long ago it last spoke (#140, #146). It has to be here
+ * rather than a filter the caller applies afterwards, because the rule is one
+ * function on purpose — `seatVictims` is what keeps `MemoryStore` and
+ * `DurableObjectStore` from drifting, and `tests/helpers/store-contract.ts`
+ * holds both to it. A `SessionDO` that filtered the result instead would own
+ * half a rule the conformance suite could no longer express.
+ *
+ * A set of member ids, not a transport: the store boundary learns WHO is
+ * connected and nothing about how. Only `SessionDO` can fill it, from
+ * `ctx.getWebSockets()` inside `seatMember`'s own invocation; `MemoryStore`
+ * leaves it empty, which is the honest statement that it holds no sockets. The
+ * default keeps that the quiet case rather than a parameter every caller has to
+ * think about.
+ *
+ * Departed ids in the set are harmless and expected. A departure does not close
+ * the member's sockets — nothing reads `memberIds` for that yet — and
+ * `isActiveMember` has already dropped those rows, so a departed member blocks
+ * no seat.
  */
 export function seatVictims(
   members: Member[],
   maxMembers: number,
   staleBefore: number,
+  connected: ReadonlySet<string> = new Set(),
 ): Member[] | null {
   const active = members.filter(isActiveMember);
   const needed = active.length - maxMembers + 1;
   if (needed <= 0) return [];
   // Longest-quiet first: if only one seat has to go, it is the one whose member
-  // has been gone longest.
+  // has been gone longest. A connected member is skipped before the sort, so it
+  // cannot be chosen however far back its `lastSeenAt` is.
   const victims = active
-    .filter((m) => lastSeen(m) < staleBefore)
+    .filter((m) => lastSeen(m) < staleBefore && !connected.has(m.memberId))
     .sort((a, b) => lastSeen(a) - lastSeen(b))
     .slice(0, needed);
   return victims.length < needed ? null : victims;
@@ -324,6 +347,29 @@ export interface BellmanStore {
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
+  /**
+   * The members an open socket is carrying for this room, right now.
+   *
+   * The one fact presence cannot infer. `lastSeenAt` is written as a side
+   * effect of traffic, so a client fed by the room's hibernating WebSocket —
+   * which is the point of #99 — stops touching it and looks quiet while it sits
+   * there watching. A listen-only member waiting on a peer's reply sends
+   * nothing at all. This is the room object being TOLD instead (#140, #146).
+   *
+   * Ids, not sockets. The store boundary says WHO is connected and nothing
+   * about how, so the rule stays one piece of code: `seatVictims` takes these
+   * and both stores reach it. `MemoryStore` returns `[]` always, and that is a
+   * true answer rather than a stub — it holds no sockets, so nobody is
+   * connected through it.
+   *
+   * Empty, never a throw, for a session that does not exist. Three read-only
+   * capacity gates call this before they know the room is there.
+   *
+   * May include departed members. Nothing closes a reaped member's sockets, so
+   * callers must keep letting `leftAt` win — `presenceOf` and `seatVictims`
+   * both do.
+   */
+  connectedMemberIds(sessionId: string): Promise<string[]>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
   /**
@@ -652,6 +698,17 @@ export class MemoryStore implements BellmanStore {
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
     return { refused: null, reclaimed };
+  }
+
+  /**
+   * Nobody, always. MemoryStore has no transport to hold a socket open, so this
+   * is the honest answer and not an unimplemented one: presence through this
+   * store is derived from `lastSeenAt` alone, exactly as it was. The contract
+   * suite pins the shape and this default; the DO's real answer needs a socket
+   * and an eviction, which is `worker-tests/ws-presence.test.ts`.
+   */
+  async connectedMemberIds(_sessionId: string): Promise<string[]> {
+    return [];
   }
 
   async updateMember(

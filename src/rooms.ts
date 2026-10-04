@@ -76,9 +76,21 @@ export function activeMembers(s: StoredSession): Member[] {
  * Members whose seat a capacity check should count: present, not merely
  * undeparted. See src/presence.ts for why this is a second reading of the
  * roster rather than a change to `activeMembers`.
+ *
+ * `connected` is the members an open socket is carrying, and every caller that
+ * can get it should pass it (#140, #146). The three gates built on this —
+ * `bellman_connect`'s preview, `issueInvite`'s mint, and the `clearJoinCodes`
+ * after a seating — all ask "is a seat free", and `seatMember` is the authority
+ * that answers it for real. Leave the socket out here and the two disagree: the
+ * gates see a seat going spare, hand out a code or a connect token for it, and
+ * `seatMember` refuses, because it will not reclaim a connected member's seat.
  */
-export function seatedMembers(s: StoredSession, now: number = Date.now()): Member[] {
-  return presentMembers(s.members, now);
+export function seatedMembers(
+  s: StoredSession,
+  now: number = Date.now(),
+  connected?: ReadonlySet<string>,
+): Member[] {
+  return presentMembers(s.members, now, connected);
 }
 
 /**
@@ -441,7 +453,14 @@ export async function issueInvite(
   // with. This only counts — the seat is actually reclaimed by the
   // bellman_confirm that redeems this code, which is the one caller authorized
   // to remove anybody. The `invite` verb is not the `evict` authority.
-  if (seatedMembers(session).length >= session.maxMembers) {
+  //
+  // Counting the sockets too, because `seatMember` does (#140, #146): a member
+  // watching over the room's socket never calls bellman_sync and so looks
+  // quiet, and a code minted for its seat is a code whose redeemer gets as far
+  // as `bellman_confirm` and is then refused. Mint nothing rather than mint a
+  // dead end.
+  const connected = new Set(await store.connectedMemberIds(sessionId));
+  if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
     return refuse(
       "conflict",
       `session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`

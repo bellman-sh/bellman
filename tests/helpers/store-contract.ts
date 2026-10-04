@@ -258,6 +258,28 @@ export function describeStoreContract(
       expect(fresh.members[0].label).toBe("jesse@codenerd");
     });
 
+    /**
+     * #140, #146. The seam this adds is a set of member ids, not a transport:
+     * the store says WHO is connected and nothing about how, so `MemoryStore`
+     * answering "nobody, ever" is a true answer rather than a stub.
+     *
+     * What both stores can be held to here is the shape and the safe default.
+     * The DO's real answer comes from `ctx.getWebSockets()`, which needs a
+     * socket and an eviction to exercise — that is
+     * `worker-tests/ws-presence.test.ts`, not this suite.
+     */
+    it("connectedMemberIds is empty for a room nobody has a socket on", async () => {
+      const s = session({ members: [member({ memberId: "m_creator" })] });
+      await store.createSession(s);
+      expect(await store.connectedMemberIds(s.id)).toEqual([]);
+    });
+
+    it("connectedMemberIds reports an unknown session as empty rather than throwing", async () => {
+      // The gates call this before they know the room exists. Throwing would
+      // turn a missing room into a 500 on three read-only paths.
+      expect(await store.connectedMemberIds("qs_nope")).toEqual([]);
+    });
+
     it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
       // The production join path. Read-then-write capacity was the bug: two
       // confirms agreeing on one seat overfill the room, and a sync landing in

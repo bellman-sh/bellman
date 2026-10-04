@@ -59,19 +59,22 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
  * What a hibernating socket remembers. The runtime rejects more than 16 KB;
  * fetch says how close this can get.
  *
- * Nothing reads `memberIds` today. wake() reads only `cursor` and carries the
- * rest along unchanged, and every member of a room receives every event (spec
- * D1a), so delivery does not depend on whose socket it is. It is kept for what
- * has to find a socket by member, the use in view being to close the sockets of
- * a member who has left. Nothing does that yet.
+ * `memberIds` has ONE reader: connectedMemberIds, which is how the seat rule
+ * learns that a member is connected right now and must not be reaped however
+ * quiet it looks (#140, #146). wake() still reads only `cursor` and carries the
+ * rest along unchanged — every member of a room receives every event (spec
+ * D1a), so delivery does not depend on whose socket it is. Closing the sockets
+ * of a member who has left is still the other use in view, and still nothing
+ * does it; that is why a departed id can appear in connectedMemberIds' answer,
+ * and why its callers let `leftAt` win.
  *
- * Whatever reads it first can trust it, because of where it comes from:
- * membersOf answered it, and fetch received it in a request the Worker built
- * (see the /ws route in worker.ts), never in a header the client sent. A
- * forged x-bellman-members reaches nothing. tests/worker-ws.test.ts pins that
- * the Worker never forwards a caller's request; it guards the day this field is
- * read, not a path that is exploitable now. If the field is removed, that test
- * can go with it; until then, keep both.
+ * That reader can trust the field, because of where it comes from: membersOf
+ * answered it, and fetch received it in a request the Worker built (see the /ws
+ * route in worker.ts), never in a header the client sent. A forged
+ * x-bellman-members reaches nothing. tests/worker-ws.test.ts pins that the
+ * Worker never forwards a caller's request, and that is no longer a guard on a
+ * future path: a client that could put its own ids here could hold any member's
+ * seat against a legitimate joiner. Keep both.
  */
 type SocketAttachment = { memberIds: string[]; cursor: number };
 
@@ -351,6 +354,58 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       memberIds: s.members.filter((m) => m.userId === userId).map((m) => m.memberId),
       closed: s.closed || Date.now() > s.expiresAt,
     };
+  }
+
+  /**
+   * The members an open socket is carrying for this room, right now.
+   *
+   * The reader `SocketAttachment.memberIds` was kept for. Plan 1 recorded that
+   * nothing read it and said whatever read it first could trust it, because of
+   * where it comes from: `membersOf` answered it, and `fetch` received it in a
+   * request the WORKER built (see the /ws route in worker.ts), never in a header
+   * a client sent. A forged `x-bellman-members` reaches nothing, and
+   * `tests/worker-ws.test.ts` pins that the Worker never forwards a caller's
+   * request. This is that reader, so keep both.
+   *
+   * SYNCHRONOUS, and that is the point rather than an optimisation.
+   * `getWebSockets` and `deserializeAttachment` are both sync, so `seatMember`
+   * can call this INSIDE its transaction without yielding — and a seat is
+   * claimed in one store operation (ARCHITECTURE rule 9). An async read here
+   * would open the window two confirms overfill a room through.
+   *
+   * Reading the live list is simpler and strictly more accurate than tracking
+   * state on close, and `webSocketClose` is NOT the hook even though it is the
+   * obvious one: the runtime drops a socket from `getWebSockets()` on its own
+   * after a polite close, a bare FIN and an RST, measured both with the handler
+   * and without it (see webSocketClose below). A close-driven set would also
+   * leak a member whose socket vanished without a close frame.
+   *
+   * CLOSING and CLOSED are skipped, `#wake`'s rule and for its reason: the
+   * runtime goes on listing a socket whose peer has not acknowledged, for 23
+   * seconds and across a revival (measured). Such a socket proves nothing about
+   * a member still being there, and counting it would hold a seat for someone
+   * who has gone.
+   *
+   * A null attachment is skipped, which is the opposite direction from
+   * `#wake`'s fail-closed and deliberately so. `#wake` cannot know what to send
+   * a socket whose cursor it does not know, so it sends nothing. Here, a socket
+   * we cannot read names nobody, so it protects nobody and the member falls
+   * back to the `lastSeenAt` window — the behaviour before this existed. Fail
+   * closed in this direction would mean inventing a member id to protect.
+   *
+   * Departed ids come back. Nothing closes a reaped member's sockets, and
+   * `membersOf` returns departed members on purpose so /ws and `bellman_sync`
+   * agree about who may watch. `presenceOf` and `seatVictims` both let `leftAt`
+   * win, so a departed member blocks no seat.
+   */
+  connectedMemberIds(): string[] {
+    const ids = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws.readyState === WS_CLOSING || ws.readyState === WS_CLOSED) continue;
+      const att = ws.deserializeAttachment() as SocketAttachment | null;
+      for (const id of att?.memberIds ?? []) ids.add(id);
+    }
+    return [...ids];
   }
 
   /**
@@ -656,7 +711,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.closed) return { refused: "closed", reclaimed: [] };
       if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
 
-      const victims = seatVictims(s.members, s.maxMembers, staleBefore);
+      // Synchronous, inside the transaction, so the no-yield property above is
+      // intact: an open socket is read as part of the same decision that writes.
+      // A member watching over the room's socket never calls bellman_sync, so
+      // it is the quietest member in the room by construction and would be the
+      // FIRST one reaped — while it sits there watching (#140, #146).
+      const victims = seatVictims(
+        s.members, s.maxMembers, staleBefore, new Set(this.connectedMemberIds()),
+      );
       if (victims === null) return { refused: "full", reclaimed: [] };
 
       const departed = new Set(victims.map((v) => v.memberId));
@@ -1863,6 +1925,16 @@ export class DurableObjectStore implements BellmanStore {
         this.registry.indexMembership(member.userId, sessionId));
     }
     return added;
+  }
+
+  /**
+   * Forwarded straight through. The ids come from the object's own socket list,
+   * so there is no registry hop and nothing to index — and no "unknown session"
+   * branch, because an object that has never held a room has no sockets and
+   * answers `[]`, which is the empty the interface promises.
+   */
+  async connectedMemberIds(sessionId: string): Promise<string[]> {
+    return this.session(sessionId).connectedMemberIds();
   }
 
   async seatMember(

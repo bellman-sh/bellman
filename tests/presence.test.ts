@@ -66,6 +66,53 @@ describe("presence is derived from lastSeenAt, not stored", () => {
     expect(staleMembers(roster, NOW).map((m) => m.memberId)).toEqual(["m_gone"]);
   });
 
+  /**
+   * #140, #146: the window infers absence; an open socket knows.
+   *
+   * These pin the reading, not the reap. A socket-fed member that reads `stale`
+   * is wrong on three surfaces at once even once its seat is safe: the roster
+   * `bellman_confirm` returns says `stale` with a live connection, and the two
+   * capacity gates built on `presentMembers` see a spare seat and hand out a
+   * connect token for a seat `seatMember` will then refuse.
+   */
+  describe("a live socket beats the window", () => {
+    it("reads a member past the window as present when a socket carries it", () => {
+      const m = member({ memberId: "m_sock", lastSeenAt: AGES_AGO });
+      expect(presenceOf(m, NOW, new Set(["m_sock"]))).toBe("present");
+    });
+
+    it("still reads a departed member as departed, socket or not", () => {
+      // Departure is deliberate and permanent, and the socket of a reaped
+      // member is not closed by the reaping. `leftAt` wins.
+      const m = member({ memberId: "m_sock", lastSeenAt: NOW, leftAt: NOW - 1 });
+      expect(presenceOf(m, NOW, new Set(["m_sock"]))).toBe("departed");
+    });
+
+    it("reads a quiet member with nobody else's socket as stale", () => {
+      const m = member({ memberId: "m_gone", lastSeenAt: AGES_AGO });
+      expect(presenceOf(m, NOW, new Set(["m_other"]))).toBe("stale");
+    });
+
+    it("counts a socket-fed member as present and not as stale", () => {
+      // The two readings are complements. A member in both lists would make a
+      // capacity gate and a roster disagree about the same seat.
+      const roster = [
+        member({ memberId: "m_sock", lastSeenAt: AGES_AGO }),
+        member({ memberId: "m_gone", lastSeenAt: AGES_AGO }),
+      ];
+      const connected = new Set(["m_sock"]);
+      expect(presentMembers(roster, NOW, connected).map((m) => m.memberId)).toEqual(["m_sock"]);
+      expect(staleMembers(roster, NOW, connected).map((m) => m.memberId)).toEqual(["m_gone"]);
+    });
+
+    it("reads exactly as before when no socket is connected", () => {
+      const m = member({ memberId: "m_gone", lastSeenAt: AGES_AGO });
+      expect(presenceOf(m, NOW, new Set())).toBe("stale");
+      expect(presenceOf(member({ memberId: "m_h", lastSeenAt: NOW }), NOW, new Set()))
+        .toBe("present");
+    });
+  });
+
   it("gives the window several multiples of the sync poll interval", () => {
     // bellman_sync long-polls at most MAX_WAIT_SECONDS (25s), and the bridge
     // watcher re-polls on the same cadence. A window near that would reap a
@@ -131,6 +178,88 @@ describe("seatVictims — the seat rule both stores share", () => {
     // Without the lift, undefined reads as the epoch and every member stored
     // before this change loses its seat to the next joiner.
     expect(seatVictims([legacy], 1, CUTOFF)).toBeNull();
+  });
+
+  /**
+   * #140, #146: an open socket is liveness, and stronger evidence than a poll.
+   *
+   * A member fed by the room's hibernating WebSocket never calls `bellman_sync`,
+   * so nothing moves its `lastSeenAt` and it becomes the quietest member in the
+   * room by construction. The seat rule has to hear the socket, or that member
+   * is the FIRST one reaped while it sits there watching. A listen-only member
+   * waiting on a peer's reply is the worst case and not a rare one.
+   *
+   * `connected` is a set of member ids, not a transport: the store boundary
+   * learns who is connected and nothing about how. MemoryStore always passes an
+   * empty one, which is the honest statement that it holds no sockets.
+   */
+  describe("a connected member keeps its seat however quiet it looks", () => {
+    it("refuses a full room whose only quiet seat is held over a live socket", () => {
+      // Without the socket this reaps m_sock. It is the acute bug in #146: the
+      // member is removed from a room it is connected to and watching.
+      expect(seatVictims([at(NOW, "m_a"), at(1, "m_sock")], 2, CUTOFF, new Set(["m_sock"])))
+        .toBeNull();
+    });
+
+    it("skips a connected member to reap a quieter-looking disconnected one", () => {
+      // m_sock is quieter by `lastSeenAt` and would be chosen first. m_gone is
+      // the honest victim: nothing is connected on its behalf.
+      const victims = seatVictims(
+        [at(NOW, "m_here"), at(1, "m_sock"), at(2, "m_gone")], 3, CUTOFF, new Set(["m_sock"])
+      );
+      expect(victims?.map((m) => m.memberId)).toEqual(["m_gone"]);
+    });
+
+    it("reclaims nobody while a seat is spare, connected or not", () => {
+      // Held for them, not taken, is unchanged: the socket does not create a
+      // question where the free seat already answered it.
+      expect(seatVictims([at(1, "m_sock")], 5, CUTOFF, new Set(["m_sock"]))).toEqual([]);
+    });
+
+    it("does not let a departed member's socket block a seat", () => {
+      // A departure does not close the member's sockets — `memberIds` has no
+      // reader doing that (store-do.ts) — so a departed id can be in the set.
+      // It holds no seat, so it frees none and must refuse nothing.
+      const roster = [at(NOW, "m_here"), member({ memberId: "m_gone", leftAt: 5 })];
+      expect(seatVictims(roster, 2, CUTOFF, new Set(["m_gone"]))).toEqual([]);
+    });
+
+    it("applies the old rule exactly when nothing is connected", () => {
+      expect(seatVictims([at(NOW, "m_a"), at(1, "m_b")], 2, CUTOFF, new Set())
+        ?.map((m) => m.memberId)).toEqual(["m_b"]);
+    });
+  });
+});
+
+describe("seatedMembers counts a seat the socket is holding", () => {
+  /**
+   * #140, #146. `seatedMembers` is what the three capacity gates count:
+   * `bellman_connect`'s preview, `bellman_invite`'s mint, and the
+   * `clearJoinCodes` after a seating. If it misses a socket-fed member, the
+   * room advertises a seat `seatMember` will then refuse — the gate and the
+   * authority disagreeing about the same seat.
+   */
+  it("counts a quiet member a socket is carrying", () => {
+    const s = session({
+      maxMembers: 2,
+      members: [
+        member({ memberId: "m_creator", lastSeenAt: NOW }),
+        member({ memberId: "m_sock", lastSeenAt: AGES_AGO }),
+      ],
+    });
+    expect(seatedMembers(s, NOW, new Set(["m_sock"])).map((m) => m.memberId))
+      .toEqual(["m_creator", "m_sock"]);
+  });
+
+  it("leaves a quiet member nothing is connected for uncounted", () => {
+    const s = session({
+      maxMembers: 2,
+      members: [
+        member({ memberId: "m_creator", lastSeenAt: NOW }),
+        member({ memberId: "m_gone", lastSeenAt: AGES_AGO }),
+      ],
+    });
+    expect(seatedMembers(s, NOW, new Set()).map((m) => m.memberId)).toEqual(["m_creator"]);
   });
 });
 
@@ -308,6 +437,144 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     // activeMembers still counts it: that is the reading the stores use to
     // decide a room has emptied, and it must not learn about staleness.
     expect(activeMembers(room)).toHaveLength(2);
+  });
+});
+
+/**
+ * #140, #146: the three capacity gates and the roster, end to end.
+ *
+ * `seatMember` refusing to reap a connected member is only half the fix. The
+ * gates built on `seatedMembers` decide whether a seat is on offer at all, and
+ * if they miss the socket the room advertises a seat the authority will refuse:
+ * `bellman_invite` mints a code for it, `bellman_connect` hands out a connect
+ * token for it, and the joiner is told "session filled while you were
+ * confirming" at the end of a handshake that should never have started.
+ *
+ * The socket is stubbed at the store boundary, which is exactly what the seam
+ * is for: `connectedMemberIds` returns ids, so a test can supply them without a
+ * transport. The real `ctx.getWebSockets()` answer is pinned in
+ * worker-tests/ws-presence.test.ts.
+ */
+describe("a socket-fed member holds its seat against the gates and the roster", () => {
+  let h: Harness;
+  beforeEach(() => { h = new Harness(); });
+  afterEach(() => h.close());
+
+  /** Report `ids` as connected, the way SessionDO reports its live sockets. */
+  const socketsFor = (...ids: string[]) => {
+    h.store.connectedMemberIds = async () => ids;
+  };
+
+  /** A full pair room whose joiner has gone quiet past the window. */
+  const quietPeer = async () => {
+    const p = await pairUp(h);
+    await h.store.updateMember(p.sessionId, p.joinerMemberId, {
+      lastSeenAt: Date.now() - STALE_AFTER_MS - 1,
+    });
+    return p;
+  };
+
+  it("refuses to mint an invite for a seat the socket is holding", async () => {
+    const p = await quietPeer();
+    socketsFor(p.joinerMemberId);
+
+    const invited = await p.creator.call("bellman_invite", {
+      session_id: p.sessionId,
+      member_id: p.creatorMemberId,
+    });
+
+    expect(invited.isError).toBe(true);
+    expect(invited.text).toContain("full");
+  });
+
+  it("still mints the invite when nothing is connected for the quiet member", async () => {
+    // The positive control for the case above: the refusal has to come from the
+    // socket, not from the room being full of present members.
+    const p = await quietPeer();
+    socketsFor();
+
+    const invited = await p.creator.call("bellman_invite", {
+      session_id: p.sessionId,
+      member_id: p.creatorMemberId,
+    });
+
+    expect(invited.isError, invited.text).toBe(false);
+  });
+
+  it("refuses the connect preview for a seat the socket is holding", async () => {
+    const p = await quietPeer();
+    // Mint while the member looks quiet, so a live code exists for a seat that
+    // is about to be revealed as taken. This is the race a watching member
+    // creates every ten minutes today.
+    socketsFor();
+    const invited = await p.creator.call("bellman_invite", {
+      session_id: p.sessionId,
+      member_id: p.creatorMemberId,
+    });
+    expect(invited.isError, invited.text).toBe(false);
+
+    socketsFor(p.joinerMemberId);
+    const third = await h.connect(DEV_KEY.outsider);
+    const preview = await third.call("bellman_connect", {
+      join_code: String(invited.data.join_code),
+    });
+
+    expect(preview.isError).toBe(true);
+    expect(preview.text).toContain("full");
+  });
+
+  it("reports a socket-fed member as present on the roster, not stale", async () => {
+    // The handshake driven by hand, because the creator has to be quiet and
+    // connected at the moment the joiner's confirm builds the roster.
+    const creator = await h.connect(DEV_KEY.jesse);
+    const joiner = await h.connect(DEV_KEY.peer);
+    const started = await creator.call("bellman_start", {
+      manifest: manifestFixture(),
+      brief: brief(),
+      capabilities: ["read_context", "receive_messages"],
+      org_only: false,
+    });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const creatorMemberId = String(started.data.member_id);
+
+    const preview = await joiner.call("bellman_connect", {
+      join_code: String(started.data.join_code),
+    });
+    expect(preview.isError, preview.text).toBe(false);
+
+    await h.store.updateMember(sessionId, creatorMemberId, {
+      lastSeenAt: Date.now() - STALE_AFTER_MS - 1,
+    });
+    socketsFor(creatorMemberId);
+
+    const confirmed = await joiner.call("bellman_confirm", {
+      connect_token: String(preview.data.connect_token),
+      brief: brief({ goal: "join a room whose creator is watching over the socket" }),
+      capabilities: ["read_context", "receive_messages"],
+    });
+
+    expect(confirmed.isError, confirmed.text).toBe(false);
+    const roster = confirmed.data.members as { member_id: string; presence: string }[];
+    expect(roster.find((m) => m.member_id === creatorMemberId)?.presence).toBe("present");
+  });
+
+  it("lets leftAt win over a socket the departed member still holds", async () => {
+    // A reaping does not close the member's sockets, so a departed id arrives
+    // in the set. It must free its seat anyway, or a room never refills.
+    const p = await quietPeer();
+    await p.joiner.call("bellman_leave", {
+      session_id: p.sessionId,
+      member_id: p.joinerMemberId,
+    });
+    socketsFor(p.joinerMemberId);
+
+    const invited = await p.creator.call("bellman_invite", {
+      session_id: p.sessionId,
+      member_id: p.creatorMemberId,
+    });
+
+    expect(invited.isError, invited.text).toBe(false);
   });
 });
 

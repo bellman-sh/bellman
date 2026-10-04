@@ -152,13 +152,24 @@ function storedMember(m: Member) {
  * A member on a live roster, which is the only place `presence` belongs: it is
  * read off the clock, so a stored copy goes wrong the moment it is replayed.
  *
- * No `now` parameter, deliberately. This is passed straight to `Array.map`,
- * which supplies the index as a second argument — an optional `now` here was
- * silently read as `now = 0` for every member in the roster, and every one of
- * them came back "present". The type system cannot catch it: `number` matches
- * `number`. `presenceOf` takes its own default instead.
+ * No `now` parameter, deliberately. An earlier version was passed straight to
+ * `Array.map`, which supplies the index as a second argument — an optional
+ * `now` here was silently read as `now = 0` for every member in the roster, and
+ * every one of them came back "present". The type system cannot catch it:
+ * `number` matches `number`. `presenceOf` takes its own default instead.
+ *
+ * `connected` is the one argument it does take, and it is why the call site is
+ * now an explicit arrow rather than a bare `.map(publicMember)`. Keep it that
+ * way. A bare map would pass the INDEX here, and while a number has no `.has`
+ * so it throws rather than lying, the trap is the same shape as the one above —
+ * and the next parameter added might not be so lucky.
+ *
+ * It is what makes a member watching over the room's socket read "present"
+ * instead of "stale" (#140, #146). Without it the roster contradicts the seat
+ * rule: `seatMember` will not reclaim that member's seat, and the roster says
+ * it has not been heard from.
  */
-function publicMember(m: Member) {
+function publicMember(m: Member, connected?: ReadonlySet<string>) {
   return {
     ...storedMember(m),
     /**
@@ -168,7 +179,7 @@ function publicMember(m: Member) {
      * answer: a `stale` member has not left, but has not been heard from, and
      * that is the distinction #66, #81 and #82 all need. See src/presence.ts.
      */
-    presence: presenceOf(m),
+    presence: presenceOf(m, Date.now(), connected),
   };
 }
 
@@ -434,7 +445,13 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       // bellman_confirm that follows, so this tool stays as read-only as its
       // annotation promises — a preview any holder of a join code can make,
       // repeatedly, must not be able to remove anybody.
-      if (seatedMembers(session).length >= session.maxMembers) {
+      // Sockets counted alongside the window, because `seatMember` counts them
+      // (#140, #146). A member fed by the room's socket never calls
+      // bellman_sync, so without this the preview offers a seat, mints a
+      // connect token for it, and the confirm at the end of the handshake
+      // refuses — a dead end this tool can see coming.
+      const connected = new Set(await s.connectedMemberIds(session.id));
+      if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
         return fail("session is full.");
       }
       const creator = session.members[0];
@@ -564,8 +581,14 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
 
+      // Read once, for the code retirement below and the roster at the end:
+      // both ask who holds a seat, and two reads could disagree.
+      const connected = new Set(await s.connectedMemberIds(joined.id));
+
       // A full pair session has no seat for ANY role, so every code goes.
-      if (seatedMembers(joined).length >= joined.maxMembers) {
+      // Counting the sockets, or a room that is full of watchers keeps a live
+      // code for a seat `seatMember` will refuse (#140, #146).
+      if (seatedMembers(joined, Date.now(), connected).length >= joined.maxMembers) {
         await s.clearJoinCodes(joined.id);
       }
 
@@ -592,7 +615,8 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           session_id: session.id,
           member_id: memberId,
           cursor: joinEvent.cursor,
-          members: joined.members.map(publicMember),
+          // An explicit arrow, never `.map(publicMember)`: see publicMember.
+          members: joined.members.map((m) => publicMember(m, connected)),
           room: roomPreview(joined, roomRole),
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)

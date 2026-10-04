@@ -10,6 +10,15 @@
  * `bellman_sync` long-polls every ~25 seconds, so a watching member announces
  * itself continuously. `lastSeenAt` just stops throwing that away.
  *
+ * There is now a THIRD signal, and it is the strongest of them: an open socket.
+ * A member in `ctx.getWebSockets()` is connected by construction, where
+ * `lastSeenAt` is an inference from traffic — and the moment a client prefers
+ * the room's hibernating WebSocket it stops sending that traffic altogether
+ * (#140, #146). The readings below take it as an optional `connected` set of
+ * member ids, supplied by whoever can know: `SessionDO`, from its own socket
+ * list. Nothing about the transport reaches this module, which is what keeps it
+ * importable by both builds.
+ *
  * Not a heartbeat. Liveness carries nothing and arrives on a timer, so a row
  * per beat in the durable, replayable event log is the worst possible home for
  * it — that is the cost curve #99 and #25 exist to flatten. It is a field on
@@ -56,25 +65,58 @@ export { lastSeen };
  * a live member mid-conversation, and only one of those is recoverable by
  * waiting.
  *
- * **A gap this leaves open: #140.** The hibernating WebSocket of #99 has
- * already landed, and `SocketAttachment` carries the member ids
- * (`store-do.ts`), so the object holds a hard fact about who is connected —
- * better than any timeout, because it is being told rather than inferring.
- * Nothing here consults it. That is latent only while every client still
- * long-polls `bellman_sync`: the first one that prefers the socket stops
- * touching `lastSeenAt` and looks stale with a live connection, and is then the
- * quietest member in the room by construction, so the next joiner takes its
- * seat. Closing it means stamping `lastSeenAt` when the socket is accepted and
- * excluding connected members from `seatVictims` inside the object — not
+ * **The window is no longer the only signal (#140, #146 closed it).** The
+ * hibernating WebSocket of #99 carries member ids in `SocketAttachment`, so the
+ * room object holds a hard fact about who is connected, and every reading here
+ * takes it as `connected`. That matters most to the member the window serves
+ * worst: one fed by the socket or the local bus never calls `bellman_sync` at
+ * all, and a listen-only member waiting on a peer's reply sends nothing, so it
+ * would be the quietest member in the room and the first reaped.
+ *
+ * `SessionDO.connectedMemberIds` is the source, read from `ctx.getWebSockets()`
+ * synchronously inside `seatMember`'s own transaction — NOT from
  * `webSocketClose`, which `store-do.ts` records as the wrong hook because the
- * runtime drops a closed socket from `getWebSockets()` on its own.
+ * runtime drops a closed socket from `getWebSockets()` on its own, and which
+ * would leak a member whose socket vanished without a close frame.
+ *
+ * Stamping `lastSeenAt` on the upgrade was the other half of #140's proposal
+ * and was deliberately NOT taken. `fetch` is built around "the only await; from
+ * here to the return nothing yields", a session write there would add one to
+ * every upgrade, and it buys a single window where reading the live list is
+ * permanent.
  */
 export const STALE_AFTER_MS = 10 * 60 * 1000;
 
 export type Presence = "present" | "stale" | "departed";
 
-export function presenceOf(m: Member, now: number = Date.now()): Presence {
+/**
+ * `connected` is the members an open socket is carrying right now, and it beats
+ * the window: the room object is being TOLD, where `lastSeenAt` is an inference
+ * from traffic that a socket-fed client no longer sends (#140, #146).
+ *
+ * `leftAt` still wins over it. Departure is deliberate and permanent, and
+ * nothing closes a reaped member's sockets — `memberIds` has no reader doing
+ * that — so a departed id can be in the set and must not read as present.
+ *
+ * Optional, and third, so every existing caller keeps the reading it had. A
+ * caller that CAN know who is connected should pass it; one that cannot is
+ * saying "no socket evidence here", which is `MemoryStore` and every pure
+ * roster computation.
+ *
+ * **Do not pass this function to `Array.map`.** `publicMember` (src/server.ts)
+ * carries the full argument: `map` supplies the index as the second argument,
+ * which an optional `now` silently read as `now = 0`, making every member
+ * present. A third parameter is the same trap — `map` would pass the array as
+ * `connected`. That one at least throws rather than lying, because an array has
+ * no `.has`, but the fix is the same: map through an explicit arrow.
+ */
+export function presenceOf(
+  m: Member,
+  now: number = Date.now(),
+  connected?: ReadonlySet<string>,
+): Presence {
   if (!isActiveMember(m)) return "departed";
+  if (connected?.has(m.memberId)) return "present";
   return now - lastSeen(m) >= STALE_AFTER_MS ? "stale" : "present";
 }
 
@@ -89,8 +131,20 @@ export function presenceOf(m: Member, now: number = Date.now()): Presence {
  * close a room; staleness is reversible and must never. Two readings, because
  * they answer two questions.
  */
-export const presentMembers = (members: Member[], now: number = Date.now()): Member[] =>
-  members.filter((m) => presenceOf(m, now) === "present");
+export const presentMembers = (
+  members: Member[],
+  now: number = Date.now(),
+  connected?: ReadonlySet<string>,
+): Member[] => members.filter((m) => presenceOf(m, now, connected) === "present");
 
-export const staleMembers = (members: Member[], now: number = Date.now()): Member[] =>
-  members.filter((m) => presenceOf(m, now) === "stale");
+/**
+ * Takes `connected` for the same reason `presentMembers` does, and it is not
+ * decoration: the two are complements, and a member counted present by a
+ * capacity gate while reading stale on a roster is the same seat described two
+ * ways. Both readings consult the same evidence or neither does.
+ */
+export const staleMembers = (
+  members: Member[],
+  now: number = Date.now(),
+  connected?: ReadonlySet<string>,
+): Member[] => members.filter((m) => presenceOf(m, now, connected) === "stale");

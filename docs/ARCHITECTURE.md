@@ -417,16 +417,47 @@ quiet close itself, destroying the history the returning session came back for.
 Departure is permanent and may close a room. Staleness is reversible and must
 never.
 
-**A gap this leaves open: #140.** #99's hibernating WebSocket has already
-landed, and `SocketAttachment` carries the member ids — so the object holds a
-hard fact about who is connected, which beats any timeout because it is being
-told rather than inferring. Presence consults none of it. That is latent only
-while every client still long-polls `bellman_sync`; the first one that prefers
-the socket stops touching `lastSeenAt`, looks stale with a live connection, and
-is then the quietest member in the room by construction, so the next joiner
-takes its seat. Closing it means stamping `lastSeenAt` when the socket is
-accepted and excluding connected members from `seatVictims` inside the object,
-which changes a `SessionDO` path the seat bug does not.
+**An open socket is the stronger signal, and presence now consults it (#140,
+#146).** #99's hibernating WebSocket carries member ids in `SocketAttachment`,
+so the room object holds a hard fact about who is connected, which beats any
+timeout because it is being told rather than inferring. The window was the only
+signal, and it serves worst exactly the member it most needs to serve: one fed
+by the socket or the local bus never calls `bellman_sync`, and a listen-only
+member waiting on a peer's reply sends nothing at all, so it would be the
+quietest member in the room by construction and the first a contested
+`bellman_confirm` reaps — while it sits there watching.
+
+`SessionDO.connectedMemberIds` reads `ctx.getWebSockets()` and is
+**synchronous**, so `seatMember` calls it inside its own transaction and a seat
+is still claimed in one store operation (rule 9). It reaches the rule through
+`seatVictims(members, maxMembers, staleBefore, connected)`: a set of member ids,
+not a transport, so the rule stays ONE function that both stores reach and
+`tests/helpers/store-contract.ts` can still express. `MemoryStore` answers `[]`,
+which is true rather than a stub — it holds no sockets.
+
+The same set reaches every other reader, because the alternative is a gate and
+an authority disagreeing about one seat. `seatedMembers` feeds three capacity
+gates — `bellman_connect`'s preview, `issueInvite`'s mint, and the
+`clearJoinCodes` after a seating — and a socket-fed member missing from the
+count makes the room advertise a seat `seatMember` then refuses: a code minted
+for nothing, a connect token handed out, and a joiner told "session filled while
+you were confirming" at the end of a handshake that should never have started.
+The roster's `presence` reads from it too, so a watching member reads `present`
+rather than `stale`.
+
+Two things deliberately NOT done. `webSocketClose` is not the hook, although it
+is the obvious one: the runtime drops a closed socket from `getWebSockets()` on
+its own after a polite close, a bare FIN and an RST (measured, with the handler
+and without), so reading the live list is simpler, strictly more accurate, and
+cannot leak a member whose socket vanished without a close frame. And
+`lastSeenAt` is not stamped on the upgrade — `fetch` is built around "the only
+await; from here to the return nothing yields", a write there would land on
+every upgrade, and it buys one window where the live list is permanent.
+
+`worker-tests/ws-presence.test.ts` is what pins it, because only workerd can: it
+opens a socket through the real `/ws` route, evicts the object, and then
+contests the seat, so the attachment has to survive a revival for the case to
+pass. Its control reaps the same member with no socket open.
 
 ## 6. Identity, plans and entitlements
 
@@ -835,7 +866,12 @@ pull request.
    quiet writes nothing, so it is reversible; only a contested seat
    turns stale into departed. `activeMembers` decides when a room has emptied
    and `seatedMembers` decides who holds a seat, and those two readings must not
-   be merged.
+   be merged. A live socket is read as presence and still writes nothing: it is
+   derived from `ctx.getWebSockets()` at the moment it is asked, which is why
+   the answer cannot go stale the way a stored `present` would, and why
+   `webSocketClose` maintaining a set would be the worse design (#140, #146).
+   `leftAt` still wins over it — nothing closes a reaped member's sockets, so a
+   departed id arrives in the set and must free its seat anyway.
 8. **A member is removed only by an authorized caller.** `bellman_leave` for
    oneself, `evictMember` for the creator, `seatMember` from `bellman_confirm`
    alone. A path that merely wants to know whether a seat is free must count,

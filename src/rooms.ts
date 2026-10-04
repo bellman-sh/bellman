@@ -687,6 +687,16 @@ export async function evictMember(
     payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
     refId: null,
   }, { markRemoved: targetMemberId });
+
+  // The door is already shut when this returns: `consumeJoinCode` committed
+  // above, so a live code for the seat is retired. This returns ahead of
+  // `announceDoorShut` and `audit`, so in this window the retirement leaves no
+  // `invite_revoked` event and no audit row at all, and a retry once the room
+  // thaws finds the code gone and records `code_retired: false`. That is the
+  // trade the comment above `consumeJoinCode` makes (member still in, door
+  // shut, the record thin), and a refusal is one more way to reach it.
+  // `bellman_evict`'s description tells the caller the code may be retired, and
+  // to repeat the call.
   if (!announced) return refuse("frozen", FROZEN);
 
   // The events read in the order a person would tell it — the member went, then

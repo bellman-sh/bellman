@@ -1020,7 +1020,7 @@ The history stays readable to the person removed: it was theirs too, and their b
 
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
-Members see a member_evicted event, the person removed too, unless the room freezes at that instant: the removal still completes, unannounced. Removing the last active member closes the room.
+Members see a member_evicted event, the person removed too. If the room freezes while the call is in progress, the call is refused instead and the person is still in the room — the seat's code may already be retired — so repeat it once the room thaws. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
       inputSchema: {
         session_id: z.string().min(4),

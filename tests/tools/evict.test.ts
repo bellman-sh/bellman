@@ -618,6 +618,15 @@ describe("bellman_evict", () => {
       // The sentence #112 shipped. It was true then and is false now.
       expect(doc).not.toContain("keeps returning new events");
       expect(doc).not.toContain("removal does not keep later messages from them");
+
+      // The other sentence this change made false. Folding the member write into
+      // the announcement's append means a room that freezes between the guard and
+      // the append REFUSES the call and leaves the person in; it used to complete
+      // the removal and skip the notice (#113 D2). The description said the old
+      // thing, and nothing pinned it, so it outlived the behaviour.
+      expect(doc, "the freeze sentence").not.toContain("the removal still completes, unannounced");
+      expect(doc, "the freeze sentence")
+        .toContain("the call is refused instead and the person is still in the room");
     });
 
     // The other half of the same promise, from the side of the agent it is made

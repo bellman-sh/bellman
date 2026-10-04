@@ -126,11 +126,53 @@ function trimOws(text: string): string {
  * in development only.
  */
 export function readSessionCookie(request: Request, secure: boolean): string | undefined {
+  return readCookie(request, sessionCookieName(secure));
+}
+
+/**
+ * The sign-in nonce cookie's name. Prefixed for the same reason the session
+ * cookie is: without it a sibling subdomain can plant this name with a Domain,
+ * and a planted nonce defeats the check it exists for.
+ */
+export function signinNonceCookieName(secure: boolean): string {
+  return secure ? "__Host-bellman_signin" : "bellman_signin";
+}
+
+/**
+ * Binds a panel sign-in to the browser that started it.
+ *
+ * Short-lived: it is wanted only for the provider round trip, so it expires with
+ * the signed state rather than outliving it. Otherwise identical to the session
+ * cookie's attributes, including the prefix — see signinNonceCookieName.
+ */
+export function serializeSigninNonce(nonce: string, secure: boolean, maxAgeSeconds: number): string {
+  return [`${signinNonceCookieName(secure)}=${nonce}`, ...attributes(secure), `Max-Age=${maxAgeSeconds}`]
+    .join("; ");
+}
+
+/** Cleared the moment the sign-in completes or fails; it has no later use. */
+export function clearedSigninNonce(secure: boolean): string {
+  return serializeSigninNonce("", secure, 0);
+}
+
+export function readSigninNonce(request: Request, secure: boolean): string | undefined {
+  return readCookie(request, signinNonceCookieName(secure));
+}
+
+/**
+ * One parser for every cookie this server reads.
+ *
+ * Shared rather than copied because the two things that make it correct are not
+ * obvious and would not survive being written twice: OWS-exact trimming, which
+ * is what stops a padded name passing for a prefixed one, and refusing a
+ * duplicate rather than choosing between them. A second cookie with its own
+ * parser would have neither.
+ */
+function readCookie(request: Request, name: string): string | undefined {
   const header = request.headers.get("cookie");
   if (!header) return undefined;
   // This mode's name and no other. In secure mode the unprefixed name is ignored,
   // because a sibling subdomain can set it with a Domain and a browser will send it.
-  const name = sessionCookieName(secure);
 
   let found: string | undefined;
   for (const part of header.split(";")) {

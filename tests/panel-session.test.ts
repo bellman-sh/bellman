@@ -647,17 +647,29 @@ describe("signing in to the panel", () => {
    * let a hand-off that refused SESSION_AUDIENCE return a 400 nobody reads, and
    * the callback below would still pass.
    */
-  async function signIn(returnTo?: string) {
+  const NONCE_COOKIE = "__Host-bellman_signin";
+
+  /**
+   * Walk the sign-in the way a browser does, carrying the nonce cookie the
+   * chooser set from there to the callback. `nonce` overrides what is sent:
+   * null omits the cookie, a string sends that value instead. Both are the
+   * login-CSRF attacker's position — they hold a valid signed state and a
+   * provider code, and the victim's browser has no matching cookie.
+   */
+  async function signIn(returnTo?: string, nonce?: string | null) {
     const query = returnTo === undefined ? "" : `?return_to=${encodeURIComponent(returnTo)}`;
     const chooser = await route(new Request(`${ISSUER}/auth/signin${query}`));
+    const minted = /__Host-bellman_signin=([^;]*)/.exec(chooser.headers.get("set-cookie") ?? "")?.[1];
     const req = decodeURIComponent(
       /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
     );
     const handoff = await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
     expect(handoff.status).toBe(302);
     expect(handoff.headers.get("location")).toContain("github.com/login/oauth/authorize");
+    const sent = nonce === undefined ? minted : nonce;
     return route(new Request(
-      `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`
+      `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`,
+      sent === null ? {} : { headers: { cookie: `${NONCE_COOKIE}=${sent}` } }
     ));
   }
 
@@ -911,5 +923,89 @@ describe("/auth/signout", () => {
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("POST");
     expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
+  });
+});
+
+
+describe("a panel sign-in is bound to the browser that started it", () => {
+  const NONCE_COOKIE = "__Host-bellman_signin";
+
+  /** The same walk signIn does, but reusable with a tampered cookie. */
+  async function walk(nonce?: string | null) {
+    const chooser = await route(new Request(`${ISSUER}/auth/signin`));
+    const minted = /__Host-bellman_signin=([^;]*)/.exec(chooser.headers.get("set-cookie") ?? "")?.[1];
+    const req = decodeURIComponent(
+      /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
+    );
+    await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
+    const sent = nonce === undefined ? minted : nonce;
+    return route(new Request(
+      `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`,
+      sent === null ? {} : { headers: { cookie: `${NONCE_COOKIE}=${sent}` } }
+    ));
+  }
+
+  it("sets a nonce cookie on the chooser, with the session cookie's attributes", async () => {
+    const header = (await route(new Request(`${ISSUER}/auth/signin`))).headers.get("set-cookie") ?? "";
+
+    expect(header).toContain(`${NONCE_COOKIE}=`);
+    expect(header).toContain("HttpOnly");
+    expect(header).toContain("Secure");
+    expect(header).toContain("SameSite=Lax");
+    expect(header).toContain("Path=/");
+    expect(header).not.toContain("Domain");
+  });
+
+  /**
+   * The login-CSRF attack itself. The attacker completes the provider half as
+   * themselves and hands the victim the callback URL; the victim's browser has
+   * no nonce cookie, so the sign-in must not land. Without the check the victim
+   * ends up signed in as the attacker and cannot tell.
+   */
+  it("refuses a callback carrying no nonce cookie, and mints no session", async () => {
+    const res = await walk(null);
+
+    expect(res.status).toBe(400);
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("__Host-bellman_session=");
+  });
+
+  it("refuses a callback whose nonce does not match the state", async () => {
+    const res = await walk("not-the-nonce-that-was-minted-aaaaaaaaaaaaaaaa");
+
+    expect(res.status).toBe(400);
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("__Host-bellman_session=");
+  });
+
+  it("refuses an empty nonce cookie", async () => {
+    const res = await walk("");
+
+    expect(res.status).toBe(400);
+    expect(res.headers.get("set-cookie") ?? "").not.toContain("__Host-bellman_session=");
+  });
+
+  it("clears the nonce cookie when the sign-in succeeds", async () => {
+    const header = (await walk()).headers.get("set-cookie") ?? "";
+
+    expect(header).toContain("__Host-bellman_session=");
+    expect(header).toContain(`${NONCE_COOKIE}=;`);
+    expect(header).toContain("Max-Age=0");
+  });
+
+  it("clears the nonce cookie when the sign-in is refused, so a replay cannot reuse it", async () => {
+    const header = (await walk("wrong")).headers.get("set-cookie") ?? "";
+
+    expect(header).toContain(`${NONCE_COOKIE}=;`);
+    expect(header).toContain("Max-Age=0");
+  });
+
+  it("gives each sign-in its own nonce", async () => {
+    const one = /__Host-bellman_signin=([^;]*)/.exec(
+      (await route(new Request(`${ISSUER}/auth/signin`))).headers.get("set-cookie") ?? "")?.[1];
+    const two = /__Host-bellman_signin=([^;]*)/.exec(
+      (await route(new Request(`${ISSUER}/auth/signin`))).headers.get("set-cookie") ?? "")?.[1];
+
+    expect(one).toBeTruthy();
+    expect(two).toBeTruthy();
+    expect(one).not.toBe(two);
   });
 });

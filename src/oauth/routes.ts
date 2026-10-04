@@ -13,7 +13,10 @@ import {
   SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
   type AuthStorage, type PanelSession,
 } from "./storage.js";
-import { clearedSessionCookie, readSessionCookie, serializeSessionCookie } from "./cookies.js";
+import {
+  clearedSessionCookie, clearedSigninNonce, readSessionCookie, readSigninNonce,
+  serializeSessionCookie, serializeSigninNonce,
+} from "./cookies.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
@@ -337,6 +340,23 @@ function paymentLink(config: OAuthConfig, name: string): string | undefined {
 /** Carried through the provider round trip when signing in to the panel. */
 interface SessionRequest {
   return_to: string;
+  /** Binds this sign-in to the browser that started it. See finishSession. */
+  nonce: string;
+}
+
+/**
+ * Constant-time string equality, for comparing a nonce against a cookie.
+ *
+ * `===` on strings can return as soon as two bytes differ, which leaks how much
+ * of a guess was right. Both values here are 32 random bytes in base64url, so a
+ * length difference is already a mismatch and comparing the whole of both costs
+ * nothing.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
 /**
@@ -464,6 +484,7 @@ async function verifyState(
  * same way a refresh token does — see sessionCaller.
  */
 async function finishSession(
+  request: Request,
   url: URL,
   name: ProviderName,
   creds: ProviderCredentials,
@@ -471,12 +492,42 @@ async function finishSession(
   config: OAuthConfig
 ): Promise<Response> {
   const panels = config.panelOrigins ?? [];
+  const secure = new URL(config.issuer).protocol === "https:";
+  /**
+   * Every exit from here clears the nonce cookie. It is worth nothing after
+   * this request either way, and leaving a live one behind would let a second
+   * replay of the same state succeed.
+   */
+  const ending = (res: Response) => {
+    res.headers.append("set-cookie", clearedSigninNonce(secure));
+    return res;
+  };
+
   if (panels.length === 0) {
-    return html(`<h1>No control panel configured</h1><p>Nothing was signed in.</p>`, 503);
+    return ending(html(`<h1>No control panel configured</h1><p>Nothing was signed in.</p>`, 503));
   }
+
+  /**
+   * The state is signed, so it cannot have been altered — but a signature says
+   * nothing about WHO is presenting it. This is what makes the state
+   * non-replayable: the browser finishing the sign-in must be the one that
+   * started it, and only that browser has the nonce cookie.
+   *
+   * Compared before the code is exchanged, so a replay costs the attacker's
+   * code nothing and tells them nothing.
+   */
+  const presented = readSigninNonce(request, secure);
+  if (!presented || !pending.nonce || !timingSafeEqual(presented, pending.nonce)) {
+    return ending(html(
+      `<h1>That sign-in did not start here</h1>` +
+        `<p>Start it again from the control panel.</p>`,
+      400
+    ));
+  }
+
   const code = url.searchParams.get("code");
   if (!code) {
-    return html(`<h1>Sign-in did not complete</h1><p>No authorization code came back. Start again.</p>`, 400);
+    return ending(html(`<h1>Sign-in did not complete</h1><p>No authorization code came back. Start again.</p>`, 400));
   }
 
   let resolved: Awaited<ReturnType<typeof resolvePlan>>;
@@ -487,7 +538,7 @@ async function finishSession(
     resolved = await resolvePlan(profile, config);
   } catch (err) {
     console.error(`${name} sign-in for the panel failed:`, err);
-    return html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502);
+    return ending(html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502));
   }
 
   const now = Date.now();
@@ -502,8 +553,7 @@ async function finishSession(
     expires_at: now + SESSION_TTL_MS,
   });
 
-  const secure = new URL(config.issuer).protocol === "https:";
-  return new Response(null, {
+  return ending(new Response(null, {
     status: 302,
     headers: {
       location: panelDestination(pending.return_to, panels),
@@ -513,7 +563,7 @@ async function finishSession(
       // must not be handed on to the panel in a Referer.
       "referrer-policy": "no-referrer",
     },
-  });
+  }));
 }
 
 export async function handleOAuth(
@@ -731,8 +781,17 @@ export async function handleOAuth(
     // Validated now as well as on the way out. Sealing an unusable destination
     // into a signed blob and discovering it after the provider round trip is a
     // worse error message for the same outcome.
+    // Binds this sign-in to this browser. Without it the signed state is a
+    // bearer credential anyone can replay: an attacker completes the provider
+    // half as themselves, keeps the callback URL, and gets a victim to open it
+    // — the callback then mints a session for the ATTACKER's account and sets
+    // it in the VICTIM's browser, who goes on using the panel believing the
+    // account is theirs. SameSite=Lax does not help, because the callback is a
+    // top-level GET navigation, which is the case Lax deliberately allows.
+    const nonce = randomId();
     const pending: SessionRequest = {
       return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
+      nonce,
     };
     const stateToken = await signJwt(
       { iss: config.issuer, sub: "session", aud: SESSION_AUDIENCE, bellman: pending as never },
@@ -742,11 +801,16 @@ export async function handleOAuth(
     const buttons = available
       .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
       .join("");
-    return html(
+    const page = html(
       `<h1>Sign in to Bellman</h1>` +
         `<p>Use the account your rooms belong to.</p>` +
         buttons
     );
+    page.headers.append(
+      "set-cookie",
+      serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS)
+    );
+    return page;
   }
 
   // ------------------------------------------------------- /auth/session
@@ -843,7 +907,7 @@ export async function handleOAuth(
       return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
     }
     if (state.audience === SESSION_AUDIENCE) {
-      return finishSession(url, name, creds, state.claims.bellman as unknown as SessionRequest, config);
+      return finishSession(request, url, name, creds, state.claims.bellman as unknown as SessionRequest, config);
     }
     if (state.audience === UPGRADE_AUDIENCE) {
       // An upgrade came back through the same callback; it ends at Stripe

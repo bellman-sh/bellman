@@ -258,6 +258,50 @@ export function describeStoreContract(
       expect(fresh.members[0].label).toBe("jesse@codenerd");
     });
 
+    /**
+     * `connectedMembers` is on BellmanStore and had no case here, so the two
+     * implementations could drift on it with nothing to catch them — and three
+     * capacity gates plus the roster read it (#146, #140).
+     *
+     * What both can be held to is the shape and the safe defaults. The widening
+     * rule itself (`connectedAmong`) needs a socket, which only one store has:
+     * tests/presence-sockets.test.ts covers it as a pure function, and
+     * worker-tests/presence-sockets.test.ts covers it through real sockets. This
+     * suite covers what every implementation owes regardless of transport.
+     *
+     * These pin agreement that already holds rather than fixing a divergence, so
+     * none of them was red first. Each was proven by breaking the store instead;
+     * the commit says which mutation reddens which.
+     */
+    it("connectedMembers is empty for a room nobody has a socket on", async () => {
+      const s = session({ members: [member({ memberId: "m_creator" })] });
+      await store.createSession(s);
+
+      expect([...(await store.connectedMembers(s.id))]).toEqual([]);
+    });
+
+    it("connectedMembers reports an unknown session as empty rather than throwing", async () => {
+      // The gates call this on a room they have only just resolved, and
+      // `issueInvite` calls it before its own guards. A throw here would turn a
+      // missing room into a failure on three read-only paths.
+      expect([...(await store.connectedMembers("qs_nope"))]).toEqual([]);
+    });
+
+    it("connectedMembers answers a set, which is what presence asks with", async () => {
+      // `presenceOf` and `seatVictims` both call `.has`, and SessionDO answers
+      // this over RPC as an array that the facade re-wraps. A store that handed
+      // back the array instead would make every `.has` undefined, so every
+      // socket-fed member would read stale again — silently, since an array is
+      // truthy and iterable.
+      const s = session({ members: [member({ memberId: "m_creator" })] });
+      await store.createSession(s);
+
+      const connected = await store.connectedMembers(s.id);
+      expect(typeof connected.has).toBe("function");
+      expect(connected.has("m_creator")).toBe(false);
+      expect(connected.size).toBe(0);
+    });
+
     it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
       // The production join path. Read-then-write capacity was the bug: two
       // confirms agreeing on one seat overfill the room, and a sync landing in

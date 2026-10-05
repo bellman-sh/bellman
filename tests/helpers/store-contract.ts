@@ -2240,22 +2240,30 @@ export function describeStoreContract(
       expect(await store.appendEvent(s.id, leaveEvent("m_creator"))).toBeNull();
     });
 
-    it("removeMember refuses a frozen room when the caller asked it to", async () => {
+    it("removeMember refuses a frozen room when the caller asked it to, and writes and queues nothing", async () => {
+      // This is the guard #118 is about, and the answer is not the proof: a store that
+      // stamped the member, wrote the events and queued the rows and only then looked at
+      // the freeze would return this same answer. So the state is read after it, and in
+      // every store, because the one production runs is the Durable Objects one. The
+      // request carries a door and the room holds a live code for it, or a misplaced
+      // guard would have nothing to shut.
       const s = session({
         frozenAt: Date.now(),
+        joinCodes: oneCode("BELL-LIVE-01"),
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
       });
       await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before the call")
+        .toBeDefined();
 
-      const outcome = await store.removeMember(s.id, "m_peer", {
-        now: 9_000_000,
-        frozen: "refuse",
-        byUserId: "u_jesse",
-        event: leaveEvent("m_peer"),
-        audit: [auditRow("member_evicted")],
-      });
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
 
       expect(outcome).toEqual({ refused: "frozen", removed: false, codeRetired: null });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
 
     it("removeMember refuses a closed room even when frozen is allowed", async () => {

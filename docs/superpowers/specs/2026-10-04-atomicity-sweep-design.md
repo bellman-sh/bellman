@@ -113,10 +113,29 @@ removeMember(
 ```
 
 `removed: false` with `refused: null` is the idempotent path — the member was
-already out. A second concurrent call on one handle gets it, and announces
-nothing. That is #117, closed by the transaction rather than by an idempotency
-key: `appendEventOnce` would have deduped the event and left the audit row
-duplicated, which is why #117's own body reaches for #59's marker.
+already out. A second concurrent call on one handle gets it, and does not
+restate the departure. That is #117, closed by the transaction rather than by an
+idempotency key: `appendEventOnce` would have deduped the event and left the
+audit row duplicated, which is why #117's own body reaches for #59's marker.
+
+It is not licence to skip what is still owed, which is the distinction the
+original `evictMember` already drew. A seat code still live was never retired,
+so that path shuts the door, writes its `invite_revoked` event and queues its
+audit row in the same transaction, and reports `codeRetired`. So `removed:
+false` with a non-null `codeRetired` is a legitimate outcome, and it cannot
+repeat: the first call made the code no longer live. Leaving that closing to a
+separate call after the removal — which is how it worked before — keeps a #118
+window open on exactly the path this design exists to close.
+
+`retire` therefore carries its own `audit` rows, queued only when the code was
+genuinely live. That is what keeps the door out of `member_evicted`'s detail as
+a predicted `code_retired` field, which is wrong whenever the door changed
+between the handler's read and the removal. Both eviction paths now write an
+`invite_revoked` row, where the original folded the live path's door into
+`member_evicted` and gave only the already-left path a row of its own — so an
+org querying `invite_revoked` finds every door rather than half of them. The row
+still names a role and no person, so it goes to the room's org and the
+creator's, not to the departed member's, which could not resolve it to anyone.
 
 ### 2. The handler passes the events in
 
@@ -217,7 +236,8 @@ the comment gets rewritten to say so rather than deleted.
    door shut — even where the writes go the other way. One transaction writes both,
    in that order.
 
-A refused call writes nothing and queues nothing. That is the rule the outbox
+A refused call writes nothing and queues nothing — a refusal, unlike the
+idempotent path above, leaves nothing owed. That is the rule the outbox
 already states for `setJoinCode` and the guarded grant writes, and it is Review
 Focus 2 and 4 of the #59/#62/#69 plan; it applies here unchanged.
 

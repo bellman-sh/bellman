@@ -609,7 +609,8 @@ In `src/store.ts`, directly after `MemoryStore.seatMember`, add:
     }
     const m = s.members.find((mm) => mm.memberId === memberId);
     if (!m) return { refused: "not_found", ...none };
-    // Already out: the idempotent path. Writing nothing is the point of it.
+    // Already out: the departure is not restated. Not licence to skip what is
+    // still owed, though — a live door is shut below.
     if (m.leftAt !== null) return { refused: null, ...none };
 
     // One value for "there is a live door to shut", so nothing downstream has to
@@ -669,8 +670,8 @@ In `src/store-do.ts`, directly after `SessionDO.seatMember`, add:
       }
       const m = s.members.find((mm) => mm.memberId === memberId);
       if (!m) return { refused: "not_found" as const, ...no };
-      // Already out: the idempotent path. Writing nothing is the point of it,
-      // and queueing nothing is the half an idempotency key could not cover.
+      // Already out: the departure is not restated, which is the half an
+      // idempotency key could not cover. A live door is still shut below.
       if (m.leftAt !== null) return { refused: null, ...no };
 
       // One value for "there is a live door to shut". Nothing prunes an expired

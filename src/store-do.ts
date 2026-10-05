@@ -1660,19 +1660,27 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // to expire yet. `pastTtl` is the second half, shared with the three readers that
     // answer "closed" from it without writing (see readsClosed).
     if (s.closed || !pastTtl(s, now)) return;
-    // The write below clears the session's codes, so their rows leave the registry's
-    // index with it, in the same transaction. Otherwise an expired room's codes stay
-    // there for good. They are already inert, because getSessionByJoinCode refuses a
-    // closed session; this is about not leaking rows.
+    // The close clears the session's codes, so their rows leave the registry's index with
+    // it, in the same transaction. Otherwise an expired room's codes stay there for good.
+    // They are already inert, because getSessionByJoinCode refuses a closed session; this
+    // is about not leaking rows.
     const intents = Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code));
-    await this.ctx.storage.transaction(async (txn) => {
-      const rows = await this.driver.enqueue(txn, intents);
-      await txn.put<unknown>({ session: { ...s, closed: true, joinCodes: {} }, ...rows });
-    });
-    // The expiry event takes its cursor in a transaction of its own, like any append (see
-    // nextCursor). It stays apart from the close above, as it was: folding the two would
-    // change what an interruption between them leaves, which is not this change's to decide.
+    // The close, those removals and the expiry event are one commit (#124). They were two:
+    // the event took its cursor in a transaction of its own "like any append", and the
+    // comment that kept it apart said folding the two "would change what an interruption
+    // between them leaves, which is not this change's to decide". That change was #120's,
+    // which moved the cursor read into a transaction and stopped there. This is the
+    // decision, and what the split left is why: an interruption after the close left a
+    // room closed with no event, and it stayed that way, because the retry (the next read,
+    // or the alarm) finds the room closed and has nothing to expire, so nothing wrote the
+    // event a poll was waiting on. In one transaction an interruption leaves the room as
+    // it was, still lapsed, and the next read or the alarm does all of it again.
+    //
+    // What "like any append" asked for still holds: the cursor is read in the transaction
+    // that writes it (see nextCursor), and that transaction is now this one. Every write
+    // is to this object's own storage, so a transaction is enough and no outbox is needed.
     const event = await this.ctx.storage.transaction<SessionEvent>(async (txn) => {
+      const rows = await this.driver.enqueue(txn, intents);
       const expired: SessionEvent = {
         cursor: await this.nextCursor(txn),
         type: "session_expired" as EventType,
@@ -1683,7 +1691,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         refId: null,
         at: now,
       };
-      await this.#writeEvent(txn, expired);
+      await this.#writeEvent(txn, expired, {
+        session: { ...s, closed: true, joinCodes: {} }, ...rows,
+      });
       return expired;
     });
     this.#wake(event);

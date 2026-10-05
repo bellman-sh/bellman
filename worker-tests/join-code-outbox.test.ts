@@ -482,14 +482,14 @@ it.each([
 });
 
 /**
- * An expiry commits the closed flag, writes the event that announces it and wakes the
- * polls waiting for it, with nothing in between that lets another call in. Only then does
- * it drain, and the drain waits on the registry, which does let other calls in. Drained
- * first, a read arriving while the registry answers would see the room closed with no
- * expiry event, and a poll waiting for that event would wait on the registry too. A
- * registry call made inside the transaction would hold the read until it committed. The
- * registry is slow here so there is time to look, and the read is issued while it is
- * still being told.
+ * An expiry commits the closed flag and the event that announces it as one transaction
+ * (#124), then wakes the polls waiting for it, with nothing in between that lets another
+ * call in. Only then does it drain, and the drain waits on the registry, which does let
+ * other calls in. Drained first, a read arriving while the registry answers would see the
+ * room closed with no expiry event, and a poll waiting for that event would wait on the
+ * registry too. A registry call made inside the transaction would hold the read until it
+ * committed. The registry is slow here so there is time to look, and the read is issued
+ * while it is still being told.
  */
 it("shows an expiry's event to every call before it waits on the registry", async () => {
   const store = new DurableObjectStore(env as never);

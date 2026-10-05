@@ -1485,6 +1485,12 @@ and deduped on the intent id like the registry's. That is what closes the half o
 and left the audit row doubled.
 ```
 
+Three existing sentences go stale with this change and are part of the same step:
+
+- The §9 table's **"Where it lives"** row reads ``src/outbox.ts``, used `RegistryDO → AuditDO` and `SessionDO → RegistryDO`". Add `SessionDO → AuditDO`.
+- **"It is used twice:"** above the two bulleted uses. It is used three times now. Change the count and add a third bullet for `SessionDO → AuditDO` (#73/#117), naming `AuditDO.append`'s intent-id dedupe as what absorbs a redelivery.
+- **Runtime fact 4** ends "`hasOrg` in `src/grant-audit.ts` and the guard in `RegistryDO`'s `#deliver` are two defences for that reason." There are three now: add `SessionDO`'s `#deliver` guard and change "two" to "three". Note that `removeMember` also filters org-less entries at the producer before queueing them, so the guard is the second line rather than the only one.
+
 In the "Rolling back" paragraph, add a sentence:
 
 ```markdown

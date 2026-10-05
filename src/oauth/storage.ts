@@ -57,6 +57,146 @@ export interface RefreshToken {
   expires_at: number;
 }
 
+/**
+ * A browser session for the control panel.
+ *
+ * Opaque rather than signed, because `POST /auth/signout` has to invalidate.
+ * Access tokens are signed and unrevocable, and a 10-minute lifetime is what
+ * makes that acceptable on /mcp; a page rendering billing and provider keys
+ * does not get the same deal.
+ */
+export interface PanelSession {
+  identity: Identity;
+  /** Where the plan came from, for /account. Same field the token path carries. */
+  plan_source: string;
+  /** Upstream keys this human resolves under, so the plan can be re-resolved. */
+  identity_keys: string[];
+  created_at: number;
+  last_used_at: number;
+  /**
+   * When the plan was last re-resolved. Read it through replannedAt, which
+   * treats anything that is not a finite number as never.
+   */
+  replanned_at: number;
+  expires_at: number;
+}
+
+/**
+ * The hard ceiling: a session ends this long after sign-in, however busy it is.
+ *
+ * Seven days, so a person who uses the panel daily signs in about once a week,
+ * which is a fair price on a page that shows billing. Deliberately well short of
+ * REFRESH_TOKEN_TTL_MS, which is 30 days: giving the panel the refresh token's
+ * lifetime is the arrangement #48 names and rejects.
+ */
+export const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long a session survives without being used.
+ *
+ * A day, so a session left open on a borrowed laptop is gone by tomorrow
+ * instead of running on to the ceiling.
+ */
+export const SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+/**
+ * How stale last_used_at gets before touchSession writes it back.
+ *
+ * The skip has a cost, and this constant bounds it. Idle time is measured from
+ * last_used_at, which lags the last real request by up to this much, so a
+ * session that goes quiet dies between SESSION_IDLE_MS minus this (23 hours)
+ * and SESSION_IDLE_MS after its last request, depending on whether that request
+ * happened to write. Skipping is never more permissive than writing on every
+ * request: it can only end a quiet session early, never keep one alive longer.
+ *
+ * What a session can rely on is the difference, not the ratio. As long as no
+ * gap between its requests exceeds SESSION_IDLE_MS minus SESSION_TOUCH_MS, it
+ * cannot die of idleness, and every hour added here comes straight off that
+ * guarantee. A ratio is the wrong way to judge a new value: twelve hours is
+ * still "half the window" and would leave a guarantee of only twelve. A test
+ * pins the 23 hours, so changing either constant fails there instead of moving
+ * the guarantee unnoticed.
+ */
+export const SESSION_TOUCH_MS = 60 * 60 * 1000;
+
+/**
+ * Whether a session has ended — past its ceiling, or idle too long. Exactly at a
+ * limit is alive and strictly past it is dead, matching hasLapsed and
+ * takeRefresh.
+ *
+ * One predicate for the same reason hasLapsed is one: a read and a sweep that
+ * each decide separately will eventually disagree, and the shape that bug takes
+ * is a session still usable because no purge has run yet.
+ *
+ * It is written as the negation of "every input is finite and inside both
+ * limits", so that anything it cannot show to be alive is dead. Two kinds of
+ * value that are not finite numbers defeat a plain "is it past the limit?" test,
+ * in different ways. NaN fails every comparison, so a record whose expires_at is
+ * NaN or missing reads as not past its ceiling, and that session would never
+ * expire. Infinity passes the comparisons in the wrong direction: an expires_at
+ * or last_used_at of +Infinity is never past, and a clock of -Infinity is before
+ * everything. So each input is checked for finiteness as well as compared.
+ * Ending sessions reliably is the reason this is a stored record rather than a
+ * signed cookie, so a value that is not a finite number has to read as dead.
+ * That is all it checks: a time that is finite but wrong, such as an expires_at
+ * of 1e300 or a clock running behind, still reads alive. `now` is one of the
+ * three inputs on purpose: a clock that is not a finite number drops the one
+ * session it touches, which costs a re-sign-in and can only follow from a bug,
+ * where the alternative waves every session through for as long as the clock is
+ * broken.
+ * hasLapsed goes the other way on an absent expires_at because older client
+ * records must keep working; no session record predates this one, so there is
+ * nothing to grandfather.
+ */
+export function sessionDead(
+  s: Pick<PanelSession, "last_used_at" | "expires_at">,
+  now: number
+): boolean {
+  return !(
+    Number.isFinite(now) && Number.isFinite(s.expires_at) && Number.isFinite(s.last_used_at) &&
+    now <= s.expires_at && now <= s.last_used_at + SESSION_IDLE_MS
+  );
+}
+
+/**
+ * Whether touchSession should write last_used_at back.
+ *
+ * Shared for the same reason sessionDead is shared: AuthDO implements the same
+ * method, and two copies of this comparison can drift apart at exactly
+ * SESSION_TOUCH_MS. One predicate means one boundary, pinned once.
+ *
+ * Ask it only of a session sessionDead has already passed. It says whether the
+ * stored time is stale and nothing about liveness. A session past its ceiling
+ * whose last_used_at is fresh reads as not due, so asked first it would be
+ * served past the ceiling for up to SESSION_TOUCH_MS, and no non-finite value is
+ * needed to get there. A NaN last_used_at reads as not due too, and would be
+ * served and never written.
+ */
+export function touchDue(s: Pick<PanelSession, "last_used_at">, now: number): boolean {
+  return now - s.last_used_at > SESSION_TOUCH_MS;
+}
+
+/**
+ * When this session's plan was last re-resolved, treating anything that is not
+ * a finite number as never.
+ *
+ * Zero makes the plan as stale as it can be, so the next request re-resolves
+ * it. The test is finiteness and not type, because `typeof` admits NaN and the
+ * infinities, which are the values that break a subtraction followed by a
+ * comparison. `now - NaN` is NaN, and NaN fails every comparison, so "stale
+ * when now - replanned_at > bound" reads false and serves an old plan for the
+ * life of the session, a revoked grant held silently, while "fresh when
+ * now - replanned_at <= bound" happens to re-resolve. `now - Infinity` is
+ * negative infinity, which reads fresh under both. With zero, both phrasings
+ * re-resolve.
+ *
+ * The lesson is the class, not this field: a number read off a stored record
+ * has to be checked for finiteness, or tested by a predicate that fails closed
+ * on non-finite input, as sessionDead is for all three of its inputs. Anyone
+ * adding a timestamp to PanelSession takes on one more of these.
+ */
+export function replannedAt(s: PanelSession): number {
+  return Number.isFinite(s.replanned_at) ? s.replanned_at : 0;
+}
+
 /** Why a registration was refused, or that it was taken. */
 export type Admission = "ok" | "rate_limited" | "full";
 
@@ -288,6 +428,49 @@ export interface AuthStorage {
   putRefresh(token: string, value: RefreshToken): Promise<void>;
   /** Single use as well — refresh tokens rotate, so using one retires it. */
   takeRefresh(token: string): Promise<RefreshToken | undefined>;
+  /** Create a browser session. */
+  putSession(id: string, value: PanelSession): Promise<void>;
+  /**
+   * Read a session, test it, and bump last_used_at — as ONE operation.
+   *
+   * Not a get and a put from the caller. The caller is the Worker and the
+   * record is in a Durable Object, so two calls have a window between them;
+   * this is the same reason admitRegistration is one method. Implementations
+   * must not yield between the read and the write.
+   *
+   * Undefined for an unknown session and for a dead one, and a dead one is
+   * dropped rather than left for a sweep — so a clock that moves backwards
+   * cannot revive it.
+   */
+  touchSession(id: string, now: number): Promise<PanelSession | undefined>;
+  /**
+   * Record a re-resolved plan on a session that still exists — as ONE operation.
+   *
+   * Merges identity and plan_source into the stored record and sets replanned_at
+   * to `now`, writes nothing else, and does nothing at all when the record is
+   * gone. Implementations must not yield between the read and the write.
+   *
+   * Resolves true when it merged, and false when there was no session to merge
+   * into, whether it was signed out, swept or never stored. False tells the
+   * caller its session ended while it was working. Whether to still answer the
+   * request it is serving, which began before the sign-out, is the caller's
+   * decision and not this method's.
+   *
+   * A request that re-resolves a plan reads the record, spends a while resolving,
+   * and then has to put the result back, and a sign-out can land in that gap.
+   * Writing the whole record back with putSession would recreate the session the
+   * human just ended, so they would sign out and stay signed in. It would also
+   * overwrite a last_used_at that another request bumped in the same gap,
+   * reverting that request's touch. putSession stays an unconditional upsert, for
+   * creating a session and for nothing else.
+   *
+   * It makes no liveness decision, because the fields it writes are not the ones
+   * sessionDead reads: merging into a record that has just died revives nothing,
+   * and touchSession remains the only place a session is judged.
+   */
+  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<boolean>;
+  /** Sign out. Idempotent: an unknown id is not an error. */
+  deleteSession(id: string): Promise<void>;
 }
 
 /** In-memory implementation, for tests and for the Node server. */
@@ -296,6 +479,7 @@ export class MemoryAuthStore implements AuthStorage {
   private codes = new Map<string, AuthCode>();
   private refreshes = new Map<string, RefreshToken>();
   private registrations = new Map<string, number[]>();
+  private sessions = new Map<string, PanelSession>();
   /** Set after a purge that reclaimed nothing; see purgeDue. */
   private purgeIdleUntil: number | undefined;
 
@@ -423,5 +607,65 @@ export class MemoryAuthStore implements AuthStorage {
     if (!value) return undefined;
     this.refreshes.delete(token);
     return Date.now() > value.expires_at ? undefined : value;
+  }
+
+  async putSession(id: string, value: PanelSession): Promise<void> {
+    this.sessions.set(id, value);
+  }
+
+  /**
+   * Synchronous throughout, like admitRegistration and for the same reason: an
+   * await between the read and the write is the window this method exists to
+   * close. A test signs out while a touch is in flight to hold that.
+   */
+  async touchSession(id: string, now: number): Promise<PanelSession | undefined> {
+    const stored = this.sessions.get(id);
+    if (!stored) return undefined;
+    // Dropped here rather than left to a sweep, so dead is terminal from the
+    // first read that sees it: a clock that moves backwards cannot revive the
+    // session. The sweep reclaims space; it does not decide liveness.
+    //
+    // This check has to stay ahead of the touchDue test below, which says
+    // whether the stored time is stale and knows nothing about liveness.
+    // Reordered, a session past its ceiling whose last_used_at is fresh would
+    // read as not due and be served until that time went stale, up to
+    // SESSION_TOUCH_MS past the ceiling, with no non-finite value needed to get
+    // there. A NaN last_used_at fails the comparison too and would be served
+    // and never dropped. Tests hold the order.
+    if (sessionDead(stored, now)) {
+      this.sessions.delete(id);
+      return undefined;
+    }
+    // Skipped while the stored value is fresh enough. In memory the write is
+    // free. The skip is here so this store returns the same last_used_at as the
+    // Durable Object for the same calls; there, a panel that polls would
+    // otherwise write on every request. See SESSION_TOUCH_MS for what it costs.
+    if (!touchDue(stored, now)) return stored;
+    const touched: PanelSession = { ...stored, last_used_at: now };
+    this.sessions.set(id, touched);
+    return touched;
+  }
+
+  /**
+   * Synchronous throughout, for the reason touchSession is: an await between the
+   * read and the write lets a sign-out land in the gap and be written over. One
+   * test signs out while a call is in flight to hold that, and another signs out
+   * between a touch and the call, which is the gap this method closes for its
+   * caller.
+   */
+  async replanSession(
+    id: string,
+    identity: Identity,
+    planSource: string,
+    now: number
+  ): Promise<boolean> {
+    const stored = this.sessions.get(id);
+    if (!stored) return false;
+    this.sessions.set(id, { ...stored, identity, plan_source: planSource, replanned_at: now });
+    return true;
+  }
+
+  async deleteSession(id: string): Promise<void> {
+    this.sessions.delete(id);
   }
 }

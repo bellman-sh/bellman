@@ -14,7 +14,7 @@ import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "..
 import { MemoryStore, seatVictims } from "../src/store.js";
 import type { Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
-import { Harness, DEV_KEY } from "./helpers/harness.js";
+import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
 
@@ -407,7 +407,8 @@ describe("the seat comes back", () => {
     h.store.updateMember(sessionId, memberId, { lastSeenAt: Date.now() - STALE_AFTER_MS - 1 });
 
   it("lets a third agent take the seat of a peer whose session died", async () => {
-    const { creator, sessionId, creatorMemberId, joinerMemberId } = await pairUp(h);
+    const { creator, joiner, sessionId, creatorMemberId, joinerMemberId, joinerCursor } =
+      await pairUp(h);
     // The laptop closes. No bellman_leave: that is the entire bug.
     await goQuiet(sessionId, joinerMemberId);
 
@@ -433,6 +434,26 @@ describe("the seat comes back", () => {
     expect(room?.members.find((m) => m.memberId === joinerMemberId)?.leftAt)
       .toEqual(expect.any(Number));
     expect(seatedMembers(room!)).toHaveLength(2);
+
+    // R2 (#113): a timeout is not an eviction, so the seat's old occupant is not
+    // cut. Nothing is recorded against it, and what the room says next still
+    // reaches it — the reclaim moves it out of the seat count and no further.
+    expect(room?.members.find((m) => m.memberId === joinerMemberId)?.removedAtCursor)
+      .toBeUndefined();
+    const said = await creator.call("bellman_send", {
+      session_id: sessionId, member_id: creatorMemberId,
+      type: "message", payload: { text: "after the seat timed out" },
+    });
+    expect(said.isError, said.text).toBe(false);
+    const stillReads = await joiner.call("bellman_sync", {
+      session_id: sessionId, member_id: joinerMemberId,
+      since_cursor: joinerCursor, wait_seconds: 0,
+    });
+    expect(stillReads.isError, stillReads.text).toBe(false);
+    expect(envelopes(stillReads.data.events)
+      .map((e) => e.data as { type: string; payload: { text?: string } })
+      .filter((d) => d.type === "message")
+      .map((d) => d.payload.text)).toEqual(["after the seat timed out"]);
   });
 
   it("refuses the seat while the peer is still answering", async () => {

@@ -16,7 +16,7 @@ import {
 } from "./rooms.js";
 import { STALE_AFTER_MS, presenceOf } from "./presence.js";
 import {
-  CONNECT_TOKEN_TTL, JOIN_CODE_TTL,
+  CONNECT_TOKEN_TTL, JOIN_CODE_TTL, isActiveMember,
   type AppendExtras, type BellmanStore, type EventWrite,
 } from "./store.js";
 import {
@@ -901,8 +901,12 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
 
       return ok({
         // The members active NOW, not the ones active when this was first
-        // appended. No history is kept to do better, and the field answers who
-        // can read it, which is the question either way.
+        // appended, and no history is kept to do better.
+        //
+        // It does NOT answer who can read this, and used to say it did. A
+        // member who left of their own accord goes on reading the room and is
+        // not listed here (#113 R3). The two predicates are different on
+        // purpose: this one answers who is in the room.
         delivered_to: others.map((m) => m.label),
         cursor: event.cursor,
         ...(replayed ? { replayed: true } : {}),
@@ -926,7 +930,8 @@ Args:
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
 
 Returns: { events[] (untrusted envelopes, your own events excluded), cursor }
-Always pass the returned cursor next time — even an empty events list can advance it.`,
+Always pass the returned cursor next time — even an empty events list can advance it.
+If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
@@ -960,11 +965,73 @@ Always pass the returned cursor next time — even an empty events list can adva
       //
       // Guarded, because this tool is otherwise free of guards on purpose:
       // reads stay open to a closed room, a frozen one, and a member who has
-      // left. Writing on those paths would have a departed member's watcher
-      // rewriting a closed room's record every 25 seconds forever.
+      // left. A member a creator REMOVED reads its history and nothing after it
+      // (#113), which is still a read: this tool cannot remove anybody or change
+      // what any other caller sees. Writing on those paths would have a
+      // departed member's watcher rewriting a closed room's record every 25
+      // seconds forever.
       await touchMember(s, session, me);
 
-      const all = await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000);
+      // A member a creator removed reads its history and nothing after it
+      // (#113). The cut is the cursor of the `member_evicted` event that
+      // removed them, and the comparison is `<=` so that event is the last
+      // thing they receive: the feed says why it stopped.
+      //
+      // Only an eviction cuts. A member who left of their own accord, and one
+      // whose seat timed out, both read on — the first chose to go, and the
+      // second is the server guessing, not a decision that they should be out.
+      //
+      // `wait_seconds` is ignored on this arm, and that is not an
+      // optimisation. A cut member that still long-polled would wake on every
+      // append it then hides, turning a 25-second poll into a busy loop
+      // against a room it cannot read. There is nothing coming: its feed has a
+      // last event and that event is in the past.
+      const cut = me.removedAtCursor;
+      const read = cut === undefined
+        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000)
+        : (await s.eventsAfter(session_id, since_cursor)).filter((e) => e.cursor <= cut);
+
+      // A removal that committed after `me` was read is not on `me`. The record,
+      // `touchMember` and the event read above are separate calls, and on Workers
+      // each is an RPC, so a creator's `bellman_evict` can land between the first
+      // and the last and leave this poll on the arm that has no cap. A poll that
+      // waits is not exposed: it is resolved with the event that woke it and
+      // never reads again. This one finds the removal already stored, so the read
+      // returns everything past `since_cursor` and registers no waiter, and the
+      // member is handed the room past the cut, peer content included.
+      //
+      // The slice says so itself. Every cursor this member holds predates the
+      // removal, and the removal's event is numbered after all of them, so a poll
+      // that can leak has `since_cursor` below the cut and the slice holds this
+      // member's own `member_evicted`. That event carries the cursor the record
+      // would have. It is the event and not a second `getSession`: read before
+      // the events, a second record leaves the same window one call later, and
+      // read after them it closes it but costs a round trip on every poll to
+      // guard a gap of milliseconds. The event is already in hand. Only the
+      // server writes `member_evicted` (a peer cannot send one; see SEND_KINDS),
+      // so what is read off its payload is the server's.
+      //
+      // Only for a member `me` shows still IN the room. A cut member is never
+      // active, since the cut sets `leftAt` in the same write, so the arm above
+      // has already answered for them. One who left of their own accord, or whose
+      // seat timed out, keeps the open feed (R2), and the event does not prove a
+      // cut for them: `markRemoved` declines a member who has left, so a leave
+      // landing between `evictMember` reading the roster and appending leaves a
+      // `member_evicted` in the log naming someone with no `removedAtCursor`
+      // (spec D3). No handler clears `leftAt` once it is set, so a record that
+      // shows it set cannot belong to a member cut after it, and skipping those
+      // costs the leak nothing.
+      const removal = isActiveMember(me)
+        ? read.find(
+            (e) =>
+              e.type === "member_evicted" &&
+              (e.payload as { member_id?: string } | null)?.member_id === member_id
+          )
+        : undefined;
+      const all = removal === undefined ? read : read.filter((e) => e.cursor <= removal.cursor);
+      // `since_cursor` and not the cut when the slice is empty: a caller that
+      // asked from past its cut gets its own cursor back, so round-tripping it
+      // stays put instead of re-requesting the same empty range forever.
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
       const foreign = all.filter((e) => e.fromMemberId !== member_id);
 
@@ -1010,11 +1077,11 @@ Returns: { left: true, session_status }`,
 
 Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. Other roles' codes are unaffected, and so is anyone else already in the room. Removal is not a ban: any live code seats them again.
 
-Reads stay open to the person removed: the history was theirs too. That includes what is said after — their bellman_sync keeps returning new events for as long as the room lives — so removal does not keep later messages from them. What stops is writing: their next bellman_send is refused.
+The history stays readable to the person removed: it was theirs too, and their bellman_sync keeps returning it, including the member_evicted event that removed them. What stops is everything after: new events do not reach them, their next bellman_send is refused, and a room socket is refused too. Rejoining on a live code gives them a fresh handle that reads the room again.
 
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
-Members see a member_evicted event, the person removed too. Removing the last active member closes the room.
+Members see a member_evicted event, the person removed too. If the room freezes while the call is in progress, the call is refused and nothing changes — the person is still in the room and their seat's code is untouched — so repeat it once the room thaws. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
       inputSchema: {
         session_id: z.string().min(4),

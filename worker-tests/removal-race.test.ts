@@ -196,14 +196,14 @@ const entry = (id: string, action: string, orgId: string | null = "org_codenerd"
 
 /** `m_peer` leaving on their own: allowed from a frozen room, with a row for the departure. */
 const leave = (id: string, over: Partial<RemovalRequest> = {}): RemovalRequest => ({
-  now: Date.now(), frozen: "allow",
+  now: Date.now(), frozen: "allow", cut: false,
   event: body("member_left", "m_peer"), audit: [entry(id, "member_left")],
   ...over,
 });
 
 /** The creator evicting `m_peer` and shutting `DOOR` behind them, with a row for each. */
 const eviction = (id: string, over: Partial<RemovalRequest> = {}): RemovalRequest => ({
-  now: Date.now(), frozen: "refuse", byUserId: "u_jesse",
+  now: Date.now(), frozen: "refuse", cut: true, byUserId: "u_jesse",
   event: body("member_evicted", "system"),
   retire: { role: DOOR, event: body("invite_revoked", "system"), audit: [entry(id, "invite_revoked")] },
   audit: [entry(id, "member_evicted")],

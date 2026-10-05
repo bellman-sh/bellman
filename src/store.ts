@@ -16,6 +16,9 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 export type MemberPatch = Partial<
   Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
 >;
+// `removedAtCursor` is deliberately absent. It is the append's to write, inside
+// the transaction that stores the event it names (#113), and a patch route
+// would be a second way to write it — one that could set a cursor no event has.
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -130,6 +133,54 @@ export function creditReport(
   return next;
 }
 
+/** Whether a creator removed this member, so its feed is cut (#113). */
+export const isRemovedMember = (m: Member): boolean => m.removedAtCursor !== undefined;
+
+/**
+ * Record `memberId` out at `cursor`, returning the new roster or `null` when
+ * there is nothing to write.
+ *
+ * Sets `leftAt` AND `removedAtCursor` in one go, because they are one write:
+ * folded into the append's transaction, a failure leaves the member in rather
+ * than half out. `creditReport` above carries the argument for why a member
+ * write that must agree with an event belongs in the event's own transaction.
+ *
+ * `null` in three cases, and none of them is merely an optimisation.
+ *
+ * A member the roster does not name: `updateMember`'s rule, an unknown member is
+ * a no-op and not a throw.
+ *
+ * A member already carrying a cursor. Without this a creator evicting the same
+ * member twice would move the cut forward and widen the window the first
+ * eviction closed.
+ *
+ * A member who has already left (#113, D6). `evictMember` returns early for one,
+ * but it reads the roster once and appends later, and a voluntary leave can land
+ * in between: `leaveRoom` sets `leftAt` through `updateMember`, and
+ * `removedAtCursor` is not patchable, so neither bail-out above sees it. Without
+ * this one that member would be handed a cut and have its own `leftAt`
+ * overwritten, and a member who chose to go is the one R2 gives the open feed.
+ * It is a `null` and not `leftAt: members[i].leftAt ?? at`, which would keep the
+ * leave time and still write the cut — the part D6 forbids.
+ *
+ * Here beside `creditReport` and `isActiveMember`, and the direction is theirs:
+ * this is applied INSIDE both stores, so it can live in neither.
+ */
+export function markRemoved(
+  members: Member[],
+  memberId: string,
+  cursor: number,
+  at: number,
+): Member[] | null {
+  const i = members.findIndex((m) => m.memberId === memberId);
+  if (i < 0) return null;
+  if (members[i].removedAtCursor !== undefined) return null;
+  if (members[i].leftAt !== null) return null;
+  const next = [...members];
+  next[i] = { ...next[i], leftAt: at, removedAtCursor: cursor };
+  return next;
+}
+
 /**
  * The roster a thaw writes back: every seat the room asks is credited with a
  * report at `now`.
@@ -179,6 +230,26 @@ export interface RemovalRequest {
   now: number;
   /** Leaving a frozen room is never refused; eviction from one is. */
   frozen: "allow" | "refuse";
+  /**
+   * Record the member out AT THE REMOVAL EVENT'S OWN CURSOR, capping what they
+   * read after it (#113) — not only stamping `leftAt`.
+   *
+   * A property of the caller, not of removal. The two callers differ on it:
+   * `evictMember` is a creator deciding someone should be out, and it cuts;
+   * `leaveRoom` is the member deciding for themselves, and it does not, because
+   * one who chose to go keeps the open feed (R2). `announceReclaimed` says the
+   * same of a timeout and warns against adding a cut here for symmetry with the
+   * eviction. Read that comment before changing this.
+   *
+   * No default, deliberately. A removal that did not say reads as one that did
+   * not decide, and the one a new caller would forget is the eviction — which is
+   * #113 back again, in the operation written to close it.
+   *
+   * Applied through `markRemoved`, the same rule `appendEvent` applies for its
+   * `markRemoved` extra, so a cut recorded by a removal and a cut recorded by an
+   * append are one piece of code and cannot drift.
+   */
+  cut: boolean;
   /** When set, the call is refused unless it matches `session.createdBy`. */
   byUserId?: string;
   /** Written only if this call did the removing. */
@@ -323,14 +394,16 @@ export type EventWrite =
  * What an append writes BESIDES the event, in the event's own transaction.
  *
  * An explicit argument rather than the store reading `e.type`: nothing in either
- * store branches on an event's kind, and this is the one write that would have
+ * store branches on an event's kind, and these are the writes that would have
  * made it. The caller already knows it is handling a `progress` send — it checked
  * the verb and validated the payload to get there — so saying so costs it a flag
- * and leaves the store a log that does not interpret what it logs.
+ * and leaves the store a log that does not interpret what it logs. An eviction is
+ * the same: `evictMember` is the one writing the `member_evicted` event.
  *
  * It is not an optimisation. The stamp and the event have to commit together or
- * a due tick can read one without the other; see `creditReport` and
- * `SessionDO.appendEvent`.
+ * a due tick can read one without the other, and the cut and its event have to
+ * commit together or a reader can be refused at a cursor no stored event
+ * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
  */
 export interface AppendExtras {
   /**
@@ -342,6 +415,12 @@ export interface AppendExtras {
    * rather than late.
    */
   creditReport?: boolean;
+  /**
+   * Record this member out at the event's own cursor, in the event's own
+   * transaction. `evictMember` passes it on the `member_evicted` append; see
+   * `markRemoved` for why the two writes cannot be separated (#113).
+   */
+  markRemoved?: string;
 }
 
 export interface BellmanStore {
@@ -454,6 +533,12 @@ export interface BellmanStore {
    * one declares its own policy through `frozen`, so a leave records its
    * departure in a frozen room without the store learning that `member_left` is
    * special.
+   *
+   * `req.cut` says whether the removal also caps what the member reads after it,
+   * at the departure event's own cursor (#113). The store applies `markRemoved`
+   * for it, inside the same write — so the cut and the event it names commit
+   * together, which is the whole of why it is not a call afterwards. Only the
+   * caller knows: an eviction cuts and a leave does not. See `RemovalRequest.cut`.
    *
    * `removed: false` with `refused: null` is the idempotent path: the member was
    * already out. The departure is not written or queued again, so a retry
@@ -884,8 +969,29 @@ export class MemoryStore implements BellmanStore {
     if (!leaving && !retiring) return { refused: null, ...none };
 
     if (leaving) {
-      m.leftAt = req.now;
-      this.appendNow(s, req.event);
+      // The event first, then the member write, because a cut names the
+      // departure's OWN cursor and the departure has none until it is written.
+      const departure = this.appendNow(s, req.event);
+      // `markRemoved` and not a `leftAt` of this method's own, so the cut an
+      // eviction records here is the write `appendEvent`'s `markRemoved` extra
+      // makes — one rule, applied inside both stores (#113). It replaces the
+      // array rather than mutating `m`, which is why nothing below reads `m`.
+      //
+      // `req.now` for the stamp and not `departure.at`: within a removal the
+      // caller's clock is the operation's, and the contract pins `leftAt` to the
+      // `now` it was handed. A room where the two disagree is a room whose
+      // members left at a time nobody asked for.
+      //
+      // Null is unreachable from here — `leaving` already read `leftAt` as null,
+      // in this same synchronous stretch, and the roster names `m`. It falls back
+      // to the roster unchanged rather than asserting, because the alternative to
+      // a cut is not a stamp of this method's own: that is the half-write the
+      // transaction exists to prevent.
+      if (req.cut) {
+        s.members = markRemoved(s.members, memberId, departure.cursor, req.now) ?? s.members;
+      } else {
+        m.leftAt = req.now;
+      }
     }
     if (retiring) {
       this.byJoinCode.delete(retiring.code);
@@ -1009,30 +1115,34 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) throw new Error(`Unknown session ${sessionId}`);
     if (s.frozenAt !== null) return null;
-    // Synchronous from here, so the event and the credit land together. The
+    // Synchronous from here, so the event and its extras land together. The
     // Durable Objects store gets that from a transaction; here it is the absence
     // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
     const event = this.appendNow(s, e);
-    this.credit(s, e.fromMemberId, event.at, extras);
+    this.applyExtras(s, event, extras);
     return detach(event);
   }
 
   /**
-   * Apply an append's `creditReport`, if it asked for one. The rule is
-   * `creditReport` in this module, shared with `SessionDO` so the two stores
-   * cannot disagree about when a stamp moves.
+   * Apply an append's `extras`, if it asked for any. Both rules live in this
+   * module and are shared with `SessionDO`, so the two stores cannot disagree
+   * about when a member write rides an append.
+   *
+   * One method rather than two, because both rules rewrite the same member
+   * array: applied separately, the second would read `s.members` from before
+   * the first and discard it.
    *
    * No awaits, for appendEvent's reason above.
    */
-  private credit(
-    s: Session,
-    memberId: string,
-    at: number,
-    extras: AppendExtras,
-  ): void {
-    if (!extras.creditReport) return;
-    const members = creditReport(s.members, memberId, at);
-    if (members) s.members = members;
+  private applyExtras(s: Session, event: SessionEvent, extras: AppendExtras): void {
+    let members = s.members;
+    if (extras.creditReport) {
+      members = creditReport(members, event.fromMemberId, event.at) ?? members;
+    }
+    if (extras.markRemoved !== undefined) {
+      members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
+    }
+    if (members !== s.members) s.members = members;
   }
 
   async appendEventOnce(
@@ -1063,10 +1173,13 @@ export class MemoryStore implements BellmanStore {
           `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
         );
       }
-      // The replay credits too. A retry cannot know whether the first attempt
-      // landed the stamp, and `creditReport` is monotonic, so re-asserting it is
-      // either a repair or a no-op and never a regression.
-      this.credit(s, e.fromMemberId, original.at, extras);
+      // The replay applies its extras too. A retry cannot know whether the first
+      // attempt landed the stamp, and `creditReport` is monotonic, so re-asserting
+      // it is either a repair or a no-op and never a regression. `original` and
+      // not `e`, so `markRemoved` sees the cursor the key names: a replay
+      // re-asserts the same cut, and `markRemoved` answers `null` once it is
+      // recorded.
+      this.applyExtras(s, original, extras);
       return { outcome: "replayed", event: detach(original) };
     }
 
@@ -1076,7 +1189,7 @@ export class MemoryStore implements BellmanStore {
     const map = seen ?? new Map<string, IdempotencyRecord>();
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
-    this.credit(s, e.fromMemberId, event.at, extras);
+    this.applyExtras(s, event, extras);
     return { outcome: "appended", event: detach(event) };
   }
 

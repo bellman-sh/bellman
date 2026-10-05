@@ -54,8 +54,9 @@ export interface BusLinkOptions {
    */
   connection: () => Promise<BusConnection> | undefined;
   /**
-   * A handle whose membership has ended. A room is never polled as one, whatever else is known about it:
-   * reads stay open to a member who was removed, so a poll as one would go on returning events.
+   * A handle whose membership has ended. A room is never polled as one, whatever else is known about it. A
+   * member a creator removed is answered at once and shown nothing past its cut, so a poll as one would only
+   * spin; one whose seat timed out reads on, so a poll as one would go on returning events.
    */
   departed: (memberId: string) => boolean;
   /** How long one poll of a room holds, in seconds. The socket's own default (25) when it is not given. */

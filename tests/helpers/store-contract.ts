@@ -37,15 +37,20 @@ import { member, oneCode, roomManifest, session } from "./fixtures.js";
  */
 export interface StoreContractDivergences {
   /**
-   * `instanceof` across a Durable Object RPC boundary. workerd reconstructs a
-   * thrown error in the caller's realm: name, message and own properties
-   * survive, the prototype does not.
+   * EMPTY, and that is the goal state: both stores pass every case identically.
    *
-   * Tracked as #101, and a production bug rather than a test artefact —
-   * src/server.ts:765 branches on exactly this `instanceof` and so never fires
-   * under Durable Objects. Delete this entry when #101 closes.
+   * It held one entry, `errorIdentityAcrossRpc`, from #12's first run of this suite
+   * inside workerd until #101 closed it — `instanceof` across a Durable Object RPC
+   * boundary, where workerd reconstructs a thrown error with its name and own
+   * properties but not its prototype. `DurableObjectStore` now revives at the seam
+   * (src/rpc-error.ts), so the case is an ordinary `it` for both.
+   *
+   * The mechanism stays for the next one. Add a field here, named for the behaviour
+   * rather than the store, with the reason as its type's doc — then pass it at the
+   * call site. The case keeps running under `it.fails`, so it goes red the moment the
+   * hole is fixed and tells you to delete the entry.
    */
-  errorIdentityAcrossRpc?: string;
+  readonly __none__?: never;
 }
 
 export function describeStoreContract(
@@ -56,7 +61,13 @@ export function describeStoreContract(
   describe(`BellmanStore contract: ${name}`, () => {
     let store: BellmanStore;
 
-    /** `it`, unless this store has an argued reason it cannot pass the case. */
+    /**
+     * `it`, unless this store has an argued reason it cannot pass the case.
+     *
+     * Unused while `StoreContractDivergences` is empty, which is the goal state. Kept
+     * because it IS the mechanism described there: a divergence is recorded by passing
+     * a reason, and this is what turns that reason into a case that still runs.
+     */
     const caseFor = (reason: string | undefined) => (reason ? it.fails : it);
 
     beforeEach(() => {
@@ -1485,14 +1496,22 @@ export function describeStoreContract(
     });
 
     /**
-     * A payload too deep to fingerprint must leave nothing behind.
+     * A payload too deep to fingerprint must leave nothing behind, and must say so
+     * as the class it is.
      *
      * `fingerprint` throws, and `appendEventOnce` calls it before it mutates
      * anything, so the throw has to reach the caller with no event appended and
      * no key recorded. A store that wrote first and fingerprinted second would
      * satisfy every other case in this block.
+     *
+     * `toThrow(PayloadTooDeepError)` is an `instanceof`, and that is the second half
+     * of the case rather than incidental to it. Under Durable Objects the throw
+     * crosses an RPC boundary, where workerd rebuilds it without its prototype — so
+     * this was the suite's one divergence until #101, and it is the assertion that
+     * holds `src/rpc-error.ts` in place. A store that reported the right message with
+     * the wrong class would pass a `toThrow(/nests deeper/)` written instead.
      */
-    caseFor(divergences.errorIdentityAcrossRpc)(
+    it(
       "throws on a payload too deep to fingerprint, and writes nothing",
       async () => {
         const s = session();
@@ -1620,6 +1639,223 @@ export function describeStoreContract(
         (await store.appendEventOnce(s.id, reported(), "p-0001", { creditReport: true }));
 
         expect(await stampOf(s.id)).toBe(later);
+      });
+    });
+
+    // ------------------------------------------ a removed member's cut cursor
+    /**
+     * An eviction leaves two facts behind — the `member_evicted` event, and the
+     * target's own `removedAtCursor`, the cursor its feed is cut at (#113). The
+     * second names the first, so they have to commit together: recorded
+     * separately, a reader can be refused at a cursor no stored event carries, or
+     * admitted past one that is already written.
+     *
+     * So the cut is an argument to the append, as `creditReport` is, and not a
+     * call after it. **These cases do not claim to prove the atomicity**, which
+     * is not observable from outside the store. What they pin is what a caller
+     * CAN see, and what both stores have to say identically: the member lands out
+     * at the event's own cursor, nobody else moves, an unknown member is a
+     * no-op, a cut already recorded stays put, a member who already left is not
+     * cut, and a refused append records nothing.
+     */
+    describe("recording a member out at an event's cursor", () => {
+      /** A creator and one peer, created in the store. */
+      const roomOfTwo = async () => {
+        const s = session({
+          members: [
+            member(),
+            member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" }),
+          ],
+        });
+        await store.createSession(s);
+        return s;
+      };
+      const TARGET = "m_peer";
+
+      /** The eviction announcement, as evictMember writes it. */
+      const removal = (memberId: string) => ({
+        type: "member_evicted" as const,
+        fromMemberId: "system",
+        fromUserId: "u_jesse",
+        fromLabel: "jesse",
+        payload: { member_id: memberId },
+        refId: null,
+      });
+
+      it("sets leftAt and removedAtCursor together, at the event's own cursor", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const event = (await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        }))!;
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        // One write, not two: a store that set only one of these is the bug
+        // this rides in the transaction to prevent.
+        expect(m.removedAtCursor).toBe(event.cursor);
+        expect(m.leftAt).not.toBeNull();
+      });
+
+      it("leaves every other member untouched", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const other = "m_creator";
+
+        await store.appendEvent(s.id, removal(target), { markRemoved: target });
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === other)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBeNull();
+      });
+
+      it("writes nothing for a member the roster does not name", async () => {
+        const s = await roomOfTwo();
+        const before = (await store.getSession(s.id))!;
+
+        const event = await store.appendEvent(s.id, removal("m_nobody"), {
+          markRemoved: "m_nobody",
+        });
+
+        // The event still lands. An unknown member is a no-op, not a throw —
+        // updateMember's rule, and creditReport's.
+        expect(event).not.toBeNull();
+        const after = (await store.getSession(s.id))!;
+        expect(after.members.map((m) => m.removedAtCursor))
+          .toEqual(before.members.map((m) => m.removedAtCursor));
+      });
+
+      it("does not move a cut that is already recorded", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const first = (await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        }))!;
+
+        await store.appendEvent(s.id, removal(target), { markRemoved: target });
+
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        // Otherwise a second eviction widens the window the first one closed.
+        expect(m.removedAtCursor).toBe(first.cursor);
+      });
+
+      /**
+       * D6 at the store. `evictMember` returns early for a member who already
+       * left, but it reads the roster once and appends later, and a voluntary
+       * leave can land in between. `leaveRoom` writes `leftAt` through
+       * `updateMember`, which is what stands in for it here, and `removedAtCursor`
+       * is not patchable — so that member reaches `markRemoved` with neither of
+       * its first two bail-outs clear. Without a third it would be handed a cut
+       * and have its own leave time overwritten, and a member who chose to go is
+       * the one R2 gives the open feed.
+       *
+       * `leftAt` is set far from the event's `at`, so a store that rewrote it
+       * cannot land on the same value by coincidence.
+       */
+      it("does not cut a member who already left, and leaves their leftAt alone", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const leftAt = 12_345;
+        await store.updateMember(s.id, target, { leftAt });
+
+        const event = await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        });
+
+        // The announcement still lands, as it does for an unknown member: the
+        // rule declines to write the member, and nothing about the append.
+        expect(event).not.toBeNull();
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBe(leftAt);
+      });
+
+      it("records nothing when the room is frozen and the append is refused", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        await store.freezeSession(s.id, Date.now());
+
+        const event = await store.appendEvent(s.id, removal(target), {
+          markRemoved: target,
+        });
+
+        // The two go together or the design's atomicity claim is false.
+        expect(event).toBeNull();
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBeUndefined();
+        expect(m.leftAt).toBeNull();
+      });
+
+      it("records the member out on a keyed append too", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const write = await store.appendEventOnce(
+          s.id, removal(target), "evict-0001", { markRemoved: target },
+        );
+
+        expect(write.outcome).toBe("appended");
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBe(write.outcome === "appended" ? write.event.cursor : -1);
+      });
+
+      /**
+       * A replay re-asserts the cut, at the ORIGINAL event's cursor. The first
+       * attempt below asks for no cut, which stands in for however the cut came
+       * to be missing — an attempt interrupted before it landed, or a row written
+       * by a build that did not have the field. What the case pins is where the
+       * retry puts it: on the event the key names, and not on a cursor the retry
+       * has no event at. A replay that dropped its extras would leave the member
+       * in the room.
+       */
+      it("records the member out on a replay, at the original event's cursor", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+        const first = await store.appendEventOnce(s.id, removal(target), "evict-0001");
+        if (first.outcome !== "appended") throw new Error(`first append said ${first.outcome}`);
+
+        const retry = await store.appendEventOnce(
+          s.id, removal(target), "evict-0001", { markRemoved: target },
+        );
+
+        expect(retry.outcome).toBe("replayed");
+        const after = (await store.getSession(s.id))!;
+        const m = after.members.find((mm) => mm.memberId === target)!;
+        expect(m.removedAtCursor).toBe(first.event.cursor);
+        expect(m.leftAt).not.toBeNull();
+        // And still one event: the repair is a cut, not a second append.
+        expect((await store.eventsAfter(s.id, 0))).toHaveLength(1);
+      });
+
+      /**
+       * Both rules rewrite the same member array, so an append that asks for both
+       * is where applying them as two writes would lose one. No handler asks for
+       * both today — a `progress` send credits its sender, and an eviction names
+       * its target — which is why nothing else exercises the pair. The sender here
+       * is a real member, so the credit has somewhere to land.
+       */
+      it("applies a report credit and a removal from one append", async () => {
+        const s = await roomOfTwo();
+        const target = TARGET;
+
+        const event = (await store.appendEvent(
+          s.id,
+          { ...removal(target), fromMemberId: "m_creator" },
+          { creditReport: true, markRemoved: target },
+        ))!;
+
+        const after = (await store.getSession(s.id))!;
+        const sender = after.members.find((mm) => mm.memberId === "m_creator")!;
+        const removed = after.members.find((mm) => mm.memberId === target)!;
+        expect(sender.lastReportAt).toBe(event.at);
+        expect(removed.removedAtCursor).toBe(event.cursor);
+        expect(removed.leftAt).not.toBeNull();
       });
     });
 
@@ -2426,6 +2662,9 @@ export function describeStoreContract(
     const eviction = (now = 9_000_000): RemovalRequest => ({
       now,
       frozen: "refuse",
+      // An eviction cuts the feed; the leave-shaped requests below pass false. The
+      // field has no default, so each case says which removal it is modelling.
+      cut: true,
       byUserId: "u_jesse",
       event: { ...leaveEvent("m_peer"), type: "member_evicted" },
       retire: {
@@ -2445,6 +2684,7 @@ export function describeStoreContract(
       const outcome = await store.removeMember(s.id, "m_peer", {
         now: 9_000_000,
         frozen: "allow",
+        cut: false,
         event: leaveEvent("m_peer"),
         audit: [auditRow("member_left")],
       });
@@ -2454,6 +2694,95 @@ export function describeStoreContract(
       expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
       expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_left"]);
+    });
+
+    /**
+     * The cut, asked for by the caller and applied inside the removal (#113).
+     *
+     * These sit here and not beside the append's own `markRemoved` cases because
+     * they pin a different route to the same rule. `evictMember` removes through
+     * `removeMember`, not through `appendEvent`, so a store that applied the cut
+     * on an append and not on a removal would pass every case in "recording a
+     * member out at an event's cursor" and still hand an evicted member an open
+     * feed — #113 reopened in the operation written to close it.
+     *
+     * As there, these do not claim to prove the atomicity, which is not visible
+     * from outside the store. What they pin is what a caller can see: the cursor
+     * is the departure's own, a removal that did not ask records none, and the
+     * cursor is the departure's and not the door's.
+     */
+    it("removeMember records the cut at the departure's own cursor when the caller asks", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        cut: true,
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      const departure = (await store.eventsAfter(s.id, 0))
+        .filter((e) => e.type === "member_evicted").at(-1)!;
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // The cursor the removal's own event carries, read back from the log rather
+      // than computed here: a store numbering its events differently would still
+      // have to agree with itself.
+      expect(m.removedAtCursor).toBe(departure.cursor);
+      // One write, not two. `leftAt` is the `now` the caller handed in, not the
+      // event's `at`: a removal's clock is its caller's.
+      expect(m.leftAt).toBe(9_000_000);
+    });
+
+    it("removeMember records no cut when the caller does not ask", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        cut: false,
+        event: leaveEvent("m_peer"),
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // Out, and still reading. R2: a member who chose to go keeps the open feed,
+      // and a store that cut here would be the symmetry `announceReclaimed` warns
+      // against. The departure is written either way — this is not a no-op path.
+      expect(m.leftAt).toBe(9_000_000);
+      expect(m.removedAtCursor).toBeUndefined();
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+    });
+
+    it("removeMember cuts at the departure's cursor, not the door's", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      const events = await store.eventsAfter(s.id, 0);
+      expect(events.map((e) => e.type), "arrangement: two events, so the cursors differ")
+        .toEqual(["member_evicted", "invite_revoked"]);
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // The removal writes two events and the cut names the FIRST. Pinned because
+      // the last one written is the easier thing to reach for, and a cut one cursor
+      // too high admits the evicted member past the door's own announcement — an
+      // event about the room they are no longer in.
+      expect(m.removedAtCursor).toBe(events[0].cursor);
+      expect(m.removedAtCursor).not.toBe(events[1].cursor);
     });
 
     it("removeMember announces a departure from a frozen room, where appendEvent would not", async () => {
@@ -2469,6 +2798,7 @@ export function describeStoreContract(
       const outcome = await store.removeMember(s.id, "m_peer", {
         now: 9_000_000,
         frozen: "allow",
+        cut: false,
         event: leaveEvent("m_peer"),
         audit: [],
       });
@@ -2519,7 +2849,7 @@ export function describeStoreContract(
       await store.createSession(s);
 
       expect(await store.removeMember(s.id, "m_peer", {
-        now: 9_000_000, frozen: "allow", event: leaveEvent("m_peer"), audit: [],
+        now: 9_000_000, frozen: "allow", cut: false, event: leaveEvent("m_peer"), audit: [],
       })).toEqual({ refused: "closed", removed: false, codeRetired: null });
     });
 
@@ -2618,6 +2948,7 @@ export function describeStoreContract(
       const outcome = await store.removeMember(s.id, "m_peer", {
         now: 9_000_000,
         frozen: "allow",
+        cut: false,
         event: leaveEvent("m_peer"),
         audit: [auditRow("member_left")],
       });
@@ -2643,6 +2974,9 @@ export function describeStoreContract(
       await store.removeMember(s.id, "m_peer", {
         now: 9_000_000,
         frozen: "allow",
+        // `true`, so the refusal is asked to swallow a cut as well as a stamp: a
+        // store that applied the cut before its guard would leave a cursor here.
+        cut: true,
         event: leaveEvent("m_peer"),
         retire: { role: "peer_b", event: leaveEvent("m_peer") },
         audit: [auditRow("member_left")],
@@ -2650,6 +2984,7 @@ export function describeStoreContract(
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.removedAtCursor).toBeUndefined();
       // The record as planted, code and expiry: pinning the code alone passes a store
       // that kept the entry and expired it.
       expect(fresh.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
@@ -2667,6 +3002,7 @@ export function describeStoreContract(
       const outcome = await store.removeMember(s.id, "m_peer", {
         now: 9_000_000,
         frozen: "refuse",
+        cut: true,
         byUserId: "u_jesse",
         event: { ...leaveEvent("m_peer"), type: "member_evicted" },
         retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },
@@ -2700,6 +3036,7 @@ export function describeStoreContract(
       const outcome = await store.removeMember(s.id, "m_peer", {
         now: Date.now(),
         frozen: "refuse",
+        cut: true,
         byUserId: "u_jesse",
         event: { ...leaveEvent("m_peer"), type: "member_evicted" },
         retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },

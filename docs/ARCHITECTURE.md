@@ -264,6 +264,25 @@ directly and not through `BellmanStore`: `MemoryStore` cannot hold a hibernating
 socket, so a `watch()` on the interface could be honoured by one implementation
 only, and the conformance suite is what makes the interface a seam.
 
+**Who the route lets in is not everyone the identity owns (#113).** There are
+three outcomes, and `leftAt` alone does not tell them apart. A member in the
+room is served by both paths. A member who left of its own accord, or whose seat
+timed out, keeps the open feed: the first chose to go, and the second is the
+server guessing, which is not a decision that anyone should stop seeing the
+room. Both have `leftAt` set, so `leftAt` is not the predicate. A member a
+creator removed has a `removedAtCursor`, the cursor of the `member_evicted`
+event that removed it, and reads its history through that event and nothing
+after. `bellman_sync` serves it that slice and does not wait. `/ws` leaves it
+out of the members the route lets in, so an identity that owns only removed
+handles is answered 403, and a socket it held at the removal is closed after the
+frame that announces it. An identity holding one removed handle and one live one
+keeps its socket, on the live one. The object checks the roster again when it
+accepts, because the route's question and the accept are two calls and a removal
+can land between them. The cursor is the server's bookkeeping and no surface
+sends it. The decisions are in the
+[eviction spec](superpowers/specs/2026-10-04-eviction-cuts-the-feed-design.md)
+([#113](../../../issues/113)).
+
 **Read-and-register still applies.** `SessionDO.fetch` awaits the events the
 client missed, then attaches the cursor, accepts the socket and sends the
 replay, with nothing yielding between those. An event appended in that gap
@@ -271,7 +290,9 @@ would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
 closes by registering its waiter with no `await` after its read (invariant 2
 below). The rule governs both paths and only the registration mechanism
 differs, a waiter pushed onto an in-memory list or a cursor attached to a socket
-the runtime holds. `wake()` is synchronous for the same reason.
+the runtime holds. `wake()` is synchronous for the same reason. Since #113 the
+roster is read just ahead of the events, for the check above, and both reads are
+storage reads, so the events read is still the last await before the attach.
 
 **And the guard belongs in the same invocation as the accept.** `/ws` is *two*
 invocations of one object — `membersOf`, then the upgrade — and the input gate
@@ -644,6 +665,47 @@ sequenceDiagram
 The invariants that encode this, and that any change has to argue against out
 loud:
 
+- **The control panel holds a cookie, not a token** — `dash.bellman.sh` renders
+  billing and provider keys, so a token in web storage there would turn any XSS
+  into account takeover. The panel authenticates with an `HttpOnly` cookie it
+  cannot read: 32 random bytes over a `PanelSession` record in `AuthDO`, so
+  `POST /auth/signout` invalidates rather than clearing the browser's copy. It
+  resolves through the same `caller` seam a bearer token does, and the stored
+  plan is re-resolved on the access token's own staleness bound, so a revoked
+  grant cannot outlive on the panel what it outlives on `/mcp`.
+
+  The cookie is `__Host-`-prefixed, which makes the browser refuse a sibling
+  subdomain's attempt at the exact name — without it, anything on
+  `*.bellman.sh` could set this name with a `Domain` and the browser would send
+  both copies in an order RFC 6265 leaves unspecified. The prefix covers the
+  exact name only; `trimOws` in `src/oauth/cookies.ts` is what refuses the
+  near-misses, and loosening it to `String.prototype.trim` removes that half of
+  the protection — a padded name then passes for the protected one, measured in
+  Chrome 153 through workerd.
+
+  **A panel sign-in is bound to the browser that started it.** The signed state
+  proves nobody altered it and says nothing about who presents it, so
+  `/auth/signin` also mints a nonce, seals it in the state, and sets it in a
+  short-lived `__Host-bellman_signin` cookie that the callback compares in
+  constant time. Without that, an attacker completes the provider half as
+  themselves and hands a victim the callback URL, and the victim ends up signed
+  in to the attacker's account. `SameSite=Lax` does not help: the callback is a
+  top-level GET navigation, the one case Lax allows.
+
+  **The cookie carries tenant-scoped identity only.** `Identity` has no operator
+  field, and `role: "admin"` is admin of an org. `/admin/*` refuses a cookie
+  outright rather than checking a role, because its writes gate on
+  `planSource === "operator"` — operator authority derives from deploy access, a
+  Worker secret, and a browser session is a strictly weaker credential for the
+  one account whose compromise is every customer's problem.
+
+  **CSRF is an `Origin` check, not a token.** `SameSite=Lax` blocks cross-site
+  forgery, but SameSite is evaluated on the registrable domain — so `bellman.sh`
+  is same-site with `mcp.bellman.sh`, and an XSS on the marketing site would
+  otherwise POST here with the cookie attached. Every cookie-authenticated
+  mutation must carry an allowlisted `Origin`; bearer callers are exempt, and
+  the method guard and the CSRF check both run ahead of any deletion.
+
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event
@@ -773,6 +835,20 @@ rather than through `appendEvent` — the frozen refusal stays on the public
 append, which is a different operation, and this one declares its own policy.
 The store still never asks what an event means.
 
+What the removal writes beside the departure is the caller's to decide, and one
+of those decisions is the cut. An eviction asks for `cut: true`, and the store
+records the target out at the departure event's own cursor through `markRemoved`
+— the same rule `appendEvent` applies for its `markRemoved` extra, so a cut
+recorded by a removal and one recorded by an append are a single piece of code in
+`src/store.ts` rather than two that can drift ([#113](../../../issues/113)). The
+cut and the event it names commit in the same put, because recorded apart a
+reader can be refused at a cursor no stored event carries, or admitted past one
+already written. A leave asks for `cut: false` and a reclaimed seat for none at
+all: a member who chose to go, or whom the server merely guessed was gone, keeps
+reading (R2). The field has no default for that reason — the removal a new caller
+would forget to mark is the eviction, which is #113 in the operation written to
+close it.
+
 Its audit rows ride the outbox as a third kind in `SessionDO`'s queue, `audit`,
 delivered `SessionDO → AuditDO` and deduped on the intent id like the
 registry's. That is what closes the half of #117 an idempotency key could not:
@@ -871,7 +947,7 @@ overtaking each other on the way to the registry), so
 `worker-tests/reconcile-race.test.ts` holds one reconcile open inside it and
 shows that the lock is what keeps the order.
 
-**What the runtime does.** Four facts, each measured on workerd rather than read
+**What the runtime does.** Five facts, each measured on workerd rather than read
 off its documentation, decide how code here is written.
 
 1. **`setAlarm` inside a `ctx.storage.transaction()` closure commits with that
@@ -926,6 +1002,24 @@ off its documentation, decide how code here is written.
    defences for that reason. `removeMember` also drops org-less entries at the
    producer, before they are queued, so for a removal the guard is the second
    line and not the only one.
+5. **A thrown error crosses an RPC boundary without its prototype.** `name`,
+   `message` and own properties survive, and workerd adds `durableObjectId` and
+   `remote`; the class does not. So the value reports itself as a
+   `PayloadTooDeepError` in every log and fails `instanceof PayloadTooDeepError`
+   outside the object that threw it (#101). `MemoryStore` throws in one realm, so
+   the root test program cannot see this — the first run of the contract suite
+   inside workerd is what found it, which is what #12 was opened to look for.
+
+   `DurableObjectStore` reaches a Durable Object through three accessors and
+   nothing else, each wrapped in `reviving` (`src/rpc-error.ts`), so the class is
+   rebuilt at the seam and `instanceof` holds for every method on the facade
+   including ones added later. Three traps in writing that wrapper, all measured:
+   `JsRpcPromise.then` refuses a non-function first argument, so the usual
+   `.then(undefined, onRejected)` dies on every call; reading `.apply` off a
+   method taken from a stub sends an RPC for a Durable Object method *named*
+   "apply"; and calling the bare function drops `this`. `Reflect.apply` is the one
+   form that does none of these. Each failure reddened all 131 contract cases at
+   once and none of them is visible against a plain-object fake.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`

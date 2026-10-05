@@ -9,7 +9,9 @@ import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
   SeatOutcome,
 } from "./store.js";
-import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./store.js";
+import {
+  connectedAmong, creditReport, isActiveMember, isRemovedMember, markRemoved, seatVictims,
+} from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -18,6 +20,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
+import { reviving } from "./rpc-error.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -62,19 +65,21 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
  * What a hibernating socket remembers. The runtime rejects more than 16 KB;
  * fetch says how close this can get.
  *
- * Two things read it. wake() reads `cursor` and carries the rest along
+ * Three things read it. wake() reads `cursor` and carries the rest along
  * unchanged, and every member of a room receives every event (spec D1a), so
  * delivery does not depend on whose socket it is. Presence reads `memberIds`
  * (#146): they find the identity that opened the socket, and every undeparted
  * member of that identity counts as connected while the socket is open, which
  * `connectedAmong` in store.ts explains (the ids are a snapshot, so they are a
- * starting point and not the whole answer). What else could read it is what has
- * to find a socket by member, the use in view being to close the sockets of a
- * member who has left. Nothing does that yet.
+ * starting point and not the whole answer). `#closeCutSockets` is what reads it
+ * to find a socket by member: on an eviction it finds the sockets naming only
+ * members a creator removed and closes them (#113). A member who merely left
+ * keeps its socket, so "has left" is not the predicate — "was removed" is.
  *
  * Whatever reads it can trust it, because of where it comes from: membersOf
  * answered it, and fetch received it in a request the Worker built (see the
- * /ws route in worker.ts), never in a header the client sent. A forged
+ * /ws route in worker.ts), never in a header the client sent, and cut it down
+ * by the roster as it stood when the socket was accepted (#113). A forged
  * x-bellman-members reaches nothing. That matters now that presence reads it: a
  * list naming a member would keep that member's whole identity out of every
  * reclaim for as long as the socket stayed open. tests/worker-ws.test.ts pins
@@ -130,29 +135,38 @@ const auditIntent = (entry: AuditEntry): OutboxIntent => ({
 });
 
 /**
- * The `session` row an append writes to credit the sender's report, or null when
- * it writes none — the append did not ask for a credit, or the stamp already
- * sits forward of this event.
+ * The extra storage rows an append owes, as one put.
  *
- * A row rather than a put, so the caller folds it into the put it was already
- * making: `#writeEvent`'s whole argument is that an event and the rows that
- * belong with it commit in ONE write, and a credit committed separately is the
- * split this fix exists to remove.
+ * One function for both rules, and one `session` row: written as two builders
+ * each returning `{ session: ... }`, the second would overwrite the first's
+ * member array and silently drop its write.
  *
- * Module-level and pure. Not a method, because a Durable Object answers RPC for
- * every method on its class — a writing helper reachable from outside would let a
- * plain stub forge a report into any room — and because the rule it applies
- * (`creditReport`) is shared with MemoryStore and belongs to neither.
+ * Empty when the append owes nothing — it asked for no extras, the stamp already
+ * sits forward of this event, the cut is already recorded, or the member is not
+ * on the roster. The caller folds the rows into the put it was already making:
+ * `#writeEvent`'s whole argument is that an event and the rows that belong with
+ * it commit in ONE write, and a member write committed separately is the split
+ * this exists to remove.
+ *
+ * A free function and not a method on the class: a Durable Object answers RPC for
+ * every method on its class, so a writing helper reachable from outside would let
+ * a plain stub forge one of these into any room. The rules it applies
+ * (`creditReport`, `markRemoved`) are shared with MemoryStore and belong to
+ * neither store.
  */
-function reportRow(
+function memberRow(
   s: StoredSession,
-  memberId: string,
-  at: number,
+  event: SessionEvent,
   extras: AppendExtras,
-): Record<string, unknown> | null {
-  if (!extras.creditReport) return null;
-  const members = creditReport(s.members, memberId, at);
-  return members ? { session: { ...s, members } } : null;
+): Record<string, unknown> {
+  let members = s.members;
+  if (extras.creditReport) {
+    members = creditReport(members, event.fromMemberId, event.at) ?? members;
+  }
+  if (extras.markRemoved !== undefined) {
+    members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
+  }
+  return members === s.members ? {} : { session: { ...s, members } };
 }
 
 /**
@@ -394,6 +408,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *
+   * The one place it does not mirror it, on purpose, is a member a creator
+   * removed (#113). bellman_sync answers that member with its history up to the
+   * removal and nothing after. A socket is the room's future and a removed
+   * member has none, so the member is left out here, and an identity that owns
+   * only removed handles gets an empty list, which the route answers 403. That
+   * is a difference in what each path serves, not drift: both still give the
+   * open feed to a member who left and to one whose seat timed out (R2), which
+   * is why the filter is on `removedAtCursor` and NOT on `isActiveMember`, both
+   * of those members having `leftAt` set.
+   *
    * Two reasons the route asks here rather than calling getSession. This
    * returns two fields, not the whole record (live join codes and every
    * member's brief) across an RPC hop. And it does not expire the room as a
@@ -415,7 +439,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
     const s = await this.stored();
     return {
-      memberIds: s ? s.members.filter((m) => m.userId === userId).map((m) => m.memberId) : [],
+      // `isRemovedMember` and not `isActiveMember`: see above. An identity that
+      // holds one removed handle and one live one keeps its socket, on the live
+      // one's entitlement (D5), which falls out of this filter without a rule.
+      memberIds: s
+        ? s.members.filter((m) => m.userId === userId && !isRemovedMember(m)).map((m) => m.memberId)
+        : [],
       closed: readsClosed(s, Date.now()),
     };
   }
@@ -482,10 +511,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cursor. So the order is waitForEvents' own: await the read FIRST, then
    * register with no await between.
    *
-   * The recheck of `closed` is in this invocation for the same reason and not a
-   * second one (#133). The Worker asked membersOf before it built this request,
-   * and a close committed in the gap would otherwise be answered with an accepted
-   * socket that nothing is left to close.
+   * **The roster is read again here, and it answers two questions from one
+   * read.** The Worker asked membersOf and then sent this request: two calls,
+   * and anything can commit between them. #133 found the close in that gap and
+   * #113 found the removal, and they are the same hazard — a state the Worker's
+   * answer predates — so they share the read rather than paying two.
+   *
+   * `closed` first, because a closed room owes a 409 whoever is asking, and the
+   * route's own pre-check answers the same 409 with the same body for a room
+   * already closed when it looked (#133). A close committed in the gap would
+   * otherwise be answered with an accepted socket that nothing is left to close.
+   *
+   * Then the cut (#113). The member list this request carries was true when it
+   * was made and is not now, and a socket accepted on it would hold the open
+   * feed of a member already removed — which `#closeCutSockets` cannot undo,
+   * because it ran before the socket existed. So the ids of members the roster
+   * has since cut are dropped, and a request left with none is refused 403, the
+   * answer the route gives an identity that owns nothing here. An id the roster
+   * does not hold is kept: it is neither entitled nor condemned, as
+   * `#closeCutSockets` reads it.
+   *
+   * Both come BEFORE the events read, so a refusal reads nothing more and
+   * accepts nothing, and the events read stays the last await ahead of the
+   * attach. Every one of them is a storage read, which is what keeps the gate
+   * closed across the whole sequence.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
@@ -511,9 +560,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * workerd test and the smoke leg are what would catch that.
    *
    * The 16 KB is reachable only by churn. What goes in is the ids one identity
-   * owns in this room, departed members included: membersOf returns them on
-   * purpose, so /ws and bellman_sync agree about who may watch, and nothing
-   * removes a member. The list grows with seatings, not with the plan's cap on
+   * owns in this room, departed members included, except one a creator removed
+   * (#113): membersOf returns the others on purpose, so /ws and bellman_sync
+   * agree about who may watch the open feed, and nothing removes a member from
+   * the roster. The list grows with seatings, not with the plan's cap on
    * active members (ENTITLEMENTS in auth.ts), so it takes over a thousand
    * seatings by one identity in one room's life. That is churn, not a breach
    * of the cap.
@@ -531,27 +581,44 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     }
     const url = new URL(request.url);
     const cursor = Number(url.searchParams.get("cursor"));
-    const memberIds = (request.headers.get("x-bellman-members") ?? "")
+    const asked = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
-    // The recheck (#133). The Worker's membersOf said open, but that was a second
-    // invocation of this object and the input gate spans neither it nor the gap
-    // after it: a close, or the TTL alarm, lands there and the socket is accepted
-    // onto a room nothing will ever close, because the close already happened. So
-    // the guard is asked HERE, where the registration is, and the two are one
-    // invocation — the read-and-register rule again, with "closed" as the thing
-    // read instead of the cursor.
+    // ONE roster read answering both rechecks (#133 and #113). The Worker's
+    // membersOf said open, and said who this identity holds, but that was a
+    // second invocation of this object and the input gate spans neither it nor
+    // the gap after it: a close, the TTL alarm, or a removal lands there. So
+    // both guards are asked HERE, where the registration is, and all of it is
+    // one invocation — the read-and-register rule again, with "closed" and the
+    // roster as the things read instead of the cursor.
     //
-    // It comes before the event read and the accept, so a refusal reads nothing more
-    // and accepts nothing. The Worker returns this response unchanged, and its own
-    // pre-check answers the same 409 with the same body for a room already closed
-    // when it looked.
-    if (readsClosed(await this.stored(), Date.now())) {
+    // Read once rather than twice: the two guards ask different questions of
+    // the same record, and a second `stored()` would be a second read of a row
+    // the gate already holds still.
+    const s = await this.stored();
+
+    // Closed first: a closed room owes a 409 whoever is asking. The Worker
+    // returns this response unchanged, and its own pre-check answers the same
+    // 409 with the same body for a room already closed when it looked.
+    //
+    // `!s` is spelled out although `readsClosed` already answers true for a
+    // missing record: it is not a type predicate, so the compiler cannot narrow
+    // `s` through it, and the cut below reads `s.members`. Naming the case here
+    // is honest about why, where a non-null assertion would hide that the two
+    // guards agree. Change `readsClosed` to a predicate and this collapses.
+    if (!s || readsClosed(s, Date.now())) {
       return new Response("This room is closed", { status: 409 });
     }
 
-    // The last await, and both of them are storage reads, so the gate holds from
-    // the recheck to the return. From here nothing yields.
+    // Then the cut: the roster this request was built against, re-read.
+    const cut = new Set<string>(s.members.filter(isRemovedMember).map((m) => m.memberId));
+    const memberIds = asked.filter((id) => !cut.has(id));
+    if (asked.length > 0 && memberIds.length === 0) {
+      return new Response("Forbidden", { status: 403 });
+    }
+
+    // The last await, and every one before it is a storage read, so the gate
+    // holds from the first recheck to the return. From here nothing yields.
     const missed = await this.events(cursor);
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
@@ -972,9 +1039,6 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const leaving = isActiveMember(m);
       if (!leaving && !retiring) return { refused: null, ...no };
 
-      const members = leaving
-        ? s.members.map((mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm))
-        : s.members;
       const joinCodes = { ...s.joinCodes };
       if (retiring) delete joinCodes[retiring.role];
 
@@ -993,6 +1057,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const written: SessionEvent[] = [];
       if (leaving) written.push({ ...req.event, cursor: next++, at });
       if (retiring) written.push({ ...retiring.event, cursor: next++, at });
+
+      // The roster is built AFTER the events, because a cut names the departure's
+      // own cursor and the departure does not have one until it is numbered. The
+      // departure is `written[0]` whenever there is one: the order above is the
+      // member then the door, and a member who was already out has no departure.
+      //
+      // `markRemoved` when the caller asked to cut, which is the rule `memberRow`
+      // applies for an append's `markRemoved` extra — one piece of code shared
+      // with MemoryStore, so the two stores cannot record a cut differently
+      // (#113). Without it a removal routed through here would stamp `leftAt` and
+      // cap nothing, which is #113 reopened in the operation written to close it.
+      //
+      // `req.now` for the stamp and not `at`: a removal's clock is its caller's,
+      // and the contract pins `leftAt` to the `now` it was handed.
+      //
+      // Null is unreachable: `leaving` read `leftAt` as null from this same
+      // transaction's roster. It falls back to the roster unchanged rather than
+      // stamping `leftAt` on its own, because a member recorded out with no cut
+      // is the open feed, and leaving them in is the recoverable half.
+      const members = !leaving
+        ? s.members
+        : req.cut
+          ? markRemoved(s.members, memberId, written[0].cursor, req.now) ?? s.members
+          : s.members.map((mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm));
 
       // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9,
       // runtime fact 4). It is filtered here, so a dead row never enters the
@@ -1023,6 +1111,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // member who was already out behind no live door. A door shut on its own
     // queues rows that want delivering, and moves nothing else.
     for (const e of written) this.#wake(e);
+    // After the wake, as appendEvent does it: the member removed is sent the
+    // frame announcing it before their socket goes, so the notice is the last
+    // thing they receive. Only when this call recorded a cut — the pass reads the
+    // roster, which is a storage read no other removal should pay, and a leave
+    // cuts nobody so it has no socket to close.
+    if (result.removed && req.cut) await this.#closeCutSockets();
     if (written.length > 0) await this.driver.deliverNow();
     // A member leaving can take the last reporting seat with them, so the derived
     // tick may have moved.
@@ -1156,11 +1250,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * stale stamp still named that member silent. Folded in here the stamp and the
    * event commit together or not at all, and the wake still waits for both.
    *
+   * **`extras.markRemoved` rides in that same put, for the same reason.** The
+   * cut a member's feed is capped at has to commit with the event whose cursor
+   * it names, or a reader can be refused at a cursor no stored event carries,
+   * or admitted past one that is already written (#113).
+   *
+   * **The sockets of a member just cut close after the wake** (#113), through
+   * `#closeCutSockets` and only for an append that carried `markRemoved`. After
+   * the wake, so the member removed is sent the frame announcing it before the
+   * socket goes and the notice is the last thing they receive.
+   *
    * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
-   * ever moves a member's deadline LATER. An alarm already armed is then early —
-   * it fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()`
-   * points it at the right time. One wake spent, and the tick it produces is
-   * correct.
+   * ever moves a member's deadline LATER, and a removal only takes a member off
+   * the roster, which cannot bring the soonest one forward either. An alarm
+   * already armed is then early — it fires, finds nobody due, advances
+   * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
+   * spent, and the tick it produces is correct.
    */
   async appendEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -1171,10 +1276,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      await this.#writeEvent(txn, next, reportRow(s, e.fromMemberId, next.at, extras) ?? {});
+      await this.#writeEvent(txn, next, memberRow(s, next, extras));
       return next;
     });
     if (event) this.#wake(event);
+    // After the wake, so the member removed receives the frame announcing it
+    // before the socket goes. The notice is the last thing they get.
+    if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
     return event;
   }
 
@@ -1212,14 +1320,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!original) {
           throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
         }
-        // The replay credits too, in this transaction. A retry cannot know
-        // whether the first attempt landed the stamp, and skipping it here is
+        // The replay applies its extras too, in this transaction. A retry cannot
+        // know whether the first attempt landed the stamp, and skipping it here is
         // what made a stamp the first attempt never wrote permanent rather than
-        // late. `creditReport` is monotonic, so this is a repair or a no-op and
-        // never a regression — and it writes nothing at all when the stamp is
-        // already forward of the original event.
-        const credit = reportRow(s, e.fromMemberId, original.at, extras);
-        if (credit) await txn.put<unknown>(credit);
+        // late. `creditReport` is monotonic and `markRemoved` leaves a recorded
+        // cut where it is, so this is a repair or a no-op and never a regression
+        // — and it writes nothing at all when there is nothing to repair, which is
+        // why the put is guarded on the row being empty. `original` and not `e`,
+        // because `markRemoved` records the cut at the cursor the key names and
+        // `e` has none.
+        const owed = memberRow(s, original, extras);
+        if (Object.keys(owed).length > 0) await txn.put<unknown>(owed);
         return { outcome: "replayed", event: original };
       }
 
@@ -1233,11 +1344,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
       await this.#writeEvent(txn, event, {
         [storageKey]: stored,
-        ...reportRow(s, e.fromMemberId, event.at, extras),
+        ...memberRow(s, event, extras),
       });
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
+    // The sockets follow the cut down this path as they do down appendEvent's:
+    // the contract hands both the same extras, so a cut that held here and left
+    // the socket open would be the open feed by another route. A replay counts
+    // too, because it can be the call that writes the cut (see the replay branch
+    // above). "frozen" and "conflict" wrote nothing, so there is nothing to follow.
+    if (
+      extras.markRemoved !== undefined &&
+      (result.outcome === "appended" || result.outcome === "replayed")
+    ) {
+      await this.#closeCutSockets();
+    }
     return result;
   }
 
@@ -1357,6 +1479,60 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       } catch (err) {
         console.error("socket delivery failed:", err);
       }
+    }
+  }
+
+  /**
+   * Close every socket whose attachment names only members a creator removed (#113).
+   *
+   * `#private` for `#wake`'s reason: a Durable Object answers RPC for every method on its
+   * class, so a reachable version would let any caller holding the SESSION binding close a
+   * room's sockets.
+   *
+   * Run after a write that recorded a cut, and only then: an append carrying `markRemoved`,
+   * or a `removeMember` whose caller asked to cut. It reads the roster, which is a storage
+   * read no write that cut nobody should pay. It looks at every socket in
+   * the room and not just the removed member's, so a socket an earlier removal missed is
+   * closed by the next removal in the room. Nothing re-runs the pass for a missed removal
+   * that no later one follows: a pass that failed, or an object that went away between the
+   * commit and the pass, leaves that member's socket open until then.
+   *
+   * A socket survives if ANY member it names is still uncut: the socket is per identity
+   * and one live handle entitles it (D5). "Uncut" includes a member who left and one whose
+   * seat timed out, because the predicate is "was removed" and not "has left" (R2). An
+   * attachment naming a member the roster does not hold counts as neither. It cannot
+   * entitle the socket and it cannot condemn it, so such a socket is left alone, which is
+   * the direction `#wake` fails in on a missing attachment.
+   *
+   * It never throws. The append has committed and the wake has gone out, so a failure here
+   * must not turn it into an error for the caller: evictMember would report a removal that
+   * failed when it had not, and skip the audit row it writes next.
+   */
+  async #closeCutSockets(): Promise<void> {
+    try {
+      const s = await this.stored();
+      if (!s) return;
+      const cut = new Set(s.members.filter(isRemovedMember).map((m) => m.memberId));
+      const known = new Set(s.members.map((m) => m.memberId));
+      for (const ws of this.ctx.getWebSockets()) {
+        // One socket must not starve the rest, for the reason #wake gives: a throw would
+        // leave every later socket unclosed, and a socket that stays open is the open feed.
+        try {
+          if (!isOpen(ws)) continue;
+          const ids = (ws.deserializeAttachment() as Partial<SocketAttachment> | null)?.memberIds;
+          if (!Array.isArray(ids)) continue;
+          const named = ids.filter((id) => known.has(id));
+          if (named.length === 0 || named.some((id) => !cut.has(id))) continue;
+          // Within 123 bytes of UTF-8: ws.close() throws above that and the throw leaves
+          // the socket open, so enforcement would become an exception. The reason is what
+          // a developer reads in their client.
+          ws.close(1008, "You were removed from this room. Its history is still readable over /mcp.");
+        } catch (err) {
+          console.error("closing a removed member's socket failed:", err);
+        }
+      }
+    } catch (err) {
+      console.error("closing a removed member's sockets failed:", err);
     }
   }
 
@@ -2105,16 +2281,26 @@ export interface BellmanEnv {
 export class DurableObjectStore implements BellmanStore {
   constructor(private env: BellmanEnv) {}
 
+  /**
+   * The three ways into a Durable Object, and every one of them `reviving`.
+   *
+   * This is the whole seam between the Worker's realm and the objects', so wrapping
+   * it here covers every method on this facade — including ones added later, which a
+   * per-method wrapper would not. workerd reconstructs a thrown error without its
+   * prototype, so without this an `instanceof` outside an object never matches a
+   * class thrown inside one (#101). `reviving` is a no-op on anything that does not
+   * need it, so there is no call it is wrong for.
+   */
   private session(id: string) {
-    return this.env.SESSION.get(this.env.SESSION.idFromName(id));
+    return reviving(this.env.SESSION.get(this.env.SESSION.idFromName(id)));
   }
 
   private get registry() {
-    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+    return reviving(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry")));
   }
 
   private audit(orgId: string) {
-    return this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId));
+    return reviving(this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId)));
   }
 
   /**

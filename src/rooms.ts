@@ -158,10 +158,12 @@ export async function touchMember(
  * included. `evictMember` is creator-only and deliberately outside the verb
  * set, and a second removal path must not be looser than the first.
  *
- * The removal is final. A reclaimed member can still read its history and must
- * redeem a fresh code to write again, the same position an evicted one is in.
- * Making it reversible instead would mean a `pair` room could hold three
- * writers the moment the vanished peer reopened its laptop.
+ * The removal is final. A reclaimed member reads on and must redeem a fresh code
+ * to write again. An evicted one is in the same position for writing and no
+ * further: a creator's removal also cuts what it reads after the removal (#113),
+ * and a timeout, being the server's guess, does not (R2). Making it reversible
+ * instead would mean a `pair` room could hold three writers the moment the
+ * vanished peer reopened its laptop.
  *
  * Unlike an eviction this retires no join code — freeing the seat is the whole
  * point — and it never closes the room: the joiner that caused it is already
@@ -178,6 +180,12 @@ export async function announceReclaimed(
     // unwound: the seat is already given. The store refuses to seat into a frozen
     // room at all, so reaching here frozen means the room froze in the gap after
     // the seating.
+    //
+    // No cut on this append, on purpose (#113, R2): a timeout is the server
+    // guessing a member is gone, not a creator deciding they should be out, so
+    // the seat's old occupant keeps the open feed. Only `member_evicted` cuts —
+    // `evictMember` asks `removeMember` for it with `cut: true`, and `leaveRoom`
+    // does not — and nobody should add a cut here for symmetry with it.
     await store.appendEvent(session.id, {
       type: "member_timed_out",
       // "system" for the same reason member_evicted uses it: no member handle
@@ -345,6 +353,13 @@ export async function leaveRoom(
   const outcome = await store.removeMember(sessionId, memberId, {
     now: Date.now(),
     frozen: "allow",
+    // No cut (#113, R2). A member who chose to go keeps reading: the removal is a
+    // decision they made, not one a creator made about them, and the history was
+    // theirs. Only `evictMember` asks for the cut; `announceReclaimed` argues the
+    // same for a timeout and warns against adding one for symmetry. `false` and
+    // not an omission, because `RemovalRequest.cut` has no default: a removal
+    // that did not say would read as one that did not decide.
+    cut: false,
     event: {
       type: "member_left",
       fromMemberId: memberId,
@@ -565,7 +580,7 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
 }
 
 /**
- * The room's creator removes a member.
+ * The room's creator removes a member, and cuts what they read after it.
  *
  * Creator-only, and outside the verb set — the same category as closing a
  * room. Authority over a room as an object, rather than authority to act
@@ -583,11 +598,19 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
  * either way, but deleting the record would leave every earlier event naming a
  * member the roster no longer holds, to keep the present tidy.
  *
- * The removal, its announcement, the closing of the seat's door and the audit
- * rows are one `removeMember` operation, and so are its guards: a room that
- * closed or froze, or a caller who did not create it, is refused inside the
- * transaction that would have written. A guard read here and a write made after
- * it is the gap #118 was filed for: a freeze landing between the two.
+ * The removal, the cut it records, its announcement, the closing of the seat's
+ * door and the audit rows are one `removeMember` operation, and so are its
+ * guards: a room that closed or froze, or a caller who did not create it, is
+ * refused inside the transaction that would have written. A guard read here and a
+ * write made after it is the gap #118 was filed for: a freeze landing between the
+ * two.
+ *
+ * So a refusal means NOTHING happened — the member is still in, with no cut, and
+ * their seat's door untouched. Under the shape this replaced, where the door shut
+ * first and the member write rode a separate append, a refusal could leave the
+ * member in with their door already shut: over-revoked, recoverable by minting
+ * again, and deliberately the better of the two halves available then. One
+ * transaction has neither half, so a retry repeats the whole eviction.
  *
  * A member who already left can still be evicted, and it is not a no-op:
  * `leaveRoom` retires no code, so their seat's code may still be live and the
@@ -637,6 +660,17 @@ export async function evictMember(
   const outcome = await store.removeMember(sessionId, targetMemberId, {
     now: Date.now(),
     frozen: "refuse",
+    // An eviction cuts the feed (#113): the target is recorded out at the
+    // `member_evicted` event's own cursor, so their last readable event is the one
+    // telling them why (R4), and everything after it is refused. The store writes
+    // the cut in the same transaction as that event, because the two cannot be
+    // allowed to disagree — a cut naming a cursor no event carries, or a member
+    // recorded out with no cut at all, which IS the open feed this closes.
+    //
+    // A leave asks for no cut and a reclaimed seat gets none: see
+    // `RemovalRequest.cut` and the note in `announceReclaimed`. Nobody should add
+    // one there for symmetry with this.
+    cut: true,
     // The caller, so that the store's creator guard is a real one: passing
     // `session.createdBy` would compare the creator with itself and refuse nobody.
     // The check above has already turned away anyone else, so on a real room this guard

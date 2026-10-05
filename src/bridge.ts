@@ -422,15 +422,16 @@ export function createBridge(opts: BridgeOptions) {
    * room needs no entry: every sync reports session_status.
    *
    * Without the record, the next bellman_sync the agent makes for a member who is
-   * out starts a watcher again. Reads stay open to them, so the sync answers, and
-   * a sync from past the eviction holds no event for the bridge to act on: it
-   * would poll that room for the life of the process.
+   * out starts a watcher again. The sync answers: a member a creator removed gets
+   * its history up to the removal, and one whose seat timed out reads on. A sync
+   * from past the eviction holds no event for the bridge to act on, so it would
+   * poll that room for the life of the process.
    *
-   * This is tidiness, not a boundary. A removed member can still read the room
-   * with bellman_sync directly, and none of that changes. What it settles is that
-   * the bridge stops polling a room its member is not in, and its human stops
-   * receiving pushes from it. In memory only: a bridge restarted after the removal
-   * has neither the event nor this record.
+   * This is tidiness, not the boundary. The server draws that line: a removed
+   * member's bellman_sync returns nothing after the cut and does not wait
+   * (#113). What this settles is that the bridge stops polling a room its member
+   * is not in, and its human stops receiving pushes from it. In memory only: a
+   * bridge restarted after the removal has neither the event nor this record.
    */
   const departed = new Set<string>();
   let closed = false;
@@ -766,7 +767,8 @@ export function createBridge(opts: BridgeOptions) {
        * knows why this stopped.
        *
        * Nothing else would stop it: bellman_sync keeps answering a member who
-       * is out, because reads stay open to them, and the room is not closed.
+       * is out (a removed one with its history and nothing new, a timed-out
+       * one with whatever the room says next), and the room is not closed.
        * A bellman_leave the agent called would have stopped this watcher on
        * the way past; an eviction is a thing that happened TO this member, so
        * the event is the only signal there is. An agent's own bellman_sync can

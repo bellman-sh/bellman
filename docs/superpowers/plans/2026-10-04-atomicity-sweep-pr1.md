@@ -32,7 +32,7 @@
 Five failure modes the spec implies that no task's happy path exercises. Each has a test assigned to the task that owns the code.
 
 1. **A refused `removeMember` must write nothing and queue nothing.** No `leftAt`, no event, no audit row. A rejected call leaving an audit trace is the bug #44 fixed on the admin path, reintroduced through a different door. → Task 2.
-2. **The idempotent path must write nothing and queue nothing.** `removed: false` is a member who was already out; re-announcing or re-auditing them is #117 with the duplicate moved one call later. → Task 2.
+2. **The idempotent path must not restate the departure.** `removed: false` is a member who was already out; re-announcing or re-auditing the departure is #117 with the duplicate moved one call later. It is NOT licence to skip what is still owed: a seat code still live was never retired, so that path shuts the door, writes its event and queues its audit row, and reports `codeRetired`. → Task 2.
 3. **An expired code still sitting in `joinCodes` must not be retired or announced.** `evictMember` today computes `live` as `Date.now() <= rec.expiresAt`, and nothing prunes an expired record. A store that retires on presence alone announces a door that was already shut. → Task 2.
 4. **An audit entry with a falsy `orgId` must enqueue nothing.** §9 runtime fact 4: a Durable Object namespace accepts `""`, `null` and `undefined` as names, so such a row is *delivered* — into a stream no org reads. A bad id misfiles rather than stalling, which is harder to notice. → Task 1.
 5. **A refused seating must clear no codes.** `seatMember`'s new branch runs inside the same closure as its guards; a `full`, `frozen` or `closed` refusal must leave the room's codes alone. → Task 4.
@@ -1505,6 +1505,52 @@ describe("removeMember under concurrency", () => {
     await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
       expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
     });
+  });
+
+  /**
+   * The door-only path: a member already out, whose seat's code is still live.
+   * It writes an event and queues rows WITHOUT recording a departure, and it is
+   * the one path on which nothing else pins the delivery — the contract suite
+   * sees the audit row only because the pinned clock makes the outbox's grace
+   * alarm overdue at once, so a missing deliverNow() there goes unnoticed.
+   */
+  it("drains the queue on the door-only path, and queues no org-less row", async () => {
+    const s = await room("qs_door_only");
+    await s.setJoinCode("qs_door_only", "peer_b", "BELL-DOOR-01", Date.now() + 900_000);
+    await s.removeMember("qs_door_only", "m_peer", {
+      now: Date.now(), frozen: "allow", event: body("member_left", "m_peer"), audit: [],
+    });
+
+    const outcome = await s.removeMember("qs_door_only", "m_peer", {
+      now: Date.now(),
+      frozen: "refuse",
+      byUserId: "u_jesse",
+      event: body("member_evicted", "system"),
+      retire: {
+        role: "peer_b",
+        event: body("invite_revoked", "system"),
+        audit: [
+          { at: Date.now(), orgId: "org_codenerd", sessionId: "qs_door_only",
+            actorUserId: "u_jesse", action: "invite_revoked", detail: { roles: ["peer_b"] } },
+          // Org-less: the producer must drop it before it is ever queued.
+          { at: Date.now(), orgId: null, sessionId: "qs_door_only",
+            actorUserId: "u_jesse", action: "invite_revoked", detail: {} },
+        ],
+      },
+      audit: [],
+    });
+
+    // The departure is not restated, but the door that was still open is shut.
+    expect(outcome.removed).toBe(false);
+    expect(outcome.codeRetired).toBe("peer_b");
+
+    const id = env.SESSION.idFromName("qs_door_only");
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      // Drained inline, not left for the alarm.
+      expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
+    });
+    // One row, not two: the org-less entry never entered the queue.
+    expect(await s.auditForOrg("org_codenerd", 10)).toHaveLength(1);
   });
 
   it("keeps the removal when the audit delivery is still owed", async () => {

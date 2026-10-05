@@ -2352,6 +2352,11 @@ export function describeStoreContract(
       // The member went, then the door shut — the order a person would tell it.
       expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
         .toEqual(["member_evicted", "invite_revoked"]);
+
+      // The cursor row ends at the LAST event, or the next append overwrites it (#120).
+      await store.appendEvent(s.id, leaveEvent("m_creator"));
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked", "member_left"]);
     });
 
     /** Review Focus 3. */

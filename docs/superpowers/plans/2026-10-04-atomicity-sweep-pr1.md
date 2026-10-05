@@ -797,14 +797,13 @@ Append to `tests/rooms.test.ts`:
   it("leaveRoom announces the departure from a frozen room", async () => {
     // #73. The event is how peers learn someone is gone; losing it leaves them
     // showing a member who left.
-    const store = new MemoryStore();
     const s = session({
       frozenAt: Date.now(),
       members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
     });
     await store.createSession(s);
 
-    const result = await leaveRoom(store, identity("u_peer"), s.id, "m_peer");
+    const result = await leaveRoom(store, peer, s.id, "m_peer");
 
     expect(result.ok).toBe(true);
     expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
@@ -813,15 +812,14 @@ Append to `tests/rooms.test.ts`:
   it("leaveRoom announces once when two first-time leaves race on one handle", async () => {
     // #117. Both calls read leftAt as null under the old shape, and both
     // announced and audited.
-    const store = new MemoryStore();
     const s = session({
       members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
     });
     await store.createSession(s);
 
     await Promise.all([
-      leaveRoom(store, identity("u_peer"), s.id, "m_peer"),
-      leaveRoom(store, identity("u_peer"), s.id, "m_peer"),
+      leaveRoom(store, peer, s.id, "m_peer"),
+      leaveRoom(store, peer, s.id, "m_peer"),
     ]);
 
     expect((await store.eventsAfter(s.id, 0)).filter((e) => e.type === "member_left")).toHaveLength(1);
@@ -833,14 +831,13 @@ Append to `tests/rooms.test.ts`:
     // #118. The guard and the write are one transaction, so a freeze cannot
     // land between them and have the removal go through against a room whose
     // writes were meant to have stopped.
-    const store = new MemoryStore();
     const s = session({
       frozenAt: Date.now(),
       members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
     });
     await store.createSession(s);
 
-    const result = await evictMember(store, identity("u_jesse"), s.id, "m_peer");
+    const result = await evictMember(store, jesse, s.id, "m_peer");
 
     expect(result.ok).toBe(false);
     expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")?.leftAt)
@@ -849,14 +846,13 @@ Append to `tests/rooms.test.ts`:
   });
 
   it("evictMember announces the removal and the door in one operation", async () => {
-    const store = new MemoryStore();
     const s = session({
       joinCodes: oneCode("BELL-LIVE-01"),
       members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
     });
     await store.createSession(s);
 
-    const result = await evictMember(store, identity("u_jesse"), s.id, "m_peer");
+    const result = await evictMember(store, jesse, s.id, "m_peer");
 
     expect(result.ok).toBe(true);
     expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
@@ -864,7 +860,7 @@ Append to `tests/rooms.test.ts`:
   });
 ```
 
-Two import notes for this file: the eviction case needs `oneCode` from `./helpers/fixtures.js`, which this file may not import yet. And if `identity` is not already a helper here, use whatever the surrounding cases use to build an `Identity` — match them rather than introducing a second way.
+This file already provides everything these cases use, so add no imports and no local fixtures: `oneCode`, `member` and `session` come from `./helpers/fixtures.js`; `jesse` and `peer` are module-level `Identity` constants (`u_jesse`/`org_codenerd`/admin and `u_peer`/`org_codenerd`/member); and `store` is a fresh `MemoryStore` from the file's `beforeEach`. Do not declare a second `store` inside a case — it would shadow the shared one and silently test a different object.
 
 - [ ] **Step 2: Run to verify they fail**
 

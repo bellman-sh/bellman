@@ -18,7 +18,7 @@ import type { AuditEntry, Identity, Member, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
-import { JOIN_CODE_TTL, isActiveMember, type BellmanStore } from "./store.js";
+import { JOIN_CODE_TTL, isActiveMember, type BellmanStore, type EventBody } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 
 // ---------------------------------------------------------------------------
@@ -175,9 +175,10 @@ export async function announceReclaimed(
 ): Promise<void> {
   for (const m of reclaimed) {
     // A frozen room swallows the event (null) and it is tolerated rather than
-    // unwound, as evictMember tolerates it: the seat is already given. The
-    // store refuses to seat into a frozen room at all, so reaching here frozen
-    // means the room froze in the gap after the seating.
+    // unwound, as the announcement of a door shut behind a departed member is
+    // (see shutDepartedDoor): the seat is already given. The store refuses to
+    // seat into a frozen room at all, so reaching here frozen means the room
+    // froze in the gap after the seating.
     await store.appendEvent(session.id, {
       type: "member_timed_out",
       // "system" for the same reason member_evicted uses it: no member handle
@@ -227,6 +228,10 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
 /**
+ * Which orgs get a row for this action, and what it says. One rule, in one
+ * place, for the callers that write it themselves and the ones that hand it to
+ * a store operation to commit with the mutation it records.
+ *
  * Enterprise audit trail. Cross-org sessions write one entry per involved org
  * so each org's admins see the crossings that touched THEIR boundary —
  * without being able to read the other org's unrelated activity.
@@ -244,6 +249,26 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
  * own row is a transport that will one day write it for one org and not the
  * other.
  */
+export function auditEntries(
+  session: StoredSession,
+  actor: Identity,
+  action: string,
+  detail: Record<string, unknown>,
+  alsoOrgs: readonly (string | null)[] = []
+): AuditEntry[] {
+  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
+  const at = Date.now();
+  return [...orgs]
+    .filter((orgId): orgId is string => orgId !== null)
+    .map((orgId) => ({
+      at, orgId, sessionId: session.id, actorUserId: actor.userId, action, detail,
+    }));
+}
+
+/**
+ * Write what `auditEntries` builds, one row per org, for a caller that has no
+ * store operation to commit it with.
+ */
 export async function audit(
   store: BellmanStore,
   session: StoredSession,
@@ -252,17 +277,7 @@ export async function audit(
   detail: Record<string, unknown>,
   alsoOrgs: readonly (string | null)[] = []
 ): Promise<void> {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
-  for (const orgId of orgs) {
-    if (orgId === null) continue;
-    const entry: AuditEntry = {
-      at: Date.now(),
-      orgId,
-      sessionId: session.id,
-      actorUserId: actor.userId,
-      action,
-      detail,
-    };
+  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs)) {
     await store.appendAudit(entry);
   }
 }
@@ -300,10 +315,17 @@ async function closeIfEmpty(store: BellmanStore, session: StoredSession): Promis
 /**
  * A member departs. The room closes behind the last one out.
  *
+ * The departure, its announcement and its audit rows are one `removeMember`
+ * operation. Two calls on one handle cannot both announce, and a frozen room
+ * does not lose the event: freezing refuses sending, joining and inviting, and
+ * must not trap anyone inside.
+ *
  * Reads stay open to a member who left — history is still theirs — so a
  * departed handle is not an error here. Leaving again is a no-op — it
  * announces and audits nothing — except that it closes a room the first
- * attempt left empty and open.
+ * attempt left empty and open. So is leaving a room that has already closed:
+ * the store writes nothing into one, and the answer is the one a repeat of the
+ * leave that closed it gives.
  */
 export async function leaveRoom(
   store: BellmanStore,
@@ -316,40 +338,39 @@ export async function leaveRoom(
   const me = findMember(session, memberId, actor);
   if (!me) return refuse("forbidden", "member_id is not yours.");
 
-  if (me.leftAt !== null) {
-    // The early return is for not saying a departure twice, and no more than
-    // that: it is not licence to skip the closing. A leave that died between
-    // recording the departure and closing the room leaves it empty but open,
-    // and a retry landing here is how that heals. Only the closing is restored,
-    // on purpose. The announcement could be replayed safely through
-    // appendEventOnce under a stable key, but this path writes it with
-    // appendEvent, and the audit row has no idempotent write at all. The outbox
-    // marker that would complete the repair is #59.
-    return succeed({ sessionStatus: await closeIfEmpty(store, session) });
-  }
-
-  await store.updateMember(session.id, memberId, { leftAt: Date.now() });
-  // The result is ignored on purpose. A frozen room swallows the announcement
-  // (null) but still lets a member leave: freezing refuses sending, joining and
-  // inviting, and must not trap anyone inside.
-  await store.appendEvent(session.id, {
-    type: "member_left",
-    fromMemberId: memberId,
-    fromUserId: actor.userId,
-    fromLabel: actor.label,
-    payload: { label: actor.label },
-    refId: null,
+  // One operation: the guard, the stamp, the departure and the audit row. Read
+  // then write was the bug — two calls on one handle both saw leftAt null and
+  // both announced (#117) — and the frozen room lost the event outright, because
+  // the public append refuses while frozen and leaving must never be refused
+  // (#73). `frozen: "allow"` is that rule, said once, here.
+  const outcome = await store.removeMember(sessionId, memberId, {
+    now: Date.now(),
+    frozen: "allow",
+    event: {
+      type: "member_left",
+      fromMemberId: memberId,
+      fromUserId: actor.userId,
+      fromLabel: actor.label,
+      payload: { label: actor.label },
+      refId: null,
+    },
+    audit: auditEntries(session, actor, "member_left", {}),
   });
 
-  // Before the close, not after it. The departure is a fact from updateMember
-  // on, and a leave that dies at the close should still have its record: the
-  // retry cannot write it, so it must not wait on a step that has nothing to do
-  // with it. The order moves the failure window rather than closing it — if
-  // this throws, an emptied room stays open until a retry heals it, where
-  // closing first would have closed the room and lost the row. That is the
-  // trade taken deliberately: a retry can restore the closing, and nothing can
-  // restore the row.
-  await audit(store, session, actor, "member_left", {});
+  // A closed room is not a refusal here. Leaving has to work on a room that is
+  // over, so that a member can tidy up after one and a client can repeat the
+  // leave that closed it; the store writes nothing into a closed room, and the
+  // closing below reports it closed. Anything else the store refuses is a room
+  // that is no longer there.
+  if (outcome.refused !== null && outcome.refused !== "closed") {
+    return refuse("not_found", "session not found.");
+  }
+
+  // The closing is a separate decision and stays one. `closeSessionIfEmpty`
+  // makes it atomically; folding it into the removal would close the room over
+  // a member who joined in the gap. A leave that died before this leaves the
+  // room empty and open, and a retry — which takes the idempotent path, writing
+  // nothing — still reaches here and heals it.
   return succeed({ sessionStatus: await closeIfEmpty(store, session) });
 }
 
@@ -529,25 +550,80 @@ export async function revokeInvite(
 }
 
 /**
- * Tell the room a seat's code was retired by its creator. From "system" for the
- * reason member_evicted is: there is no member handle to name.
+ * The event that says a seat's code was retired by its creator, built here and
+ * written by whoever retires the code: the store, when the retirement is part of
+ * a removal, and `shutDepartedDoor` when it is not. From "system" for the reason
+ * member_evicted is: there is no member handle to name.
  */
-async function announceDoorShut(
-  store: BellmanStore,
-  actor: Identity,
-  sessionId: string,
-  role: string,
-): Promise<void> {
-  // A null return means the room froze in the gap. The code is already retired,
-  // so it is tolerated rather than unwound.
-  await store.appendEvent(sessionId, {
+function doorShutEvent(actor: Identity, role: string): EventBody {
+  return {
     type: "invite_revoked",
     fromMemberId: "system",
     fromUserId: actor.userId,
     fromLabel: actor.label,
     payload: { roles: [role] },
     refId: null,
-  });
+  };
+}
+
+/**
+ * Shut the door behind a member who is already out, if it is open, and say so.
+ * Returns the role whose code it retired, or null when nothing was open.
+ *
+ * `removeMember` retires a code only as part of a removal it makes, and for a
+ * member who is already out it makes none: it writes nothing, so that a repeat
+ * announces no second departure. The door is owed anyway. `leaveRoom` retires no
+ * code, so a member who left on their own leaves their seat's code live and the
+ * seat free, and whoever holds the code walks back in; an eviction that answered
+ * "evicted" and left that open would be the removal undoing itself. This does not
+ * say the removal again, because its announcement and audit rows were written
+ * with it. The door's closing is new, so it is announced and audited here.
+ *
+ * The room is read again rather than taken from the caller's first read. Two
+ * evictions of one member both see the door open: one removes the member and
+ * retires it, and the other lands here after, and from its own earlier read would
+ * announce and audit a closing that had already been made. A code that has
+ * expired is not a live one either, though nothing prunes it (see revokeInvite),
+ * so a code's presence alone does not mean the door is open.
+ *
+ * Reading it from the state is also what makes a repeated eviction write
+ * nothing: the first one consumed the code. A consequence comes with that,
+ * chosen rather than overlooked: a fresh code minted for this role between two
+ * evictions of the same member is live, so the second retires it. That is the
+ * over-revoke bias — shutting a door nobody meant to shut is recoverable by
+ * minting again, and leaving one open behind someone who believes it shut is
+ * not — and it is what a retry of an interrupted eviction rests on.
+ *
+ * Separate store calls, because there is no store operation for this one: retire,
+ * then announce, then audit. A closing announced for a door that did not shut is
+ * worse than a silent one, so the announcement and the row come after the
+ * retirement and never before it. A failure at the retirement leaves the door
+ * open and nothing said, which is where a retry starts. A failure after it leaves
+ * the door shut and the record thin, the direction to err in.
+ */
+async function shutDepartedDoor(
+  store: BellmanStore,
+  session: StoredSession,
+  actor: Identity,
+  role: string,
+): Promise<string | null> {
+  const room = (await store.getSession(session.id)) ?? session;
+  const rec = room.joinCodes[role];
+  if (rec === undefined || Date.now() > rec.expiresAt) return null;
+
+  await store.consumeJoinCode(session.id, role);
+  // A null return means the room froze in the gap. The code is already retired,
+  // so it is tolerated rather than unwound.
+  await store.appendEvent(session.id, doorShutEvent(actor, role));
+  // As revokeInvite writes it: the room's org and the creator's, and no more. The
+  // row names a role and no person, so the departed member's org could not tell
+  // whom it concerned, and a row an org cannot resolve to anyone is worse than
+  // none. A row of its own, because this call writes no `member_evicted` to fold
+  // it into: the removal already happened, and not saying it twice is the point of
+  // the idempotent path. A removal that retires a door records that as an event
+  // only, so a query for `invite_revoked` finds this door and not that one.
+  await audit(store, session, actor, "invite_revoked", { roles: [role] });
+  return role;
 }
 
 /**
@@ -569,10 +645,17 @@ async function announceDoorShut(
  * either way, but deleting the record would leave every earlier event naming a
  * member the roster no longer holds, to keep the present tidy.
  *
+ * The removal, its announcement, the closing of the seat's door and the audit
+ * rows are one `removeMember` operation, and so are its guards: a room that
+ * closed or froze, or a caller who did not create it, is refused inside the
+ * transaction that would have written. A guard read here and a write made after
+ * it is the gap #118 was filed for: a freeze landing between the two.
+ *
  * A member who already left can still be evicted, and it is not a no-op:
  * `leaveRoom` retires no code, so their seat's code may still be live and the
  * seat free, and evicting them shuts that door. Only the removal is not said a
- * second time.
+ * second time. `shutDepartedDoor` does that part, because the store retires a
+ * code only as part of a removal it makes.
  */
 export async function evictMember(
   store: BellmanStore,
@@ -582,14 +665,14 @@ export async function evictMember(
 ): Promise<RoomResult<{ evicted: boolean; codeRetired: string | null; sessionStatus: string }>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
-  if (session.closed) return refuse("closed", "session is closed.");
-  if (session.frozenAt !== null) return refuse("frozen", FROZEN);
-  if (session.createdBy !== actor.userId) {
-    return refuse("forbidden", "only the person who created this room can remove a member from it.");
-  }
 
   // A direct lookup, NOT findMember: that helper requires the handle to belong
-  // to the caller, which is the one thing eviction has to do differently.
+  // to the caller, which is the one thing eviction has to do differently. Read
+  // here to say WHICH refusal the caller reads and to build the rows. The two
+  // checks made on this read are of facts that cannot change under it: a member's
+  // record is never deleted and its user never changes. The room closing and a
+  // freeze can, so those guards, and the creator check beside them, are inside
+  // removeMember, where a freeze landing in this gap cannot slip past them (#118).
   const target = session.members.find((m) => m.memberId === targetMemberId);
   if (!target) return refuse("not_found", "no member with that member_id is in this room.");
   if (target.userId === actor.userId) {
@@ -599,105 +682,74 @@ export async function evictMember(
     return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
   }
 
-  // A code that has expired is not a live one, though nothing prunes it (see
-  // revokeInvite), so a code's presence alone does not mean the door is open.
-  //
-  // Reading it from the state is also what makes a repeated eviction write
-  // nothing: the first one consumed the code. A consequence comes with that,
-  // chosen rather than overlooked: a fresh code minted for this role between two
-  // evictions of the same member is live, so the second retires it. That is the
-  // over-revoke bias again, and minting once more recovers it.
-  const rec = session.joinCodes[target.roomRole];
-  const live = rec !== undefined && Date.now() <= rec.expiresAt;
-
-  if (target.leftAt !== null) {
-    // The early return is for not saying the removal twice, not licence to skip
-    // what is still owed, and two things can be. The closing: a retry landing here
-    // closes a room an interrupted eviction left empty and open. And the door:
-    // leaveRoom retires no code, so a member who left on their own leaves their
-    // seat's code live and the seat free, and whoever holds the code walks back in.
-    // Neither says the removal again: its announcement and audit row cannot be
-    // replayed safely as they are written (see leaveRoom, and #59). The door's
-    // closing is new, so it is announced and audited, and it cannot repeat: it is
-    // guarded by `live`, and the first closing made that false.
-    if (live) {
-      await store.consumeJoinCode(sessionId, target.roomRole);
-      await announceDoorShut(store, actor, sessionId, target.roomRole);
-      // A row of its own, where the live path below folds the same closing into
-      // `member_evicted` as `code_retired`: this call writes no `member_evicted`
-      // to fold it into, because the removal already happened and not saying it
-      // twice is what this early return is for. So a query for `invite_revoked`
-      // finds this door and not the live path's.
-      //
-      // As revokeInvite writes it: the room's org and the creator's, and no more.
-      // The row names a role and no person, so the departed member's org could not
-      // tell whom it concerned, and a row an org cannot resolve to anyone is worse
-      // than none.
-      await audit(store, session, actor, "invite_revoked", { roles: [target.roomRole] });
-    }
-    // Last, as below: whatever came after the close would be lost, because every
-    // later call refuses on "closed".
-    return succeed({
-      evicted: true,
-      codeRetired: live ? target.roomRole : null,
-      sessionStatus: await closeIfEmpty(store, session),
-    });
-  }
-
-  // The door shuts BEFORE the member is recorded out, so this operation never
-  // leaves them out with their seat's door still open: the removal that undoes
-  // itself, which is what it exists to prevent. The early return above would shut
-  // it on a retry, but only once someone retries, and until then the member could
-  // redeem the code and walk back in. This order fails the other way: member
-  // still in, door shut, and a retry finishes the eviction. It finds the code
-  // already gone, so what it records under-reports the retirement — the end state
-  // is right and the record is thin. Over-revoking is recoverable by minting
-  // again; under-revoking leaves a door open behind someone who believes it shut.
-  if (live) await store.consumeJoinCode(sessionId, target.roomRole);
-
-  await store.updateMember(sessionId, targetMemberId, { leftAt: Date.now() });
-
-  // The events read in the order a person would tell it — the member went,
-  // then the door shut — even though the store writes went the other way. A
-  // null return means the room froze in the gap; the member is already out, so
-  // it is tolerated rather than unwound.
-  await store.appendEvent(sessionId, {
-    type: "member_evicted",
-    // No member handle to name: creator authority is on the user, and a
-    // creator who has left the room still holds it. "system" is the existing
-    // marker for a server-originated event; the creator is in fromUserId.
-    fromMemberId: "system",
-    fromUserId: actor.userId,
-    fromLabel: actor.label,
-    payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
-    refId: null,
-  });
-  if (live) await announceDoorShut(store, actor, sessionId, target.roomRole);
-
-  // Before the close, as in leaveRoom: the eviction is a fact from
-  // updateMember on, and its record must not wait on a step unrelated to it.
-  // The order moves the failure window rather than closing it — if this throws,
-  // an emptied room stays open until a retry heals it, where closing first
-  // would have closed the room and lost the row. That is the trade taken
-  // deliberately: a retry can restore the closing, and nothing can restore the
-  // row.
-  await audit(
-    store, session, actor, "member_evicted",
-    {
-      // The seat and the person. member_id is per connection and only resolves
-      // inside the room, so user_id is what lets an org reading its own log see
-      // which of its people went; member_id stays for when one person holds two.
-      member_id: targetMemberId, user_id: target.userId,
-      room_role: target.roomRole, code_retired: live,
+  const outcome = await store.removeMember(sessionId, targetMemberId, {
+    now: Date.now(),
+    frozen: "refuse",
+    // The caller. The store refuses unless this is the room's creator, so passing
+    // `session.createdBy` here would compare the creator with itself and refuse
+    // nobody.
+    byUserId: actor.userId,
+    event: {
+      type: "member_evicted",
+      // No member handle to name: creator authority is on the user, and a
+      // creator who has left the room still holds it. "system" is the existing
+      // marker for a server-originated event; the creator is in fromUserId.
+      fromMemberId: "system",
+      fromUserId: actor.userId,
+      fromLabel: actor.label,
+      payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
+      refId: null,
     },
-    // The evicted member's org as well. The actor here is the creator, not the
-    // member, so unless that org is also the room's it would get no row.
-    [target.orgId],
-  );
+    // The door and the member go together now. Under the old shape the door shut
+    // FIRST and deliberately, so a failure left the member in with the door shut
+    // rather than out with it open: over-revoking is recoverable by minting again,
+    // and under-revoking leaves a door open behind someone who believes it shut.
+    // One transaction makes both land or neither, so the ordering no longer
+    // carries that. The bias survives where there is still a retry to choose for:
+    // see shutDepartedDoor. The events are written in the order a person would
+    // tell it — the member went, then the door shut.
+    retire: { role: target.roomRole, event: doorShutEvent(actor, target.roomRole) },
+    audit: auditEntries(
+      session, actor, "member_evicted",
+      {
+        // The seat and the person. member_id is per connection and only resolves
+        // inside the room, so user_id is what lets an org reading its own log see
+        // which of its people went; member_id stays for when one person holds two.
+        //
+        // No `code_retired` here. Whether a door shut is the store's answer, and
+        // this row is built before the store gives it: a field filled in from the
+        // read above would be wrong whenever the door changed between that read
+        // and the removal. The `invite_revoked` event the store writes in the same
+        // transaction is where the closing is recorded.
+        member_id: targetMemberId, user_id: target.userId, room_role: target.roomRole,
+      },
+      // The evicted member's org as well. The actor here is the creator, not the
+      // member, so unless that org is also the room's it would get no row.
+      [target.orgId],
+    ),
+  });
+
+  if (outcome.refused === "closed") return refuse("closed", "session is closed.");
+  if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
+  if (outcome.refused === "forbidden") {
+    return refuse("forbidden", "only the person who created this room can remove a member from it.");
+  }
+  if (outcome.refused !== null) return refuse("not_found", "session not found.");
+
+  // `removed: false` with no refusal is a member who was already out, and the
+  // store wrote nothing. Two things are still owed, and neither says the removal
+  // again. The door: the store retires a code only as part of a removal it makes,
+  // and `leaveRoom` retires none. And the closing, below: a retry landing here
+  // closes a room an interrupted eviction left empty and open.
+  const codeRetired = outcome.removed
+    ? outcome.codeRetired
+    : await shutDepartedDoor(store, session, actor, target.roomRole);
 
   return succeed({
     evicted: true,
-    codeRetired: live ? target.roomRole : null,
+    codeRetired,
+    // Last, as before: whatever came after the close would be lost, because
+    // every later call refuses on "closed".
     sessionStatus: await closeIfEmpty(store, session),
   });
 }

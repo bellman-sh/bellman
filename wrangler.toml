@@ -66,5 +66,18 @@ persist = true
 [vars]
 BELLMAN_BILLING = "shadow"
 
+# Where the control panel is served from. Comma-separated; bare origins, no
+# trailing slash — the Origin header carries neither, and parsePanelOrigins
+# normalises an entry that does rather than letting it match nothing.
+#
+# A var rather than a secret: it is not sensitive, and changing which origins
+# may hold a browser session should be a reviewed commit, the same argument this
+# file already makes for BELLMAN_BILLING.
+#
+# Unset means no browser may sign in at all. That is the fail-closed direction;
+# reading an empty allowlist as "no restriction" would accept a session cookie
+# from anywhere.
+BELLMAN_PANEL_ORIGINS = "https://dash.bellman.sh"
+
 # BELLMAN_KEYS is a secret, never a var:
 #   npx wrangler secret put BELLMAN_KEYS

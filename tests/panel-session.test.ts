@@ -1009,3 +1009,88 @@ describe("a panel sign-in is bound to the browser that started it", () => {
     expect(one).not.toBe(two);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 11: the whole panel session, end to end.
+// ---------------------------------------------------------------------------
+
+describe("the whole panel session, end to end", () => {
+  const NONCE = "__Host-bellman_signin";
+
+  it("signs in, reads the account, signs out, is then refused, and signs nobody else out", async () => {
+    // A bystander, signed in as someone else before the walk begins. Every
+    // assertion about them is "still signed in as themselves", because reading
+    // a session touches it — there is no untouched to assert at this level.
+    const bystander = await seedBystander(cfg);
+    const stillSam = async () => {
+      const res = await route(withCookie("/auth/session", bystander));
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { user_id: string }).user_id).toBe("u_github_9999");
+    };
+
+    // 1. The panel boots with nothing. 401, no WWW-Authenticate, CORS present.
+    const cold = await route(new Request(`${ISSUER}/auth/session`, { headers: { origin: PANEL } }));
+    expect(cold.status).toBe(401);
+    expect(cold.headers.get("www-authenticate")).toBeNull();
+    expect(cold.headers.get("access-control-allow-origin")).toBe(PANEL);
+
+    // 2. The human signs in through GitHub, carrying the nonce as a browser does.
+    const chooser = await route(new Request(
+      `${ISSUER}/auth/signin?return_to=${encodeURIComponent(`${PANEL}/rooms`)}`
+    ));
+    const nonce = /__Host-bellman_signin=([^;]*)/.exec(chooser.headers.get("set-cookie") ?? "")![1];
+    const req = decodeURIComponent(
+      /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
+    );
+    await route(new Request(`${ISSUER}/authorize/github?req=${encodeURIComponent(req)}`));
+
+    // 3. Signing in does not disturb a session that already existed.
+    await stillSam();
+
+    const back = await route(new Request(
+      `${ISSUER}/callback/github?code=upstream-code&state=${encodeURIComponent(req)}`,
+      { headers: { cookie: `${NONCE}=${nonce}` } }
+    ));
+    expect(back.status).toBe(302);
+    expect(back.headers.get("location")).toBe(`${PANEL}/rooms`);
+    const sid = /__Host-bellman_session=([^;]+)/.exec(back.headers.get("set-cookie")!)![1];
+    await stillSam();
+
+    // 4. The panel's boot call now answers.
+    const session = await route(withCookie("/auth/session", sid, { headers: { origin: PANEL } }));
+    expect(session.status).toBe(200);
+    expect(((await session.json()) as { user_id: string }).user_id).toBe("u_github_4242");
+
+    // 5. And so does the account screen, with CORS and the full body.
+    const account = await route(withCookie("/account", sid, {
+      headers: { origin: PANEL, accept: "application/json" },
+    }));
+    expect(account.status).toBe(200);
+    const body = (await account.json()) as Record<string, unknown>;
+    expect(body.plan).toBe("free");
+    expect(body.entitlements).toBeDefined();
+    expect(account.headers.get("access-control-allow-credentials")).toBe("true");
+
+    // 6. /admin is not reachable with it, whatever the identity says.
+    expect((await route(withCookie("/admin/grants", sid, { headers: { origin: PANEL } }))).status)
+      .toBe(401);
+
+    // 7. A write with no Origin is refused, and the session survives it.
+    const forged = await route(new Request(`${ISSUER}/auth/signout`, {
+      method: "POST", headers: { cookie: `${COOKIE}=${sid}` },
+    }));
+    expect(forged.status).toBe(403);
+    expect((await route(withCookie("/auth/session", sid))).status).toBe(200);
+
+    // 8. Signing out works, is final, and ends only this session.
+    const out = await route(new Request(`${ISSUER}/auth/signout`, {
+      method: "POST", headers: { cookie: `${COOKIE}=${sid}`, origin: PANEL },
+    }));
+    expect(out.status).toBe(204);
+    expect(out.headers.get("set-cookie")).toContain("Max-Age=0");
+
+    expect((await route(withCookie("/auth/session", sid, { headers: { origin: PANEL } }))).status)
+      .toBe(401);
+    await stillSam();
+  });
+});

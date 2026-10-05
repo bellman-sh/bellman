@@ -6,6 +6,7 @@ import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
+import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
@@ -36,6 +37,14 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
+  /**
+   * Comma-separated origins the control panel is served from, e.g.
+   * "https://dash.bellman.sh". Unset means no browser may hold a session —
+   * browser authentication is a capability this grants, not a default it
+   * restricts, so a deploy that forgets it gets a panel that cannot sign in
+   * rather than one that accepts a cookie from anywhere.
+   */
+  BELLMAN_PANEL_ORIGINS?: string;
   /** off | shadow | on. See src/billing/config.ts. Anything else is off. */
   BELLMAN_BILLING?: string;
   /** Signing secret (whsec_…) of the Stripe webhook endpoint. */
@@ -72,6 +81,7 @@ function oauthConfig(
     store: new AuthStore(env.AUTH),
     credentials,
     overrides: parseOverrides(env.BELLMAN_USERS),
+    panelOrigins: parsePanelOrigins(env.BELLMAN_PANEL_ORIGINS),
     plans,
     paymentLinks: billingSettings(env).paymentLinks,
     // The switch has to reach plans already stored, or it only stops new

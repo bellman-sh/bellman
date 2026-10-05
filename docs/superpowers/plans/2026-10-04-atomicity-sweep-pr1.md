@@ -1317,6 +1317,13 @@ Replace its closure's refusals and tail:
 Run: `npx vitest run tests/store.test.ts -t seatMember` then `npm run test:worker -- store-contract`
 Expected: PASS in both.
 
+- [ ] **Step 6b: Correct two descriptions in `src/server.ts` that the removal change made false**
+
+Found by Task 3's implementer, outside its own files.
+
+- `bellman_evict`'s description says an eviction completes "unless the room freezes at that instant: the removal still completes, unannounced." That is no longer true: a freeze reaching the store before the guard is refused with the frozen sentence, and one arriving after the commit finds the event already written. Delete that clause. (`tests/tools/invite.test.ts` pins the INVITE tool's equivalent sentence, which is still true — do not touch that one.)
+- The `idempotentHint` comment says a retry "finishes an eviction that died partway, whatever of the door, the removal and the closing was left undone." For an active member only the closing can be left undone now, because the door and the removal commit together. Say that.
+
 - [ ] **Step 7: Take the clearing out of `bellman_confirm`**
 
 In `src/server.ts`, delete these lines from the confirm handler:

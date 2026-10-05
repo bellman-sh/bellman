@@ -203,10 +203,19 @@ export interface RemovalRequest {
  * is announcing removals that actually happened. A call that cannot free enough
  * seats refuses "full" and removes nobody: a partial reap would remove a member
  * for a joiner that never got in.
+ *
+ * `codesCleared` says the seating filled the room, so every code it held was retired
+ * in the same operation that seated the member; a room that held none reports it too.
+ * It is false for every refusal, which writes nothing. "Filled" means a further
+ * joiner would be refused, with no free seat and none reclaimable, which is not the
+ * same as every seat being occupied: a stale seat is occupied and still reclaimable,
+ * so a room holding one keeps its codes.
  */
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
   reclaimed: Member[];
+  /** The seating filled the room, so every role's code was retired with it. */
+  codesCleared: boolean;
 }
 
 /**
@@ -404,6 +413,15 @@ export interface BellmanStore {
    *
    * Refuses rather than partially reaping. Reclaiming one of two seats a joiner
    * needs would remove a member for somebody who never got in.
+   *
+   * When the seat it took fills the room, it also retires every role's join code,
+   * and `codesCleared` says so. That was `bellman_confirm`'s second call, made once
+   * the seat had committed with nothing spanning the two, and a failure there left
+   * the member in the room with no event, no audit row and no member_id returned,
+   * and a connect token that is single use and so could not replay (#116). "Fills"
+   * means a further joiner would be refused, which is `seatVictims` answering null
+   * once this member is in: not a count of undeparted members, because a stale seat
+   * is occupied and still reclaimable.
    */
   seatMember(
     sessionId: string,
@@ -773,13 +791,13 @@ export class MemoryStore implements BellmanStore {
     // same reason, as closeSessionIfEmpty. The Durable Objects store gets it
     // from a transaction instead.
     const s = this.sessions.get(sessionId);
-    if (!s) return { refused: "not_found", reclaimed: [] };
-    if (s.closed) return { refused: "closed", reclaimed: [] };
-    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+    if (!s) return { refused: "not_found", reclaimed: [], codesCleared: false };
+    if (s.closed) return { refused: "closed", reclaimed: [], codesCleared: false };
+    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
     const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
-    if (victims === null) return { refused: "full", reclaimed: [] };
+    if (victims === null) return { refused: "full", reclaimed: [], codesCleared: false };
 
     const reclaimed: Member[] = [];
     for (const v of victims) {
@@ -790,7 +808,23 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
-    return { refused: null, reclaimed };
+
+    // A full room has no seat for ANY role, so every code goes — decided and
+    // written here rather than by the caller afterwards. As a second call made
+    // once the seat had committed it had nothing spanning it: a failure left the
+    // joiner seated with the codes still redeemable (#116).
+    //
+    // "Full" is asked the only way that preserves what the caller used to
+    // compute: whether a FURTHER joiner would be refused. Counting members with
+    // a null leftAt is not the same question — a stale seat is occupied but
+    // reclaimable, so a room with one still has a door worth leaving open, and
+    // counting would have retired its code.
+    const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
+    if (full) {
+      for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+      s.joinCodes = {};
+    }
+    return { refused: null, reclaimed, codesCleared: full };
   }
 
   async removeMember(

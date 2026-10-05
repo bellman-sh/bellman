@@ -847,22 +847,31 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Only on a successful seating, so a room that refused "full", "closed" or
    * "frozen" arms nothing it did not change.
    *
+   * A seating that fills the room also retires its codes (#116). The registry drops
+   * are queued in this transaction, by the same `enqueue` `clearJoinCodes` uses, and
+   * delivered once it has committed. That used to be `bellman_confirm` calling
+   * `clearJoinCodes` after this returned, a second transaction in this object with
+   * nothing spanning the two, and its failure left the member seated with no event,
+   * no audit row and no member_id returned.
+   *
    * `createSession` deliberately skips reArm() when it queued outbox intents,
    * because `enqueue` arms for the queue's marker — dated now — and a reArm()
-   * would bring the alarm in behind the commit to race the inline delivery. That
-   * guard is about a method's OWN enqueue and does not transfer: this one queues
-   * nothing, so the only due times reArm() can see are the TTL, the tick, and an
-   * outbox marker some earlier call left behind — and a marker still present means
-   * a delivery genuinely is owed, so arming for it is recovery rather than a race.
-   * `bellman_confirm`'s `clearJoinCodes`, which runs after this, arms the alarm
-   * itself inside its own transaction and so overwrites whatever this set.
+   * would bring the alarm in behind the commit to race the inline delivery. A
+   * seating that retired codes queued some, so the same race is open here, and it
+   * is closed by the order: deliver first, and re-arm only once the delivery has
+   * finished. By then the marker is gone unless a delivery failed, and a marker
+   * still present means a delivery genuinely is owed, so arming for it is recovery
+   * rather than a race. A seating that retired nothing queued nothing, so the only
+   * due times reArm() sees are the TTL, the tick, and a marker some earlier call
+   * left behind.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
     const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
+      const no = { reclaimed: [], codesCleared: false };
       const s = await this.stored(txn);
-      if (!s) return { refused: "not_found", reclaimed: [] };
-      if (s.closed) return { refused: "closed", reclaimed: [] };
-      if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+      if (!s) return { refused: "not_found" as const, ...no };
+      if (s.closed) return { refused: "closed" as const, ...no };
+      if (s.frozenAt !== null) return { refused: "frozen" as const, ...no };
 
       // The sockets as they are now, read here and not passed in. It is
       // synchronous and inside the transaction, so the decision is made against
@@ -871,7 +880,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // reclaiming it is final.
       const connected = connectedAmong(s.members, this.#attachedIds());
       const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
-      if (victims === null) return { refused: "full", reclaimed: [] };
+      if (victims === null) return { refused: "full" as const, ...no };
 
       const departed = new Set(victims.map((v) => v.memberId));
       const reclaimed: Member[] = [];
@@ -881,10 +890,33 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         reclaimed.push(next);
         return next;
       });
-      await txn.put("session", { ...s, members: [...members, member] });
-      return { refused: null, reclaimed };
+      const seated = [...members, member];
+
+      // A full room has no seat for ANY role, so every code goes — in this
+      // transaction, not in a second call after it committed (#116). The
+      // registry drops ride the same outbox clearJoinCodes uses.
+      //
+      // "Full" is asked the only way that preserves what bellman_confirm used to
+      // compute: whether a FURTHER joiner would be refused. Counting members with
+      // a null leftAt is not the same question — a stale seat is occupied but
+      // reclaimable, so a room with one still has a door worth leaving open.
+      const full = seatVictims(seated, s.maxMembers, staleBefore, connected) === null;
+      const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
+      const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
+
+      await txn.put<unknown>({
+        session: { ...s, members: seated, joinCodes: full ? {} : s.joinCodes },
+        ...rows,
+      });
+      return { refused: null, reclaimed, codesCleared: full };
     });
-    if (outcome.refused === null) await this.driver.reArm();
+    // After the commit, never inside the closure: everything awaited in there holds
+    // every other call to this object until it commits. Delivery first, then the
+    // re-arm, for the reason above.
+    if (outcome.refused === null) {
+      if (outcome.codesCleared) await this.driver.deliverNow();
+      await this.driver.reArm();
+    }
     return outcome;
   }
 

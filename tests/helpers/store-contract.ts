@@ -345,7 +345,7 @@ export function describeStoreContract(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
       );
 
-      expect(outcome).toEqual({ refused: null, reclaimed: [] });
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
       // Held for them, not taken: the joiner can have the free seat, so the
       // quiet member keeps its own.
       expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_quiet")?.leftAt)
@@ -363,7 +363,7 @@ export function describeStoreContract(
 
       expect(await store.seatMember(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "full", reclaimed: [] });
+      )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members).toHaveLength(2);
     });
 
@@ -384,7 +384,7 @@ export function describeStoreContract(
       // permanently AND silently from a state meant to be reversible.
       expect(await store.seatMember(
         frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "frozen", reclaimed: [] });
+      )).toEqual({ refused: "frozen", reclaimed: [], codesCleared: false });
       expect((await store.getSession(frozen.id))!.members
         .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
 
@@ -411,7 +411,7 @@ export function describeStoreContract(
       // somebody who never got in.
       expect(await store.seatMember(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "full", reclaimed: [] });
+      )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
         .toEqual([]);
     });
@@ -419,7 +419,193 @@ export function describeStoreContract(
     it("seatMember reports an unknown session rather than throwing", async () => {
       expect(await store.seatMember(
         "qs_nope", member({ memberId: "m_late", userId: "u_late" }), 0, 9_000_000
-      )).toEqual({ refused: "not_found", reclaimed: [] });
+      )).toEqual({ refused: "not_found", reclaimed: [], codesCleared: false });
+    });
+
+    // ------------------------------------- the codes a seating retires (#116)
+    //
+    // bellman_confirm used to retire a filled room's codes in a second call, made once
+    // the seat had committed, with nothing spanning the two. If that call threw, the
+    // member was in the room with no event, no audit row and no member_id returned, and
+    // the connect token that got them there is single use. The seating retires them
+    // now, in the operation that decides the room is full.
+    //
+    // "Full" is whether a FURTHER joiner would be refused: no free seat and none
+    // reclaimable. It is not a count of members whose `leftAt` is null. A stale seat is
+    // occupied and reclaimable, so a room holding one still has a door worth leaving
+    // open, and a count would retire its code.
+    //
+    // Each case plants the doors it means to test and starts by reading them back: a
+    // room with no live door for the call to retire passes for any store. `oneCode`
+    // plants for `peer_b` unless told otherwise. That is `session()`'s default role,
+    // and not `member()`'s default seat, which is `peer_a`.
+
+    /** The joiner every case below seats: fresh, and in the role `oneCode` plants for. */
+    const late = () => member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" });
+
+    /** The control each case starts from: its doors are in the record, and each resolves. */
+    const doorsAreLive = async (sessionId: string, doors: ReturnType<typeof oneCode>) => {
+      expect((await store.getSession(sessionId))!.joinCodes, "control: the doors are planted")
+        .toEqual(doors);
+      for (const [role, rec] of Object.entries(doors)) {
+        expect(await store.getSessionByJoinCode(rec.code), `control: the ${role} door resolves before the call`)
+          .toMatchObject({ role });
+      }
+    };
+
+    it("seatMember retires every role's code when the seat it took filled the room", async () => {
+      // Two doors, on two roles, and the joiner takes one of them: a store that
+      // retired only the joiner's own role's code, or only the default role's, would
+      // shut one and leave the other redeemable.
+      const doors = { ...oneCode("BELL-LIVE-01", "peer_b"), ...oneCode("BELL-LIVE-02", "peer_a") };
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
+      // The record, and not only what resolves: a store that expired the codes instead
+      // of removing them would stop resolving them and still list them.
+      expect(after.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-02")).toBeUndefined();
+    });
+
+    it("seatMember retires the codes when the seat it reclaimed is the one that filled the room", async () => {
+      // The joiner takes a seat a stale member held, so the room is as full as it was
+      // and no seat is left for anyone: the door shuts, as it did when the handler
+      // asked after the seat.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
+      expect(outcome.codesCleared).toBe(true);
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+    });
+
+    it("seatMember leaves the codes alone when a stale seat could still be reclaimed", async () => {
+      // No FREE seat is left once this joiner is in, but one is reclaimable, so a
+      // further joiner would get in and the door stays open. A count of members whose
+      // leftAt is null reads this room as full and would retire the code, locking out
+      // somebody who could have been seated.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
+          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      // Both seats are stale, so this joiner reclaims ONE, the longest quiet, and the
+      // other stays occupied but reclaimable. Had both members been fresh after the
+      // seating, that would be the other case, and it DOES retire the code.
+      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet_a"]);
+      expect(outcome.codesCleared).toBe(false);
+      const after = (await store.getSession(s.id))!;
+      // The premise, read off the record: by a head count of undeparted members this
+      // room is at capacity. That is what makes this a test of the question and not of
+      // a room with space in it.
+      expect(after.members.filter((m) => m.leftAt === null)).toHaveLength(2);
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toMatchObject({ role: "peer_b" });
+    });
+
+    it("seatMember leaves the codes alone when a seat is still spare", async () => {
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 5,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      expect((await store.getSession(s.id))!.joinCodes, "the door is untouched").toEqual(doors);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toMatchObject({ role: "peer_b" });
+    });
+
+    it("seatMember does not count a member who has left toward a full room", async () => {
+      // Three seats, a creator, one member already gone, and the joiner: three rows
+      // and two undeparted members, so a seat is spare. A store counting rows reads
+      // this room as full.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 3,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_creator" }),
+          member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", leftAt: 5_000 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members, "the premise: three rows").toHaveLength(3);
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+    });
+
+    // A refusal retires nothing. The clearing sits in the same closure as the guards,
+    // and a store that decided the room was full before looking at them, or that
+    // retired the codes of a room it then refused, would pass every case above. Each
+    // room is one this joiner would have FILLED had the seating gone through, except
+    // "full", which is at capacity already, so a clearing that ignored the guard has a
+    // door to shut.
+    it.each([
+      { refusal: "frozen", over: () => ({ frozenAt: Date.now() }) },
+      { refusal: "closed", over: () => ({ closed: true }) },
+      { refusal: "full", over: () => ({ maxMembers: 1 }) },
+    ])("seatMember clears no codes when it refuses a $refusal room", async ({ refusal, over }) => {
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator", lastSeenAt: Date.now() })],
+        ...over(),
+      });
+      await store.createSession(s);
+      // The record, and not what resolves: a closed room resolves no code whatever it lists.
+      expect((await store.getSession(s.id))!.joinCodes, "control: the door is planted").toEqual(doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: refusal, reclaimed: [], codesCleared: false });
+      const after = (await store.getSession(s.id))!;
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+      expect(after.members.map((m) => m.memberId), "nobody was seated").toEqual(["m_creator"]);
     });
 
     it("updateMember patches lastSeenAt on its own", async () => {

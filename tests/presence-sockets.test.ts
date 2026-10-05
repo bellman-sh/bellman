@@ -240,7 +240,7 @@ describe("the four places a handler reads presence", () => {
       Date.now() - STALE_AFTER_MS, Date.now(),
     );
 
-    expect(outcome).toEqual({ refused: "full", reclaimed: [] });
+    expect(outcome).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     expect((await read()).members.map((m) => [m.memberId, m.leftAt]))
       .toEqual([["m_creator", null], ["m_quiet", null]]);
 

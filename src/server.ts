@@ -572,7 +572,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       // about to take the seat — the authority the preview and the `invite` verb
       // do not carry — and every guard that matters is inside it, where there is
       // no gap to land in. It frees one seat, longest-quiet first, or refuses
-      // and frees none.
+      // and frees none. When the seat it takes fills the room it retires every
+      // role's code in the same transaction (#116), so nothing here follows it to
+      // do that: a call after the seat could fail with the member already in.
       const seated = await s.seatMember(
         session.id, member, member.joinedAt - STALE_AFTER_MS, member.joinedAt
       );
@@ -594,14 +596,10 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
 
       // Re-read: the store hands back detached copies, so `session` is now stale.
       const joined = (await s.getSession(session.id)) ?? session;
-      // Who is on a socket, for the two readings of presence below. Advisory:
-      // the reclaim was decided inside seatMember, against the sockets then.
+      // Who is on a socket, for the roster's presence below. Advisory: the reclaim,
+      // and the retiring of a filled room's codes, were decided inside seatMember,
+      // against the sockets then.
       const connected = await s.connectedMembers(joined.id);
-
-      // A full pair session has no seat for ANY role, so every code goes.
-      if (seatedMembers(joined, Date.now(), connected).length >= joined.maxMembers) {
-        await s.clearJoinCodes(joined.id);
-      }
 
       const joinEvent = await appendOrFrozen(s, session.id, {
         type: "member_joined",
@@ -1016,7 +1014,7 @@ Reads stay open to the person removed: the history was theirs too. That includes
 
 Args: session_id, member_id (THEIRS, not yours)
 Returns: { evicted, code_retired (the role whose code was retired, or null), session_status }
-Members see a member_evicted event, the person removed too, unless the room freezes at that instant: the removal still completes, unannounced. Removing the last active member closes the room.
+Members see a member_evicted event, the person removed too. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
       inputSchema: {
         session_id: z.string().min(4),
@@ -1030,10 +1028,10 @@ Errors: only the creator may call it; you cannot evict yourself (use bellman_lea
       // is false as stated.
       //
       // Whether to retry is a separate question, and the answer is yes. A repeat finishes
-      // an eviction that died partway, whatever of the door, the removal and the closing
-      // was left undone, and after a completed one it announces and audits nothing unless
-      // a code was minted since. That extra effect leans toward over-revoking, and
-      // minting again recovers it.
+      // an eviction that died partway. For an active member only the closing can be left
+      // undone now, because the door and the removal commit together, and after a
+      // completed one it announces and audits nothing unless a code was minted since.
+      // That extra effect leans toward over-revoking, and minting again recovers it.
       //
       // bellman_leave keeps idempotentHint: true, for a real reason: once a leave has
       // completed, a repeat announces and audits nothing, and the closing it may still

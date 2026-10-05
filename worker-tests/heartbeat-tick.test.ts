@@ -381,11 +381,11 @@ const joinerReports = roomManifest({
 });
 
 /**
- * `joinCodes: {}` on purpose. A code would queue a registry write, and its drain
- * ends in reArm() — which is how a `pair` room masks this: bellman_confirm calls
- * clearJoinCodes once the room fills, and by the time that drain re-arms, the
- * reporting member is seated. A swarm room that is not yet full makes no such
- * call, so nothing re-arms as a side effect and the arming has to be its own.
+ * `joinCodes: {}` on purpose. A code would be queued for retirement when the seat
+ * fills the room, and `enqueue` arms the alarm for that queue, sooner than the TTL,
+ * which is all these assertions compare the alarm with. That is how a `pair` room
+ * masks a missing arming. A room with no code to retire queues nothing, so nothing
+ * arms the alarm as a side effect and the arming has to be the seating's own.
  */
 const swarm = (id: string, over = {}) =>
   session({

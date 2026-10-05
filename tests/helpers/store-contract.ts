@@ -600,6 +600,30 @@ export function describeStoreContract(
       expect((await store.seatMember(s.id, further, 1, 9_000_000)).refused).toBe("full");
     });
 
+    it("seatMember clears an expired record when the room fills, and reports that it did", async () => {
+      // removeMember retires only a code that is still live, because it announces a door
+      // shutting and must not announce one that had already shut: an expired record is
+      // not a door. A seating announces nothing and is tidying rows, and a full room needs
+      // no code at all, so an expired record goes with the rest and the call reports that
+      // it cleared one. The two ask different questions, and this pins this side of the
+      // difference; see removeMember's expired-code cases for the other.
+      const stale = { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } };
+      const s = session({
+        maxMembers: 2,
+        joinCodes: stale,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      expect((await store.getSession(s.id))!.joinCodes, "control: the expired record is planted").toEqual(stale);
+      expect(await store.getSessionByJoinCode("BELL-STALE-1"), "control: it does not resolve").toBeUndefined();
+
+      const outcome = await store.seatMember(s.id, late(), 1, Date.now());
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      // The record, and not only what resolves: it did not resolve before the call either.
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+    });
+
     // A refusal retires nothing. The clearing sits in the same closure as the guards,
     // and a store that decided the room was full before looking at them, or that
     // retired the codes of a room it then refused, would pass every case above. Each

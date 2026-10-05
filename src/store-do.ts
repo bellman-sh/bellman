@@ -900,6 +900,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // compute: whether a FURTHER joiner would be refused. Counting members with
       // a null leftAt is not the same question — a stale seat is occupied but
       // reclaimable, so a room with one still has a door worth leaving open.
+      //
+      // Cleared by presence, where removeMember retires only a code that is still live
+      // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+      // announces a door shutting, so it must not announce one that had already shut,
+      // and an expired record is not a door. A seating announces nothing: it tidies
+      // rows, and a full room needs no code at all, so an expired record is dropped
+      // from the room and from the registry's index with the rest. A room that fills
+      // while holding only one therefore reports `codesCleared: true`, which answers
+      // this question and does not contradict the other. The contract suite pins this
+      // side, and its expired-code cases for removeMember pin the other.
       const full = seatVictims(seated, s.maxMembers, staleBefore, connected) === null;
       const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
       const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));

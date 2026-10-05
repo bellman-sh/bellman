@@ -211,6 +211,12 @@ export interface RemovalRequest {
  * with no free seat and none reclaimable, which is not the same as every seat being
  * occupied: a stale seat is occupied and still reclaimable, so a room holding one
  * keeps its codes.
+ *
+ * Nothing in `bellman_confirm` reads it, and nothing announces a retired code: a room
+ * that fills has its codes cleared without a word, as `clearJoinCodes` did. The field
+ * is here so the outcome says what the seating did. `SessionDO` reads it to decide
+ * whether the seating queued registry drops that want delivering, and the contract
+ * suite reads it to pin what a seating did.
  */
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
@@ -820,6 +826,16 @@ export class MemoryStore implements BellmanStore {
     // a null leftAt is not the same question — a stale seat is occupied but
     // reclaimable, so a room with one still has a door worth leaving open, and
     // counting would have retired its code.
+    //
+    // Cleared by presence, where removeMember retires only a code that is still live
+    // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+    // announces a door shutting, so it must not announce one that had already shut,
+    // and an expired record is not a door. A seating announces nothing: it tidies
+    // rows, and a full room needs no code at all, so an expired record goes with the
+    // rest. A room that fills while holding only one therefore reports
+    // `codesCleared: true`, which answers this question and does not contradict the
+    // other. The contract suite pins this side, and its expired-code cases for
+    // removeMember pin the other.
     const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
     const codes = full ? Object.values(s.joinCodes) : [];
     if (full) {

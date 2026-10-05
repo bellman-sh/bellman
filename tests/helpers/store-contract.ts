@@ -2176,6 +2176,26 @@ export function describeStoreContract(
       detail: {},
     });
 
+    /**
+     * An eviction of `m_peer`: the departure, and the door behind it with its own audit
+     * row. The door is `peer_b`'s. That is the seat `oneCode` and `session()` plant a
+     * live code for, and not `member()`'s default seat, `peer_a`: a room built from
+     * those fixtures has a door for this request to shut only because the request names
+     * the role instead of taking it from the member.
+     */
+    const eviction = (now = 9_000_000): RemovalRequest => ({
+      now,
+      frozen: "refuse",
+      byUserId: "u_jesse",
+      event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+      retire: {
+        role: "peer_b",
+        event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
+        audit: [auditRow("invite_revoked")],
+      },
+      audit: [auditRow("member_evicted")],
+    });
+
     it("removeMember records the member out, writes its event and queues its audit row", async () => {
       const s = session({
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
@@ -2252,20 +2272,30 @@ export function describeStoreContract(
       })).toEqual({ refused: "closed", removed: false, codeRetired: null });
     });
 
-    it("removeMember refuses a caller who did not create the room", async () => {
+    it("removeMember refuses a caller who did not create the room, and writes and queues nothing", async () => {
+      // The answer is not the proof. A store that stamped the member, wrote the events
+      // and queued the rows, and only then checked who was asking, would return this
+      // same answer, so the state is read as well. The request carries a door and the
+      // room holds a live code for it, or a misplaced guard would have nothing to shut.
       const s = session({
         createdBy: "u_jesse",
+        joinCodes: oneCode("BELL-LIVE-01"),
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
       });
       await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before the call")
+        .toBeDefined();
 
       expect(await store.removeMember(s.id, "m_peer", {
-        now: 9_000_000,
-        frozen: "refuse",
+        ...eviction(),
         byUserId: "u_someone_else",
-        event: leaveEvent("m_peer"),
-        audit: [auditRow("member_evicted")],
       })).toEqual({ refused: "forbidden", removed: false, codeRetired: null });
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
 
     it("removeMember answers not_found for an unknown room and an unknown member", async () => {
@@ -2389,20 +2419,6 @@ export function describeStoreContract(
     // Not saying the departure twice is not licence to skip what is still owed. A live
     // code behind a member who left on their own was never shut, so shutting it is a
     // write that has not happened yet, and not a duplicate of one that has.
-
-    /** An eviction of `m_peer`: the departure, and the door behind it with its own audit row. */
-    const eviction = (now = 9_000_000): RemovalRequest => ({
-      now,
-      frozen: "refuse",
-      byUserId: "u_jesse",
-      event: { ...leaveEvent("m_peer"), type: "member_evicted" },
-      retire: {
-        role: "peer_b",
-        event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
-        audit: [auditRow("invite_revoked")],
-      },
-      audit: [auditRow("member_evicted")],
-    });
 
     /** The creator, and `m_peer`, who has already left, with whatever codes the caller names. */
     const roomWithDeparted = (joinCodes: ReturnType<typeof oneCode>) => session({

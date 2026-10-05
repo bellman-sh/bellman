@@ -1553,9 +1553,19 @@ describe("removeMember under concurrency", () => {
     // One row, not two: the org-less entry never entered the queue.
     expect(await s.auditForOrg("org_codenerd", 10)).toHaveLength(1);
 
-    // An unknown member must not retire the door or queue rows on its way to
+    // An unknown member must not retire a door or queue rows on its way to
     // refusing. The contract suite catches this through an audit read that races
     // the delivering alarm; reading the queue is the deterministic form.
+    //
+    // The peer_a code is planted FIRST and deliberately. Without a live record
+    // for the role this names, `retiring` is null in every store, correct or
+    // broken, nothing is ever queued, and the assertion below cannot fail —
+    // a control that is green for a reason unrelated to what it claims.
+    await s.setJoinCode("qs_door_only", "peer_a", "BELL-GHOST-01", Date.now() + 900_000);
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      await ctx.storage.delete([...(await ctx.storage.list({ prefix: "ob:" })).keys()]);
+    });
+
     const unknown = await s.removeMember("qs_door_only", "m_ghost", {
       now: Date.now(),
       frozen: "refuse",
@@ -1568,6 +1578,39 @@ describe("removeMember under concurrency", () => {
       audit: [],
     });
     expect(unknown.refused).toBe("not_found");
+    expect((await s.getSession("qs_door_only"))!.joinCodes["peer_a"]?.code)
+      .toBe("BELL-GHOST-01");
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
+    });
+  });
+
+  /**
+   * The unknown-ROOM refusal, which has no deterministic control anywhere else.
+   * In the contract suite it is caught in workerd only by an audit read that
+   * races the delivering alarm, and that read is vacuous if the pinned clock,
+   * the grace period or the alarm's speed ever changes. A store that queues
+   * before it looks the room up queues into the object this names, so that is
+   * what we read.
+   */
+  it("queues nothing into a room that does not exist", async () => {
+    const outcome = await store().removeMember("qs_never_created", "m_peer", {
+      now: Date.now(),
+      frozen: "refuse",
+      byUserId: "u_jesse",
+      event: body("member_evicted", "system"),
+      retire: { role: "peer_b", event: body("invite_revoked", "system"), audit: [
+        { at: Date.now(), orgId: "org_codenerd", sessionId: "qs_never_created",
+          actorUserId: "u_jesse", action: "invite_revoked", detail: {} },
+      ] },
+      audit: [
+        { at: Date.now(), orgId: "org_codenerd", sessionId: "qs_never_created",
+          actorUserId: "u_jesse", action: "member_evicted", detail: {} },
+      ],
+    });
+
+    expect(outcome.refused).toBe("not_found");
+    const id = env.SESSION.idFromName("qs_never_created");
     await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
       expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
     });

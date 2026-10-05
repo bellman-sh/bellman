@@ -1454,6 +1454,56 @@ describe("removeMember under concurrency", () => {
     }
   });
 
+  /**
+   * Review Focus 1 and 2, pinned directly rather than through delivery.
+   *
+   * The contract suite can only see "queued nothing" by looking for a delivered
+   * row, and in the Workers program that is visible at all only because the
+   * suite's fake clock makes the outbox's five-second grace alarm overdue at
+   * once. On a real clock a refused call could leave rows sitting in `ob:` and
+   * the contract case would still pass. This reads the queue itself.
+   */
+  it("leaves the outbox empty when the removal is refused and when it is a no-op", async () => {
+    const s = await room("qs_queue_empty");
+    await s.freezeSession("qs_queue_empty", Date.now());
+
+    const refused = await s.removeMember("qs_queue_empty", "m_peer", {
+      now: Date.now(), frozen: "refuse", byUserId: "u_jesse",
+      event: body("member_evicted", "system"),
+      retire: { role: "peer_b", event: body("invite_revoked", "system") },
+      audit: [{
+        at: Date.now(), orgId: "org_codenerd", sessionId: "qs_queue_empty",
+        actorUserId: "u_jesse", action: "member_evicted", detail: {},
+      }],
+    });
+    expect(refused.refused).toBe("frozen");
+
+    const id = env.SESSION.idFromName("qs_queue_empty");
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
+    });
+
+    // And the idempotent path: a member already out queues nothing either.
+    await s.freezeSession("qs_queue_empty", null);
+    await s.removeMember("qs_queue_empty", "m_peer", {
+      now: Date.now(), frozen: "allow", event: body("member_left", "m_peer"), audit: [],
+    });
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      await ctx.storage.delete([...(await ctx.storage.list({ prefix: "ob:" })).keys()]);
+    });
+    const again = await s.removeMember("qs_queue_empty", "m_peer", {
+      now: Date.now(), frozen: "allow", event: body("member_left", "m_peer"),
+      audit: [{
+        at: Date.now(), orgId: "org_codenerd", sessionId: "qs_queue_empty",
+        actorUserId: "u_peer", action: "member_left", detail: {},
+      }],
+    });
+    expect(again.removed).toBe(false);
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
+    });
+  });
+
   it("keeps the removal when the audit delivery is still owed", async () => {
     // The row is queued in the removal's transaction, so a delivery that has
     // not happened yet cannot unmake the departure. The alarm is what finishes it.

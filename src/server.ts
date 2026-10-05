@@ -992,6 +992,27 @@ If a room's creator has removed you, you still get the history up to and includi
         ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000)
         : (await s.eventsAfter(session_id, since_cursor)).filter((e) => e.cursor <= cut);
 
+      // The status is the room's as it is when this poll answers, not as it was when the
+      // call began (#74). `session` is from before the wait, which is up to `wait_seconds`
+      // ago, and a room that froze or closed meanwhile would still read `active` here. A
+      // freeze appends nothing, so it does not even end the poll, and the first the agent
+      // learned of it was a refused `bellman_send`. Read after the events, so the status
+      // is never older than they are: a poll woken by `session_expired` cannot report an
+      // open room beside it.
+      //
+      // Only when the poll could have waited. A removed member's arm does not (the cut
+      // ignores `wait_seconds`, above) and neither does a poll that asked for none, so for
+      // them `session` is milliseconds old and a read would be a round trip on every poll
+      // to repair nothing. `closeIfEmpty` takes its status from a read after its work too,
+      // and not from the record it was handed. This record is used for the status alone:
+      // the removal's cap and the `removed` flag below keep the record the call began
+      // with, and say why in their own comments.
+      const status = sessionStatus(
+        cut === undefined && wait_seconds > 0
+          ? (await s.getSession(session_id)) ?? session
+          : session
+      );
+
       // A removal that committed after `me` was read is not on `me`. The record,
       // `touchMember` and the event read above are separate calls, and on Workers
       // each is an RPC, so a creator's `bellman_evict` can land between the first
@@ -1042,7 +1063,7 @@ If a room's creator has removed you, you still get the history up to and includi
             untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))
           ),
           cursor,
-          session_status: sessionStatus(session),
+          session_status: status,
           // Only when true, as `replayed` and `ambient` are: a client that has
           // never heard of it keeps working, and the twelve-field shape every
           // other poll returns does not change.

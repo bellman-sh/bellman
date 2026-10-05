@@ -120,6 +120,15 @@ const dropCodeIntent = (code: string): OutboxIntent => ({
 });
 
 /**
+ * An audit entry as an outbox intent, for an object that earns the entry in a
+ * transaction and must not then write it from outside one. Shared by SessionDO
+ * and RegistryDO so the two cannot disagree about the row's shape.
+ */
+const auditIntent = (entry: AuditEntry): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "audit", payload: entry,
+});
+
+/**
  * The `session` row an append writes to credit the sender's report, or null when
  * it writes none — the append did not ask for a credit, or the stamp already
  * sits forward of this event.
@@ -1209,7 +1218,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * One queued registry write, delivered to the registry's index.
+   * One queued write, delivered to the registry's index or to an org's audit stream.
    *
    * `#private` rather than `private`, because TypeScript's is erased at compile time
    * and a Durable Object answers RPC for every method on its class. A `private` one
@@ -1227,6 +1236,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await registry().putJoinCode(code, sessionId);
     } else if (row.kind === "join_code_drop") {
       await registry().dropJoinCode((row.payload as { code: string }).code);
+    } else if (row.kind === "audit") {
+      const entry = row.payload as AuditEntry;
+      // A falsy org is not a stall, it is a misfile: a namespace accepts null
+      // and "" as names, so this row WOULD be delivered, into a stream nobody
+      // reads. Dropped here instead, and the row still counts as delivered.
+      // ARCHITECTURE.md section 9, runtime fact 4.
+      if (!entry.orgId) return;
+      await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
@@ -1550,7 +1567,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   /** Each entry becomes one queued intent, with an id the stream can dedupe on. */
   #auditIntents(entries: AuditEntry[]): OutboxIntent[] {
-    return entries.map((entry) => ({ id: crypto.randomUUID(), kind: "audit", payload: entry }));
+    return entries.map(auditIntent);
   }
 
   /**

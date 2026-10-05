@@ -1734,15 +1734,25 @@ it was given and never learns what an event means. The frozen refusal stays on
 mutation that earns them. `AuditDO.append` already dedupes on the intent id.
 
 **`seatMember` clears a filled room's codes** inside the transaction that filled
-it, so `bellman_confirm` makes no second-object call after the seat commits.
+it, so the clearing no longer runs as a second transaction after the seat has
+committed.
+
+That is the half of #116 this closes, and the issue stays open for the rest.
+`bellman_confirm` still runs `announceReclaimed`, the `member_joined` append and
+the `brief_exchanged` audit row after the seat commits, and `audit()` writes
+straight to `AuditDO` with no intent id and no queue. So the failure #116
+describes — the member seated with no event, no audit row and no `member_id`
+returned, against a connect token that is single use and cannot replay — is
+still reachable through those three. Only the "codes still redeemable" half of
+it is gone.
 
 Peer content is untrusted as before; nothing here changes how it crosses or is
 rendered.
 
 Closes #73
-Closes #116
 Closes #117
 Closes #118
+Refs #116
 BODY
 )"
 ```

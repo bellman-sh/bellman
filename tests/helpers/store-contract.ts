@@ -2176,6 +2176,14 @@ export function describeStoreContract(
       detail: {},
     });
 
+    // The audit reads in the cases below are timing-dependent in the Durable Objects
+    // store. A row a refused call queued there reaches auditForOrg when the outbox
+    // delivers it, and a refusal commits nothing that would deliver it inline, so that is
+    // the alarm's doing and not the call's. The suite pins the clock to 2026-03-15 (see
+    // the beforeEach), which makes the alarm overdue the moment it is set, so it has
+    // delivered by the time these cases read. That is the clock and not a guarantee. The
+    // stamp, door and events reads do not depend on it.
+
     /**
      * An eviction of `m_peer`: the departure, and the door behind it with its own audit
      * row. The door is `peer_b`'s. That is the seat `oneCode` and `session()` plant a
@@ -2247,9 +2255,10 @@ export function describeStoreContract(
       // every store, because the one production runs is the Durable Objects one. The
       // request carries a door and the room holds a live code for it, or a misplaced
       // guard would have nothing to shut.
+      const door = oneCode("BELL-LIVE-01");
       const s = session({
         frozenAt: Date.now(),
-        joinCodes: oneCode("BELL-LIVE-01"),
+        joinCodes: door,
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
       });
       await store.createSession(s);
@@ -2261,7 +2270,9 @@ export function describeStoreContract(
       expect(outcome).toEqual({ refused: "frozen", removed: false, codeRetired: null });
       const after = (await store.getSession(s.id))!;
       expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
-      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
@@ -2285,9 +2296,10 @@ export function describeStoreContract(
       // and queued the rows, and only then checked who was asking, would return this
       // same answer, so the state is read as well. The request carries a door and the
       // room holds a live code for it, or a misplaced guard would have nothing to shut.
+      const door = oneCode("BELL-LIVE-01");
       const s = session({
         createdBy: "u_jesse",
-        joinCodes: oneCode("BELL-LIVE-01"),
+        joinCodes: door,
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
       });
       await store.createSession(s);
@@ -2301,21 +2313,34 @@ export function describeStoreContract(
 
       const after = (await store.getSession(s.id))!;
       expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
-      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
 
     it("removeMember answers not_found for an unknown room and an unknown member, and writes and queues nothing", async () => {
       // One code, two refusals, and neither is proved by its answer. What a misplaced
-      // guard could leave behind differs. Stamping the member and writing the departure
-      // need the member's record, so a store cannot do those first. The door's retirement
-      // and the audit rows do not, so a store that put them ahead of the member check
-      // would shut a door and file rows for someone who is not there; and for a room that
-      // is not there the rows alone could be queued. Each request carries a door and rows,
-      // and the room holds a live code for the door.
+      // guard could leave behind differs, and so does the read that sees it.
+      //
+      // A room that is not there has no record to stamp or retire from. It can still be
+      // handed audit rows, which need no record to be queued: the audit reads catch those.
+      // And in the Durable Objects store it can be handed an event, because a room's events
+      // are keys in an object that exists for any name, so one written before the room
+      // check would sit in a room that does not exist: the events read of that room
+      // catches it there. MemoryStore has no record to append to, so it cannot.
+      //
+      // A member who is not there cannot be stamped, because the stamp needs the record.
+      // The rest does not need it. The departure's event body is in the request, so a
+      // store that wrote it before looking the member up would leave it behind: the
+      // events read catches that. The door's retirement needs only the room: the door read
+      // catches that. The rows need neither: the audit reads catch those.
+      //
+      // Each request carries a door and rows, and the room holds a live code for the door.
+      const door = oneCode("BELL-LIVE-01");
       const s = session({
-        joinCodes: oneCode("BELL-LIVE-01"),
+        joinCodes: door,
         members: [member({ memberId: "m_creator" })],
       });
       await store.createSession(s);
@@ -2324,12 +2349,25 @@ export function describeStoreContract(
 
       expect(await store.removeMember("qs_nope", "m_peer", eviction()))
         .toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      // Vacuous in the Durable Objects store. This read follows the call at once, and
+      // rows a misplaced guard queued there are delivered by the outbox's alarm, which
+      // has not run yet. The final audit read below is what catches them, and only
+      // because this suite pins the clock to 2026-03-15 (see its beforeEach), which makes
+      // the outbox's five-second grace alarm overdue the moment it is set. Pin a recent
+      // date, lengthen the grace or slow the alarm and the room half goes green with no
+      // signal. A correct store queues nothing, so this cannot go red by accident: it is
+      // caught today and not guarded against drift. A deterministic pin reads the
+      // outbox's rows directly, as worker-tests/session-audit-outbox.test.ts does, and
+      // belongs in the workers program, not in this suite that MemoryStore shares.
       expect(await store.auditForOrg("org_codenerd", 10), "no row for a room that is not there").toEqual([]);
+      expect(await store.eventsAfter("qs_nope", 0), "no event for a room that is not there").toEqual([]);
 
       expect(await store.removeMember(s.id, "m_ghost", eviction()))
         .toEqual({ refused: "not_found", removed: false, codeRetired: null });
       const after = (await store.getSession(s.id))!;
-      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
@@ -2361,9 +2399,10 @@ export function describeStoreContract(
 
     /** Review Focus 1. */
     it("removeMember writes and queues nothing when it refuses", async () => {
+      const door = oneCode("BELL-LIVE-01");
       const s = session({
         closed: true,
-        joinCodes: oneCode("BELL-LIVE-01"),
+        joinCodes: door,
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
       });
       await store.createSession(s);
@@ -2378,7 +2417,9 @@ export function describeStoreContract(
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
-      expect(fresh.joinCodes["peer_b"]?.code).toBe("BELL-LIVE-01");
+      // The record as planted, code and expiry: pinning the code alone passes a store
+      // that kept the entry and expired it.
+      expect(fresh.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });

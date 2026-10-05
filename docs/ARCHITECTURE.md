@@ -521,10 +521,12 @@ vouches for it.
   argument so the seat rule stays one function for both stores; `MemoryStore`
   has no sockets and supplies none.
 - **Everything that only counts reads `BellmanStore.connectedMembers`**: the
-  preview in `bellman_connect`, the capacity check in `issueInvite`, whether
-  `bellman_confirm` retires the codes of a full room, and the roster's
-  `presence`. The reclaim is still confined to `bellman_confirm`, and none of
-  these removes anybody.
+  preview in `bellman_connect`, the capacity check in `issueInvite`, and the
+  roster's `presence`. Whether `bellman_confirm` retires the codes of a full room
+  is no longer one of them: `seatMember` decides it (#116), reading the sockets
+  itself inside its own transaction as the reclaim does, so a set the handler
+  fetched cannot disagree with it. The reclaim is still confined to
+  `bellman_confirm`, and none of these removes anybody.
 - **A socket this object is closing does not count.** `isOpen` is the one
   definition of a live socket, shared with `wake()`: the runtime keeps listing a
   socket this object has closed until its peer acknowledges.
@@ -692,7 +694,7 @@ flowchart TB
         D5["#67 operator impersonation"]
     end
     subgraph E["Correctness debt"]
-        E3["#73 #74 #75 freeze gaps"]
+        E3["#74 #75 freeze gaps"]
     end
 
     A2 --> A4
@@ -722,7 +724,7 @@ three filed bugs, and they were two different problems:
 | Filed as | [#59](../../../issues/59), [#62](../../../issues/62) | [#69](../../../issues/69) |
 | What goes wrong | A mutation commits in one object and the write that must accompany it lands in another. Lose the second and nothing records that it was owed. | Two operations interleave and an older result lands after a newer one. |
 | What fixes it | **Durable delivery.** Persist the intent in the same transaction as the mutation, then deliver it. An alarm retries what did not arrive. | **A lock.** The whole operation runs inside the object whose queue can cover it. |
-| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO` and `SessionDO → RegistryDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
+| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO`, `SessionDO → RegistryDO` and `SessionDO → AuditDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
 
 Neither fixes the other's problem. A durable queue delivers an old write as
 reliably as a new one, and a lock does nothing for a write that was never sent;
@@ -731,7 +733,7 @@ which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
-`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `addMember` and the two
+`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember` and the two
 appends are single transactions. An append carries the rows that belong with its
 event — the cursor, an idempotency key's record, and for a `progress` send the
 sending member's own `lastReportAt`. That last one was a second `updateMember`
@@ -755,6 +757,26 @@ removes somebody from a room that is meant to cost nobody their place. One
 transaction closes all three. The handler keeps only what the store cannot know:
 which sentence the joiner reads, and the events and audit rows for the seats the
 store reports it actually took.
+
+`removeMember` is the same shape for the other direction, and it goes one step
+further than `seatMember` for a reason. A seating leaves its events to the
+handler, because the handler knows which sentence the joiner reads. A removal
+cannot: the event is the thing that was being lost. A leave from a frozen room
+dropped its `member_left` outright, because the public append refuses while
+frozen (#73); an eviction checked `closed` and `frozenAt` against a snapshot and
+mutated afterwards, so a freeze landing in the window either wrote to a room
+whose writes had stopped or swallowed the `member_evicted` the bridge disarms a
+watcher on (#118); and two first-time leaves on one handle both read `leftAt` as
+null and both announced (#117). So the caller hands the event bodies in and the
+store writes them inside the transaction, in the same put as the member's stamp,
+rather than through `appendEvent` — the frozen refusal stays on the public
+append, which is a different operation, and this one declares its own policy.
+The store still never asks what an event means.
+
+Its audit rows ride the outbox as a third kind in `SessionDO`'s queue, `audit`,
+delivered `SessionDO → AuditDO` and deduped on the intent id like the
+registry's. That is what closes the half of #117 an idempotency key could not:
+`appendEventOnce` would have deduped the event and left the audit row doubled.
 
 **A lost write: durable delivery.** `src/outbox.ts`:
 
@@ -788,7 +810,7 @@ store reports it actually took.
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.
 
-It is used twice:
+It is used three times:
 
 - **`RegistryDO → AuditDO` ([#59](../../../issues/59)).** The four guarded grant
   writes (`putGrantIfOwned`, `deleteGrantIfOwned`, `putGrantIfSource`,
@@ -802,6 +824,13 @@ It is used twice:
   entry, a session holding a code nothing resolves, was open: a stale `jc:` row
   was already inert, because `getSessionByJoinCode` re-reads the session and
   requires the code to still be in its `joinCodes`.
+- **`SessionDO → AuditDO` ([#73](../../../issues/73), [#117](../../../issues/117)).**
+  `removeMember` queues a removal's audit rows, and those of the door it shuts,
+  in the transaction that makes the change each one records. Auditing afterwards
+  loses the row when the call that writes it fails, and writes it twice when two
+  leaves race on one handle. `SessionDO`'s `#deliver` hands each row to the org's
+  `AuditDO`, and `AuditDO.append`'s intent-id dedupe is what absorbs a
+  redelivery of one.
 
 Delivery is at least once, so each consumer absorbs a redelivery in its own way.
 `AuditDO.append` dedupes on the intent id (a `d:<id>` row written in the entry's
@@ -892,8 +921,11 @@ off its documentation, decide how code here is written.
    `"undefined"` and `"null"`, which `isOrgId` accepts. An entry filed against a
    falsy org id is therefore delivered, into a stream no org reads or into the
    stream of an org called `undefined`: a bad id misfiles instead of stalling.
-   Check an id before it names an object; `hasOrg` in `src/grant-audit.ts` and
-   the guard in `RegistryDO`'s `#deliver` are two defences for that reason.
+   Check an id before it names an object; `hasOrg` in `src/grant-audit.ts`, the
+   guard in `RegistryDO`'s `#deliver` and the one in `SessionDO`'s are three
+   defences for that reason. `removeMember` also drops org-less entries at the
+   producer, before they are queued, so for a removal the guard is the second
+   line and not the only one.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`
@@ -902,7 +934,10 @@ consumes a `due:outbox` row, and fires its alarm back to back, indefinitely. A
 rollback past that change has to clear those rows, and a `due:outbox` marker is
 safe to delete only when its `ob:` queue is empty, which is what the drain checks
 first. Deleted over queued rows it stops the spin and strands them, with nothing
-armed to deliver them.
+armed to deliver them. A build with no `audit` branch in `SessionDO.#deliver`
+throws `outbox: unknown kind audit` on such a row rather than skipping it, which
+blocks every row behind it. Rolling back past this change strands a queued audit
+row the same way rolling back past #62 strands a `due:outbox` marker.
 
 The heartbeat is the safer half of that rule. A stored `due:` row that an older
 build never consumes is the spin above; a derived due time that a build does not
@@ -921,9 +956,16 @@ room that a lapsed plan does not freeze, or a room missing from a joined listing
 — never the room itself. That is the reasoning for logging rather than
 retrying, and it is the same window the outbox closes elsewhere. Room activity
 is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
-directly with no intent id and no queue, so only grant changes are guaranteed to
-reach the audit stream. `bellman_confirm`, which commits a seat and then makes a
-second-object write, is the filed case ([#116](../../../issues/116)).
+directly with no intent id and no queue, so only grant changes and the rows of a
+leave or an eviction are guaranteed to reach the audit stream. A removal's rows
+are queued by `removeMember` in its own transaction, and every path it does not
+cover still goes through `audit()`. `bellman_confirm` was the filed case
+([#116](../../../issues/116)): it committed a seat and then called
+`clearJoinCodes`, which is a second transaction in the same `SessionDO` and not
+a call to another object, and a failure there left the member seated with no
+event, no audit row and no `member_id` returned. The seating now retires a
+filled room's codes inside its own transaction, so nothing follows the seat that
+could fail it.
 
 Two related classes, both of which have already bitten:
 

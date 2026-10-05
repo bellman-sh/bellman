@@ -1112,19 +1112,23 @@ Append inside `describeStoreContract`:
         maxMembers: 2,
         joinCodes: oneCode("BELL-LIVE-01"),
         members: [
-          member({ memberId: "m_creator", lastSeenAt: Date.now() }),
-          member({ memberId: "m_quiet", userId: "u_quiet", roomRole: "peer_b", lastSeenAt: 1 }),
+          member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
+          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
         ],
       });
       await store.createSession(s);
 
-      // staleBefore ahead of m_quiet's lastSeenAt but behind the creator's, so
-      // exactly one seat is reclaimable after this seating.
+      // Both seats are stale, so this joiner reclaims ONE and the other stays
+      // occupied but reclaimable. A further joiner would still get in, so the
+      // door stays open. Both members fresh after the seating would be the
+      // other case, and that one DOES clear.
       const outcome = await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }), 1_000, 9_000_000,
+        s.id, member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }),
+        1_000_000, 9_000_000,
       );
 
       expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed).toHaveLength(1);
       expect(outcome.codesCleared).toBe(false);
       expect((await store.getSession(s.id))!.joinCodes["peer_b"]?.code).toBe("BELL-LIVE-01");
     });

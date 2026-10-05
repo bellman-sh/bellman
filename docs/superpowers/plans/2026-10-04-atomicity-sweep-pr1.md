@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Close #73, #116, #117 and #118 by making a member's removal one transactional store operation, and by folding the join-code clearing into the seating that decides it.
+**Goal:** Close #73, #117 and #118 by making a member's removal one transactional store operation, and shut the half of #116 that is the join-code clearing, by folding it into the seating that decides it. The rest of #116 — the event and the audit row that still follow a committed seat — stays open.
 
 **Architecture:** `SessionDO` gains an `audit` outbox kind, so a room's audit rows can be queued in the transaction that earns them. `BellmanStore` gains `removeMember`, which performs the guard, the `leftAt` write, the removal event, the code retirement and its event, and queues the audit rows — all in one `SessionDO` transaction. `rooms.ts` moves `leaveRoom` and `evictMember` onto it. Separately, `seatMember` clears the room's join codes inside its own transaction when the seat it just took filled the room, so `bellman_confirm` makes no second-object call after the seat commits.
 
@@ -1092,7 +1092,7 @@ reaches it."
 
 ## Task 4: `seatMember` clears the codes that its own seat filled
 
-#116. `bellman_confirm` calls `clearJoinCodes` after `SessionDO` has committed the seat, reaching a second object with nothing spanning it. `seatMember` already decides capacity inside its transaction and already queues registry drops, so the clearing belongs in that closure.
+#116, in part. `bellman_confirm` calls `clearJoinCodes` after `SessionDO` has committed the seat: a second transaction with nothing spanning the two. (The issue calls it a second-*object* write; that is loose — the call is to the same `SessionDO`, and only its outbox delivery reaches `RegistryDO`.) `seatMember` already decides capacity inside its transaction and already queues registry drops, so the clearing belongs in that closure.
 
 **Files:**
 - Modify: `src/store.ts` — `SeatOutcome`, `MemoryStore.seatMember`
@@ -1686,7 +1686,7 @@ Three existing sentences go stale with this change and are part of the same step
 Two more passages describe `bellman_confirm` as it no longer works, found by Task 4's implementer:
 
 - The bullet listing what reads `BellmanStore.connectedMembers` (around line 525) says one of them is "whether `bellman_confirm` retires the codes of a full room". That decision moved into `seatMember`, which reads the sockets itself inside its own transaction. Say so.
-- The paragraph on room activity not being audited through the outbox (around line 925) ends "`bellman_confirm`, which commits a seat and then makes a second-object write, is the filed case (#116)." Two things are now wrong with it. #116 is closed by this PR, and the characterisation was never quite right: `clearJoinCodes` is a call to the SAME `SessionDO`, and only its outbox delivery reaches `RegistryDO`. The defect was a second *transaction* after the seat committed, not a second object. Rewrite it to say the seating now clears the codes inside its own transaction, and keep the surrounding point about `audit()` in `src/server.ts` calling `AuditDO.append` directly, which is still true for the paths `removeMember` does not cover.
+- The paragraph on room activity not being audited through the outbox (around line 925) ends "`bellman_confirm`, which commits a seat and then makes a second-object write, is the filed case (#116)." Two things are now wrong with it. This PR closes the codes half of #116 and leaves the rest open, and the characterisation was never quite right: `clearJoinCodes` is a call to the SAME `SessionDO`, and only its outbox delivery reaches `RegistryDO`. The defect was a second *transaction* after the seat committed, not a second object. Rewrite it to say the seating now clears the codes inside its own transaction, and keep the surrounding point about `audit()` in `src/server.ts` calling `AuditDO.append` directly, which is still true for the paths `removeMember` does not cover.
 
 In the "Rolling back" paragraph, add a sentence:
 

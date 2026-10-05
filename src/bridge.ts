@@ -600,6 +600,19 @@ export function createBridge(opts: BridgeOptions) {
          * delivery the watcher's order (deliver, then stop) exists to guarantee.
          */
         if (showsEvictionOf(out.events, memberId)) markDeparted(memberId);
+        /**
+         * The same ruling, from the server's own flag rather than the event.
+         *
+         * `showsEvictionOf` needs the `member_evicted` event in this slice, and a
+         * bridge that came back AFTER the removal asks from a cursor already past
+         * it: the event is behind it for ever, the slice is empty, and an empty
+         * slice with `session_status: "active"` is what a quiet room looks like.
+         * So the arm above would start a watcher that polls a room this member is
+         * out of for the life of the process — which is what the flag exists to
+         * prevent (#113 follow-up). It is read after `arm`, not instead of it, so
+         * one code path arms and one marks departed, as the eviction event's does.
+         */
+        if (out.removed === true) markDeparted(memberId);
         break;
       }
       case "bellman_leave":
@@ -750,6 +763,7 @@ export function createBridge(opts: BridgeOptions) {
         events?: WireEnvelope[];
         cursor?: number;
         session_status?: string;
+        removed?: boolean;
       };
       let deliveredAny = false;
       for (const envelope of out.events ?? []) {
@@ -779,6 +793,26 @@ export function createBridge(opts: BridgeOptions) {
        * `departed`.
        */
       if (showsEvictionOf(out.events, w.memberId)) {
+        markDeparted(w.memberId);
+        return;
+      }
+
+      // The server's flag, for the polls the event cannot reach: once this
+      // watcher's cursor is past the removal, every later answer is empty and
+      // `showsEvictionOf` can never fire again. Checked AFTER the event, so a
+      // human still receives the `member_evicted` on the poll that carries it —
+      // deliver, then stop, which is this loop's order.
+      //
+      // UNPINNED, and deliberately kept. `observe` covers the route a test can
+      // build — an agent's own sync, where `seenThrough` moves this cursor past
+      // the event — and a mutation removing THIS check reddens nothing, which is
+      // how that was established rather than assumed. What it still answers is a
+      // watcher that reaches a cursor past the cut by some other route and has no
+      // bus to hear the eviction on: `deliver`'s guard needs a bus, and `bus` is
+      // optional (see BridgeOptions), so a poll-only bridge would otherwise have
+      // no signal at all once the event is behind it. Delete the check only
+      // alongside a test that proves that bridge stops some other way.
+      if (out.removed === true) {
         markDeparted(w.memberId);
         return;
       }

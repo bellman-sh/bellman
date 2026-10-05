@@ -931,7 +931,8 @@ Args:
   - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor }
+Returns: { events[] (untrusted envelopes, your own events excluded), cursor, removed? }
+removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.
 If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
       inputSchema: {
@@ -1044,6 +1045,24 @@ If a room's creator has removed you, you still get the history up to and includi
           ),
           cursor,
           session_status: sessionStatus(session),
+          // Only when true, as `replayed` and `ambient` are: a client that has
+          // never heard of it keeps working, and the twelve-field shape every
+          // other poll returns does not change.
+          //
+          // It exists because the cut is otherwise INVISIBLE to the caller. A
+          // member polling from past it gets an empty slice and
+          // `session_status: "active"`, which reads exactly like a quiet room.
+          // The `member_evicted` event is the other signal, and a client that
+          // restarted after the removal can never see it — its cursor is already
+          // past it — so it would poll forever. The socket cannot tell it either:
+          // Node's undici collapses a /ws 403 into the same bare `error` event as
+          // a 503 (room-socket.ts says so), so the status is unreadable there.
+          // This flag is the one signal that survives both, and it is on every
+          // poll rather than once, because "once" is what the event already was.
+          //
+          // `removal` covers the same window the cap does: a removal that
+          // committed after `me` was read is proved by the event in the slice.
+          ...(cut !== undefined || removal !== undefined ? { removed: true as const } : {}),
         },
         foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
       );

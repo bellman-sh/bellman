@@ -252,7 +252,7 @@ describe("seatMember claims the seat and frees it in one operation", () => {
       ],
     }));
 
-    expect(await seat()).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat()).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     expect((await read()).members).toHaveLength(2);
   });
 
@@ -260,7 +260,7 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     await fullWithStalePeer();
     await store.freezeSession("qs_test", Date.now());
 
-    expect(await seat()).toEqual({ refused: "frozen", reclaimed: [] });
+    expect(await seat()).toEqual({ refused: "frozen", reclaimed: [], codesCleared: false });
     // The guard is inside the operation because the removal and the
     // announcement are separate writes: updateMember has no frozen guard and
     // appendEvent returns null, so a reap here would remove members
@@ -273,12 +273,12 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     await fullWithStalePeer();
     await store.closeSession("qs_test");
 
-    expect(await seat()).toEqual({ refused: "closed", reclaimed: [] });
+    expect(await seat()).toEqual({ refused: "closed", reclaimed: [], codesCleared: false });
   });
 
   it("refuses a session that does not exist", async () => {
     expect(await store.seatMember("qs_nope", joiner(), 0, Date.now()))
-      .toEqual({ refused: "not_found", reclaimed: [] });
+      .toEqual({ refused: "not_found", reclaimed: [], codesCleared: false });
   });
 
   it("does not close the room when it reclaims its last member", async () => {
@@ -293,11 +293,33 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     expect(seatedMembers(await read()).map((m) => m.memberId)).toEqual(["m_late"]);
   });
 
-  it("leaves the join code alone — freeing the seat is the whole point", async () => {
-    await fullWithStalePeer();
-    await seat();
+  it("leaves the join code alone when the reclaim does not fill the room — freeing the seat is the whole point", async () => {
+    // Both seats are stale, so the joiner takes one and the other is still
+    // reclaimable: a further joiner would get in, and the code is how they would.
+    await store.createSession(session({
+      members: [
+        member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
+        member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+      ],
+    }));
+    const planted = (await read()).joinCodes;
+    expect(Object.keys(planted), "control: the room holds a door").not.toEqual([]);
 
-    expect(Object.keys((await read()).joinCodes)).not.toEqual([]);
+    expect((await seat()).reclaimed).toHaveLength(1);
+
+    expect((await read()).joinCodes).toEqual(planted);
+  });
+
+  it("retires the join code when the seat it reclaimed leaves the room full again", async () => {
+    // The reclaim retires nothing by itself. What retires the code is the room
+    // filling, which is true of any seating that fills it. The handler did this
+    // after the seat until #116, and the seating does it now.
+    await fullWithStalePeer();
+    expect(Object.keys((await read()).joinCodes), "control: the room holds a door").not.toEqual([]);
+
+    expect((await seat()).codesCleared).toBe(true);
+
+    expect((await read()).joinCodes).toEqual({});
   });
 
   it("keeps a stale member out of the seat count while leaving it active", async () => {

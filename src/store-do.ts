@@ -6,7 +6,8 @@ import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
+  AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
+  SeatOutcome,
 } from "./store.js";
 import {
   connectedAmong, creditReport, isActiveMember, isRemovedMember, markRemoved, seatVictims,
@@ -122,6 +123,15 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 });
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
+});
+
+/**
+ * An audit entry as an outbox intent, for an object that earns the entry in a
+ * transaction and must not then write it from outside one. Shared by SessionDO
+ * and RegistryDO so the two cannot disagree about the row's shape.
+ */
+const auditIntent = (entry: AuditEntry): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "audit", payload: entry,
 });
 
 /**
@@ -904,22 +914,31 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Only on a successful seating, so a room that refused "full", "closed" or
    * "frozen" arms nothing it did not change.
    *
+   * A seating that fills the room also retires its codes (#116). The registry drops
+   * are queued in this transaction, by the same `enqueue` `clearJoinCodes` uses, and
+   * delivered once it has committed. That used to be `bellman_confirm` calling
+   * `clearJoinCodes` after this returned, a second transaction in this object with
+   * nothing spanning the two, and its failure left the member seated with no event,
+   * no audit row and no member_id returned.
+   *
    * `createSession` deliberately skips reArm() when it queued outbox intents,
    * because `enqueue` arms for the queue's marker — dated now — and a reArm()
-   * would bring the alarm in behind the commit to race the inline delivery. That
-   * guard is about a method's OWN enqueue and does not transfer: this one queues
-   * nothing, so the only due times reArm() can see are the TTL, the tick, and an
-   * outbox marker some earlier call left behind — and a marker still present means
-   * a delivery genuinely is owed, so arming for it is recovery rather than a race.
-   * `bellman_confirm`'s `clearJoinCodes`, which runs after this, arms the alarm
-   * itself inside its own transaction and so overwrites whatever this set.
+   * would bring the alarm in behind the commit to race the inline delivery. A
+   * seating that retired codes queued some, so the same race is open here, and it
+   * is closed by the order: deliver first, and re-arm only once the delivery has
+   * finished. By then the marker is gone unless a delivery failed, and a marker
+   * still present means a delivery genuinely is owed, so arming for it is recovery
+   * rather than a race. A seating that retired nothing queued nothing, so the only
+   * due times reArm() sees are the TTL, the tick, and a marker some earlier call
+   * left behind.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
     const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
+      const no = { reclaimed: [], codesCleared: false };
       const s = await this.stored(txn);
-      if (!s) return { refused: "not_found", reclaimed: [] };
-      if (s.closed) return { refused: "closed", reclaimed: [] };
-      if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+      if (!s) return { refused: "not_found" as const, ...no };
+      if (s.closed) return { refused: "closed" as const, ...no };
+      if (s.frozenAt !== null) return { refused: "frozen" as const, ...no };
 
       // The sockets as they are now, read here and not passed in. It is
       // synchronous and inside the transaction, so the decision is made against
@@ -928,7 +947,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // reclaiming it is final.
       const connected = connectedAmong(s.members, this.#attachedIds());
       const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
-      if (victims === null) return { refused: "full", reclaimed: [] };
+      if (victims === null) return { refused: "full" as const, ...no };
 
       const departed = new Set(victims.map((v) => v.memberId));
       const reclaimed: Member[] = [];
@@ -938,11 +957,171 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         reclaimed.push(next);
         return next;
       });
-      await txn.put("session", { ...s, members: [...members, member] });
-      return { refused: null, reclaimed };
+      const seated = [...members, member];
+
+      // A full room has no seat for ANY role, so every code goes — in this
+      // transaction, not in a second call after it committed (#116). The
+      // registry drops ride the same outbox clearJoinCodes uses.
+      //
+      // "Full" is asked the only way that preserves what bellman_confirm used to
+      // compute: whether a FURTHER joiner would be refused. Counting members with
+      // a null leftAt is not the same question — a stale seat is occupied but
+      // reclaimable, so a room with one still has a door worth leaving open.
+      //
+      // Cleared by presence, where removeMember retires only a code that is still live
+      // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+      // announces a door shutting, so it must not announce one that had already shut,
+      // and an expired record is not a door. A seating announces nothing: it tidies
+      // rows, and a full room needs no code at all, so an expired record is dropped
+      // from the room and from the registry's index with the rest. A room that fills
+      // while holding only one therefore reports `codesCleared: true`, which answers
+      // this question and does not contradict the other. The contract suite pins this
+      // side, and its expired-code cases for removeMember pin the other.
+      const full = seatVictims(seated, s.maxMembers, staleBefore, connected) === null;
+      const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
+      const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
+
+      await txn.put<unknown>({
+        session: { ...s, members: seated, joinCodes: full ? {} : s.joinCodes },
+        ...rows,
+      });
+      // What the call did, and not only whether the room filled: a room that fills
+      // with no code left in it queued nothing, so there is nothing to deliver.
+      return { refused: null, reclaimed, codesCleared: codes.length > 0 };
     });
-    if (outcome.refused === null) await this.driver.reArm();
+    // After the commit, never inside the closure: everything awaited in there holds
+    // every other call to this object until it commits. Delivery first, then the
+    // re-arm, for the reason above.
+    if (outcome.refused === null) {
+      if (outcome.codesCleared) await this.driver.deliverNow();
+      await this.driver.reArm();
+    }
     return outcome;
+  }
+
+  async removeMember(
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    // `written` rides out of the closure so the wake can happen after the
+    // commit, the way appendEvent does it: nobody hears of an event that did
+    // not land. It is stripped before the result goes back over RPC.
+    const outcome = await this.ctx.storage.transaction<
+      RemovalOutcome & { written: SessionEvent[] }
+    >(async (txn) => {
+      const no = { removed: false, codeRetired: null, written: [] };
+      const s = await this.stored(txn);
+      if (!s) return { refused: "not_found" as const, ...no };
+      if (s.closed) return { refused: "closed" as const, ...no };
+      if (req.frozen === "refuse" && s.frozenAt !== null) {
+        return { refused: "frozen" as const, ...no };
+      }
+      if (req.byUserId !== undefined && s.createdBy !== req.byUserId) {
+        return { refused: "forbidden" as const, ...no };
+      }
+      const m = s.members.find((mm) => mm.memberId === memberId);
+      if (!m) return { refused: "not_found" as const, ...no };
+      // One value for "there is a live door to shut". Nothing prunes an expired
+      // record, so a code's presence in joinCodes is not the same as a door
+      // being open, and retiring on presence announces a closing that already
+      // happened. Decided before the member's state is looked at, because a live
+      // door is owed to one who is already out as much as to one who is not.
+      const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
+      const retiring = req.retire && rec && req.now <= rec.expiresAt
+        ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
+        : null;
+
+      // Already out: the idempotent path. The departure is not said again, and
+      // queueing nothing for it is the half an idempotency key could not cover. A
+      // live door behind them is a different matter: it was never shut, so shutting
+      // it is a write that has not happened yet and not a duplicate. With neither
+      // owed, nothing is written and nothing is queued.
+      const leaving = isActiveMember(m);
+      if (!leaving && !retiring) return { refused: null, ...no };
+
+      const joinCodes = { ...s.joinCodes };
+      if (retiring) delete joinCodes[retiring.role];
+
+      // Written in this transaction's one put, not through appendEvent: the
+      // frozen refusal lives on the public append and stays there, because it is
+      // what stops a freeze landing between a tool's read and its write and
+      // letting a room grow. This operation declares its own policy through
+      // `frozen`. The store still never asks what an event means — it writes
+      // what it was given.
+      //
+      // The order is the one a person would tell it: the member went, then the
+      // door shut. Either may be missing, and not both: a member who was already
+      // out has no departure to write.
+      let next = await this.nextCursor(txn);
+      const at = Date.now();
+      const written: SessionEvent[] = [];
+      if (leaving) written.push({ ...req.event, cursor: next++, at });
+      if (retiring) written.push({ ...retiring.event, cursor: next++, at });
+
+      // The roster is built AFTER the events, because a cut names the departure's
+      // own cursor and the departure does not have one until it is numbered. The
+      // departure is `written[0]` whenever there is one: the order above is the
+      // member then the door, and a member who was already out has no departure.
+      //
+      // `markRemoved` when the caller asked to cut, which is the rule `memberRow`
+      // applies for an append's `markRemoved` extra — one piece of code shared
+      // with MemoryStore, so the two stores cannot record a cut differently
+      // (#113). Without it a removal routed through here would stamp `leftAt` and
+      // cap nothing, which is #113 reopened in the operation written to close it.
+      //
+      // `req.now` for the stamp and not `at`: a removal's clock is its caller's,
+      // and the contract pins `leftAt` to the `now` it was handed.
+      //
+      // Null is unreachable: `leaving` read `leftAt` as null from this same
+      // transaction's roster. It falls back to the roster unchanged rather than
+      // stamping `leftAt` on its own, because a member recorded out with no cut
+      // is the open feed, and leaving them in is the recoverable half.
+      const members = !leaving
+        ? s.members
+        : req.cut
+          ? markRemoved(s.members, memberId, written[0].cursor, req.now) ?? s.members
+          : s.members.map((mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm));
+
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9,
+      // runtime fact 4). It is filtered here, so a dead row never enters the
+      // queue, and again in #deliver, so one that arrives another way is dropped
+      // instead of misfiled. The door's rows get the same filter as the member's,
+      // and go in the same order as the events: the outbox delivers in order.
+      const intents = [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])]
+        .filter((e) => e.orgId)
+        .map(auditIntent);
+      const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
+      const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
+
+      await txn.put<unknown>({
+        session: { ...s, members, joinCodes },
+        ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
+        // The cursor row ends at the LAST event written, or the next append takes
+        // that event's cursor and overwrites it (#120).
+        cursor: written[written.length - 1].cursor,
+        ...rows,
+      });
+      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written };
+    });
+
+    const { written, ...result } = outcome;
+    // After the commit, never inside the closure: everything awaited in there
+    // holds every other call to this object until it commits, and reArm() reads
+    // stored(). `written` is empty exactly when nothing was done: a refusal, or a
+    // member who was already out behind no live door. A door shut on its own
+    // queues rows that want delivering, and moves nothing else.
+    for (const e of written) this.#wake(e);
+    // After the wake, as appendEvent does it: the member removed is sent the
+    // frame announcing it before their socket goes, so the notice is the last
+    // thing they receive. Only when this call recorded a cut — the pass reads the
+    // roster, which is a storage read no other removal should pay, and a leave
+    // cuts nobody so it has no socket to close.
+    if (result.removed && req.cut) await this.#closeCutSockets();
+    if (written.length > 0) await this.driver.deliverNow();
+    // A member leaving can take the last reporting seat with them, so the derived
+    // tick may have moved.
+    if (result.removed) await this.driver.reArm();
+    return result;
   }
 
   // updateMember, closeSession and freezeSession below still read and then put.
@@ -1310,8 +1489,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * class, so a reachable version would let any caller holding the SESSION binding close a
    * room's sockets.
    *
-   * Run after an append that carried `markRemoved`, and only then. It reads the roster,
-   * which is a storage read this must not pay on every append. It looks at every socket in
+   * Run after a write that recorded a cut, and only then: an append carrying `markRemoved`,
+   * or a `removeMember` whose caller asked to cut. It reads the roster, which is a storage
+   * read no write that cut nobody should pay. It looks at every socket in
    * the room and not just the removed member's, so a socket an earlier removal missed is
    * closed by the next removal in the room. Nothing re-runs the pass for a missed removal
    * that no later one follows: a pass that failed, or an object that went away between the
@@ -1357,7 +1537,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * One queued registry write, delivered to the registry's index.
+   * One queued write, delivered to the registry's index or to an org's audit stream.
    *
    * `#private` rather than `private`, because TypeScript's is erased at compile time
    * and a Durable Object answers RPC for every method on its class. A `private` one
@@ -1375,6 +1555,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await registry().putJoinCode(code, sessionId);
     } else if (row.kind === "join_code_drop") {
       await registry().dropJoinCode((row.payload as { code: string }).code);
+    } else if (row.kind === "audit") {
+      const entry = row.payload as AuditEntry;
+      // A falsy org is not a stall, it is a misfile: a namespace accepts null
+      // and "" as names, so this row WOULD be delivered, into a stream nobody
+      // reads. Dropped here instead, and the row still counts as delivered.
+      // ARCHITECTURE.md section 9, runtime fact 4.
+      if (!entry.orgId) return;
+      await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
@@ -1698,7 +1886,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   /** Each entry becomes one queued intent, with an id the stream can dedupe on. */
   #auditIntents(entries: AuditEntry[]): OutboxIntent[] {
-    return entries.map((entry) => ({ id: crypto.randomUUID(), kind: "audit", payload: entry }));
+    return entries.map(auditIntent);
   }
 
   /**
@@ -2246,6 +2434,14 @@ export class DurableObjectStore implements BellmanStore {
         this.registry.indexMembership(member.userId, sessionId));
     }
     return seated;
+  }
+
+  async removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    return this.session(sessionId).removeMember(memberId, req);
   }
 
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {

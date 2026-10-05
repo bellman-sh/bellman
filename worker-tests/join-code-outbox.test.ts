@@ -30,7 +30,7 @@ import { JOIN_CODE_TTL } from "../src/store.js";
 // The shared fixture, not a hand-rolled literal: hydrateStoredSession returns
 // undefined for a session whose manifest has no roles object, so a `manifest: null`
 // fixture reads as GONE and every assertion below would fail against correct code.
-import { oneCode, session } from "../tests/helpers/fixtures.js";
+import { member, oneCode, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
   await reset();
@@ -333,6 +333,20 @@ const SITES: Site[] = [
     name: "clearJoinCodes",
     given: holdTwo,
     act: (store, id) => store.clearJoinCodes(id),
+    owes: () => [drop(A), drop(B)],
+    after: () => [undefined, undefined, undefined],
+  },
+  {
+    // The seat and the clearing are one transaction (#116), and this is the site whose
+    // `act` is a seating and not a join-code call. The room holds one member and seats
+    // two, nobody is stale, so the joiner takes the free seat and fills it. The contract
+    // suite cannot see these rows, because the facade's lookup re-reads the session and
+    // answers "no" for a code the registry still holds.
+    name: "seatMember, when the seat fills the room",
+    given: holdTwo,
+    act: (store, id) => store.seatMember(
+      id, member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }), 1, Date.now(),
+    ),
     owes: () => [drop(A), drop(B)],
     after: () => [undefined, undefined, undefined],
   },

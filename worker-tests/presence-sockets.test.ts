@@ -92,7 +92,7 @@ describe("an open socket is liveness", () => {
     expect(presenceOf(m)).toBe("stale");
     expect(presenceOf(m, Date.now(), connected)).toBe("present");
 
-    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
 
     // Hibernation. Mark the instance that accepted the socket, because evicting
     // an object that is not running does nothing and a no-op would pass below.
@@ -101,7 +101,7 @@ describe("an open socket is liveness", () => {
 
     // The rebuilt instance holds nothing from before: it has to find the socket
     // through ctx.getWebSockets(), as wake() does.
-    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     const warm = await runInDurableObject(stub, (instance) => (instance as unknown as { warm?: boolean }).warm);
     expect(warm).toBeUndefined();
 
@@ -141,7 +141,7 @@ describe("an open socket is liveness", () => {
 
     // So a confirm contesting the seat in the gap after the drop is refused,
     // where before the stamp it reclaimed it.
-    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
   });
 
   it("still reaps a quiet member with no socket, and stops protecting one whose socket closes", async () => {
@@ -155,7 +155,7 @@ describe("an open socket is liveness", () => {
     // object reads the sockets when it decides, and keeps no list of its own.
     const closing = await room([here("m_here"), quiet("m_quiet")], 2);
     const ws = await open(closing.id);
-    expect(await seat(closing.store, closing.id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(closing.store, closing.id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     ws.close(1000, "done");
     await vi.waitFor(async () => {
       expect(await closing.store.connectedMembers(closing.id)).toEqual(new Set());
@@ -166,7 +166,7 @@ describe("an open socket is liveness", () => {
     // reclaim here until that landed, which was the bug: a member that merely
     // dropped lost its seat with no window at all, where a polling member gets
     // ten minutes.
-    expect(await seat(closing.store, closing.id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(closing.store, closing.id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
 
     // And the stamp is a WINDOW, not permanent protection: stand past it and a
     // seat is reclaimable again, which is what separates "was here a moment ago"
@@ -191,7 +191,7 @@ describe("an open socket is liveness", () => {
     // What the route built: every member the identity owned when it connected.
     expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_a", "m_b"] })]);
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
-    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
   });
 
@@ -206,7 +206,7 @@ describe("an open socket is liveness", () => {
     expect(await store.addMember(id, quiet("m_b"))).toBe(true);
 
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
-    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [] });
+    expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
   });
 
@@ -228,6 +228,38 @@ describe("an open socket is liveness", () => {
       .filter((m) => m.memberId !== "m_here")
       .map((m) => [m.memberId, presenceOf(m)]);
     expect(stamped).toEqual([["m_a", "present"], ["m_b", "present"]]);
+  });
+
+  /**
+   * #116 with #146. The seating retires a filled room's codes, and "filled" is the
+   * question the refusal asks: would a further joiner be refused. A quiet member on a
+   * socket is not reclaimable, so with it the room is full and the codes go. The same
+   * roster with no socket has a seat a further joiner could take, and they stay.
+   *
+   * The handler used to ask this with `connectedMembers`, and the seating asks it with
+   * the sockets read inside its own transaction. Two rooms with one roster, so the
+   * socket is the only difference between them.
+   */
+  it("retires the codes of a room a quiet member's socket keeps full, and not those of one it does not", async () => {
+    const held = await room([here("m_here"), quiet("m_quiet")], 3);
+    const free = await room([here("m_here"), quiet("m_quiet")], 3);
+    // Each room's own record: the fixture stamps an expiry from the clock as it is built,
+    // so two rooms made a millisecond apart do not hold equal records.
+    const heldDoors = (await held.store.getSession(held.id))!.joinCodes;
+    const freeDoors = (await free.store.getSession(free.id))!.joinCodes;
+    expect(Object.keys(heldDoors), "control: the first room holds a door").not.toEqual([]);
+    expect(Object.keys(freeDoors), "control: the second room holds a door").not.toEqual([]);
+    await open(held.id);
+    expect([...await held.store.connectedMembers(held.id)], "control: the socket vouches for it")
+      .toEqual(["m_quiet"]);
+
+    const withSocket = await seat(held.store, held.id);
+    const without = await seat(free.store, free.id);
+
+    expect(withSocket).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+    expect((await held.store.getSession(held.id))!.joinCodes).toEqual({});
+    expect(without).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+    expect((await free.store.getSession(free.id))!.joinCodes).toEqual(freeDoors);
   });
 
   it("writes nothing to a closed room when its socket closes", async () => {

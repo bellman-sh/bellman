@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore } from "../../src/store.js";
+import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
@@ -356,7 +356,7 @@ export function describeStoreContract(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
       );
 
-      expect(outcome).toEqual({ refused: null, reclaimed: [] });
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
       // Held for them, not taken: the joiner can have the free seat, so the
       // quiet member keeps its own.
       expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_quiet")?.leftAt)
@@ -374,7 +374,7 @@ export function describeStoreContract(
 
       expect(await store.seatMember(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "full", reclaimed: [] });
+      )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members).toHaveLength(2);
     });
 
@@ -395,7 +395,7 @@ export function describeStoreContract(
       // permanently AND silently from a state meant to be reversible.
       expect(await store.seatMember(
         frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "frozen", reclaimed: [] });
+      )).toEqual({ refused: "frozen", reclaimed: [], codesCleared: false });
       expect((await store.getSession(frozen.id))!.members
         .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
 
@@ -422,7 +422,7 @@ export function describeStoreContract(
       // somebody who never got in.
       expect(await store.seatMember(
         s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
-      )).toEqual({ refused: "full", reclaimed: [] });
+      )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
         .toEqual([]);
     });
@@ -430,7 +430,239 @@ export function describeStoreContract(
     it("seatMember reports an unknown session rather than throwing", async () => {
       expect(await store.seatMember(
         "qs_nope", member({ memberId: "m_late", userId: "u_late" }), 0, 9_000_000
-      )).toEqual({ refused: "not_found", reclaimed: [] });
+      )).toEqual({ refused: "not_found", reclaimed: [], codesCleared: false });
+    });
+
+    // ------------------------------------- the codes a seating retires (#116)
+    //
+    // bellman_confirm used to retire a filled room's codes in a second call, made once
+    // the seat had committed, with nothing spanning the two. If that call threw, the
+    // member was in the room with no event, no audit row and no member_id returned, and
+    // the connect token that got them there is single use. The seating retires them
+    // now, in the operation that decides the room is full.
+    //
+    // "Full" is whether a FURTHER joiner would be refused: no free seat and none
+    // reclaimable. It is not a count of members whose `leftAt` is null. A stale seat is
+    // occupied and reclaimable, so a room holding one still has a door worth leaving
+    // open, and a count would retire its code.
+    //
+    // Each case plants the doors it means to test and starts by reading them back: a
+    // room with no live door for the call to retire passes for any store. `oneCode`
+    // plants for `peer_b` unless told otherwise. That is `session()`'s default role,
+    // and not `member()`'s default seat, which is `peer_a`.
+
+    /** The joiner every case below seats: fresh, and in the role `oneCode` plants for. */
+    const late = () => member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" });
+
+    /** The control each case starts from: its doors are in the record, and each resolves. */
+    const doorsAreLive = async (sessionId: string, doors: ReturnType<typeof oneCode>) => {
+      expect((await store.getSession(sessionId))!.joinCodes, "control: the doors are planted")
+        .toEqual(doors);
+      for (const [role, rec] of Object.entries(doors)) {
+        expect(await store.getSessionByJoinCode(rec.code), `control: the ${role} door resolves before the call`)
+          .toMatchObject({ role });
+      }
+    };
+
+    it("seatMember retires every role's code when the seat it took filled the room", async () => {
+      // Two doors, on two roles, and the joiner takes one of them: a store that
+      // retired only the joiner's own role's code, or only the default role's, would
+      // shut one and leave the other redeemable.
+      const doors = { ...oneCode("BELL-LIVE-01", "peer_b"), ...oneCode("BELL-LIVE-02", "peer_a") };
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
+      // The record, and not only what resolves: a store that expired the codes instead
+      // of removing them would stop resolving them and still list them.
+      expect(after.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-02")).toBeUndefined();
+    });
+
+    it("seatMember retires the codes when the seat it reclaimed is the one that filled the room", async () => {
+      // The joiner takes a seat a stale member held, so the room is as full as it was
+      // and no seat is left for anyone: the door shuts, as it did when the handler
+      // asked after the seat.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
+      expect(outcome.codesCleared).toBe(true);
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+    });
+
+    it("seatMember leaves the codes alone when a stale seat could still be reclaimed", async () => {
+      // No FREE seat is left once this joiner is in, but one is reclaimable, so a
+      // further joiner would get in and the door stays open. A count of members whose
+      // leftAt is null reads this room as full and would retire the code, locking out
+      // somebody who could have been seated.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
+          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      // Both seats are stale, so this joiner reclaims ONE, the longest quiet, and the
+      // other stays occupied but reclaimable. Had both members been fresh after the
+      // seating, that would be the other case, and it DOES retire the code.
+      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+
+      expect(outcome.refused).toBeNull();
+      expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet_a"]);
+      expect(outcome.codesCleared).toBe(false);
+      const after = (await store.getSession(s.id))!;
+      // The premise, read off the record: by a head count of undeparted members this
+      // room is at capacity. That is what makes this a test of the question and not of
+      // a room with space in it.
+      expect(after.members.filter((m) => m.leftAt === null)).toHaveLength(2);
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toMatchObject({ role: "peer_b" });
+    });
+
+    it("seatMember leaves the codes alone when a seat is still spare", async () => {
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 5,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      expect((await store.getSession(s.id))!.joinCodes, "the door is untouched").toEqual(doors);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toMatchObject({ role: "peer_b" });
+    });
+
+    it("seatMember does not count a member who has left toward a full room", async () => {
+      // Three seats, a creator, one member already gone, and the joiner: three rows
+      // and two undeparted members, so a seat is spare. A store counting rows reads
+      // this room as full.
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 3,
+        joinCodes: doors,
+        members: [
+          member({ memberId: "m_creator" }),
+          member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", leftAt: 5_000 }),
+        ],
+      });
+      await store.createSession(s);
+      await doorsAreLive(s.id, doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members, "the premise: three rows").toHaveLength(3);
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+    });
+
+    it("seatMember reports no codes cleared when the room fills holding none", async () => {
+      // The flag says what the call did. A room that fills with no code left in it had
+      // nothing to retire: no registry write is owed, and a caller reading
+      // `codesCleared` must not conclude that a door was shut.
+      const s = session({
+        maxMembers: 2,
+        joinCodes: {},
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      expect((await store.getSession(s.id))!.joinCodes, "control: the room holds no code").toEqual({});
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+      // The premise: the room did fill. Otherwise false here would mean "not full",
+      // which the spare-seat case already pins, and this case would say nothing new.
+      const further = member({ memberId: "m_later", userId: "u_later", roomRole: "peer_b" });
+      expect((await store.seatMember(s.id, further, 1, 9_000_000)).refused).toBe("full");
+    });
+
+    it("seatMember clears an expired record when the room fills, and reports that it did", async () => {
+      // removeMember retires only a code that is still live, because it announces a door
+      // shutting and must not announce one that had already shut: an expired record is
+      // not a door. A seating announces nothing and is tidying rows, and a full room needs
+      // no code at all, so an expired record goes with the rest and the call reports that
+      // it cleared one. The two ask different questions, and this pins this side of the
+      // difference; see removeMember's expired-code cases for the other.
+      const stale = { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } };
+      const s = session({
+        maxMembers: 2,
+        joinCodes: stale,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      expect((await store.getSession(s.id))!.joinCodes, "control: the expired record is planted").toEqual(stale);
+      expect(await store.getSessionByJoinCode("BELL-STALE-1"), "control: it does not resolve").toBeUndefined();
+
+      const outcome = await store.seatMember(s.id, late(), 1, Date.now());
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      // The record, and not only what resolves: it did not resolve before the call either.
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+    });
+
+    // A refusal retires nothing. The clearing sits in the same closure as the guards,
+    // and a store that decided the room was full before looking at them, or that
+    // retired the codes of a room it then refused, would pass every case above. Each
+    // room is one this joiner would have FILLED had the seating gone through, except
+    // "full", which is at capacity already, so a clearing that ignored the guard has a
+    // door to shut.
+    it.each([
+      { refusal: "frozen", over: () => ({ frozenAt: Date.now() }) },
+      { refusal: "closed", over: () => ({ closed: true }) },
+      { refusal: "full", over: () => ({ maxMembers: 1 }) },
+    ])("seatMember clears no codes when it refuses a $refusal room", async ({ refusal, over }) => {
+      const doors = oneCode("BELL-LIVE-01");
+      const s = session({
+        maxMembers: 2,
+        joinCodes: doors,
+        members: [member({ memberId: "m_creator", lastSeenAt: Date.now() })],
+        ...over(),
+      });
+      await store.createSession(s);
+      // The record, and not what resolves: a closed room resolves no code whatever it lists.
+      expect((await store.getSession(s.id))!.joinCodes, "control: the door is planted").toEqual(doors);
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: refusal, reclaimed: [], codesCleared: false });
+      const after = (await store.getSession(s.id))!;
+      expect(after.joinCodes, "the door is untouched").toEqual(doors);
+      expect(after.members.map((m) => m.memberId), "nobody was seated").toEqual(["m_creator"]);
     });
 
     it("updateMember patches lastSeenAt on its own", async () => {
@@ -2391,6 +2623,586 @@ export function describeStoreContract(
       (await store.sweep(Date.now()));
       expect((await store.getSession(s.id))?.closed).toBe(false);
       expect((await store.takePendingConnect("qct_live"))).toBeDefined();
+    });
+
+    // ----------------------------------------------------- removing a member
+    const leaveEvent = (memberId: string): EventBody => ({
+      type: "member_left",
+      fromMemberId: memberId,
+      fromUserId: "u_jesse",
+      fromLabel: "jesse@codenerd",
+      payload: { label: "jesse@codenerd" },
+      refId: null,
+    });
+
+    const auditRow = (action: string) => ({
+      at: Date.now(),
+      orgId: "org_codenerd",
+      sessionId: "qs_test",
+      actorUserId: "u_jesse",
+      action,
+      detail: {},
+    });
+
+    // The audit reads in the cases below are timing-dependent in the Durable Objects
+    // store. A row a refused call queued there reaches auditForOrg when the outbox
+    // delivers it, and a refusal commits nothing that would deliver it inline, so that is
+    // the alarm's doing and not the call's. The suite pins the clock to 2026-03-15 (see
+    // the beforeEach), which makes the alarm overdue the moment it is set, so it usually
+    // has delivered by the time these cases read. That is the clock and not a guarantee:
+    // a read can get there first. The stamp, door and events reads do not depend on it.
+
+    /**
+     * An eviction of `m_peer`: the departure, and the door behind it with its own audit
+     * row. The door is `peer_b`'s. That is the seat `oneCode` and `session()` plant a
+     * live code for, and not `member()`'s default seat, `peer_a`: a room built from
+     * those fixtures has a door for this request to shut only because the request names
+     * the role instead of taking it from the member.
+     */
+    const eviction = (now = 9_000_000): RemovalRequest => ({
+      now,
+      frozen: "refuse",
+      // An eviction cuts the feed; the leave-shaped requests below pass false. The
+      // field has no default, so each case says which removal it is modelling.
+      cut: true,
+      byUserId: "u_jesse",
+      event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+      retire: {
+        role: "peer_b",
+        event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
+        audit: [auditRow("invite_revoked")],
+      },
+      audit: [auditRow("member_evicted")],
+    });
+
+    it("removeMember records the member out, writes its event and queues its audit row", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        cut: false,
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_left")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_left"]);
+    });
+
+    /**
+     * The cut, asked for by the caller and applied inside the removal (#113).
+     *
+     * These sit here and not beside the append's own `markRemoved` cases because
+     * they pin a different route to the same rule. `evictMember` removes through
+     * `removeMember`, not through `appendEvent`, so a store that applied the cut
+     * on an append and not on a removal would pass every case in "recording a
+     * member out at an event's cursor" and still hand an evicted member an open
+     * feed — #113 reopened in the operation written to close it.
+     *
+     * As there, these do not claim to prove the atomicity, which is not visible
+     * from outside the store. What they pin is what a caller can see: the cursor
+     * is the departure's own, a removal that did not ask records none, and the
+     * cursor is the departure's and not the door's.
+     */
+    it("removeMember records the cut at the departure's own cursor when the caller asks", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        cut: true,
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      const departure = (await store.eventsAfter(s.id, 0))
+        .filter((e) => e.type === "member_evicted").at(-1)!;
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // The cursor the removal's own event carries, read back from the log rather
+      // than computed here: a store numbering its events differently would still
+      // have to agree with itself.
+      expect(m.removedAtCursor).toBe(departure.cursor);
+      // One write, not two. `leftAt` is the `now` the caller handed in, not the
+      // event's `at`: a removal's clock is its caller's.
+      expect(m.leftAt).toBe(9_000_000);
+    });
+
+    it("removeMember records no cut when the caller does not ask", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        cut: false,
+        event: leaveEvent("m_peer"),
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // Out, and still reading. R2: a member who chose to go keeps the open feed,
+      // and a store that cut here would be the symmetry `announceReclaimed` warns
+      // against. The departure is written either way — this is not a no-op path.
+      expect(m.leftAt).toBe(9_000_000);
+      expect(m.removedAtCursor).toBeUndefined();
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+    });
+
+    it("removeMember cuts at the departure's cursor, not the door's", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      const events = await store.eventsAfter(s.id, 0);
+      expect(events.map((e) => e.type), "arrangement: two events, so the cursors differ")
+        .toEqual(["member_evicted", "invite_revoked"]);
+      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      // The removal writes two events and the cut names the FIRST. Pinned because
+      // the last one written is the easier thing to reach for, and a cut one cursor
+      // too high admits the evicted member past the door's own announcement — an
+      // event about the room they are no longer in.
+      expect(m.removedAtCursor).toBe(events[0].cursor);
+      expect(m.removedAtCursor).not.toBe(events[1].cursor);
+    });
+
+    it("removeMember announces a departure from a frozen room, where appendEvent would not", async () => {
+      // #73. Freezing refuses sending, joining and inviting; it must never trap
+      // a member inside a room they want to leave, and the departure peers see
+      // is part of the leaving.
+      const s = session({
+        frozenAt: Date.now(),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        cut: false,
+        event: leaveEvent("m_peer"),
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+      // The public append still refuses, because that is what stops a freeze
+      // landing between a tool's read and its write and letting a room grow.
+      expect(await store.appendEvent(s.id, leaveEvent("m_creator"))).toBeNull();
+    });
+
+    it("removeMember refuses a frozen room when the caller asked it to, and writes and queues nothing", async () => {
+      // This is the guard #118 is about, and the answer is not the proof: a store that
+      // stamped the member, wrote the events and queued the rows and only then looked at
+      // the freeze would return this same answer. So the state is read after it, and in
+      // every store, because the one production runs is the Durable Objects one. The
+      // request carries a door and the room holds a live code for it, or a misplaced
+      // guard would have nothing to shut.
+      const door = oneCode("BELL-LIVE-01");
+      const s = session({
+        frozenAt: Date.now(),
+        joinCodes: door,
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before the call")
+        .toBeDefined();
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: "frozen", removed: false, codeRetired: null });
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember refuses a closed room even when frozen is allowed", async () => {
+      // "allow" is about the freeze and nothing else. A closed room is over, and
+      // writing a departure into it would reopen the question of what closed means.
+      const s = session({
+        closed: true,
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      expect(await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000, frozen: "allow", cut: false, event: leaveEvent("m_peer"), audit: [],
+      })).toEqual({ refused: "closed", removed: false, codeRetired: null });
+    });
+
+    it("removeMember refuses a caller who did not create the room, and writes and queues nothing", async () => {
+      // The answer is not the proof. A store that stamped the member, wrote the events
+      // and queued the rows, and only then checked who was asking, would return this
+      // same answer, so the state is read as well. The request carries a door and the
+      // room holds a live code for it, or a misplaced guard would have nothing to shut.
+      const door = oneCode("BELL-LIVE-01");
+      const s = session({
+        createdBy: "u_jesse",
+        joinCodes: door,
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before the call")
+        .toBeDefined();
+
+      expect(await store.removeMember(s.id, "m_peer", {
+        ...eviction(),
+        byUserId: "u_someone_else",
+      })).toEqual({ refused: "forbidden", removed: false, codeRetired: null });
+
+      const after = (await store.getSession(s.id))!;
+      expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember answers not_found for an unknown room and an unknown member, and writes and queues nothing", async () => {
+      // One code, two refusals, and neither is proved by its answer. What a misplaced
+      // guard could leave behind differs, and so does the read that sees it.
+      //
+      // A room that is not there has no record to stamp or retire from. It can still be
+      // handed audit rows, which need no record to be queued: the audit reads catch those.
+      // And in the Durable Objects store it can be handed an event, because a room's events
+      // are keys in an object that exists for any name, so one written before the room
+      // check would sit in a room that does not exist: the events read of that room
+      // catches it there. MemoryStore has no record to append to, so it cannot.
+      //
+      // A member who is not there cannot be stamped, because the stamp needs the record.
+      // The rest does not need it. The departure's event body is in the request, so a
+      // store that wrote it before looking the member up would leave it behind: the
+      // events read catches that. The door's retirement needs only the room: the door read
+      // catches that. The rows need neither: the audit reads catch those.
+      //
+      // Each request carries a door and rows, and the room holds a live code for the door.
+      const door = oneCode("BELL-LIVE-01");
+      const s = session({
+        joinCodes: door,
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before either call")
+        .toBeDefined();
+
+      expect(await store.removeMember("qs_nope", "m_peer", eviction()))
+        .toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      // Vacuous in the Durable Objects store, in every run so far. This read follows the
+      // call at once, and rows a misplaced guard queued there are delivered by the
+      // outbox's alarm, which had not got that far. The final audit read below is what
+      // catches them, and only because this suite pins the clock to 2026-03-15 (see its
+      // beforeEach), which makes the outbox's five-second grace alarm overdue the moment
+      // it is set. Pin a recent date, lengthen the grace or slow the alarm and the room
+      // half goes green with no signal. A correct store queues nothing, so this cannot go
+      // red by accident: it is caught today and not guarded against drift. A
+      // deterministic pin reads the outbox's rows directly, as
+      // worker-tests/session-audit-outbox.test.ts does, and belongs in the workers
+      // program, not in this suite that MemoryStore shares.
+      expect(await store.auditForOrg("org_codenerd", 10), "no row for a room that is not there").toEqual([]);
+      expect(await store.eventsAfter("qs_nope", 0), "no event for a room that is not there").toEqual([]);
+
+      expect(await store.removeMember(s.id, "m_ghost", eviction()))
+        .toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      const after = (await store.getSession(s.id))!;
+      // The record as planted, code and expiry, and not merely a record: a store that
+      // kept the door's entry but expired it, or swapped the code, would still have one.
+      expect(after.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    /** Review Focus 2. */
+    it("removeMember writes and queues nothing for a member who is already out", async () => {
+      const s = session({
+        members: [
+          member({ memberId: "m_creator" }),
+          member({ memberId: "m_peer", userId: "u_peer", leftAt: 5_000 }),
+        ],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        cut: false,
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_left")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      // The original stamp stands: a retry must not restate when they went.
+      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")?.leftAt)
+        .toBe(5_000);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    /** Review Focus 1. */
+    it("removeMember writes and queues nothing when it refuses", async () => {
+      const door = oneCode("BELL-LIVE-01");
+      const s = session({
+        closed: true,
+        joinCodes: door,
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        // `true`, so the refusal is asked to swallow a cut as well as a stamp: a
+        // store that applied the cut before its guard would leave a cursor here.
+        cut: true,
+        event: leaveEvent("m_peer"),
+        retire: { role: "peer_b", event: leaveEvent("m_peer") },
+        audit: [auditRow("member_left")],
+      });
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.removedAtCursor).toBeUndefined();
+      // The record as planted, code and expiry: pinning the code alone passes a store
+      // that kept the entry and expired it.
+      expect(fresh.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember retires a live code and writes its event, in the member's order", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        cut: true,
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },
+        audit: [auditRow("member_evicted")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      expect((await store.getSession(s.id))!.joinCodes["peer_b"]).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      // The member went, then the door shut — the order a person would tell it.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked"]);
+
+      // The cursor row ends at the LAST event, or the next append overwrites it (#120).
+      await store.appendEvent(s.id, leaveEvent("m_creator"));
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked", "member_left"]);
+    });
+
+    /** Review Focus 3. */
+    it("removeMember does not retire a code that has already expired", async () => {
+      // Nothing prunes an expired record, so presence in joinCodes is not the
+      // same as a door being open. Retiring on presence alone announces a
+      // closing that already happened.
+      const s = session({
+        joinCodes: { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } },
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: Date.now(),
+        frozen: "refuse",
+        cut: true,
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      expect(outcome.codeRetired).toBeNull();
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_evicted"]);
+    });
+
+    // ------------------------------------- the door behind a member already out
+    //
+    // Not saying the departure twice is not licence to skip what is still owed. A live
+    // code behind a member who left on their own was never shut, so shutting it is a
+    // write that has not happened yet, and not a duplicate of one that has.
+
+    /** The creator, and `m_peer`, who has already left, with whatever codes the caller names. */
+    const roomWithDeparted = (joinCodes: ReturnType<typeof oneCode>) => session({
+      joinCodes,
+      members: [
+        member({ memberId: "m_creator" }),
+        member({ memberId: "m_peer", userId: "u_peer", leftAt: 5_000 }),
+      ],
+    });
+
+    it("removeMember shuts a live code behind a member who is already out, and says only that", async () => {
+      const s = roomWithDeparted(oneCode("BELL-LIVE-01"));
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      // Two answers, not one: nobody was removed, and a code was retired.
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: "peer_b" });
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt, "the original stamp stands")
+        .toBe(5_000);
+      expect(fresh.joinCodes["peer_b"]).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      // The door, and not the departure: member_evicted is not said a second time, by
+      // event or by row.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["invite_revoked"]);
+
+      // The cursor row ends at the one event written, or the next append overwrites it (#120).
+      await store.appendEvent(s.id, leaveEvent("m_creator"));
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["invite_revoked", "member_left"]);
+    });
+
+    it("removeMember shuts that door once: a repeat finds it gone and writes nothing", async () => {
+      const s = roomWithDeparted(oneCode("BELL-LIVE-01"));
+      await store.createSession(s);
+      await store.removeMember(s.id, "m_peer", eviction());
+
+      const again = await store.removeMember(s.id, "m_peer", eviction());
+
+      // It cannot repeat: the first call made the code no longer live.
+      expect(again).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["invite_revoked"]);
+    });
+
+    it("removeMember writes and queues nothing for a member who is already out, when their seat has no code", async () => {
+      // Passing `retire` does not make the call owe a write. With no door there is
+      // nothing to shut, and the departure is not said again.
+      const s = roomWithDeparted({});
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember writes and queues nothing for a member who is already out, when their seat's code has expired", async () => {
+      // Review Focus 3 on this path too: nothing prunes an expired record, so its
+      // presence is not an open door.
+      const s = roomWithDeparted({ peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction(Date.now()));
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember queues the retirement's audit row after the member's, when it retires the code", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      // The member went, then the door shut: the events and the rows both.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    it("removeMember queues no retirement audit row when there was no live code to retire", async () => {
+      // A row for the door is a claim that this call shut it, so it is queued with the
+      // retirement and not with the request. Otherwise a caller that asked for a
+      // retirement that never happened would have audited one.
+      const s = session({
+        joinCodes: { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } },
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction(Date.now()));
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_evicted"]);
+    });
+
+    it("removeMember queues no retirement audit row when it refuses", async () => {
+      const s = session({
+        closed: true,
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: "closed", removed: false, codeRetired: null });
+      expect((await store.getSession(s.id))!.closed).toBe(true);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember files no row for an org-less entry, in audit or in retire.audit", async () => {
+      // A falsy org names a stream nobody reads. MemoryStore would file the row there
+      // all the same, and a Durable Object namespace takes "" as a name and would
+      // deliver into it, so the entry is dropped before it is queued. Both defences
+      // sit behind this answer in the Durable Object store (the producer's filter and
+      // the outbox's delivery guard), so what this pins there is the result; the
+      // producer's filter alone is what MemoryStore leaves to hold it.
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      await store.removeMember(s.id, "m_peer", {
+        ...eviction(),
+        audit: [auditRow("member_evicted"), { ...auditRow("member_evicted"), orgId: "" }],
+        retire: {
+          role: "peer_b",
+          event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
+          audit: [auditRow("invite_revoked"), { ...auditRow("invite_revoked"), orgId: "" }],
+        },
+      });
+
+      expect(await store.auditForOrg("", 10)).toEqual([]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["member_evicted", "invite_revoked"]);
     });
   });
 }

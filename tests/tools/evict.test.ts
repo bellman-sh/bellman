@@ -619,14 +619,22 @@ describe("bellman_evict", () => {
       expect(doc).not.toContain("keeps returning new events");
       expect(doc).not.toContain("removal does not keep later messages from them");
 
-      // The other sentence this change made false. Folding the member write into
-      // the announcement's append means a room that freezes between the guard and
-      // the append REFUSES the call and leaves the person in; it used to complete
-      // the removal and skip the notice (#113 D2). The description said the old
-      // thing, and nothing pinned it, so it outlived the behaviour.
+      // The other sentence this change made false. A freeze landing mid-call
+      // REFUSES and leaves the person in; it used to complete the removal and skip
+      // the notice (#113 D2). The description said the old thing, and nothing
+      // pinned it, so it outlived the behaviour.
       expect(doc, "the freeze sentence").not.toContain("the removal still completes, unannounced");
-      expect(doc, "the freeze sentence")
-        .toContain("the call is refused instead and the person is still in the room");
+      // Two facts rather than one phrase. #113 wrote this as a single substring
+      // ending "...and the person is still in the room", when the removal was an
+      // append carrying the member write and the door had already been shut by a
+      // separate call — so that sentence went on to say the code might be retired
+      // anyway. The removal is one transaction now: a refusal writes nothing, and
+      // the door is untouched. Pinning the claims separately keeps the test on the
+      // behaviour instead of on the wording, and the third assertion is what stops
+      // the retired-code caveat coming back now that it is false.
+      expect(doc, "the freeze sentence").toContain("the call is refused");
+      expect(doc, "the freeze sentence").toContain("the person is still in the room");
+      expect(doc, "the freeze sentence").not.toContain("code may already be retired");
     });
 
     // The other half of the same promise, from the side of the agent it is made

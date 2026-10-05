@@ -209,6 +209,63 @@ export function clearSilence(s: StoredSession, now: number): Member[] {
   return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
 }
 
+/** What `appendEvent` already takes: an event without the fields the store fills. */
+export type EventBody = Omit<SessionEvent, "cursor" | "at">;
+
+/** What a removal did, reported from inside the transaction that did it. */
+export interface RemovalOutcome {
+  refused: "not_found" | "closed" | "frozen" | "forbidden" | null;
+  /** True only when THIS call recorded the member out. */
+  removed: boolean;
+  /**
+   * The role whose code this call retired, or null. Not tied to `removed`: a member
+   * who was already out can still have a live code behind them, and shutting it is
+   * a write this call makes.
+   */
+  codeRetired: string | null;
+}
+
+/** The guard and the writes a removal performs, handed in by its caller. */
+export interface RemovalRequest {
+  now: number;
+  /** Leaving a frozen room is never refused; eviction from one is. */
+  frozen: "allow" | "refuse";
+  /**
+   * Record the member out AT THE REMOVAL EVENT'S OWN CURSOR, capping what they
+   * read after it (#113) — not only stamping `leftAt`.
+   *
+   * A property of the caller, not of removal. The two callers differ on it:
+   * `evictMember` is a creator deciding someone should be out, and it cuts;
+   * `leaveRoom` is the member deciding for themselves, and it does not, because
+   * one who chose to go keeps the open feed (R2). `announceReclaimed` says the
+   * same of a timeout and warns against adding a cut here for symmetry with the
+   * eviction. Read that comment before changing this.
+   *
+   * No default, deliberately. A removal that did not say reads as one that did
+   * not decide, and the one a new caller would forget is the eviction — which is
+   * #113 back again, in the operation written to close it.
+   *
+   * Applied through `markRemoved`, the same rule `appendEvent` applies for its
+   * `markRemoved` extra, so a cut recorded by a removal and a cut recorded by an
+   * append are one piece of code and cannot drift.
+   */
+  cut: boolean;
+  /** When set, the call is refused unless it matches `session.createdBy`. */
+  byUserId?: string;
+  /** Written only if this call did the removing. */
+  event: EventBody;
+  /**
+   * Retire this role's code, and write this event and queue this audit, if the code
+   * is still live. That holds whether or not this call removed the member: a live
+   * code behind one who is already out was never shut. The rows are queued only
+   * when a code was retired, so a row says what this call did and not what its
+   * caller expected to happen.
+   */
+  retire?: { role: string; event: EventBody; audit?: readonly AuditEntry[] };
+  /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
+  audit: readonly AuditEntry[];
+}
+
 /**
  * What `seatMember` did. `refused` is null exactly when the member is seated.
  *
@@ -217,10 +274,26 @@ export function clearSilence(s: StoredSession, now: number): Member[] {
  * is announcing removals that actually happened. A call that cannot free enough
  * seats refuses "full" and removes nobody: a partial reap would remove a member
  * for a joiner that never got in.
+ *
+ * `codesCleared` says what the seating did: it filled the room and retired the codes
+ * the room held, in the same operation that seated the member. A room that fills with
+ * no code left in it reports false, because nothing was cleared, and so does every
+ * refusal, which writes nothing. "Filled" means a further joiner would be refused,
+ * with no free seat and none reclaimable, which is not the same as every seat being
+ * occupied: a stale seat is occupied and still reclaimable, so a room holding one
+ * keeps its codes.
+ *
+ * Nothing in `bellman_confirm` reads it, and nothing announces a retired code: a room
+ * that fills has its codes cleared without a word, as `clearJoinCodes` did. The field
+ * is here so the outcome says what the seating did. `SessionDO` reads it to decide
+ * whether the seating queued registry drops that want delivering, and the contract
+ * suite reads it to pin what a seating did.
  */
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
   reclaimed: Member[];
+  /** The seating filled the room and retired the codes it held. False when it held none. */
+  codesCleared: boolean;
 }
 
 /**
@@ -426,6 +499,15 @@ export interface BellmanStore {
    *
    * Refuses rather than partially reaping. Reclaiming one of two seats a joiner
    * needs would remove a member for somebody who never got in.
+   *
+   * When the seat it took fills the room, it also retires every role's join code,
+   * and `codesCleared` says whether there was one to retire. That was
+   * `bellman_confirm`'s second call, made once the seat had committed with nothing
+   * spanning the two, and a failure there left the member in the room with no event,
+   * no audit row and no member_id returned, and a connect token that is single use
+   * and so could not replay (#116). "Fills" means a further joiner would be refused,
+   * which is `seatVictims` answering null once this member is in: not a count of
+   * undeparted members, because a stale seat is occupied and still reclaimable.
    */
   seatMember(
     sessionId: string,
@@ -433,6 +515,46 @@ export interface BellmanStore {
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
+  /**
+   * Record a member out of a room, say so, and retire their seat's code — as ONE
+   * operation.
+   *
+   * It cannot be four calls, and it was. `leaveRoom` read `leftAt` and wrote it
+   * with an await between, so two calls on one handle both saw null and both
+   * announced (#117). `evictMember` checked `closed` and `frozenAt` against a
+   * snapshot and mutated afterwards, so a freeze landing in the window either
+   * wrote to a room whose writes had stopped or swallowed the event the bridge
+   * disarms its watcher on (#118). And a leave from a frozen room lost its event
+   * outright, because the public append refuses while frozen (#73).
+   *
+   * The caller hands the event bodies in. The store writes the record it was
+   * given and never asks what an event means — the constraint #147 set. The
+   * frozen refusal stays on `appendEvent`, which is a different operation: this
+   * one declares its own policy through `frozen`, so a leave records its
+   * departure in a frozen room without the store learning that `member_left` is
+   * special.
+   *
+   * `req.cut` says whether the removal also caps what the member reads after it,
+   * at the departure event's own cursor (#113). The store applies `markRemoved`
+   * for it, inside the same write — so the cut and the event it names commit
+   * together, which is the whole of why it is not a call afterwards. Only the
+   * caller knows: an eviction cuts and a leave does not. See `RemovalRequest.cut`.
+   *
+   * `removed: false` with `refused: null` is the idempotent path: the member was
+   * already out. The departure is not written or queued again, so a retry
+   * announces no second one. What is still owed is a live code behind them: a
+   * leave retires none, so it was never shut, and shutting it is a write that has
+   * not happened yet and not a duplicate of one that has. `codeRetired` says so.
+   * With no live code, nothing is written and nothing is queued at all. Closing
+   * the room if it has emptied is NOT part of this — `closeSessionIfEmpty` makes
+   * that decision atomically on its own, and folding it in here would close over a
+   * member who joined in the gap.
+   */
+  removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome>;
   /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
@@ -761,13 +883,13 @@ export class MemoryStore implements BellmanStore {
     // same reason, as closeSessionIfEmpty. The Durable Objects store gets it
     // from a transaction instead.
     const s = this.sessions.get(sessionId);
-    if (!s) return { refused: "not_found", reclaimed: [] };
-    if (s.closed) return { refused: "closed", reclaimed: [] };
-    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [] };
+    if (!s) return { refused: "not_found", reclaimed: [], codesCleared: false };
+    if (s.closed) return { refused: "closed", reclaimed: [], codesCleared: false };
+    if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
     const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
-    if (victims === null) return { refused: "full", reclaimed: [] };
+    if (victims === null) return { refused: "full", reclaimed: [], codesCleared: false };
 
     const reclaimed: Member[] = [];
     for (const v of victims) {
@@ -778,7 +900,112 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
-    return { refused: null, reclaimed };
+
+    // A full room has no seat for ANY role, so every code goes — decided and
+    // written here rather than by the caller afterwards. As a second call made
+    // once the seat had committed it had nothing spanning it: a failure left the
+    // joiner seated with the codes still redeemable (#116).
+    //
+    // "Full" is asked the only way that preserves what the caller used to
+    // compute: whether a FURTHER joiner would be refused. Counting members with
+    // a null leftAt is not the same question — a stale seat is occupied but
+    // reclaimable, so a room with one still has a door worth leaving open, and
+    // counting would have retired its code.
+    //
+    // Cleared by presence, where removeMember retires only a code that is still live
+    // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+    // announces a door shutting, so it must not announce one that had already shut,
+    // and an expired record is not a door. A seating announces nothing: it tidies
+    // rows, and a full room needs no code at all, so an expired record goes with the
+    // rest. A room that fills while holding only one therefore reports
+    // `codesCleared: true`, which answers this question and does not contradict the
+    // other. The contract suite pins this side, and its expired-code cases for
+    // removeMember pin the other.
+    const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
+    const codes = full ? Object.values(s.joinCodes) : [];
+    if (full) {
+      for (const rec of codes) this.byJoinCode.delete(rec.code);
+      s.joinCodes = {};
+    }
+    // What the call did, and not only whether the room filled: a room that fills
+    // with no code left in it had nothing to retire.
+    return { refused: null, reclaimed, codesCleared: codes.length > 0 };
+  }
+
+  async removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    // No await from here to the last write, deliberately — the same rule, and
+    // the same reason, as seatMember and closeSessionIfEmpty. The Durable
+    // Objects store gets it from a transaction instead.
+    const none = { removed: false, codeRetired: null };
+    const s = this.sessions.get(sessionId);
+    if (!s) return { refused: "not_found", ...none };
+    if (s.closed) return { refused: "closed", ...none };
+    if (req.frozen === "refuse" && s.frozenAt !== null) return { refused: "frozen", ...none };
+    if (req.byUserId !== undefined && s.createdBy !== req.byUserId) {
+      return { refused: "forbidden", ...none };
+    }
+    const m = s.members.find((mm) => mm.memberId === memberId);
+    if (!m) return { refused: "not_found", ...none };
+
+    // One value for "there is a live door to shut", so nothing downstream has to
+    // re-derive it. Nothing prunes an expired record, so a code's presence in
+    // joinCodes is not the same as a door being open. Decided before the member's
+    // state is looked at, because a live door is owed to one who is already out as
+    // much as to one who is not.
+    const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
+    const retiring = req.retire && rec && req.now <= rec.expiresAt
+      ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
+      : null;
+
+    // Already out: the idempotent path. The departure is not said again, which is
+    // the point of it. A live door behind them is a different matter: it was never
+    // shut, so shutting it is a write that has not happened yet and not a
+    // duplicate. With neither owed, nothing is written.
+    const leaving = isActiveMember(m);
+    if (!leaving && !retiring) return { refused: null, ...none };
+
+    if (leaving) {
+      // The event first, then the member write, because a cut names the
+      // departure's OWN cursor and the departure has none until it is written.
+      const departure = this.appendNow(s, req.event);
+      // `markRemoved` and not a `leftAt` of this method's own, so the cut an
+      // eviction records here is the write `appendEvent`'s `markRemoved` extra
+      // makes — one rule, applied inside both stores (#113). It replaces the
+      // array rather than mutating `m`, which is why nothing below reads `m`.
+      //
+      // `req.now` for the stamp and not `departure.at`: within a removal the
+      // caller's clock is the operation's, and the contract pins `leftAt` to the
+      // `now` it was handed. A room where the two disagree is a room whose
+      // members left at a time nobody asked for.
+      //
+      // Null is unreachable from here — `leaving` already read `leftAt` as null,
+      // in this same synchronous stretch, and the roster names `m`. It falls back
+      // to the roster unchanged rather than asserting, because the alternative to
+      // a cut is not a stamp of this method's own: that is the half-write the
+      // transaction exists to prevent.
+      if (req.cut) {
+        s.members = markRemoved(s.members, memberId, departure.cursor, req.now) ?? s.members;
+      } else {
+        m.leftAt = req.now;
+      }
+    }
+    if (retiring) {
+      this.byJoinCode.delete(retiring.code);
+      delete s.joinCodes[retiring.role];
+      this.appendNow(s, retiring.event);
+    }
+    // A falsy org names a stream nobody reads, and the Durable Objects store
+    // drops such an entry rather than file it, so this one does too. The member's
+    // rows, then the door's: the order the events were written in.
+    this.recordAudit(
+      [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
+    );
+
+    return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
   }
 
   /**

@@ -1683,6 +1683,11 @@ Three existing sentences go stale with this change and are part of the same step
 - **"It is used twice:"** above the two bulleted uses. It is used three times now. Change the count and add a third bullet for `SessionDO → AuditDO` (#73/#117), naming `AuditDO.append`'s intent-id dedupe as what absorbs a redelivery.
 - **Runtime fact 4** ends "`hasOrg` in `src/grant-audit.ts` and the guard in `RegistryDO`'s `#deliver` are two defences for that reason." There are three now: add `SessionDO`'s `#deliver` guard and change "two" to "three". Note that `removeMember` also filters org-less entries at the producer before queueing them, so the guard is the second line rather than the only one.
 
+Two more passages describe `bellman_confirm` as it no longer works, found by Task 4's implementer:
+
+- The bullet listing what reads `BellmanStore.connectedMembers` (around line 525) says one of them is "whether `bellman_confirm` retires the codes of a full room". That decision moved into `seatMember`, which reads the sockets itself inside its own transaction. Say so.
+- The paragraph on room activity not being audited through the outbox (around line 925) ends "`bellman_confirm`, which commits a seat and then makes a second-object write, is the filed case (#116)." Two things are now wrong with it. #116 is closed by this PR, and the characterisation was never quite right: `clearJoinCodes` is a call to the SAME `SessionDO`, and only its outbox delivery reaches `RegistryDO`. The defect was a second *transaction* after the seat committed, not a second object. Rewrite it to say the seating now clears the codes inside its own transaction, and keep the surrounding point about `audit()` in `src/server.ts` calling `AuditDO.append` directly, which is still true for the paths `removeMember` does not cover.
+
 In the "Rolling back" paragraph, add a sentence:
 
 ```markdown

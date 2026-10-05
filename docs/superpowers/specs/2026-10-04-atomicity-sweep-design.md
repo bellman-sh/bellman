@@ -46,11 +46,14 @@ means every open instance was looked at, not that every one needed the same fix.
 - **#117** — `leaveRoom` reads `me.leftAt` and writes it with an `await` between.
   Two calls on one handle both see `null`, both announce, both audit.
 - **#116** — `bellman_confirm` calls `clearJoinCodes` after `SessionDO` has
-  committed the seat. That reaches a second object with no transaction spanning
-  it; if it throws, the member is in the room with no `member_joined` event, no
+  committed the seat. That is a second transaction with nothing spanning the two;
+  if it throws, the member is in the room with no `member_joined` event, no
   audit row, no `member_id` returned, and the codes still redeemable. The connect
   token was consumed and is single use, so the retry cannot replay, and in a pair
-  room the ghost seat has filled it.
+  room the ghost seat has filled it. (The issue, and `ARCHITECTURE.md`, call this
+  a second-*object* write. That is loose: `clearJoinCodes` is a call to the same
+  `SessionDO`, and only its outbox delivery reaches `RegistryDO`. The gap is
+  between the two transactions, wherever the second one lands.)
 
 Each is the same sentence with different nouns. The first three are one
 operation — a member leaving a room, by their own hand or someone else's — split

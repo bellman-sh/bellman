@@ -1552,6 +1552,25 @@ describe("removeMember under concurrency", () => {
     });
     // One row, not two: the org-less entry never entered the queue.
     expect(await s.auditForOrg("org_codenerd", 10)).toHaveLength(1);
+
+    // An unknown member must not retire the door or queue rows on its way to
+    // refusing. The contract suite catches this through an audit read that races
+    // the delivering alarm; reading the queue is the deterministic form.
+    const unknown = await s.removeMember("qs_door_only", "m_ghost", {
+      now: Date.now(),
+      frozen: "refuse",
+      byUserId: "u_jesse",
+      event: body("member_evicted", "system"),
+      retire: { role: "peer_a", event: body("invite_revoked", "system"), audit: [
+        { at: Date.now(), orgId: "org_codenerd", sessionId: "qs_door_only",
+          actorUserId: "u_jesse", action: "invite_revoked", detail: {} },
+      ] },
+      audit: [],
+    });
+    expect(unknown.refused).toBe("not_found");
+    await runInDurableObject(env.SESSION.get(id), async (_do: SessionDO, ctx) => {
+      expect([...(await ctx.storage.list({ prefix: "ob:" })).keys()]).toEqual([]);
+    });
   });
 
   it("keeps the removal when the audit delivery is still owed", async () => {

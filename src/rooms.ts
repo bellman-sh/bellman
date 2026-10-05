@@ -158,10 +158,12 @@ export async function touchMember(
  * included. `evictMember` is creator-only and deliberately outside the verb
  * set, and a second removal path must not be looser than the first.
  *
- * The removal is final. A reclaimed member can still read its history and must
- * redeem a fresh code to write again, the same position an evicted one is in.
- * Making it reversible instead would mean a `pair` room could hold three
- * writers the moment the vanished peer reopened its laptop.
+ * The removal is final. A reclaimed member reads on and must redeem a fresh code
+ * to write again. An evicted one is in the same position for writing and no
+ * further: a creator's removal also cuts what it reads after the removal (#113),
+ * and a timeout, being the server's guess, does not (R2). Making it reversible
+ * instead would mean a `pair` room could hold three writers the moment the
+ * vanished peer reopened its laptop.
  *
  * Unlike an eviction this retires no join code — freeing the seat is the whole
  * point — and it never closes the room: the joiner that caused it is already
@@ -178,6 +180,11 @@ export async function announceReclaimed(
     // unwound, as evictMember tolerates it: the seat is already given. The
     // store refuses to seat into a frozen room at all, so reaching here frozen
     // means the room froze in the gap after the seating.
+    //
+    // No `markRemoved` on this append, on purpose (#113, R2): a timeout is the
+    // server guessing a member is gone, not a creator deciding they should be
+    // out, so the seat's old occupant keeps the open feed. Only `member_evicted`
+    // cuts, and nobody should add a cut here for symmetry with it.
     await store.appendEvent(session.id, {
       type: "member_timed_out",
       // "system" for the same reason member_evicted uses it: no member handle
@@ -655,13 +662,21 @@ export async function evictMember(
   // again; under-revoking leaves a door open behind someone who believes it shut.
   if (live) await store.consumeJoinCode(sessionId, target.roomRole);
 
-  await store.updateMember(sessionId, targetMemberId, { leftAt: Date.now() });
-
-  // The events read in the order a person would tell it — the member went,
-  // then the door shut — even though the store writes went the other way. A
-  // null return means the room froze in the gap; the member is already out, so
-  // it is tolerated rather than unwound.
-  await store.appendEvent(sessionId, {
+  // The door still shuts first, for the reason written above it: the other
+  // ordering leaves a door open behind someone who believes it shut.
+  //
+  // One append, where this was an updateMember followed by an appendEvent. The
+  // member write rides the announcement's transaction (#113), because the cut
+  // a reader is capped at names this event's cursor and the two cannot be
+  // allowed to disagree — a cut naming a cursor no event carries, or a member
+  // recorded out with no cut at all, which is the open feed this closes.
+  //
+  // So a refusal here means the member is still IN, where it used to mean they
+  // were out and unannounced. That is the more recoverable of the two: a retry
+  // finds `leftAt` still null and performs the whole eviction, announcement
+  // included. The frozen case is the one that reaches it — the guard above
+  // refuses a room already frozen, so this is a freeze landing in the gap.
+  const announced = await store.appendEvent(sessionId, {
     type: "member_evicted",
     // No member handle to name: creator authority is on the user, and a
     // creator who has left the room still holds it. "system" is the existing
@@ -671,11 +686,25 @@ export async function evictMember(
     fromLabel: actor.label,
     payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
     refId: null,
-  });
+  }, { markRemoved: targetMemberId });
+
+  // The door is already shut when this returns: `consumeJoinCode` committed
+  // above, so a live code for the seat is retired. This returns ahead of
+  // `announceDoorShut` and `audit`, so in this window the retirement leaves no
+  // `invite_revoked` event and no audit row at all, and a retry once the room
+  // thaws finds the code gone and records `code_retired: false`. That is the
+  // trade the comment above `consumeJoinCode` makes (member still in, door
+  // shut, the record thin), and a refusal is one more way to reach it.
+  // `bellman_evict`'s description tells the caller the code may be retired, and
+  // to repeat the call.
+  if (!announced) return refuse("frozen", FROZEN);
+
+  // The events read in the order a person would tell it — the member went, then
+  // the door shut — though the store shut the door first.
   if (live) await announceDoorShut(store, actor, sessionId, target.roomRole);
 
-  // Before the close, as in leaveRoom: the eviction is a fact from
-  // updateMember on, and its record must not wait on a step unrelated to it.
+  // Before the close, as in leaveRoom: the eviction is a fact from the append
+  // on, and its record must not wait on a step unrelated to it.
   // The order moves the failure window rather than closing it — if this throws,
   // an emptied room stays open until a retry heals it, where closing first
   // would have closed the room and lost the row. That is the trade taken

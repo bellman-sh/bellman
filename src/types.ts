@@ -53,6 +53,18 @@ export interface Member {
    * existed; read it through `lastReport`, which lifts those to `joinedAt`.
    */
   lastReportAt?: number;
+  /**
+   * The cursor of the `member_evicted` event that removed this member, if a
+   * creator removed them.
+   *
+   * Absent on a member still in the room, on one who left of their own accord,
+   * on one whose seat timed out, and on every row stored before this field
+   * existed — all of which keep the open feed (#113). Absence IS the answer
+   * here, so there is no lifting accessor as `lastSeenAt` and `lastReportAt`
+   * have: for those, reading `undefined` as "never" would have been actively
+   * wrong, and every legacy row would have read as reclaimable.
+   */
+  removedAtCursor?: number;
 }
 
 export type EventType =

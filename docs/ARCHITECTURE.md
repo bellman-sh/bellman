@@ -264,6 +264,25 @@ directly and not through `BellmanStore`: `MemoryStore` cannot hold a hibernating
 socket, so a `watch()` on the interface could be honoured by one implementation
 only, and the conformance suite is what makes the interface a seam.
 
+**Who the route lets in is not everyone the identity owns (#113).** There are
+three outcomes, and `leftAt` alone does not tell them apart. A member in the
+room is served by both paths. A member who left of its own accord, or whose seat
+timed out, keeps the open feed: the first chose to go, and the second is the
+server guessing, which is not a decision that anyone should stop seeing the
+room. Both have `leftAt` set, so `leftAt` is not the predicate. A member a
+creator removed has a `removedAtCursor`, the cursor of the `member_evicted`
+event that removed it, and reads its history through that event and nothing
+after. `bellman_sync` serves it that slice and does not wait. `/ws` leaves it
+out of the members the route lets in, so an identity that owns only removed
+handles is answered 403, and a socket it held at the removal is closed after the
+frame that announces it. An identity holding one removed handle and one live one
+keeps its socket, on the live one. The object checks the roster again when it
+accepts, because the route's question and the accept are two calls and a removal
+can land between them. The cursor is the server's bookkeeping and no surface
+sends it. The decisions are in the
+[eviction spec](superpowers/specs/2026-10-04-eviction-cuts-the-feed-design.md)
+([#113](../../../issues/113)).
+
 **Read-and-register still applies.** `SessionDO.fetch` awaits the events the
 client missed, then attaches the cursor, accepts the socket and sends the
 replay, with nothing yielding between those. An event appended in that gap
@@ -271,7 +290,9 @@ would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
 closes by registering its waiter with no `await` after its read (invariant 2
 below). The rule governs both paths and only the registration mechanism
 differs, a waiter pushed onto an in-memory list or a cursor attached to a socket
-the runtime holds. `wake()` is synchronous for the same reason.
+the runtime holds. `wake()` is synchronous for the same reason. Since #113 the
+roster is read just ahead of the events, for the check above, and both reads are
+storage reads, so the events read is still the last await before the attach.
 
 **And the guard belongs in the same invocation as the accept.** `/ws` is *two*
 invocations of one object — `membersOf`, then the upgrade — and the input gate

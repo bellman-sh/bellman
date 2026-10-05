@@ -56,10 +56,18 @@ Five failure modes the spec implies that no task's happy path exercises. Each ha
 Create `worker-tests/session-audit-outbox.test.ts`:
 
 ```ts
-import { describe, it, expect } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
+import { describe, it, expect, afterEach } from "vitest";
+import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import type { SessionDO, AuditDO } from "../src/store-do.js";
 import { outboxKey, OUTBOX_SEQ, dueKey, OUTBOX_HANDLER } from "../src/outbox.js";
+
+// Storage is not isolated between tests in this pool (worker-tests/README.md), and
+// the first and third cases both file rows under org_codenerd. Without this the
+// redelivery case counts the first case's row and fails with a length of 2.
+afterEach(async () => {
+  await reset();
+  await abortAllDurableObjects();
+});
 
 /**
  * The rows are planted directly rather than earned by an operation. Nothing
@@ -87,6 +95,25 @@ const entry = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+/** An entry with no `orgId` property at all, rather than a null or an empty one. */
+const entryWithoutOrg = (): Record<string, unknown> => {
+  const e: Record<string, unknown> = entry();
+  delete e.orgId;
+  return e;
+};
+
+/**
+ * One case per shape of "no org". Each shape reaches a DIFFERENT Durable Object
+ * stream, and a row that cannot reach a stream is no control for it: with only
+ * `null` planted, the checks on "" and "undefined" can never fail, and a guard
+ * reduced to `entry.orgId === null` — the form `appendAudit` uses — goes unnoticed.
+ */
+const NO_ORG = [
+  { shape: "null", session: "qs_audit_null", payload: () => entry({ orgId: null }) },
+  { shape: "empty", session: "qs_audit_empty", payload: () => entry({ orgId: "" }) },
+  { shape: "absent", session: "qs_audit_absent", payload: entryWithoutOrg },
+];
+
 describe("SessionDO delivers audit intents", () => {
   it("delivers an audit row to the entry's own org", async () => {
     const id = env.SESSION.idFromName("qs_audit_one");
@@ -106,12 +133,14 @@ describe("SessionDO delivers audit intents", () => {
   /**
    * Review Focus 4. A namespace accepts null as a name, so a falsy org is
    * DELIVERED — into a stream no org reads, or one called "null". The guard is
-   * what keeps a misfiled row from looking like a delivered one.
+   * what stops the misfile; the row still counts as delivered either way.
    */
-  it("delivers nothing for an entry with no org, and clears the row", async () => {
-    const id = env.SESSION.idFromName("qs_audit_none");
+  it.each(NO_ORG)(
+    "delivers nothing for an entry whose org is $shape, and clears the row",
+    async ({ session, payload }) => {
+    const id = env.SESSION.idFromName(session);
     await plant(id, {
-      id: "intent-none", kind: "audit", payload: entry({ orgId: null }), attempts: 0,
+      id: "intent-none", kind: "audit", payload: payload(), attempts: 0,
     });
 
     await runInDurableObject(env.SESSION.get(id), async (instance: SessionDO) => {
@@ -121,7 +150,8 @@ describe("SessionDO delivers audit intents", () => {
     for (const name of ["null", "undefined", ""]) {
       const auditId = env.AUDIT.idFromName(name);
       await runInDurableObject(env.AUDIT.get(auditId), async (audit: AuditDO) => {
-        expect(await audit.recent(10)).toEqual([]);
+        // The message names the stream, so a red run says which one took the entry.
+        expect(await audit.recent(10), `the stream named "${name}"`).toEqual([]);
       });
     }
 
@@ -211,7 +241,7 @@ Replace `RegistryDO`'s `#auditIntents` body with:
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `npm run test:worker -- session-audit-outbox`
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests — the no-org case runs once per shape.
 
 - [ ] **Step 7: Confirm nothing else moved**
 
@@ -1451,7 +1481,7 @@ The fixture above builds a session inline because `tests/helpers/fixtures.ts` is
 - [ ] **Step 2: Run them**
 
 Run: `npm run test:worker -- removal-race`
-Expected: PASS, 3 tests.
+Expected: PASS, 5 tests — the no-org case runs once per shape.
 
 - [ ] **Step 3: Break the race case on purpose, and quote the failure**
 

@@ -317,11 +317,45 @@ describe("channel delivery", () => {
 
     await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
 
-    // The event reaches the human first. Nothing else would stop the watcher:
-    // bellman_sync keeps answering a member who is out, with nothing new, and
-    // the room is not closed.
+    // The event reaches the human first, which is the order `watch` guarantees:
+    // deliver, then stop. The `removed` flag would stop it too (see the next
+    // test), but only the event carries what the human needs to read.
     await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
     await until(() => b.bridge.watching().length === 0);
+  });
+
+  /**
+   * The restart case, which the event cannot cover.
+   *
+   * `showsEvictionOf` needs the `member_evicted` event in the slice. A bridge
+   * that comes back after the removal asks from a cursor already past it, so
+   * the event is behind it for ever and the slice is empty. Before the server
+   * sent `removed`, `observe` armed a watcher on that empty answer and the
+   * watcher polled the 1-second floor for the life of the process — nothing in
+   * the answer said otherwise, because an empty slice with
+   * `session_status: "active"` is what a quiet room looks like too.
+   */
+  it("does not arm a watcher when the sync says removed and carries no event", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, joinerMember } = await pair(a, b);
+    await a.call("bellman_evict", { session_id: sessionId, member_id: joinerMember });
+    await until(() => b.bridge.watching().length === 0);
+
+    // A fresh bridge for the same member: no `departed` record, and a cursor
+    // past the cut, so nothing it reads will ever contain the eviction.
+    const restarted = await open(DEV_KEY.peer);
+    const synced = await restarted.call("bellman_sync", {
+      session_id: sessionId, member_id: joinerMember,
+      since_cursor: 9_999, wait_seconds: 0,
+    });
+
+    expect(synced.isError, synced.text).toBe(false);
+    // The premise: no event to read. If this slice ever carries the eviction,
+    // `showsEvictionOf` would cover it and the test proves nothing new.
+    expect(synced.data.events).toEqual([]);
+    expect(synced.data.removed).toBe(true);
+    expect(restarted.bridge.watching()).toHaveLength(0);
   });
 
   it("keeps watching when the member evicted is somebody else", async () => {

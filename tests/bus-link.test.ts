@@ -45,6 +45,7 @@ let logs: string[];
 let cleanups: Array<() => Promise<void>>;
 
 beforeEach(async () => {
+    removedMembers.clear();
   rooms = await fakeBellman().rooms({ keys: { [KEY]: ME, [KEY_ROTATED]: ME } });
   // Short, because a socket path is limited to about a hundred bytes.
   tmp = mkdtempSync(join(tmpdir(), "bl-"));
@@ -90,6 +91,13 @@ function room(id: string, ...members: string[]): FakeRoom {
   made.members = { [ME.userId]: members };
   return made;
 }
+
+/**
+ * Members `bellman_sync` answers `removed: true` for (#113). File-local rather
+ * than a field on the shared FakeRoom: only this file needs it, and the sync
+ * answer is built a few lines up.
+ */
+const removedMembers = new Set<string>();
 
 const socketPath = (): string => busPath({ url: rooms.url, credential: KEY, root });
 
@@ -137,6 +145,7 @@ function scripted(): Scripted {
           events: poll.events.map(envelope),
           cursor: poll.cursor,
           session_status: poll.closed ? "closed" : "active",
+          ...(removedMembers.has(member) ? { removed: true } : {}),
         },
       };
     },
@@ -660,12 +669,52 @@ describe("when the socket cannot be had", () => {
     expect(a.conn.calls.some((c) => c.session_id === R1 && c.wait_seconds === 0)).toBe(true);
   });
 
+  /**
+   * The bus-enabled path, which is the one production takes.
+   *
+   * A removed member's /ws upgrade is refused 403, and this runtime reports that
+   * as the same bare handshake error as a 503, so the socket cannot tell the two
+   * apart and degrades to polling either way. That poll is this adapter's, and
+   * reading only `session_status` there would hand the room an empty ACTIVE
+   * answer for ever — the room really is open, it is this membership that is
+   * over. So the flag has to survive the hop, and the room has to end on it.
+   *
+   * It ends for EVERY member on this machine, not just the removed one, which is
+   * the existing endRoom contract: the coordinator polls upstream as one member,
+   * so once that membership is gone it can no longer serve the others, and each
+   * of them is told to check for itself. m2 may well be fine; its own poll is
+   * what will say so.
+   */
+  it("ends the room when the poll says the member it polls as was removed", async () => {
+    const r1 = room(R1, "m1", "m2");
+    const a = await coordinatorWith(R1, "m1");
+    const b = await subscriberWith(R1, "m2");
+    r1.append();
+    await until(() => a.watched.events.length === 1 && b.watched.events.length === 1, "an event for both");
+
+    // The member the COORDINATOR polls upstream as. Marking m2 instead would
+    // prove nothing: the coordinator's poll is made as m1, so m2's removal is
+    // not in the answer this adapter reads.
+    removedMembers.add("m1");
+    rooms.refuse(503);
+    r1.drop();
+
+    await until(
+      () => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1,
+      "every member of the room to be handed back to its own polling",
+    );
+    expect(a.watched.fallbacks[0]).toMatch(/removed from the room|not there|not this identity's/);
+  });
+
   it("ends the room's subscriptions when the member is not the identity's, or the room is not there", async () => {
     room(R1); // the identity owns no member in it: /ws says 403, and bellman_sync says "not yours"
     const a = await coordinatorWith(R1, "m1");
     const b = await subscriberWith(R1, "m2");
     await until(() => a.watched.fallbacks.length === 1 && b.watched.fallbacks.length === 1, "both to fall back");
-    expect(a.watched.fallbacks[0]).toMatch(/found that Bellman says the room is not there, or the member is not this identity's/);
+    // The wording names a third cause since #113 — a removed member — so this
+    // matches the two clauses this case is about rather than the whole string.
+    expect(a.watched.fallbacks[0]).toMatch(/found that Bellman says the room is not there/);
+    expect(a.watched.fallbacks[0]).toMatch(/the member is not this identity's/);
   });
 
   it("takes a connection to Bellman that has been retired as the credential being gone, and ends the room", async () => {

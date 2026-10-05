@@ -218,6 +218,57 @@ describe("a removed member's bellman_sync on the real object", () => {
     expect(answer.data.cursor).toBe(cut);
   });
 
+  it("does not tell a leaver they were removed, even on a stale record", async () => {
+    /**
+     * The two hazards above, composed — and the one place the cap and the FLAG have
+     * to part company.
+     *
+     * The cap may be read off the `member_evicted` in the slice, because a wrong cap
+     * costs one poll and the next poll, reading a fresh record, reopens the feed.
+     * The flag cannot: a client reads it as "stop asking" and marks the handle
+     * departed for the life of the process (`markDeparted` in src/bridge.ts), so a
+     * flag emitted wrongly ends a voluntary leaver's feed for good. Nothing
+     * self-heals.
+     *
+     * This is the state where the two disagree: the record the poll holds was read
+     * before the leave, so it shows the member active and the `isActiveMember` guard
+     * passes; the leave then commits; the eviction appends and `markRemoved` declines
+     * it (spec D3), so no cut is ever recorded. The slice therefore holds a
+     * `member_evicted` naming a member R2 gives the open feed. The cap fires, which
+     * is accepted and documented. The flag must not.
+     */
+    const { id, store, asMember } = await room();
+
+    // The record as the poll would have read it an instant before the leave.
+    const before = await store.getSession(id);
+    expect(before!.members.find((m) => m.memberId === "m_target")!.leftAt,
+      "arrangement: the record the poll will hold shows them still in").toBeNull();
+
+    const left = await asMember.call("bellman_leave", { session_id: id, member_id: "m_target" });
+    expect(left.isError, left.text).toBe(false);
+    await store.appendEvent(id, {
+      type: "member_evicted", fromMemberId: "system", fromUserId: "u_boss", fromLabel: "boss@elsewhere",
+      payload: { member_id: "m_target", label: "jesse@codenerd", room_role: "peer_b" }, refId: null,
+    }, { markRemoved: "m_target" });
+
+    const record = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!;
+    expect(record.leftAt, "arrangement: they left").not.toBeNull();
+    expect(record.removedAtCursor, "arrangement: the store declined the cut").toBeUndefined();
+
+    const read = vi.spyOn(store, "getSession").mockResolvedValueOnce(before);
+    const answer = await asMember.call("bellman_sync", {
+      session_id: id, member_id: "m_target", since_cursor: 0, wait_seconds: 0,
+    });
+    expect(read, "the poll read its record through the interposed store").toHaveBeenCalledTimes(1);
+
+    expect(answer.isError, answer.text).toBe(false);
+    // The event IS in the slice, which is what makes this the hazard rather than a
+    // trivially safe case: anything reading the flag off the event would emit it.
+    expect(envelopes(answer.data.events).map((e) => (e.data as { type: string }).type))
+      .toContain("member_evicted");
+    expect(answer.data.removed, "a leaver is never told to stop asking").toBeUndefined();
+  });
+
   it("does not cap a member who left, though a removal naming them is in the log", async () => {
     /**
      * The limit of the case above, which caps a poll on the removal it finds in the events.
@@ -263,6 +314,13 @@ describe("a removed member's bellman_sync on the real object", () => {
     expect(envelopes(answer.data.events).map((e) => (e.data as { type: string }).type))
       .toEqual(["member_evicted", "message"]);
     expect(answer.data.cursor).toBe(stored[stored.length - 1].cursor);
+    // And they are NOT told they were removed. The flag is persistent in a way
+    // the cap is not: a client reads it as "stop asking" and marks the handle
+    // departed for the life of the process, so emitting it on the event alone
+    // would end a voluntary leaver's feed for good — where the cap costs one
+    // poll and self-heals. So the flag comes off the recorded `removedAtCursor`
+    // only, which the store declined to write here.
+    expect(answer.data.removed).toBeUndefined();
   });
 
   it("does not take a peer's message naming them for their own removal", async () => {

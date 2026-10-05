@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
+import { STALE_AFTER_MS } from "../../src/presence.js";
 
 /**
  * A creator removing a member. The history stays open to the person removed — it
@@ -315,6 +316,111 @@ describe("bellman_evict", () => {
     });
 
     // Review Focus 1.
+    /**
+     * The field a client needs to stop asking.
+     *
+     * The cut alone is invisible to a caller polling from past it: the slice is
+     * empty and `session_status` still reads "active", which is indistinguishable
+     * from a quiet room. A bridge restarted after the removal has no
+     * `member_evicted` in hand either — its cursor is already past the event — so
+     * `showsEvictionOf` can never fire for it, and it polls the 1-second floor
+     * for the life of the process. Node's undici also collapses a /ws 403 into
+     * the same bare `error` event as a 503 (see room-socket.ts), so the socket
+     * arm cannot tell it either. This flag is the only signal that survives both.
+     */
+    it("tells them they are removed, on a poll that carries no events at all", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      await s.creator.call("bellman_evict", {
+        session_id: s.sessionId, member_id: third.memberId,
+      });
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId, member_id: s.creatorMemberId,
+        type: "message", payload: { text: "they must not see this" },
+      });
+
+      // From past the cut: the bridge-restarted case, where no event is returned.
+      const blind = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: third.memberId,
+        since_cursor: 9_999, wait_seconds: 0,
+      });
+      expect(blind.isError, blind.text).toBe(false);
+      expect(blind.data.events).toEqual([]);
+      expect(blind.data.removed).toBe(true);
+
+      // And on the poll that does carry the history, for the same reason.
+      const withHistory = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: third.memberId,
+        since_cursor: 0, wait_seconds: 0,
+      });
+      expect(withHistory.data.removed).toBe(true);
+    });
+
+    it("says nothing of the kind to a member who left of their own accord", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      await third.peer.call("bellman_leave", {
+        session_id: s.sessionId, member_id: third.memberId,
+      });
+
+      const synced = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: third.memberId,
+        since_cursor: third.cursor, wait_seconds: 0,
+      });
+
+      // R2 again: a voluntary leaver keeps the open feed, so a client of theirs
+      // must not be told to stop. `undefined` and not `false` — the field is
+      // present only when it is true, as `replayed` and `ambient` are.
+      expect(synced.data.removed).toBeUndefined();
+    });
+
+    /**
+     * The other half R2 protects, and it needs a seat actually taken rather than
+     * a name in a test title.
+     *
+     * A reclaim only happens when a room is FULL and someone needs the seat, so
+     * this is a pair room: the joiner's seat is aged past the window, the creator
+     * mints a code, and a third party redeeming it reclaims the stale seat. The
+     * reclaimed member keeps the open feed, so nothing may tell its client to
+     * stop asking.
+     */
+    it("says nothing of the kind to a member whose seat timed out", async () => {
+      const s = await pairUp(h);
+      // Aged past STALE_AFTER_MS, which is what makes the seat reclaimable.
+      await h.store.updateMember(s.sessionId, s.joinerMemberId, {
+        lastSeenAt: Date.now() - STALE_AFTER_MS - 1,
+      });
+      const invited = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId, member_id: s.creatorMemberId,
+      });
+      expect(invited.isError, invited.text).toBe(false);
+      const taker = await h.connect(DEV_KEY.outsider);
+      const confirmed = await join(taker, invited.data.join_code);
+      expect(confirmed.isError, confirmed.text).toBe(false);
+
+      const synced = await s.joiner.call("bellman_sync", {
+        session_id: s.sessionId, member_id: s.joinerMemberId,
+        since_cursor: 0, wait_seconds: 0,
+      });
+
+      // The arrangement, asserted rather than assumed: the seat really went.
+      expect(envelopes(synced.data.events).map((e) => (e.data as { type: string }).type))
+        .toContain("member_timed_out");
+      expect(synced.data.removed, "a timed-out seat is not a removal (R2)").toBeUndefined();
+    });
+
+    it("says nothing of the kind to a member still in the room", async () => {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+
+      const synced = await third.peer.call("bellman_sync", {
+        session_id: s.sessionId, member_id: third.memberId,
+        since_cursor: third.cursor, wait_seconds: 0,
+      });
+
+      expect(synced.data.removed).toBeUndefined();
+    });
+
     it("does not move their cursor backwards when they ask from past the cut", async () => {
       const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
       const third = await joinThird(s);

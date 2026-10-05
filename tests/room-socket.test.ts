@@ -715,6 +715,45 @@ describe("degrading (D11)", () => {
     await until(() => polls.length >= 1, "the first poll");
   });
 
+  /**
+   * The removal arrives by poll because nothing else can carry it.
+   *
+   * A removed member's /ws upgrade is refused 403, and this runtime reports the
+   * same bare handshake `error` for a 403 as for a transient 503 (see the note
+   * at the top of src/room-socket.ts), so the socket arm cannot tell a removal
+   * from an outage and keeps retrying — which is exactly the degraded state
+   * this block is about. `closed` does not cover it either: the ROOM is fine and
+   * its other members carry on. So the poll says `removed` and the room ends
+   * `gone`, meaning this membership is over rather than the room (#113).
+   */
+  it("ends the room gone once the poll reports this member removed", async () => {
+    rooms.refuse(503);
+    const { socket } = open({
+      poll: async () => ({ events: [], cursor: 0, removed: true }),
+      tuning: { degradeAfter: 1 },
+    });
+
+    expect(await within(socket.stopped, 2000, "stopped")).toBe("gone");
+  });
+
+  it("keeps polling a merely empty answer, which is what a quiet room looks like", async () => {
+    // The control for the case above. An empty active answer must NOT end the
+    // room, or every quiet room would be given up on — `removed` is the only
+    // difference between the two answers, so without it this would hang.
+    rooms.refuse(503);
+    const polls: PollRequest[] = [];
+    const { socket } = open({
+      poll: async (request) => {
+        polls.push(request);
+        return { events: [], cursor: 0 };
+      },
+      tuning: { degradeAfter: 1 },
+    });
+
+    await until(() => polls.length >= 2, "a second poll, so it did not stop");
+    expect(socket.state).toBe("degraded");
+  });
+
   it("keeps serving a room whose socket drops and never comes back", async () => {
     room.append();
     const { socket, events, polls } = open();

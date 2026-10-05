@@ -129,7 +129,9 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  */
 const ENDED_UPSTREAM: Partial<Record<StopReason, string>> = {
   closed: "the room is closed",
-  gone: "Bellman says the room is not there, or the member is not this identity's",
+  gone:
+    "Bellman says the room is not there, the member is not this identity's, " +
+    "or a creator removed the member this socket polls as",
   unauthorized: "Bellman no longer accepts this bridge's connection",
 };
 
@@ -144,7 +146,7 @@ class NotConnected extends Error {}
 /** Bellman says the room is not there, or the member is not this identity's. The same two answers `watch()` stops on. */
 class RoomGone extends Error {}
 
-interface Answer { events: WireEnvelope[]; cursor: number; closed: boolean }
+interface Answer { events: WireEnvelope[]; cursor: number; closed: boolean; removed: boolean }
 
 /** One bus, from the moment it was asked for until it is lost or closed. */
 interface Slot {
@@ -221,11 +223,24 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
       if (/session not found|not yours/i.test(text)) throw new RoomGone(text);
       throw new Error(text);
     }
-    const out = (result.structuredContent ?? {}) as { events?: WireEnvelope[]; cursor?: number; session_status?: string };
+    const out = (result.structuredContent ?? {}) as {
+      events?: WireEnvelope[]; cursor?: number; session_status?: string; removed?: boolean;
+    };
     return {
       events: Array.isArray(out.events) ? out.events : [],
       cursor: Number(out.cursor ?? cursor),
       closed: out.session_status === "closed",
+      // Carried, not dropped. This is the bus-enabled path, and it is the one
+      // production takes: a removed member's room socket falls back to THIS
+      // poll, and a subscriber reading only `closed` would be handed an empty
+      // active answer for ever and sleep only the poll floor (#113).
+      //
+      // Pinned by "ends the room when the poll says the member it polls as was
+      // removed" in tests/bus-link.test.ts: it refuses the socket so the link
+      // degrades to this poll, answers `removed` for the member the coordinator
+      // polls AS, and expects every member of the room handed back to its own
+      // polling. Setting either of these two copies to `false` reddens it.
+      removed: out.removed === true,
     };
   }
 
@@ -259,7 +274,12 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
         if (error instanceof RoomGone) throw new RoomEnded("gone", error.message);
         throw error;
       }
-      return { events: answer.events.map((envelope) => envelope.data), cursor: answer.cursor, closed: answer.closed };
+      return {
+        events: answer.events.map((envelope) => envelope.data),
+        cursor: answer.cursor,
+        closed: answer.closed,
+        removed: answer.removed,
+      };
     };
   }
 

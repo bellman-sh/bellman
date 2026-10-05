@@ -96,7 +96,23 @@ export interface PollRequest { cursor: number; waitSeconds: number; signal: Abor
  * it can be past the last event, and without it a gap of only the member's own events would be
  * asked for again for ever. `closed` is `session_status === "closed"`.
  */
-export interface PollResult { events: unknown[]; cursor: number; closed?: boolean }
+export interface PollResult {
+  events: unknown[];
+  cursor: number;
+  closed?: boolean;
+  /**
+   * The poll says a creator removed this member (#113). Distinct from `closed`:
+   * the ROOM is fine and other members carry on, it is this membership that is
+   * over, which is what `gone` means among the stop reasons.
+   *
+   * It has to come from the poll because nothing else can say it. A removed
+   * member's /ws upgrade is refused 403, and the handshake failure this runtime
+   * reports is the same bare `error` for 403 as for a transient 503 (see the
+   * note at the top of this file), so the socket arm cannot tell a removal from
+   * an outage and must keep retrying. The poll is the only authoritative answer.
+   */
+  removed?: boolean;
+}
 
 export type Poll = (request: PollRequest) => Promise<PollResult>;
 
@@ -567,6 +583,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       const startedAt = Date.now();
       let delivered = 0;
       let closed = false;
+      let removed = false;
       try {
         const answer = await orAbort(options.poll({ cursor, waitSeconds: pollWaitSeconds, signal }), signal);
         // A late answer is dropped, not delivered: if the socket is back it will replay from
@@ -574,6 +591,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
         if (answer === ABORTED || signal.aborted) return;
         delivered = take(answer);
         closed = answer.closed === true;
+        removed = answer.removed === true;
       } catch (error) {
         if (signal.aborted) return;
         if (error instanceof RoomEnded) {
@@ -589,6 +607,14 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
       if (closed) {
         emit("the poll reports the room closed");
         stop("closed");
+        return;
+      }
+      // Checked after `closed`, and after the events above were delivered: a
+      // member removed from a room is still owed what it said up to the
+      // removal, which is the same order the bridge's watcher keeps.
+      if (removed) {
+        emit("the poll reports this member removed from the room");
+        stop("gone");
         return;
       }
       if (delivered === 0 && Date.now() - startedAt < pollFloorMs) await sleep(pollFloorMs, signal);

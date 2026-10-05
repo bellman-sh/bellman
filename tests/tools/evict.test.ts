@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
+import { STALE_AFTER_MS } from "../../src/presence.js";
 
 /**
  * A creator removing a member. The history stays open to the person removed — it
@@ -355,7 +356,7 @@ describe("bellman_evict", () => {
       expect(withHistory.data.removed).toBe(true);
     });
 
-    it("says nothing of the kind to a member who left, or whose seat timed out", async () => {
+    it("says nothing of the kind to a member who left of their own accord", async () => {
       const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
       const third = await joinThird(s);
       await third.peer.call("bellman_leave", {
@@ -371,6 +372,41 @@ describe("bellman_evict", () => {
       // must not be told to stop. `undefined` and not `false` — the field is
       // present only when it is true, as `replayed` and `ambient` are.
       expect(synced.data.removed).toBeUndefined();
+    });
+
+    /**
+     * The other half R2 protects, and it needs a seat actually taken rather than
+     * a name in a test title.
+     *
+     * A reclaim only happens when a room is FULL and someone needs the seat, so
+     * this is a pair room: the joiner's seat is aged past the window, the creator
+     * mints a code, and a third party redeeming it reclaims the stale seat. The
+     * reclaimed member keeps the open feed, so nothing may tell its client to
+     * stop asking.
+     */
+    it("says nothing of the kind to a member whose seat timed out", async () => {
+      const s = await pairUp(h);
+      // Aged past STALE_AFTER_MS, which is what makes the seat reclaimable.
+      await h.store.updateMember(s.sessionId, s.joinerMemberId, {
+        lastSeenAt: Date.now() - STALE_AFTER_MS - 1,
+      });
+      const invited = await s.creator.call("bellman_invite", {
+        session_id: s.sessionId, member_id: s.creatorMemberId,
+      });
+      expect(invited.isError, invited.text).toBe(false);
+      const taker = await h.connect(DEV_KEY.outsider);
+      const confirmed = await join(taker, invited.data.join_code);
+      expect(confirmed.isError, confirmed.text).toBe(false);
+
+      const synced = await s.joiner.call("bellman_sync", {
+        session_id: s.sessionId, member_id: s.joinerMemberId,
+        since_cursor: 0, wait_seconds: 0,
+      });
+
+      // The arrangement, asserted rather than assumed: the seat really went.
+      expect(envelopes(synced.data.events).map((e) => (e.data as { type: string }).type))
+        .toContain("member_timed_out");
+      expect(synced.data.removed, "a timed-out seat is not a removal (R2)").toBeUndefined();
     });
 
     it("says nothing of the kind to a member still in the room", async () => {

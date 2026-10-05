@@ -1060,9 +1060,24 @@ If a room's creator has removed you, you still get the history up to and includi
           // This flag is the one signal that survives both, and it is on every
           // poll rather than once, because "once" is what the event already was.
           //
-          // `removal` covers the same window the cap does: a removal that
-          // committed after `me` was read is proved by the event in the slice.
-          ...(cut !== undefined || removal !== undefined ? { removed: true as const } : {}),
+          // From the RECORDED cut only, and deliberately not from `removal`.
+          //
+          // The cap may be read off the event in the slice, because a wrong cap
+          // costs one poll: the next one reads a fresh record and the feed
+          // reopens. This flag cannot. A client reads it as "stop asking" and
+          // marks the handle departed for the life of the process
+          // (`markDeparted` in src/bridge.ts), so emitting it wrongly ends a
+          // feed for good, and nothing self-heals.
+          //
+          // Wrongly is reachable: `me` read before a leave shows the member
+          // active, the leave commits, the eviction appends, and `markRemoved`
+          // declines the cut (spec D3) — leaving a `member_evicted` in the slice
+          // naming a member R2 gives the open feed. The event is evidence that
+          // an eviction was ATTEMPTED, not that a cut was recorded, and only the
+          // record can say the second. A genuine eviction loses nothing by the
+          // wait: this poll is still capped by the event, and the next poll
+          // reads the committed cursor and sets the flag.
+          ...(cut !== undefined ? { removed: true as const } : {}),
         },
         foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
       );

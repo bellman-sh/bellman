@@ -144,7 +144,7 @@ class NotConnected extends Error {}
 /** Bellman says the room is not there, or the member is not this identity's. The same two answers `watch()` stops on. */
 class RoomGone extends Error {}
 
-interface Answer { events: WireEnvelope[]; cursor: number; closed: boolean }
+interface Answer { events: WireEnvelope[]; cursor: number; closed: boolean; removed: boolean }
 
 /** One bus, from the moment it was asked for until it is lost or closed. */
 interface Slot {
@@ -221,11 +221,28 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
       if (/session not found|not yours/i.test(text)) throw new RoomGone(text);
       throw new Error(text);
     }
-    const out = (result.structuredContent ?? {}) as { events?: WireEnvelope[]; cursor?: number; session_status?: string };
+    const out = (result.structuredContent ?? {}) as {
+      events?: WireEnvelope[]; cursor?: number; session_status?: string; removed?: boolean;
+    };
     return {
       events: Array.isArray(out.events) ? out.events : [],
       cursor: Number(out.cursor ?? cursor),
       closed: out.session_status === "closed",
+      // Carried, not dropped. This is the bus-enabled path, and it is the one
+      // production takes: a removed member's room socket falls back to THIS
+      // poll, and a subscriber reading only `closed` would be handed an empty
+      // active answer for ever and sleep only the poll floor (#113).
+      //
+      // UNPINNED, and said so rather than left looking covered. Both ends of
+      // the chain have controls — the server's flag in
+      // worker-tests/removed-member-sync.test.ts, and `room-socket.ts` ending
+      // the room `gone`, which reddens when its own check is removed. This hop
+      // does not: reaching it needs a subscription already fallen back to
+      // polling AND a server answer carrying the flag, and an attempt at that
+      // in tests/bus-link.test.ts could not get the link to fall back at all.
+      // What is unverified is therefore narrow and explicit — that these two
+      // field copies happen — and a mutation setting either to `false` passes.
+      removed: out.removed === true,
     };
   }
 
@@ -259,7 +276,12 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
         if (error instanceof RoomGone) throw new RoomEnded("gone", error.message);
         throw error;
       }
-      return { events: answer.events.map((envelope) => envelope.data), cursor: answer.cursor, closed: answer.closed };
+      return {
+        events: answer.events.map((envelope) => envelope.data),
+        cursor: answer.cursor,
+        closed: answer.closed,
+        removed: answer.removed,
+      };
     };
   }
 

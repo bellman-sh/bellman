@@ -18,6 +18,8 @@ import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
+import { reviving } from "./rpc-error.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -156,6 +158,29 @@ function memberRow(
   }
   return members === s.members ? {} : { session: { ...s, members } };
 }
+
+/**
+ * Past its TTL. `#expireIfDue`'s rule for whether there is expiring to do, and the
+ * one definition of it, because `membersOf`, `fetch` and `#tickIfDue` all have to
+ * reach the same verdict as the alarm about a room whose expiry has arrived and
+ * whose alarm has not fired yet. Two copies of `now > s.expiresAt` and the four
+ * disagree the first time one of them is edited.
+ */
+const pastTtl = (s: StoredSession, now: number): boolean => now > s.expiresAt;
+
+/**
+ * Whether a room reads as closed, deciding it without writing: closed outright, or
+ * past its TTL with the alarm still to come. A row that is gone reads closed, which
+ * is the answer an unknown room has always had.
+ *
+ * Every read that refuses a closed room goes through here, so the rule and the
+ * refusals cannot drift apart. `membersOf` authorizes a watch with it and `fetch`
+ * rechecks it before accepting the socket — one rule asked twice, which is what #133
+ * was missing: with no recheck, a close landing between the two calls left a socket
+ * on a closed room and nothing to close it.
+ */
+const readsClosed = (s: StoredSession | undefined, now: number): boolean =>
+  !s || s.closed || pastTtl(s, now);
 
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
@@ -392,20 +417,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The second reason carries an obligation. The two paths must still agree
    * on "closed", or a room past its TTL whose alarm has not fired yet reads
    * as open here while bellman_sync, through getSession, reads it as closed.
-   * So `closed` is computed by expireIfDue's own rule (now past expiresAt)
-   * and not written. Change that rule in one place and it must change in both.
+   * So `closed` comes from `readsClosed`, expireIfDue's own rule, and is not
+   * written. That predicate is where the rule lives for all of its readers.
+   *
+   * What this answer does NOT settle is whether the room is still open by the
+   * time the socket is accepted: that is a second invocation, and `fetch` asks
+   * `readsClosed` again for itself (#133). This one is what distinguishes 403
+   * from 404 without telling a stranger which, and it spares an upgrade for a
+   * caller who owns nothing here.
    */
   async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
     const s = await this.stored();
-    if (!s) return { memberIds: [], closed: true };
     return {
       // `isRemovedMember` and not `isActiveMember`: see above. An identity that
       // holds one removed handle and one live one keeps its socket, on the live
       // one's entitlement (D5), which falls out of this filter without a rule.
-      memberIds: s.members
-        .filter((m) => m.userId === userId && !isRemovedMember(m))
-        .map((m) => m.memberId),
-      closed: s.closed || Date.now() > s.expiresAt,
+      memberIds: s
+        ? s.members.filter((m) => m.userId === userId && !isRemovedMember(m)).map((m) => m.memberId)
+        : [],
+      closed: readsClosed(s, Date.now()),
     };
   }
 
@@ -463,27 +493,38 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and asked membersOf who they are; this request is one the Worker BUILT,
    * so nothing on it came from the client (see the /ws route in worker.ts).
    *
-   * Read, attach, accept and send happen in this one invocation, and, its
-   * only awaits being storage reads, the input gate holds every other request
-   * to this object for its duration. That is CLAUDE.md's read-and-register
+   * Recheck, read, attach, accept and send happen in this one invocation, and,
+   * every await in it being a storage read, the input gate holds every other
+   * request to this object for its duration. That is CLAUDE.md's read-and-register
    * rule, not an exemption from it: an event appended between the read and
    * the accept would otherwise be delivered to nobody and skipped by the
    * cursor. So the order is waitForEvents' own: await the read FIRST, then
    * register with no await between.
    *
-   * **The roster is read again here, and the list the Worker sent is cut down
-   * by it (#113).** The Worker asked membersOf and then sent this request: two
-   * calls, and a removal can commit between them. The list this request
-   * carries was true when it was made and is not now, and a socket accepted on
-   * it would hold the open feed of a member already cut, which
-   * `#closeCutSockets` cannot undo because it ran before the socket existed.
-   * So the ids of members the roster has since cut are dropped, and a request
-   * left with none is refused 403, the answer the route gives an identity that
-   * owns nothing here. An id the roster does not hold is kept: it is neither
-   * entitled nor condemned, as `#closeCutSockets` reads it. The roster is read
-   * BEFORE the events, so the events read stays the last await ahead of the
-   * attach, and both are storage reads, which is what keeps the gate closed
-   * across the pair.
+   * **The roster is read again here, and it answers two questions from one
+   * read.** The Worker asked membersOf and then sent this request: two calls,
+   * and anything can commit between them. #133 found the close in that gap and
+   * #113 found the removal, and they are the same hazard — a state the Worker's
+   * answer predates — so they share the read rather than paying two.
+   *
+   * `closed` first, because a closed room owes a 409 whoever is asking, and the
+   * route's own pre-check answers the same 409 with the same body for a room
+   * already closed when it looked (#133). A close committed in the gap would
+   * otherwise be answered with an accepted socket that nothing is left to close.
+   *
+   * Then the cut (#113). The member list this request carries was true when it
+   * was made and is not now, and a socket accepted on it would hold the open
+   * feed of a member already removed — which `#closeCutSockets` cannot undo,
+   * because it ran before the socket existed. So the ids of members the roster
+   * has since cut are dropped, and a request left with none is refused 403, the
+   * answer the route gives an identity that owns nothing here. An id the roster
+   * does not hold is kept: it is neither entitled nor condemned, as
+   * `#closeCutSockets` reads it.
+   *
+   * Both come BEFORE the events read, so a refusal reads nothing more and
+   * accepts nothing, and the events read stays the last await ahead of the
+   * attach. Every one of them is a storage read, which is what keeps the gate
+   * closed across the whole sequence.
    *
    * The gate is D5's premise and is untested here: the fake has no input gate,
    * and the sequence test pins only that nothing else awaits. Task 8's test,
@@ -518,24 +559,56 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * of the cap.
    */
   async fetch(request: Request): Promise<Response> {
-    if (request.headers.get("upgrade") !== "websocket") {
-      return new Response("Expected a WebSocket upgrade", { status: 426 });
+    // The same reading as the route's, from the same module (#132). The Worker builds
+    // this request and sets the header itself, so nothing reaches here with `WebSocket`
+    // or a list today — which is the reason to share the rule rather than let a second
+    // copy of it sit here being quietly wrong.
+    if (!wantsWebSocket(request.headers.get("upgrade"))) {
+      return new Response(UPGRADE_REQUIRED.body, {
+        status: UPGRADE_REQUIRED.status,
+        headers: UPGRADE_REQUIRED.headers,
+      });
     }
     const url = new URL(request.url);
     const cursor = Number(url.searchParams.get("cursor"));
     const asked = (request.headers.get("x-bellman-members") ?? "")
       .split(",").filter(Boolean);
 
-    // The roster first, then the events: two storage reads, and the second is the last
-    // await. See the docblock for what the roster is read for.
+    // ONE roster read answering both rechecks (#133 and #113). The Worker's
+    // membersOf said open, and said who this identity holds, but that was a
+    // second invocation of this object and the input gate spans neither it nor
+    // the gap after it: a close, the TTL alarm, or a removal lands there. So
+    // both guards are asked HERE, where the registration is, and all of it is
+    // one invocation — the read-and-register rule again, with "closed" and the
+    // roster as the things read instead of the cursor.
+    //
+    // Read once rather than twice: the two guards ask different questions of
+    // the same record, and a second `stored()` would be a second read of a row
+    // the gate already holds still.
     const s = await this.stored();
-    const cut = new Set<string>(s?.members.filter(isRemovedMember).map((m) => m.memberId));
+
+    // Closed first: a closed room owes a 409 whoever is asking. The Worker
+    // returns this response unchanged, and its own pre-check answers the same
+    // 409 with the same body for a room already closed when it looked.
+    //
+    // `!s` is spelled out although `readsClosed` already answers true for a
+    // missing record: it is not a type predicate, so the compiler cannot narrow
+    // `s` through it, and the cut below reads `s.members`. Naming the case here
+    // is honest about why, where a non-null assertion would hide that the two
+    // guards agree. Change `readsClosed` to a predicate and this collapses.
+    if (!s || readsClosed(s, Date.now())) {
+      return new Response("This room is closed", { status: 409 });
+    }
+
+    // Then the cut: the roster this request was built against, re-read.
+    const cut = new Set<string>(s.members.filter(isRemovedMember).map((m) => m.memberId));
     const memberIds = asked.filter((id) => !cut.has(id));
     if (asked.length > 0 && memberIds.length === 0) {
       return new Response("Forbidden", { status: 403 });
     }
 
-    // The last await. From here to the return nothing yields.
+    // The last await, and every one before it is a storage read, so the gate
+    // holds from the first recheck to the return. From here nothing yields.
     const missed = await this.events(cursor);
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
@@ -1395,8 +1468,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * SESSION binding rewrite a room and reach into the registry's index.
    */
   async #expireIfDue(s: StoredSession, now: number): Promise<void> {
-    // membersOf is the other half of this rule: it answers "closed" the same way, without writing.
-    if (s.closed || now <= s.expiresAt) return;
+    // Already closed, so there is nothing to expire; not lapsed, so there is nothing
+    // to expire yet. `pastTtl` is the second half, shared with the three readers that
+    // answer "closed" from it without writing (see readsClosed).
+    if (s.closed || !pastTtl(s, now)) return;
     // The write below clears the session's codes, so their rows leave the registry's
     // index with it, in the same transaction. Otherwise an expired room's codes stay
     // there for good. They are already inert, because getSessionByJoinCode refuses a
@@ -1450,8 +1525,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *   two are not. `dueNames` sorts the due handlers, "heartbeat" sorts before
    *   "ttl", and a firing delayed past `expiresAt` finds both due — so the tick
    *   ran, appended and woke every watcher on a room the very next iteration of
-   *   that loop was about to close. `now > s.expiresAt` is `#expireIfDue`'s own
-   *   test for lapsed, read here rather than reordering the handlers: a guard is
+   *   that loop was about to close. `pastTtl` is `#expireIfDue`'s own test for
+   *   lapsed, read here rather than reordering the handlers: a guard is
    *   checkable where a name's place in an alphabet is an accident.
    *
    * **One transaction, for the reason `stored()` gives, and it is what makes the
@@ -1476,7 +1551,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return null;
-      if (s.closed || s.frozenAt !== null || now > s.expiresAt) return null;
+      if (s.closed || s.frozenAt !== null || pastTtl(s, now)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
       const due = dueMembers(s, now);
@@ -2018,16 +2093,26 @@ export interface BellmanEnv {
 export class DurableObjectStore implements BellmanStore {
   constructor(private env: BellmanEnv) {}
 
+  /**
+   * The three ways into a Durable Object, and every one of them `reviving`.
+   *
+   * This is the whole seam between the Worker's realm and the objects', so wrapping
+   * it here covers every method on this facade — including ones added later, which a
+   * per-method wrapper would not. workerd reconstructs a thrown error without its
+   * prototype, so without this an `instanceof` outside an object never matches a
+   * class thrown inside one (#101). `reviving` is a no-op on anything that does not
+   * need it, so there is no call it is wrong for.
+   */
   private session(id: string) {
-    return this.env.SESSION.get(this.env.SESSION.idFromName(id));
+    return reviving(this.env.SESSION.get(this.env.SESSION.idFromName(id)));
   }
 
   private get registry() {
-    return this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+    return reviving(this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry")));
   }
 
   private audit(orgId: string) {
-    return this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId));
+    return reviving(this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId)));
   }
 
   /**

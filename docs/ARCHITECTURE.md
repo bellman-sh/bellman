@@ -294,6 +294,22 @@ the runtime holds. `wake()` is synchronous for the same reason. Since #113 the
 roster is read just ahead of the events, for the check above, and both reads are
 storage reads, so the events read is still the last await before the attach.
 
+**And the guard belongs in the same invocation as the accept.** `/ws` is *two*
+invocations of one object — `membersOf`, then the upgrade — and the input gate
+covers each but not the pair. So a close, or the TTL alarm, lands between them,
+and `fetch` accepted the socket onto a closed room where nothing was left to
+close it: the close had already happened ([#133](../../../issues/133)). The
+Worker's check could not be moved and could not be trusted alone; `fetch`
+rechecks `closed` for itself, before the event read and the accept, and refuses
+with 409. One rule asked twice, from `readsClosed` in `store-do.ts`, which is
+also what the TTL alarm expires a room by. The Worker's check stays because it is
+what tells 403 from 404 without naming the room to a stranger, and what spares an
+upgrade for a caller who owns nothing here. This is read-and-register again with
+a guard in place of the cursor, and it is the same family as
+[#118](../../../issues/118), [#120](../../../issues/120) and
+[#124](../../../issues/124): a value read in one invocation and acted on in
+another.
+
 **One socket per (machine, room).** A socket binds to one `SessionDO`, so a
 machine watching three rooms holds three. That is already fewer than per-member
 polls hold, because a room socket carries every event in the room and the
@@ -847,7 +863,7 @@ overtaking each other on the way to the registry), so
 `worker-tests/reconcile-race.test.ts` holds one reconcile open inside it and
 shows that the lock is what keeps the order.
 
-**What the runtime does.** Four facts, each measured on workerd rather than read
+**What the runtime does.** Five facts, each measured on workerd rather than read
 off its documentation, decide how code here is written.
 
 1. **`setAlarm` inside a `ctx.storage.transaction()` closure commits with that
@@ -899,6 +915,24 @@ off its documentation, decide how code here is written.
    stream of an org called `undefined`: a bad id misfiles instead of stalling.
    Check an id before it names an object; `hasOrg` in `src/grant-audit.ts` and
    the guard in `RegistryDO`'s `#deliver` are two defences for that reason.
+5. **A thrown error crosses an RPC boundary without its prototype.** `name`,
+   `message` and own properties survive, and workerd adds `durableObjectId` and
+   `remote`; the class does not. So the value reports itself as a
+   `PayloadTooDeepError` in every log and fails `instanceof PayloadTooDeepError`
+   outside the object that threw it (#101). `MemoryStore` throws in one realm, so
+   the root test program cannot see this — the first run of the contract suite
+   inside workerd is what found it, which is what #12 was opened to look for.
+
+   `DurableObjectStore` reaches a Durable Object through three accessors and
+   nothing else, each wrapped in `reviving` (`src/rpc-error.ts`), so the class is
+   rebuilt at the seam and `instanceof` holds for every method on the facade
+   including ones added later. Three traps in writing that wrapper, all measured:
+   `JsRpcPromise.then` refuses a non-function first argument, so the usual
+   `.then(undefined, onRejected)` dies on every call; reading `.apply` off a
+   method taken from a stub sends an RPC for a Durable Object method *named*
+   "apply"; and calling the bare function drops `this`. `Reflect.apply` is the one
+   form that does none of these. Each failure reddened all 131 contract cases at
+   once and none of them is visible against a plain-object fake.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`
@@ -953,7 +987,9 @@ pull request.
    waiter**, or an event arriving in the gap wakes an empty list. `SessionDO.fetch`
    obeys it for a socket: read first, then attach and accept with nothing
    yielding between. Guarded writes obey the same rule through a synchronous
-   read.
+   read. **A guard read in another invocation does not bind the registration in
+   this one**, so `fetch` rechecks `closed` itself rather than resting on the
+   Worker's `membersOf` ([#133](../../../issues/133)).
 3. **Peer content is untrusted everywhere** and stays wrapped to the model.
 4. **Reads return detached copies.** Nothing relies on shared references.
 5. **`main` moves only through merges.** The repo is colocated

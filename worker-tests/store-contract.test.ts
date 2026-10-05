@@ -30,10 +30,7 @@ afterEach(async () => {
   await abortAllDurableObjects();
 });
 
-describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as never), {
-  // #101. Not a harness problem: src/server.ts:765 branches on this same
-  // instanceof, so the branch never fires in production either.
-  errorIdentityAcrossRpc:
-    "workerd reconstructs an error thrown inside a Durable Object in the caller's " +
-    "realm, so it keeps its name and own properties but not its prototype (#101)",
-});
+// No divergences. `errorIdentityAcrossRpc` was the last one and closed with #101:
+// DurableObjectStore reaches every object through accessors wrapped in `reviving`,
+// so a class thrown inside one is still that class outside.
+describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as never));

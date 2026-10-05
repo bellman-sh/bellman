@@ -1137,3 +1137,64 @@ describe("bellman_confirm lists the room for the member it seats", () => {
     expect(await h.store.sessionsJoinedBy(joiner.identity.userId, 10)).toContain(sessionId);
   });
 });
+
+describe("bellman_connect's declaration", () => {
+  /**
+   * A client reads the hints to decide how hard to confirm before running a tool, so
+   * they are part of its contract — which is why #112 flipped bellman_evict's and why
+   * this one had to be flipped too (#119).
+   *
+   * The boolean is asserted WITH the two writes that make it false. On its own, the
+   * annotation case is satisfied by anyone who edits the annotation and the test
+   * together; the writes are what say the annotation has no choice.
+   */
+  it("is not read-only, because one preview leaves two writes behind", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    const joiner = await h.connect(DEV_KEY.peer);
+
+    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect(preview.isError, preview.text).toBe(false);
+
+    // Write 1: a durable record. It is what carries the seat the code named until
+    // bellman_confirm claims it (PendingConnect.roomRole), so it cannot be deferred
+    // to confirm without changing the handshake.
+    const pending = await h.store.takePendingConnect(String(preview.data.connect_token));
+    expect(pending, "the preview wrote a pending-connect record").toBeDefined();
+    expect(pending?.userId).toBe(joiner.identity.userId);
+
+    // Write 2: a row SOMEBODY ELSE reads. This is the one that settles it — an org
+    // seeing who previewed its rooms is the point of per-org audit, so the write is
+    // visible by design and no shaping of it can make the tool read-only.
+    const log = await creator.call("bellman_audit", { limit: 100 });
+    const actions = ((log.data.entries ?? []) as Array<{ action: string }>).map((e) => e.action);
+    expect(actions, "the preview is in the org's audit log").toContain("connect_previewed");
+
+    const { tools } = await joiner.listTools();
+    expect(tools.find((x) => x.name === "bellman_connect")?.annotations).toMatchObject({
+      readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+    });
+  });
+
+  it("is still the phase that commits nothing of the joiner's", async () => {
+    // What flipping the hint did NOT change, and the reason the flip was a cost worth
+    // weighing rather than free. Two-phase joining's whole pitch is that a preview
+    // discloses nothing of the caller's: the joiner is not a member, and its brief has
+    // not crossed. A later "fix" that made connect seat the member would satisfy every
+    // assertion above.
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    const sessionId = String(started.data.session_id);
+    const joiner = await h.connect(DEV_KEY.peer);
+
+    await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+
+    const session = await h.store.getSession(sessionId);
+    expect(session!.members.map((m) => m.userId), "no seat taken").toEqual([creator.identity.userId]);
+    // The control for the line below. A `not.toContain` over a serialised record is
+    // vacuous if the record is empty or the ids are not in it at all, so the positive
+    // case stands beside it: the creator's id IS there, and the joiner's is not.
+    expect(JSON.stringify(session)).toContain(creator.identity.userId);
+    expect(JSON.stringify(session)).not.toContain(joiner.identity.userId);
+  });
+});

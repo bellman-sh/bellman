@@ -421,7 +421,29 @@ The room's verbs are enforced by the server, so your_verbs is what your seat may
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
-        readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+        // `readOnlyHint` is FALSE, and this tool previews rather than joins (#119).
+        // It writes twice: a pending-connect record, which is what carries the seat
+        // the code named until bellman_confirm claims it, and a `connect_previewed`
+        // audit row. MCP defines the hint as "the tool does not modify its
+        // environment", and a durable token plus a row another caller reads are
+        // modifications. #112 settled how this repo resolves that: a documented
+        // exception to a boolean claim means the boolean is wrong.
+        //
+        // The cost is accepted, not overlooked. A host may put a confirmation in
+        // front of a preview that discloses nothing of the caller's, which is the
+        // opposite of what two-phase joining is for. It is tolerable because this
+        // is a ONE-SHOT the human already initiated — they were handed a join code
+        // out of band and asked for it to be used — so a prompt lands where the
+        // human is already present.
+        //
+        // That is also why bellman_sync's exception does not extend here. Sync
+        // keeps `readOnlyHint: true` over its own `lastSeenAt` write because it is
+        // an unattended poll called every few seconds, where a prompt would make
+        // the product unusable, and because its write can only keep the caller
+        // present. This one's audit row is read by somebody else: an org seeing who
+        // previewed its rooms is the point of per-org audit, so the write is
+        // visible by design and the claim cannot be rescued.
+        readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
     async ({ join_code }): Promise<ToolResult> => {
@@ -436,10 +458,12 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       // Seated, not active: a room held full by a session that died is
       // previewable rather than refused here and at every retry until its TTL
       // (#103). This only counts. The stale seat is reclaimed by the
-      // bellman_confirm that follows, so this tool stays as read-only as its
-      // annotation promises — a preview any holder of a join code can make,
-      // repeatedly, must not be able to remove anybody. A member on a socket is
-      // counted, because the confirm that follows will not reclaim it either.
+      // bellman_confirm that follows, so a preview removes nobody — which is the
+      // rule whether or not the annotation claims read-only (it no longer does,
+      // see #119 above): ANY holder of a join code can call this, repeatedly, and
+      // reaching a seat is bellman_confirm's authority and not a previewer's. A
+      // member on a socket is counted, because the confirm that follows will not
+      // reclaim it either.
       const connected = await s.connectedMembers(session.id);
       if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
         return fail("session is full.");

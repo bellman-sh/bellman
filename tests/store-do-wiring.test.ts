@@ -1169,11 +1169,28 @@ describe("fetch: websocket upgrade", () => {
       .toEqual({ memberIds: ["m1"], cursor: 2 });
   });
 
-  it("refuses a request that is not an upgrade", async () => {
+  it("refuses a request that is not an upgrade, and says what it wants", async () => {
     const { doi, ctx } = await world();
     const res = await doi.fetch(new Request("https://do/ws?cursor=0"));
     expect(res.status).toBe(426);
+    // The same 426 the route sends, from the same place (#132).
+    expect(res.headers.get("upgrade"), "the 426 names the protocol").toBe("websocket");
     expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("serves an upgrade whose token is not lowercase", async () => {
+    // The Worker builds this request and writes the header itself, so nothing reaches
+    // here cased or listed today. The rule is shared with the route rather than
+    // copied (src/upgrade.ts), and this is what holds this copy to it: a second
+    // comparison reintroduced here would pass every other case in this block.
+    const { doi, ctx } = await world();
+    const res = await doi.fetch(
+      new Request("https://do/ws?cursor=0", {
+        headers: { upgrade: "WebSocket", "x-bellman-members": "m1" },
+      }),
+    );
+    expect(res.status).toBe(101);
+    expect(ctx.sockets).toHaveLength(1);
   });
 
   it("accepts no socket when reading the missed events fails", async () => {
@@ -1271,6 +1288,47 @@ describe("fetch: websocket upgrade", () => {
 
     await expect(doi.fetch(upgrade(0, ids.join(",")))).rejects.toThrow("cannot be larger than 16384 bytes");
     expect(ctx.sockets).toHaveLength(0);
+  });
+
+  /**
+   * The recheck (#133). The Worker asked membersOf in a separate invocation and the
+   * input gate spans neither it nor the gap after it, so a close or the TTL can land
+   * between the authorization and the accept. fetch therefore asks `readsClosed`
+   * again for itself, and these rooms are what it sees when it does.
+   *
+   * worker-tests/ws-close-race.test.ts puts a real close in the real gap, through the
+   * real route. These are the method's own contract, and cheaper: both rules by which
+   * a room reads closed, and that the refusal happens before anything is read.
+   */
+  describe("a room that reads closed", () => {
+    const closedWorld = async (over: Partial<Session>) => {
+      const storage = fakeStorage({ session: currentRow(over), cursor: 0 });
+      const ctx = fakeCtx(storage);
+      return { doi: new storeDo.SessionDO(ctx as never, {} as never), ctx, storage };
+    };
+
+    const CASES = [
+      { what: "closed outright", over: { closed: true } },
+      { what: "past its TTL with the alarm still to come", over: { expiresAt: Date.now() - 1 } },
+    ];
+
+    it.each(CASES)("is refused 409 when it is $what", async ({ over }) => {
+      const { doi, ctx } = await closedWorld(over);
+      const res = await doi.fetch(upgrade(0));
+      expect(res.status).toBe(409);
+      expect((res as unknown as { webSocket?: unknown }).webSocket).toBeFalsy();
+      expect(ctx.sockets, "nothing accepted").toHaveLength(0);
+    });
+
+    it("refuses before it reads the events", async () => {
+      // The order the fix turns on: a refusal costs one get and no range scan, and
+      // a recheck placed after the read would pass the case above while still
+      // listing a closed room's whole history on every refused upgrade.
+      const { doi, storage } = await closedWorld({ closed: true });
+      const before = storage.lists;
+      expect(await doi.fetch(upgrade(0))).toHaveProperty("status", 409);
+      expect(storage.lists, "no event list on a refusal").toBe(before);
+    });
   });
 });
 
@@ -1390,12 +1448,18 @@ describe("wake: socket delivery", () => {
   });
 
   it("delivers session_expired over the socket too", async () => {
-    const storage = fakeStorage({
-      session: { ...currentRow(), expiresAt: Date.now() - 1 }, cursor: 0,
-    });
+    // The socket opens while the room is still live and the room lapses under it. It
+    // cannot be the other way round any more: fetch rechecks and refuses an upgrade
+    // onto a room that already reads closed (#133). This order is production's own —
+    // a watcher connects, and the TTL arrives beneath them — and it is the one that
+    // makes the case mean something, since a socket opened after the expiry would
+    // have nothing to be told.
+    const live = currentRow();
+    const storage = fakeStorage({ session: live, cursor: 0 });
     const ctx = fakeCtx(storage);
     const doi = new storeDo.SessionDO(ctx as never, {} as never);
     await doi.fetch(open(ctx, 0));
+    await storage.put("session", { ...live, expiresAt: Date.now() - 1 });
     await doi.alarm();
     expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
   });

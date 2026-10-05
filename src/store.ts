@@ -158,6 +158,33 @@ export function clearSilence(s: StoredSession, now: number): Member[] {
   return s.members.map((m) => (asked(s, m) ? { ...m, lastReportAt: now } : m));
 }
 
+/** What `appendEvent` already takes: an event without the fields the store fills. */
+export type EventBody = Omit<SessionEvent, "cursor" | "at">;
+
+/** What a removal did, reported from inside the transaction that did it. */
+export interface RemovalOutcome {
+  refused: "not_found" | "closed" | "frozen" | "forbidden" | null;
+  /** True only when THIS call recorded the member out. */
+  removed: boolean;
+  /** The role whose code this call retired, or null. */
+  codeRetired: string | null;
+}
+
+/** The guard and the writes a removal performs, handed in by its caller. */
+export interface RemovalRequest {
+  now: number;
+  /** Leaving a frozen room is never refused; eviction from one is. */
+  frozen: "allow" | "refuse";
+  /** When set, the call is refused unless it matches `session.createdBy`. */
+  byUserId?: string;
+  /** Written only if this call did the removing. */
+  event: EventBody;
+  /** Retire this role's code, and write this event, if the code is still live. */
+  retire?: { role: string; event: EventBody };
+  /** Queued in the same transaction and delivered by the outbox. */
+  audit: readonly AuditEntry[];
+}
+
 /**
  * What `seatMember` did. `refused` is null exactly when the member is seated.
  *
@@ -374,6 +401,36 @@ export interface BellmanStore {
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
+  /**
+   * Record a member out of a room, say so, and retire their seat's code — as ONE
+   * operation.
+   *
+   * It cannot be four calls, and it was. `leaveRoom` read `leftAt` and wrote it
+   * with an await between, so two calls on one handle both saw null and both
+   * announced (#117). `evictMember` checked `closed` and `frozenAt` against a
+   * snapshot and mutated afterwards, so a freeze landing in the window either
+   * wrote to a room whose writes had stopped or swallowed the event the bridge
+   * disarms its watcher on (#118). And a leave from a frozen room lost its event
+   * outright, because the public append refuses while frozen (#73).
+   *
+   * The caller hands the event bodies in. The store writes the record it was
+   * given and never asks what an event means — the constraint #147 set. The
+   * frozen refusal stays on `appendEvent`, which is a different operation: this
+   * one declares its own policy through `frozen`, so a leave records its
+   * departure in a frozen room without the store learning that `member_left` is
+   * special.
+   *
+   * `removed: false` with `refused: null` is the idempotent path: the member was
+   * already out. Nothing is written and nothing is queued, so a retry announces
+   * no second departure. Closing the room if it has emptied is NOT part of this —
+   * `closeSessionIfEmpty` makes that decision atomically on its own, and folding
+   * it in here would close over a member who joined in the gap.
+   */
+  removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome>;
   /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
@@ -720,6 +777,49 @@ export class MemoryStore implements BellmanStore {
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
     return { refused: null, reclaimed };
+  }
+
+  async removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    // No await from here to the last write, deliberately — the same rule, and
+    // the same reason, as seatMember and closeSessionIfEmpty. The Durable
+    // Objects store gets it from a transaction instead.
+    const none = { removed: false, codeRetired: null };
+    const s = this.sessions.get(sessionId);
+    if (!s) return { refused: "not_found", ...none };
+    if (s.closed) return { refused: "closed", ...none };
+    if (req.frozen === "refuse" && s.frozenAt !== null) return { refused: "frozen", ...none };
+    if (req.byUserId !== undefined && s.createdBy !== req.byUserId) {
+      return { refused: "forbidden", ...none };
+    }
+    const m = s.members.find((mm) => mm.memberId === memberId);
+    if (!m) return { refused: "not_found", ...none };
+    // Already out: the idempotent path. Writing nothing is the point of it.
+    if (!isActiveMember(m)) return { refused: null, ...none };
+
+    // One value for "there is a live door to shut", so nothing downstream has to
+    // re-derive it. Nothing prunes an expired record, so a code's presence in
+    // joinCodes is not the same as a door being open.
+    const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
+    const retiring = req.retire && rec && req.now <= rec.expiresAt
+      ? { role: req.retire.role, code: rec.code, event: req.retire.event }
+      : null;
+
+    m.leftAt = req.now;
+    this.appendNow(s, req.event);
+    if (retiring) {
+      this.byJoinCode.delete(retiring.code);
+      delete s.joinCodes[retiring.role];
+      this.appendNow(s, retiring.event);
+    }
+    // A falsy org names a stream nobody reads, and the Durable Objects store
+    // drops such an entry rather than file it, so this one does too.
+    this.recordAudit(req.audit.filter((e) => e.orgId));
+
+    return { refused: null, removed: true, codeRetired: retiring?.role ?? null };
   }
 
   /**

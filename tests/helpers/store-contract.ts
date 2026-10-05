@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore } from "../../src/store.js";
+import type { BellmanStore, EventBody } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
@@ -2155,6 +2155,228 @@ export function describeStoreContract(
       (await store.sweep(Date.now()));
       expect((await store.getSession(s.id))?.closed).toBe(false);
       expect((await store.takePendingConnect("qct_live"))).toBeDefined();
+    });
+
+    // ----------------------------------------------------- removing a member
+    const leaveEvent = (memberId: string): EventBody => ({
+      type: "member_left",
+      fromMemberId: memberId,
+      fromUserId: "u_jesse",
+      fromLabel: "jesse@codenerd",
+      payload: { label: "jesse@codenerd" },
+      refId: null,
+    });
+
+    const auditRow = (action: string) => ({
+      at: Date.now(),
+      orgId: "org_codenerd",
+      sessionId: "qs_test",
+      actorUserId: "u_jesse",
+      action,
+      detail: {},
+    });
+
+    it("removeMember records the member out, writes its event and queues its audit row", async () => {
+      const s = session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_left")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_left"]);
+    });
+
+    it("removeMember announces a departure from a frozen room, where appendEvent would not", async () => {
+      // #73. Freezing refuses sending, joining and inviting; it must never trap
+      // a member inside a room they want to leave, and the departure peers see
+      // is part of the leaving.
+      const s = session({
+        frozenAt: Date.now(),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        event: leaveEvent("m_peer"),
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
+      // The public append still refuses, because that is what stops a freeze
+      // landing between a tool's read and its write and letting a room grow.
+      expect(await store.appendEvent(s.id, leaveEvent("m_creator"))).toBeNull();
+    });
+
+    it("removeMember refuses a frozen room when the caller asked it to", async () => {
+      const s = session({
+        frozenAt: Date.now(),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        byUserId: "u_jesse",
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_evicted")],
+      });
+
+      expect(outcome).toEqual({ refused: "frozen", removed: false, codeRetired: null });
+    });
+
+    it("removeMember refuses a closed room even when frozen is allowed", async () => {
+      // "allow" is about the freeze and nothing else. A closed room is over, and
+      // writing a departure into it would reopen the question of what closed means.
+      const s = session({
+        closed: true,
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      expect(await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000, frozen: "allow", event: leaveEvent("m_peer"), audit: [],
+      })).toEqual({ refused: "closed", removed: false, codeRetired: null });
+    });
+
+    it("removeMember refuses a caller who did not create the room", async () => {
+      const s = session({
+        createdBy: "u_jesse",
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      expect(await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        byUserId: "u_someone_else",
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_evicted")],
+      })).toEqual({ refused: "forbidden", removed: false, codeRetired: null });
+    });
+
+    it("removeMember answers not_found for an unknown room and an unknown member", async () => {
+      const s = session({ members: [member({ memberId: "m_creator" })] });
+      await store.createSession(s);
+
+      expect(await store.removeMember("qs_nope", "m_creator", {
+        now: 1, frozen: "allow", event: leaveEvent("m_creator"), audit: [],
+      })).toEqual({ refused: "not_found", removed: false, codeRetired: null });
+
+      expect(await store.removeMember(s.id, "m_ghost", {
+        now: 1, frozen: "allow", event: leaveEvent("m_ghost"), audit: [],
+      })).toEqual({ refused: "not_found", removed: false, codeRetired: null });
+    });
+
+    /** Review Focus 2. */
+    it("removeMember writes and queues nothing for a member who is already out", async () => {
+      const s = session({
+        members: [
+          member({ memberId: "m_creator" }),
+          member({ memberId: "m_peer", userId: "u_peer", leftAt: 5_000 }),
+        ],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        event: leaveEvent("m_peer"),
+        audit: [auditRow("member_left")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      // The original stamp stands: a retry must not restate when they went.
+      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")?.leftAt)
+        .toBe(5_000);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    /** Review Focus 1. */
+    it("removeMember writes and queues nothing when it refuses", async () => {
+      const s = session({
+        closed: true,
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "allow",
+        event: leaveEvent("m_peer"),
+        retire: { role: "peer_b", event: leaveEvent("m_peer") },
+        audit: [auditRow("member_left")],
+      });
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
+      expect(fresh.joinCodes["peer_b"]?.code).toBe("BELL-LIVE-01");
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember retires a live code and writes its event, in the member's order", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: 9_000_000,
+        frozen: "refuse",
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },
+        audit: [auditRow("member_evicted")],
+      });
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      expect((await store.getSession(s.id))!.joinCodes["peer_b"]).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      // The member went, then the door shut — the order a person would tell it.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    /** Review Focus 3. */
+    it("removeMember does not retire a code that has already expired", async () => {
+      // Nothing prunes an expired record, so presence in joinCodes is not the
+      // same as a door being open. Retiring on presence alone announces a
+      // closing that already happened.
+      const s = session({
+        joinCodes: { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } },
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", {
+        now: Date.now(),
+        frozen: "refuse",
+        byUserId: "u_jesse",
+        event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+        retire: { role: "peer_b", event: { ...leaveEvent("m_peer"), type: "invite_revoked" } },
+        audit: [],
+      });
+
+      expect(outcome.removed).toBe(true);
+      expect(outcome.codeRetired).toBeNull();
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     });
   });
 }

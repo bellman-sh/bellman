@@ -6,7 +6,8 @@ import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, EventWrite, MemberPatch, SeatOutcome,
+  AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
+  SeatOutcome,
 } from "./store.js";
 import { connectedAmong, creditReport, isActiveMember, seatVictims } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -885,6 +886,91 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
     if (outcome.refused === null) await this.driver.reArm();
     return outcome;
+  }
+
+  async removeMember(
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    // `written` rides out of the closure so the wake can happen after the
+    // commit, the way appendEvent does it: nobody hears of an event that did
+    // not land. It is stripped before the result goes back over RPC.
+    const outcome = await this.ctx.storage.transaction<
+      RemovalOutcome & { written: SessionEvent[] }
+    >(async (txn) => {
+      const no = { removed: false, codeRetired: null, written: [] };
+      const s = await this.stored(txn);
+      if (!s) return { refused: "not_found" as const, ...no };
+      if (s.closed) return { refused: "closed" as const, ...no };
+      if (req.frozen === "refuse" && s.frozenAt !== null) {
+        return { refused: "frozen" as const, ...no };
+      }
+      if (req.byUserId !== undefined && s.createdBy !== req.byUserId) {
+        return { refused: "forbidden" as const, ...no };
+      }
+      const m = s.members.find((mm) => mm.memberId === memberId);
+      if (!m) return { refused: "not_found" as const, ...no };
+      // Already out: the idempotent path. Writing nothing is the point of it,
+      // and queueing nothing is the half an idempotency key could not cover.
+      if (!isActiveMember(m)) return { refused: null, ...no };
+
+      // One value for "there is a live door to shut". Nothing prunes an expired
+      // record, so a code's presence in joinCodes is not the same as a door
+      // being open, and retiring on presence announces a closing that already
+      // happened.
+      const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
+      const retiring = req.retire && rec && req.now <= rec.expiresAt
+        ? { role: req.retire.role, code: rec.code, event: req.retire.event }
+        : null;
+
+      const members = s.members.map(
+        (mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm)
+      );
+      const joinCodes = { ...s.joinCodes };
+      if (retiring) delete joinCodes[retiring.role];
+
+      // Written in this transaction's one put, not through appendEvent: the
+      // frozen refusal lives on the public append and stays there, because it is
+      // what stops a freeze landing between a tool's read and its write and
+      // letting a room grow. This operation declares its own policy through
+      // `frozen`. The store still never asks what an event means — it writes
+      // what it was given.
+      //
+      // The order is the one a person would tell it: the member went, then the
+      // door shut.
+      let cursor = await this.nextCursor(txn);
+      const at = Date.now();
+      const written: SessionEvent[] = [{ ...req.event, cursor, at }];
+      if (retiring) written.push({ ...retiring.event, cursor: ++cursor, at });
+
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9,
+      // runtime fact 4). It is filtered here, so a dead row never enters the
+      // queue, and again in #deliver, so one that arrives another way is dropped
+      // instead of misfiled.
+      const intents = req.audit.filter((e) => e.orgId).map(auditIntent);
+      const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
+      const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
+
+      await txn.put<unknown>({
+        session: { ...s, members, joinCodes },
+        ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
+        cursor,
+        ...rows,
+      });
+      return { refused: null, removed: true, codeRetired: retiring?.role ?? null, written };
+    });
+
+    const { written, ...result } = outcome;
+    // After the commit, never inside the closure: everything awaited in there
+    // holds every other call to this object until it commits, and reArm() reads
+    // stored(). A member leaving can take the last reporting seat with them, so
+    // the derived tick may have moved.
+    for (const e of written) this.#wake(e);
+    if (result.removed) {
+      await this.driver.deliverNow();
+      await this.driver.reArm();
+    }
+    return result;
   }
 
   // updateMember, closeSession and freezeSession below still read and then put.
@@ -2105,6 +2191,14 @@ export class DurableObjectStore implements BellmanStore {
         this.registry.indexMembership(member.userId, sessionId));
     }
     return seated;
+  }
+
+  async removeMember(
+    sessionId: string,
+    memberId: string,
+    req: RemovalRequest,
+  ): Promise<RemovalOutcome> {
+    return this.session(sessionId).removeMember(memberId, req);
   }
 
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {

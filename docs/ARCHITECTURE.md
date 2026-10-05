@@ -963,9 +963,17 @@ cover still goes through `audit()`. `bellman_confirm` was the filed case
 ([#116](../../../issues/116)): it committed a seat and then called
 `clearJoinCodes`, which is a second transaction in the same `SessionDO` and not
 a call to another object, and a failure there left the member seated with no
-event, no audit row and no `member_id` returned. The seating now retires a
-filled room's codes inside its own transaction, so nothing follows the seat that
-could fail it.
+event, no audit row and no `member_id` returned, and the room's codes still
+redeemable. This closed one half of that and not the other. The seating now
+retires a filled room's codes inside its own transaction, so a failure after the
+seat can no longer leave a filled room's codes live. What still follows the seat
+can fail it. After `seatMember` commits, `bellman_confirm` announces the members
+it reclaimed, appends `member_joined`, and writes the `brief_exchanged` audit row
+through `audit()`, which is the direct, unqueued write described above. A throw in
+any of them leaves the member seated with no `member_id` returned and the event or
+the row missing, and the connect token, which is single use and was consumed
+before the seat, cannot replay the call. That window is open, and #116 stays open
+for it.
 
 Two related classes, both of which have already bitten:
 

@@ -188,7 +188,7 @@ Delivery order follows the rule already in force: FIFO, a failing head blocks th
 rows behind it, retries back off to the five-minute cap. A removal that emits a
 `member_evicted` row and an `invite_revoked` row needs both, in that order.
 
-### 4. #116 — nothing new, just inside the transaction
+### 4. #116 — the half that fits inside the transaction
 
 `seatMember` already decides capacity inside its transaction, and `clearJoinCodes`
 already queues its registry drops through the outbox. So "clear the codes if this
@@ -196,13 +196,27 @@ seat filled the room" folds into `seatMember`'s existing closure: it is the same
 `driver.enqueue` call `clearJoinCodes` makes, against the codes the same closure
 can see.
 
-`SeatOutcome` gains `codesCleared: boolean`, so the handler announces what the
-store reports it did. `bellman_confirm` then makes no second-object call after the
-seat commits, and the failure described in #116 — a member in the room with no
-event, no audit row and no `member_id` returned — has no window left to happen in.
+`SeatOutcome` gains `codesCleared: boolean`, which says what the seating did: it
+filled the room and retired the codes the room held. The handler does not read it,
+and nothing announces a retired code. `SessionDO` reads it to decide whether the
+seating queued registry drops that want delivering, and the contract suite reads it
+to pin what a seating did. `bellman_confirm` then makes no call after the seat
+commits that clears codes, which closes one half of #116: a failure after the seat
+can no longer leave a filled room's codes live.
 
-This needs no new mechanism and no new store method, which is why it belongs in
-this PR rather than waiting for one.
+**It does not close the other half, and this PR does not claim to.** What follows
+the seat can still fail it. After `seatMember` commits, `bellman_confirm` announces
+the members it reclaimed (`announceReclaimed`), appends `member_joined`
+(`appendOrFrozen`), and writes the `brief_exchanged` audit row through `audit()`,
+which calls `AuditDO.append` directly with no intent id and no queue. A throw in
+any of them leaves what #116 describes: a member in the room with no event, no
+audit row and no `member_id` returned, and a connect token that is single use and
+was consumed before the seat, so the retry cannot replay it. #116 stays open for
+that half. Closing it needs those writes inside the seat's transaction or behind
+the outbox, which is a larger change than this one and is not in it.
+
+The half it does close needs no new mechanism and no new store method, which is
+why it belongs in this PR rather than waiting for one.
 
 ### 5. What stays in the handler
 
@@ -263,7 +277,7 @@ Four PRs on one branch. Group A is PR 1 and is what this spec designs.
 
 | PR | Closes | Shape |
 |---|---|---|
-| 1 | #73, #116, #117, #118 | This design |
+| 1 | #73, #117, #118, and the codes half of #116 | This design. #116 stays open for the other half: see §4 |
 | 2 | #124, #122, #74, #134 | Four small independent fixes; #124 and #122 each get a contract case |
 | 3 | #125, #120 | Measurement only. #120's first step is deciding whether the pool creates the window; if it does, it closes with a note on the stress test |
 | 4 | #123 | Only if PR 3's measurement warrants it; its own body says measure the drain first |

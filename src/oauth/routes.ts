@@ -9,10 +9,18 @@ import {
   isProviderName, isStableIdentityKey,
   type ProviderCredentials, type ProviderName, type ProviderProfile,
 } from "./providers.js";
-import { UNUSED_CLIENT_TTL_MS, type AuthStorage } from "./storage.js";
+import {
+  SESSION_TTL_MS, UNUSED_CLIENT_TTL_MS, replannedAt,
+  type AuthStorage, type PanelSession,
+} from "./storage.js";
+import {
+  clearedSessionCookie, clearedSigninNonce, readSessionCookie, readSigninNonce,
+  serializeSessionCookie, serializeSigninNonce,
+} from "./cookies.js";
+import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "./browser.js";
 import {
   ACCESS_TOKEN_TTL_SECONDS, AUTH_CODE_TTL_MS, REFRESH_TOKEN_TTL_MS, STATE_TTL_SECONDS,
-  canonicalResource, randomId, signJwt, verifyJwt, verifyPkce,
+  canonicalResource, randomId, signJwt, verifyJwt, verifyPkce, type Claims,
 } from "./tokens.js";
 
 /**
@@ -34,6 +42,15 @@ export interface OAuthConfig {
   store: AuthStorage;
   credentials: Partial<Record<ProviderName, ProviderCredentials>>;
   overrides?: Record<string, Identity>;
+  /**
+   * Origins the control panel is served from, e.g. ["https://dash.bellman.sh"].
+   *
+   * Absent or empty means no browser may hold a session: see allowedOrigin.
+   * Browser authentication is a capability this list grants, not a default the
+   * list restricts. Optional so that the Worker program keeps compiling between
+   * here and Task 10, which is where the value arrives.
+   */
+  panelOrigins?: string[];
   /**
    * Stripe Payment Links by name, e.g. { pro_monthly: "https://buy.stripe.com/…" }.
    * /upgrade/<name> signs the human in and sends them to the link tagged with
@@ -262,6 +279,7 @@ function storedIdentityKeys(stored: { identity_keys?: string[] }): string[] | nu
 
 const STATE_AUDIENCE = "bellman:authorize-state";
 const UPGRADE_AUDIENCE = "bellman:upgrade-state";
+const SESSION_AUDIENCE = "bellman:session-state";
 const SCOPE = "bellman";
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -317,6 +335,64 @@ interface AuthorizeRequest {
 function paymentLink(config: OAuthConfig, name: string): string | undefined {
   const links = config.paymentLinks;
   return links && Object.hasOwn(links, name) ? links[name] : undefined;
+}
+
+/** Carried through the provider round trip when signing in to the panel. */
+interface SessionRequest {
+  return_to: string;
+  /** Binds this sign-in to the browser that started it. See finishSession. */
+  nonce: string;
+}
+
+/**
+ * Constant-time string equality, for comparing a nonce against a cookie.
+ *
+ * `===` on strings can return as soon as two bytes differ, which leaks how much
+ * of a guess was right. Both values here are 32 random bytes in base64url, so a
+ * length difference is already a mismatch and comparing the whole of both costs
+ * nothing.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+/**
+ * Where to send a freshly-authenticated browser.
+ *
+ * The open redirect. `returnTo` reaches us inside a signed state, so it cannot
+ * have been altered mid-flow — but it was supplied by whoever started the flow,
+ * and that is not necessarily the person finishing it. So it is validated here
+ * too, on exact origin equality against the panel allowlist.
+ *
+ * Exact equality, not a prefix test: startsWith("https://dash.bellman.sh")
+ * admits "https://dash.bellman.sh.attacker.example".
+ *
+ * Parsing is not validation. `new URL("javascript:alert(1)")` succeeds, and its
+ * origin is the string "null" — so the origin comparison is what refuses it,
+ * not the parse. A relative path throws instead. Both land on the fallback.
+ *
+ * Anything unusable falls back to the first configured panel origin rather than
+ * erroring: a sign-in that completed should end somewhere the human can use.
+ */
+function panelDestination(returnTo: string | undefined, panelOrigins: string[]): string {
+  const fallback = panelOrigins[0];
+  if (!returnTo) return fallback;
+  let parsed: URL;
+  try {
+    parsed = new URL(returnTo);
+  } catch {
+    return fallback;
+  }
+  // `returnTo` unchanged, not `parsed.toString()`. This runs twice — once at
+  // /auth/signin to seal a usable destination into the state, and again in
+  // finishSession on the way out — and toString() normalises a bare origin to
+  // origin + "/", so the second pass would rewrite the first pass's answer.
+  // Returning the input makes it idempotent. The origin is what was validated;
+  // the path and query are the panel's business.
+  return panelOrigins.includes(parsed.origin) ? returnTo : fallback;
 }
 
 /** Carried through the provider round trip when signing in to pay. */
@@ -378,6 +454,118 @@ async function finishUpgrade(
   return Response.redirect(checkout.toString(), 302);
 }
 
+/**
+ * Verify a signed state blob against any of several audiences, and say which
+ * one matched.
+ *
+ * Connecting a client and signing in to pay share one provider round trip, so
+ * the hand-off and the callback must both accept either state, and only the
+ * callback has to know which it was: one ends at an authorization code, the
+ * other at Stripe. Returning the audience with the claims lets it dispatch on
+ * the answer rather than verify a second time to find out. A further audience
+ * is one more entry in each list.
+ */
+async function verifyState(
+  token: string,
+  config: Pick<OAuthConfig, "issuer" | "secret">,
+  audiences: readonly string[]
+): Promise<{ claims: Claims; audience: string } | null> {
+  for (const audience of audiences) {
+    const claims = await verifyJwt(token, config.secret, { issuer: config.issuer, audience });
+    if (claims) return { claims, audience };
+  }
+  return null;
+}
+
+/**
+ * Complete a panel sign-in: mint a session, set the cookie, send the browser on.
+ *
+ * The record carries identity_keys so the plan can be re-resolved later, the
+ * same way a refresh token does — see sessionCaller.
+ */
+async function finishSession(
+  request: Request,
+  url: URL,
+  name: ProviderName,
+  creds: ProviderCredentials,
+  pending: SessionRequest,
+  config: OAuthConfig
+): Promise<Response> {
+  const panels = config.panelOrigins ?? [];
+  const secure = new URL(config.issuer).protocol === "https:";
+  /**
+   * Every exit from here clears the nonce cookie. It is worth nothing after
+   * this request either way, and leaving a live one behind would let a second
+   * replay of the same state succeed.
+   */
+  const ending = (res: Response) => {
+    res.headers.append("set-cookie", clearedSigninNonce(secure));
+    return res;
+  };
+
+  if (panels.length === 0) {
+    return ending(html(`<h1>No control panel configured</h1><p>Nothing was signed in.</p>`, 503));
+  }
+
+  /**
+   * The state is signed, so it cannot have been altered — but a signature says
+   * nothing about WHO is presenting it. This is what makes the state
+   * non-replayable: the browser finishing the sign-in must be the one that
+   * started it, and only that browser has the nonce cookie.
+   *
+   * Compared before the code is exchanged, so a replay costs the attacker's
+   * code nothing and tells them nothing.
+   */
+  const presented = readSigninNonce(request, secure);
+  if (!presented || !pending.nonce || !timingSafeEqual(presented, pending.nonce)) {
+    return ending(html(
+      `<h1>That sign-in did not start here</h1>` +
+        `<p>Start it again from the control panel.</p>`,
+      400
+    ));
+  }
+
+  const code = url.searchParams.get("code");
+  if (!code) {
+    return ending(html(`<h1>Sign-in did not complete</h1><p>No authorization code came back. Start again.</p>`, 400));
+  }
+
+  let resolved: Awaited<ReturnType<typeof resolvePlan>>;
+  try {
+    const profile = await PROVIDERS[name].exchange(
+      creds, code, `${config.issuer}/callback/${name}`, config.fetchImpl
+    );
+    resolved = await resolvePlan(profile, config);
+  } catch (err) {
+    console.error(`${name} sign-in for the panel failed:`, err);
+    return ending(html(`<h1>Sign-in failed</h1><p>Start again from the control panel.</p>`, 502));
+  }
+
+  const now = Date.now();
+  const id = randomId();
+  await config.store.putSession(id, {
+    identity: resolved.identity,
+    plan_source: resolved.source,
+    identity_keys: resolved.keys,
+    created_at: now,
+    last_used_at: now,
+    replanned_at: now,
+    expires_at: now + SESSION_TTL_MS,
+  });
+
+  return ending(new Response(null, {
+    status: 302,
+    headers: {
+      location: panelDestination(pending.return_to, panels),
+      "set-cookie": serializeSessionCookie(id, secure, Math.floor(SESSION_TTL_MS / 1000)),
+      "cache-control": "no-store",
+      // This response's own URL holds the provider's authorization code, and it
+      // must not be handed on to the panel in a Referer.
+      "referrer-policy": "no-referrer",
+    },
+  }));
+}
+
 export async function handleOAuth(
   request: Request,
   config: OAuthConfig
@@ -385,6 +573,20 @@ export async function handleOAuth(
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "") || "/";
   const method = request.method;
+
+  /**
+   * The paths the panel reaches with fetch, and the only ones that get CORS.
+   *
+   * Not /mcp: MCP clients are not browsers, and a CORS surface there invites a
+   * browser to try. Not /admin: see the branch below. Not /auth/signin or
+   * /callback/:provider, which are navigations and never subject to the
+   * same-origin policy.
+   */
+  const browserPath = path === "/auth/session" || path === "/auth/signout" || path === "/account";
+
+  if (method === "OPTIONS" && browserPath) {
+    return preflightResponse(allowedOrigin(request, config.panelOrigins));
+  }
 
   // ------------------------------------------------------------- discovery
   if (method === "GET" && path.startsWith("/.well-known/oauth-protected-resource")) {
@@ -559,6 +761,118 @@ export async function handleOAuth(
     );
   }
 
+  // -------------------------------------------------------- /auth/signin
+  // The panel's sign-in. Same provider hand-off as /authorize and /upgrade;
+  // what differs is only where it ends — a cookie rather than an authorization
+  // code or a Stripe redirect.
+  if (method === "GET" && path === "/auth/signin") {
+    const panels = config.panelOrigins ?? [];
+    if (panels.length === 0) {
+      return html(
+        `<h1>No control panel configured</h1>` +
+          `<p>This Bellman server has no panel origin set, so it cannot start a browser session.</p>`,
+        503
+      );
+    }
+    const available = (Object.keys(PROVIDERS) as ProviderName[]).filter((name) => config.credentials[name]);
+    if (available.length === 0) {
+      return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
+    }
+    // Validated now as well as on the way out. Sealing an unusable destination
+    // into a signed blob and discovering it after the provider round trip is a
+    // worse error message for the same outcome.
+    // Binds this sign-in to this browser. Without it the signed state is a
+    // bearer credential anyone can replay: an attacker completes the provider
+    // half as themselves, keeps the callback URL, and gets a victim to open it
+    // — the callback then mints a session for the ATTACKER's account and sets
+    // it in the VICTIM's browser, who goes on using the panel believing the
+    // account is theirs. SameSite=Lax does not help, because the callback is a
+    // top-level GET navigation, which is the case Lax deliberately allows.
+    const nonce = randomId();
+    const pending: SessionRequest = {
+      return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
+      nonce,
+    };
+    const stateToken = await signJwt(
+      { iss: config.issuer, sub: "session", aud: SESSION_AUDIENCE, bellman: pending as never },
+      config.secret,
+      STATE_TTL_SECONDS
+    );
+    const buttons = available
+      .map((name) => `<a class="btn" href="/authorize/${name}?req=${encodeURIComponent(stateToken)}">Continue with ${PROVIDERS[name].displayName}</a>`)
+      .join("");
+    const page = html(
+      `<h1>Sign in to Bellman</h1>` +
+        `<p>Use the account your rooms belong to.</p>` +
+        buttons
+    );
+    page.headers.append(
+      "set-cookie",
+      serializeSigninNonce(nonce, new URL(config.issuer).protocol === "https:", STATE_TTL_SECONDS)
+    );
+    return page;
+  }
+
+  // ------------------------------------------------------- /auth/session
+  // What the panel calls on boot: who am I, or 401.
+  if (method === "GET" && path === "/auth/session") {
+    const origin = allowedOrigin(request, config.panelOrigins);
+    const who = await caller(request, config);
+    if (!who) {
+      // No WWW-Authenticate. It exists to tell an OAuth client where discovery
+      // starts (RFC 9728), and a browser cannot act on it — the panel's answer
+      // to a 401 is to show a link to /auth/signin.
+      return json({ error: "not_signed_in" }, 401, corsHeaders(origin));
+    }
+    const { identity } = who;
+    // The identity and nothing that costs a second store read. /account adds
+    // entitlements and this month's usage, which is a round trip to the
+    // registry; the panel's render-or-sign-in decision needs neither.
+    return json(
+      {
+        user_id: identity.userId,
+        label: identity.label,
+        plan: identity.plan,
+        role: identity.role,
+        org_id: identity.orgId,
+      },
+      200,
+      corsHeaders(origin)
+    );
+  }
+
+  // ------------------------------------------------------- /auth/signout
+  if (path === "/auth/signout") {
+    const origin = allowedOrigin(request, config.panelOrigins);
+    if (method !== "POST") {
+      return new Response("Method not allowed", {
+        status: 405,
+        headers: { allow: "POST", ...corsHeaders(origin) },
+      });
+    }
+    const refusal = csrfRefusal(request, "cookie", origin);
+    if (refusal) return refusal;
+
+    const secure = new URL(config.issuer).protocol === "https:";
+    const id = readSessionCookie(request, secure);
+    // Best effort, and deliberately not conditional on the record existing.
+    // Signing out must never fail: the recourse when it does is to leave the
+    // session open, which is the opposite of what was asked for.
+    if (id) {
+      await config.store
+        .deleteSession(id)
+        .catch((err) => console.error("could not delete a panel session:", err));
+    }
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "set-cookie": clearedSessionCookie(secure),
+        "cache-control": "no-store",
+        ...corsHeaders(origin),
+      },
+    });
+  }
+
   // ------------------------------------------- hand off to a provider
   const startMatch = /^\/authorize\/([a-z]+)$/.exec(path);
   if (method === "GET" && startMatch) {
@@ -568,12 +882,10 @@ export async function handleOAuth(
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
     const req = url.searchParams.get("req") ?? "";
-    // Either audience: the same provider hand-off serves connecting a client
-    // and signing in to pay, and only the callback needs to tell them apart.
-    const claims =
-      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE })) ??
-      (await verifyJwt(req, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE }));
-    if (!claims) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
+    // Every audience reaches the same hand-off; only the callback needs to tell
+    // them apart.
+    const state = await verifyState(req, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE, SESSION_AUDIENCE]);
+    if (!state) return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
 
     return Response.redirect(
       PROVIDERS[name].authorizeUrl(creds, `${config.issuer}/callback/${name}`, req),
@@ -589,16 +901,20 @@ export async function handleOAuth(
     const creds = config.credentials[name];
     if (!creds) return oauthError("invalid_request", `${name} sign-in is not configured`, 503);
 
-    const state = url.searchParams.get("state") ?? "";
-    const claims = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: STATE_AUDIENCE });
-    if (!claims) {
-      // An upgrade came back through the same callback; it ends at Stripe
-      // rather than at an authorization code.
-      const upgrade = await verifyJwt(state, config.secret, { issuer: config.issuer, audience: UPGRADE_AUDIENCE });
-      if (upgrade) return finishUpgrade(url, name, creds, upgrade.bellman as unknown as UpgradeRequest, config);
+    const stateToken = url.searchParams.get("state") ?? "";
+    const state = await verifyState(stateToken, config, [STATE_AUDIENCE, UPGRADE_AUDIENCE, SESSION_AUDIENCE]);
+    if (!state) {
       return html(`<h1>This sign-in link expired</h1><p>Start the connection again.</p>`, 400);
     }
-    const pending = claims.bellman as unknown as AuthorizeRequest;
+    if (state.audience === SESSION_AUDIENCE) {
+      return finishSession(request, url, name, creds, state.claims.bellman as unknown as SessionRequest, config);
+    }
+    if (state.audience === UPGRADE_AUDIENCE) {
+      // An upgrade came back through the same callback; it ends at Stripe
+      // rather than at an authorization code.
+      return finishUpgrade(url, name, creds, state.claims.bellman as unknown as UpgradeRequest, config);
+    }
+    const pending = state.claims.bellman as unknown as AuthorizeRequest;
 
     const upstreamError = url.searchParams.get("error");
     const code = url.searchParams.get("code");
@@ -731,11 +1047,20 @@ export async function handleOAuth(
   // What a signed-in human can see about themselves: who they are, what plan,
   // where that plan came from, and how much of the monthly quota is left.
   if (method === "GET" && path === "/account") {
+    const origin = allowedOrigin(request, config.panelOrigins);
     const who = await caller(request, config);
     if (!who) {
       return new Response("Sign in to see your account.", {
         status: 401,
-        headers: { ...unauthorizedHeaders(config), "content-type": "text/plain" },
+        headers: {
+          // unauthorizedHeaders stays: /account is reached by bearer clients
+          // too, and RFC 9728 discovery is what one of those needs.
+          // /auth/session is the browser-only endpoint, and that is where the
+          // header is omitted.
+          ...unauthorizedHeaders(config),
+          "content-type": "text/plain",
+          ...corsHeaders(origin),
+        },
       });
     }
     const { identity, planSource } = who;
@@ -755,7 +1080,9 @@ export async function handleOAuth(
         remaining: Math.max(limits.monthlyCreates - used, 0),
       },
     };
-    if ((request.headers.get("accept") ?? "").includes("application/json")) return json(account);
+    if ((request.headers.get("accept") ?? "").includes("application/json")) {
+      return json(account, 200, corsHeaders(origin));
+    }
 
     const row = (k: string, v: string) => `<tr><th>${escape(k)}</th><td>${escape(v)}</td></tr>`;
     return html(
@@ -780,6 +1107,28 @@ export async function handleOAuth(
   if (path === "/admin/grants") {
     const who = await caller(request, config);
     if (!who) return oauthError("invalid_token", "sign in first", 401);
+    /**
+     * Bearer only, and deliberately not a role check.
+     *
+     * The writes below gate on planSource === "operator", so a cookie that
+     * carried it would be an operator bit on the customer session — the thing
+     * #61 rules out, even though the endpoint is itself org-scoped. Operator
+     * authority derives from deploy access, and converting "can deploy" into
+     * "holds a session cookie" is a strictly weaker credential for the one
+     * account whose compromise is every customer's problem rather than one
+     * customer's.
+     *
+     * No CORS either, so a browser cannot read this refusal — there is nothing
+     * here for the panel to do with it. When #53-#58 build the org-admin UI,
+     * that is the point to design a cookie-reachable admin surface on purpose.
+     */
+    if (who.via === "cookie") {
+      return oauthError(
+        "invalid_token",
+        "this endpoint requires a bearer token, not a browser session",
+        401
+      );
+    }
     const { identity } = who;
     if (!entitlementsFor(identity).audit || identity.role !== "admin" || !identity.orgId) {
       return oauthError("insufficient_scope", "granting plans requires a team admin", 403);
@@ -923,22 +1272,103 @@ export async function handleOAuth(
   return undefined;
 }
 
-/** Identify the caller from an access token. Bearer keys are for /mcp, not here. */
+/**
+ * Who is calling, and how.
+ *
+ * Bearer first, then a session cookie. `via` is the only thing a consumer
+ * learns beyond the identity, and only the CSRF check and /admin read it —
+ * everything else sees an Identity and cannot tell the two apart, which is what
+ * keeps the authorization rules in one place.
+ */
 async function caller(
   request: Request,
   config: OAuthConfig
-): Promise<{ identity: Identity; planSource: string } | null> {
+): Promise<{ identity: Identity; planSource: string; via: "bearer" | "cookie" } | null> {
   const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
-  if (!bearer) return null;
-  const claims = await verifyJwt(bearer, config.secret, {
-    issuer: config.issuer,
-    audience: config.resource,
-  });
-  if (!claims) return null;
-  return {
-    identity: claims.bellman,
-    planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
-  };
+  if (bearer) {
+    const claims = await verifyJwt(bearer, config.secret, {
+      issuer: config.issuer,
+      audience: config.resource,
+    });
+    if (!claims) return null;
+    return {
+      identity: claims.bellman,
+      planSource: String((claims as Record<string, unknown>).plan_source ?? "default"),
+      via: "bearer",
+    };
+  }
+  return sessionCaller(request, config);
+}
+
+/**
+ * The cookie half, including re-resolving the plan.
+ *
+ * The record holds the identity captured at sign-in, and a session lives seven
+ * days — so without re-resolution a grant revoked on day one would keep
+ * applying for six more. replanOnRefresh is the function for it: it is the one
+ * that already re-derives a plan from stored keys rather than a provider
+ * profile, and its rules carry over intact, including that it consults only
+ * immutableKeys so an address that has changed hands since sign-in cannot
+ * resolve a stranger's plan onto this session.
+ *
+ * The bound is ACCESS_TOKEN_TTL_SECONDS deliberately: the same staleness a
+ * bearer token already has on /mcp. One number for the system rather than two,
+ * and a revoked grant cannot outlive on the panel what it outlives on the tool
+ * surface.
+ */
+async function sessionCaller(
+  request: Request,
+  config: OAuthConfig
+): Promise<{ identity: Identity; planSource: string; via: "cookie" } | null> {
+  // The allowlist is what grants browser authentication at all. Without this a
+  // deploy that forgot BELLMAN_PANEL_ORIGINS would still accept cookies while
+  // serving no CORS — a session usable by anything that is not a browser.
+  if (!config.panelOrigins?.length) return null;
+
+  const secure = new URL(config.issuer).protocol === "https:";
+  const id = readSessionCookie(request, secure);
+  if (!id) return null;
+
+  const now = Date.now();
+  const stored = await config.store.touchSession(id, now);
+  if (!stored) return null;
+
+  if (now - replannedAt(stored) <= ACCESS_TOKEN_TTL_SECONDS * 1000) {
+    return { identity: stored.identity, planSource: stored.plan_source, via: "cookie" };
+  }
+
+  const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
+  // Written back so the next request inside the window is served from the
+  // record rather than re-resolving again.
+  //
+  // replanSession, not putSession. Re-resolving can await the registry, so a
+  // sign-out can land between the touch above and this write, and putSession
+  // would write `stored` back whole and recreate the session the human just
+  // ended. replanSession merges the three fields into what is stored now and
+  // does nothing if the record is gone. Merging also leaves alone a
+  // last_used_at that another request bumped in the same gap, which a
+  // whole-record write would revert.
+  //
+  // Its answer is acted on. False means the record is gone, because the human
+  // signed out or the session was swept as dead, and either way there is no
+  // session, so this request is refused rather than finished. It began before
+  // the sign-out, and letting an in-flight request finish is ordinary
+  // elsewhere, but the reason to store a session at all is that sign-out takes
+  // effect now, and one more authenticated response after it gives that back.
+  // The window is small: this path runs about once per ACCESS_TOKEN_TTL_SECONDS
+  // per session.
+  //
+  // A write that fails is a different thing. It costs a repeated
+  // re-resolution, not a wrong answer, and says nothing about whether the
+  // session is still there, so it must not cost the human their session.
+  let merged = true;
+  try {
+    merged = await config.store.replanSession(id, current.identity, current.source, now);
+  } catch (err) {
+    console.error("could not store a re-resolved panel session:", err);
+  }
+  if (!merged) return null;
+  return { identity: current.identity, planSource: current.source, via: "cookie" };
 }
 
 async function issueTokens(

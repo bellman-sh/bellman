@@ -51,6 +51,7 @@ beforeEach(() => {
     },
     overrides: {},
     plans: new MemoryStore(),
+    paymentLinks: { pro_monthly: "https://buy.stripe.com/test_link" },
     fetchImpl: fakeFetch,
   };
 });
@@ -309,6 +310,23 @@ describe("the full flow", () => {
 
     expect(forged.status).toBe(400);
     expect(forged.headers.get("location")).toBeNull();
+  });
+
+  it("accepts an upgrade state at the provider hand-off, not only an authorize state", async () => {
+    // Both audiences reach /authorize/:provider, but upgradeThrough (in "signing
+    // in to pay") goes from the chooser straight to /callback/:provider, so
+    // nothing else in this file sends an upgrade state through the hand-off. If
+    // it stopped accepting one, every other test would pass while a buyer was
+    // told their sign-in link had expired.
+    const chooser = await call("/upgrade/pro_monthly");
+    const req = decodeURIComponent(
+      /href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]
+    );
+
+    const handoff = await call(`/authorize/github?req=${encodeURIComponent(req)}`);
+
+    expect(handoff.status).toBe(302);
+    expect(handoff.headers.get("location")).toContain("github.com/login/oauth/authorize");
   });
 
   it("rejects an unsupported grant", async () => {

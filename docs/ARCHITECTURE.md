@@ -663,6 +663,47 @@ sequenceDiagram
 The invariants that encode this, and that any change has to argue against out
 loud:
 
+- **The control panel holds a cookie, not a token** — `dash.bellman.sh` renders
+  billing and provider keys, so a token in web storage there would turn any XSS
+  into account takeover. The panel authenticates with an `HttpOnly` cookie it
+  cannot read: 32 random bytes over a `PanelSession` record in `AuthDO`, so
+  `POST /auth/signout` invalidates rather than clearing the browser's copy. It
+  resolves through the same `caller` seam a bearer token does, and the stored
+  plan is re-resolved on the access token's own staleness bound, so a revoked
+  grant cannot outlive on the panel what it outlives on `/mcp`.
+
+  The cookie is `__Host-`-prefixed, which makes the browser refuse a sibling
+  subdomain's attempt at the exact name — without it, anything on
+  `*.bellman.sh` could set this name with a `Domain` and the browser would send
+  both copies in an order RFC 6265 leaves unspecified. The prefix covers the
+  exact name only; `trimOws` in `src/oauth/cookies.ts` is what refuses the
+  near-misses, and loosening it to `String.prototype.trim` removes that half of
+  the protection — a padded name then passes for the protected one, measured in
+  Chrome 153 through workerd.
+
+  **A panel sign-in is bound to the browser that started it.** The signed state
+  proves nobody altered it and says nothing about who presents it, so
+  `/auth/signin` also mints a nonce, seals it in the state, and sets it in a
+  short-lived `__Host-bellman_signin` cookie that the callback compares in
+  constant time. Without that, an attacker completes the provider half as
+  themselves and hands a victim the callback URL, and the victim ends up signed
+  in to the attacker's account. `SameSite=Lax` does not help: the callback is a
+  top-level GET navigation, the one case Lax allows.
+
+  **The cookie carries tenant-scoped identity only.** `Identity` has no operator
+  field, and `role: "admin"` is admin of an org. `/admin/*` refuses a cookie
+  outright rather than checking a role, because its writes gate on
+  `planSource === "operator"` — operator authority derives from deploy access, a
+  Worker secret, and a browser session is a strictly weaker credential for the
+  one account whose compromise is every customer's problem.
+
+  **CSRF is an `Origin` check, not a token.** `SameSite=Lax` blocks cross-site
+  forgery, but SameSite is evaluated on the registrable domain — so `bellman.sh`
+  is same-site with `mcp.bellman.sh`, and an XSS on the marketing site would
+  otherwise POST here with the cookie attached. Every cookie-authenticated
+  mutation must carry an allowlisted `Origin`; bearer callers are exempt, and
+  the method guard and the CSRF check both run ahead of any deletion.
+
 - **Peer content crosses wrapped** — `{ trust: "untrusted", origin, data }`
   behind a warning preamble, all the way into the model's context. The room
   socket ([two delivery paths](#two-delivery-paths)) sends the bare event

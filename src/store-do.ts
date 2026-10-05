@@ -908,7 +908,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         session: { ...s, members: seated, joinCodes: full ? {} : s.joinCodes },
         ...rows,
       });
-      return { refused: null, reclaimed, codesCleared: full };
+      // What the call did, and not only whether the room filled: a room that fills
+      // with no code left in it queued nothing, so there is nothing to deliver.
+      return { refused: null, reclaimed, codesCleared: codes.length > 0 };
     });
     // After the commit, never inside the closure: everything awaited in there holds
     // every other call to this object until it commits. Delivery first, then the

@@ -578,6 +578,28 @@ export function describeStoreContract(
       expect(after.joinCodes, "the door is untouched").toEqual(doors);
     });
 
+    it("seatMember reports no codes cleared when the room fills holding none", async () => {
+      // The flag says what the call did. A room that fills with no code left in it had
+      // nothing to retire: no registry write is owed, and a caller reading
+      // `codesCleared` must not conclude that a door was shut.
+      const s = session({
+        maxMembers: 2,
+        joinCodes: {},
+        members: [member({ memberId: "m_creator" })],
+      });
+      await store.createSession(s);
+      expect((await store.getSession(s.id))!.joinCodes, "control: the room holds no code").toEqual({});
+
+      const outcome = await store.seatMember(s.id, late(), 1, 9_000_000);
+
+      expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+      expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+      // The premise: the room did fill. Otherwise false here would mean "not full",
+      // which the spare-seat case already pins, and this case would say nothing new.
+      const further = member({ memberId: "m_later", userId: "u_later", roomRole: "peer_b" });
+      expect((await store.seatMember(s.id, further, 1, 9_000_000)).refused).toBe("full");
+    });
+
     // A refusal retires nothing. The clearing sits in the same closure as the guards,
     // and a store that decided the room was full before looking at them, or that
     // retired the codes of a room it then refused, would pass every case above. Each

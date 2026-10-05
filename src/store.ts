@@ -204,17 +204,18 @@ export interface RemovalRequest {
  * seats refuses "full" and removes nobody: a partial reap would remove a member
  * for a joiner that never got in.
  *
- * `codesCleared` says the seating filled the room, so every code it held was retired
- * in the same operation that seated the member; a room that held none reports it too.
- * It is false for every refusal, which writes nothing. "Filled" means a further
- * joiner would be refused, with no free seat and none reclaimable, which is not the
- * same as every seat being occupied: a stale seat is occupied and still reclaimable,
- * so a room holding one keeps its codes.
+ * `codesCleared` says what the seating did: it filled the room and retired the codes
+ * the room held, in the same operation that seated the member. A room that fills with
+ * no code left in it reports false, because nothing was cleared, and so does every
+ * refusal, which writes nothing. "Filled" means a further joiner would be refused,
+ * with no free seat and none reclaimable, which is not the same as every seat being
+ * occupied: a stale seat is occupied and still reclaimable, so a room holding one
+ * keeps its codes.
  */
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
   reclaimed: Member[];
-  /** The seating filled the room, so every role's code was retired with it. */
+  /** The seating filled the room and retired the codes it held. False when it held none. */
   codesCleared: boolean;
 }
 
@@ -415,13 +416,13 @@ export interface BellmanStore {
    * needs would remove a member for somebody who never got in.
    *
    * When the seat it took fills the room, it also retires every role's join code,
-   * and `codesCleared` says so. That was `bellman_confirm`'s second call, made once
-   * the seat had committed with nothing spanning the two, and a failure there left
-   * the member in the room with no event, no audit row and no member_id returned,
-   * and a connect token that is single use and so could not replay (#116). "Fills"
-   * means a further joiner would be refused, which is `seatVictims` answering null
-   * once this member is in: not a count of undeparted members, because a stale seat
-   * is occupied and still reclaimable.
+   * and `codesCleared` says whether there was one to retire. That was
+   * `bellman_confirm`'s second call, made once the seat had committed with nothing
+   * spanning the two, and a failure there left the member in the room with no event,
+   * no audit row and no member_id returned, and a connect token that is single use
+   * and so could not replay (#116). "Fills" means a further joiner would be refused,
+   * which is `seatVictims` answering null once this member is in: not a count of
+   * undeparted members, because a stale seat is occupied and still reclaimable.
    */
   seatMember(
     sessionId: string,
@@ -820,11 +821,14 @@ export class MemoryStore implements BellmanStore {
     // reclaimable, so a room with one still has a door worth leaving open, and
     // counting would have retired its code.
     const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
+    const codes = full ? Object.values(s.joinCodes) : [];
     if (full) {
-      for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+      for (const rec of codes) this.byJoinCode.delete(rec.code);
       s.joinCodes = {};
     }
-    return { refused: null, reclaimed, codesCleared: full };
+    // What the call did, and not only whether the room filled: a room that fills
+    // with no code left in it had nothing to retire.
+    return { refused: null, reclaimed, codesCleared: codes.length > 0 };
   }
 
   async removeMember(

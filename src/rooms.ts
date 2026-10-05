@@ -604,13 +604,27 @@ export async function evictMember(
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
 
+  // Authority before anything the room would say about itself. The refusals below
+  // name a member that is not there and a handle that is the caller's, and a caller
+  // who did not create this room must read neither. `bellman_evict` takes the
+  // target's member_id and no handle of the caller's, so nothing in the call shows the
+  // caller is in the room at all: "no member with that member_id is in this room"
+  // would tell anyone holding a session id which ids it holds, and the refusal for
+  // evicting oneself would tell them which are theirs. The store checks the same
+  // thing again, because the removal's guards live there and every caller of
+  // removeMember gets them. The creator never changes, so the two cannot disagree on
+  // a real room; this check is what decides what a caller is told.
+  if (session.createdBy !== actor.userId) {
+    return refuse("forbidden", "only the person who created this room can remove a member from it.");
+  }
+
   // A direct lookup, NOT findMember: that helper requires the handle to belong
   // to the caller, which is the one thing eviction has to do differently. Read
   // here to say WHICH refusal the caller reads and to build the rows. The two
   // checks made on this read are of facts that cannot change under it: a member's
   // record is never deleted and its user never changes. The room closing and a
-  // freeze can, so those guards, and the creator check beside them, are inside
-  // removeMember, where a freeze landing in this gap cannot slip past them (#118).
+  // freeze can, so those guards are inside removeMember, where a freeze landing in
+  // this gap cannot slip past them (#118).
   const target = session.members.find((m) => m.memberId === targetMemberId);
   if (!target) return refuse("not_found", "no member with that member_id is in this room.");
   if (target.userId === actor.userId) {
@@ -623,9 +637,11 @@ export async function evictMember(
   const outcome = await store.removeMember(sessionId, targetMemberId, {
     now: Date.now(),
     frozen: "refuse",
-    // The caller. The store refuses unless this is the room's creator, so passing
-    // `session.createdBy` here would compare the creator with itself and refuse
-    // nobody.
+    // The caller, so that the store's creator guard is a real one: passing
+    // `session.createdBy` would compare the creator with itself and refuse nobody.
+    // The check above has already turned away anyone else, so on a real room this guard
+    // does not fire from here. It is the second belt, and it is what guards a removal
+    // wherever the removal is asked from.
     byUserId: actor.userId,
     event: {
       type: "member_evicted",

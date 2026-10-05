@@ -529,6 +529,84 @@ describe("evictMember", () => {
     expect(r.code).toBe("forbidden");
   });
 
+  // Authority comes before anything the room would say about itself. bellman_evict
+  // takes the target's member_id and no handle of the caller's, so nothing in the call
+  // shows the caller is in the room: someone holding only its session id must not be
+  // able to tell which member ids it holds, nor which handles are theirs. The answer
+  // is the same refusal whatever they name, and it is the creator's reason, not the
+  // member lookup's or the self-check's.
+  describe("a caller who did not create the room", () => {
+    const creatorOnly = "only the person who created this room can remove a member from it.";
+    const stranger: Identity = {
+      userId: "u_stranger", orgId: "org_other", plan: "free", role: "member", label: "stranger@other",
+    };
+    /** The creator, and `peer` seated beside them as m_peer. */
+    const peopledRoom = () => session({
+      maxMembers: 4,
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
+    });
+
+    it("is refused for the creator's reason when the member_id names nobody", async () => {
+      await store.createSession(peopledRoom());
+
+      // One who is in the room and one who is not: neither is told the id is unknown.
+      for (const who of [peer, stranger]) {
+        const r = await evictMember(store, who, "qs_test", "m_ghost");
+
+        expect(r.ok, who.userId).toBe(false);
+        if (r.ok) return;
+        expect(r.code, who.userId).toBe("forbidden");
+        expect(r.reason, `${who.userId} must not read the member lookup's refusal`).toBe(creatorOnly);
+      }
+    });
+
+    it("is refused for the creator's reason when the member_id is their own handle", async () => {
+      await store.createSession(peopledRoom());
+
+      const r = await evictMember(store, peer, "qs_test", "m_peer");
+
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.code).toBe("forbidden");
+      expect(r.reason, "must not read the self-check's refusal, which says the handle is theirs").toBe(creatorOnly);
+    });
+
+    it("is told the same whether the member_id is the creator's, nobody's or their own", async () => {
+      await store.createSession(peopledRoom());
+
+      const answers = await Promise.all(
+        ["m_creator", "m_ghost", "m_peer"].map((id) => evictMember(store, peer, "qs_test", id)),
+      );
+
+      expect(answers).toEqual(Array(3).fill({ ok: false, code: "forbidden", reason: creatorOnly }));
+    });
+
+    // The handler's check and the store's are one question asked twice, and the creator
+    // never changes, so on a real room the store's never fires from here. This makes
+    // them disagree on purpose: the handler's read takes the caller for the creator, and
+    // the store, which reads for itself, does not. If the request stopped carrying the
+    // caller to the store, the second belt would be unfastened and nothing else would say so.
+    it("has the store refuse a non-creator the handler's read took for the creator", async () => {
+      await store.createSession(peopledRoom());
+      const read = store.getSession.bind(store);
+      vi.spyOn(store, "getSession").mockImplementationOnce(async (id) => {
+        const seen = await read(id);
+        expect(seen?.createdBy, "control: the room really belongs to someone else").toBe("u_jesse");
+        return seen && { ...seen, createdBy: peer.userId };
+      });
+
+      const r = await evictMember(store, peer, "qs_test", "m_creator");
+
+      expect(r.ok, JSON.stringify(r)).toBe(false);
+      if (r.ok) return;
+      expect(r.code).toBe("forbidden");
+      expect(r.reason).toBe(creatorOnly);
+      const after = (await store.getSession("qs_test"))!;
+      expect(after.members.find((m) => m.memberId === "m_creator")?.leftAt, "the creator is still in").toBeNull();
+      expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+    });
+  });
+
   /** REVIEW FOCUS 2 — memberId is per connection; the rule is on userId. */
   it("refuses a creator evicting their own second handle", async () => {
     await store.createSession(session({

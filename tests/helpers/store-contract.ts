@@ -2180,9 +2180,9 @@ export function describeStoreContract(
     // store. A row a refused call queued there reaches auditForOrg when the outbox
     // delivers it, and a refusal commits nothing that would deliver it inline, so that is
     // the alarm's doing and not the call's. The suite pins the clock to 2026-03-15 (see
-    // the beforeEach), which makes the alarm overdue the moment it is set, so it has
-    // delivered by the time these cases read. That is the clock and not a guarantee. The
-    // stamp, door and events reads do not depend on it.
+    // the beforeEach), which makes the alarm overdue the moment it is set, so it usually
+    // has delivered by the time these cases read. That is the clock and not a guarantee:
+    // a read can get there first. The stamp, door and events reads do not depend on it.
 
     /**
      * An eviction of `m_peer`: the departure, and the door behind it with its own audit
@@ -2349,16 +2349,17 @@ export function describeStoreContract(
 
       expect(await store.removeMember("qs_nope", "m_peer", eviction()))
         .toEqual({ refused: "not_found", removed: false, codeRetired: null });
-      // Vacuous in the Durable Objects store. This read follows the call at once, and
-      // rows a misplaced guard queued there are delivered by the outbox's alarm, which
-      // has not run yet. The final audit read below is what catches them, and only
-      // because this suite pins the clock to 2026-03-15 (see its beforeEach), which makes
-      // the outbox's five-second grace alarm overdue the moment it is set. Pin a recent
-      // date, lengthen the grace or slow the alarm and the room half goes green with no
-      // signal. A correct store queues nothing, so this cannot go red by accident: it is
-      // caught today and not guarded against drift. A deterministic pin reads the
-      // outbox's rows directly, as worker-tests/session-audit-outbox.test.ts does, and
-      // belongs in the workers program, not in this suite that MemoryStore shares.
+      // Vacuous in the Durable Objects store, in every run so far. This read follows the
+      // call at once, and rows a misplaced guard queued there are delivered by the
+      // outbox's alarm, which had not got that far. The final audit read below is what
+      // catches them, and only because this suite pins the clock to 2026-03-15 (see its
+      // beforeEach), which makes the outbox's five-second grace alarm overdue the moment
+      // it is set. Pin a recent date, lengthen the grace or slow the alarm and the room
+      // half goes green with no signal. A correct store queues nothing, so this cannot go
+      // red by accident: it is caught today and not guarded against drift. A
+      // deterministic pin reads the outbox's rows directly, as
+      // worker-tests/session-audit-outbox.test.ts does, and belongs in the workers
+      // program, not in this suite that MemoryStore shares.
       expect(await store.auditForOrg("org_codenerd", 10), "no row for a room that is not there").toEqual([]);
       expect(await store.eventsAfter("qs_nope", 0), "no event for a room that is not there").toEqual([]);
 

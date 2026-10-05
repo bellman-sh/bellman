@@ -2306,17 +2306,32 @@ export function describeStoreContract(
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
 
-    it("removeMember answers not_found for an unknown room and an unknown member", async () => {
-      const s = session({ members: [member({ memberId: "m_creator" })] });
+    it("removeMember answers not_found for an unknown room and an unknown member, and writes and queues nothing", async () => {
+      // One code, two refusals, and neither is proved by its answer. What a misplaced
+      // guard could leave behind differs. Stamping the member and writing the departure
+      // need the member's record, so a store cannot do those first. The door's retirement
+      // and the audit rows do not, so a store that put them ahead of the member check
+      // would shut a door and file rows for someone who is not there; and for a room that
+      // is not there the rows alone could be queued. Each request carries a door and rows,
+      // and the room holds a live code for the door.
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" })],
+      });
       await store.createSession(s);
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01"), "control: the door is live before either call")
+        .toBeDefined();
 
-      expect(await store.removeMember("qs_nope", "m_creator", {
-        now: 1, frozen: "allow", event: leaveEvent("m_creator"), audit: [],
-      })).toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      expect(await store.removeMember("qs_nope", "m_peer", eviction()))
+        .toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      expect(await store.auditForOrg("org_codenerd", 10), "no row for a room that is not there").toEqual([]);
 
-      expect(await store.removeMember(s.id, "m_ghost", {
-        now: 1, frozen: "allow", event: leaveEvent("m_ghost"), audit: [],
-      })).toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      expect(await store.removeMember(s.id, "m_ghost", eviction()))
+        .toEqual({ refused: "not_found", removed: false, codeRetired: null });
+      const after = (await store.getSession(s.id))!;
+      expect(after.joinCodes["peer_b"], "the door is untouched").toBeDefined();
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
     });
 
     /** Review Focus 2. */

@@ -910,22 +910,27 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       }
       const m = s.members.find((mm) => mm.memberId === memberId);
       if (!m) return { refused: "not_found" as const, ...no };
-      // Already out: the idempotent path. Writing nothing is the point of it,
-      // and queueing nothing is the half an idempotency key could not cover.
-      if (!isActiveMember(m)) return { refused: null, ...no };
-
       // One value for "there is a live door to shut". Nothing prunes an expired
       // record, so a code's presence in joinCodes is not the same as a door
       // being open, and retiring on presence announces a closing that already
-      // happened.
+      // happened. Decided before the member's state is looked at, because a live
+      // door is owed to one who is already out as much as to one who is not.
       const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
       const retiring = req.retire && rec && req.now <= rec.expiresAt
-        ? { role: req.retire.role, code: rec.code, event: req.retire.event }
+        ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
         : null;
 
-      const members = s.members.map(
-        (mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm)
-      );
+      // Already out: the idempotent path. The departure is not said again, and
+      // queueing nothing for it is the half an idempotency key could not cover. A
+      // live door behind them is a different matter: it was never shut, so shutting
+      // it is a write that has not happened yet and not a duplicate. With neither
+      // owed, nothing is written and nothing is queued.
+      const leaving = isActiveMember(m);
+      if (!leaving && !retiring) return { refused: null, ...no };
+
+      const members = leaving
+        ? s.members.map((mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm))
+        : s.members;
       const joinCodes = { ...s.joinCodes };
       if (retiring) delete joinCodes[retiring.role];
 
@@ -937,39 +942,47 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // what it was given.
       //
       // The order is the one a person would tell it: the member went, then the
-      // door shut.
-      let cursor = await this.nextCursor(txn);
+      // door shut. Either may be missing, and not both: a member who was already
+      // out has no departure to write.
+      let next = await this.nextCursor(txn);
       const at = Date.now();
-      const written: SessionEvent[] = [{ ...req.event, cursor, at }];
-      if (retiring) written.push({ ...retiring.event, cursor: ++cursor, at });
+      const written: SessionEvent[] = [];
+      if (leaving) written.push({ ...req.event, cursor: next++, at });
+      if (retiring) written.push({ ...retiring.event, cursor: next++, at });
 
       // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9,
       // runtime fact 4). It is filtered here, so a dead row never enters the
       // queue, and again in #deliver, so one that arrives another way is dropped
-      // instead of misfiled.
-      const intents = req.audit.filter((e) => e.orgId).map(auditIntent);
+      // instead of misfiled. The door's rows get the same filter as the member's,
+      // and go in the same order as the events: the outbox delivers in order.
+      const intents = [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])]
+        .filter((e) => e.orgId)
+        .map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
       const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
 
       await txn.put<unknown>({
         session: { ...s, members, joinCodes },
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
-        cursor,
+        // The cursor row ends at the LAST event written, or the next append takes
+        // that event's cursor and overwrites it (#120).
+        cursor: written[written.length - 1].cursor,
         ...rows,
       });
-      return { refused: null, removed: true, codeRetired: retiring?.role ?? null, written };
+      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written };
     });
 
     const { written, ...result } = outcome;
     // After the commit, never inside the closure: everything awaited in there
     // holds every other call to this object until it commits, and reArm() reads
-    // stored(). A member leaving can take the last reporting seat with them, so
-    // the derived tick may have moved.
+    // stored(). `written` is empty exactly when nothing was done: a refusal, or a
+    // member who was already out behind no live door. A door shut on its own
+    // queues rows that want delivering, and moves nothing else.
     for (const e of written) this.#wake(e);
-    if (result.removed) {
-      await this.driver.deliverNow();
-      await this.driver.reArm();
-    }
+    if (written.length > 0) await this.driver.deliverNow();
+    // A member leaving can take the last reporting seat with them, so the derived
+    // tick may have moved.
+    if (result.removed) await this.driver.reArm();
     return result;
   }
 

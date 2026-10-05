@@ -623,9 +623,9 @@ describe("evictMember", () => {
   // them is how the creator shuts that door: an eviction that took "already out" to
   // mean nothing was owed would answer "evicted" and leave the removal to undo itself,
   // and nothing downstream could tell that from a code that had expired. The store
-  // retires a code only as part of a removal it makes, so this is the case that holds
-  // the handler to shutting it. A room that has filled has cleared its codes, so this
-  // is the case for rooms that are not full, swarm and hub rooms.
+  // shuts the door on its already-out path, and this is the case that holds the
+  // handler to asking it to. A room that has filled has cleared its codes, so this is
+  // the case for rooms that are not full, swarm and hub rooms.
   it("shuts a seat's door that a leave left open, without announcing the removal again", async () => {
     await store.createSession(session({
       maxMembers: 4,
@@ -672,19 +672,21 @@ describe("evictMember", () => {
     expect(ours.map((a) => a.action)).toEqual(["invite_revoked"]);
   });
 
-  // The announcement and the audit row come after the retirement, never before it:
-  // an announced closing of a door that did not shut is worse than a silent one. A
-  // failure to shut it leaves the door open and nothing said, which is where a retry
-  // starts.
+  // The door's retirement, its announcement and its audit row are one operation, so
+  // a failure leaves the door open and nothing said, which is where a retry starts.
+  // An announced closing of a door that did not shut is worse than a silent one. The
+  // old shape got there by ordering three calls, and the case here pinned that order;
+  // with one store call what is left to hold is that the handler writes nothing of
+  // its own around it.
   it("announces and audits nothing when a departed member's door could not be shut, and the retry shuts it", async () => {
     await store.createSession(session({
       maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
-    vi.spyOn(store, "consumeJoinCode").mockRejectedValueOnce(new Error("consume failed"));
+    vi.spyOn(store, "removeMember").mockRejectedValueOnce(new Error("remove failed"));
 
-    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("consume failed");
+    await expect(evictMember(store, jesse, "qs_test", "m_peer")).rejects.toThrow("remove failed");
 
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
@@ -812,9 +814,11 @@ describe("evictMember", () => {
     expect(evicted.payload).toEqual({ member_id: "m_watcher", label: "peer@codenerd", room_role: "observer" });
     expect(revoked.type).toBe("invite_revoked");
     expect(revoked.payload).toEqual({ roles: ["observer"] });
+    // The member's row, then the door's, which names the observer seat and no other.
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.map((a) => a.detail)).toEqual([
       { member_id: "m_watcher", user_id: "u_peer", room_role: "observer" },
+      { roles: ["observer"] },
     ]);
   });
 
@@ -1036,7 +1040,8 @@ describe("evictMember", () => {
     expect(await store.getSessionByJoinCode("BELL-TEST-01")).toBeUndefined();
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type))
       .toEqual(["member_evicted", "invite_revoked"]);
-    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+    expect((await store.auditForOrg("org_codenerd", 50)).map((a) => a.action))
+      .toEqual(["member_evicted", "invite_revoked"]);
   });
 
   // Labels are distinct here, because the fixture gives everyone the creator's
@@ -1079,7 +1084,7 @@ describe("evictMember", () => {
 
     await evictMember(store, jesse, "qs_test", "m_peer");
 
-    const rows = await store.auditForOrg("org_codenerd", 50);
+    const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       action: "member_evicted",
@@ -1088,10 +1093,27 @@ describe("evictMember", () => {
     });
     // Exactly these, and no `code_retired`. The row is built before the store says
     // whether a door shut, so a field for it would be a prediction from the read,
-    // wrong whenever the door changed in between; the `invite_revoked` event the
-    // store writes in the same transaction is where the closing is recorded. An
-    // exact match is what keeps the prediction from coming back unnoticed.
+    // wrong whenever the door changed in between. The door has a row of its own, in
+    // the next case, queued only if one shut. An exact match is what keeps the
+    // prediction from coming back unnoticed.
     expect(rows[0].detail).toEqual({ member_id: "m_peer", user_id: "u_peer", room_role: "peer_b" });
+  });
+
+  // The door an eviction shuts is recorded the same way whether or not the member
+  // was still in the room: an `invite_revoked` row, beside the member's when there
+  // was one. So a query for the doors an eviction shut finds all of them, where a
+  // field on the member's row could only describe the ones behind members this call
+  // removed. The row goes to the room's org and the creator's, as revokeInvite's does.
+  it("audits the door an eviction shut as a row of its own, beside the member's", async () => {
+    await store.createSession(peopled());
+
+    await evictMember(store, jesse, "qs_test", "m_peer");
+
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.map((a) => a.action)).toEqual(["member_evicted", "invite_revoked"]);
+    expect(rows[1]).toMatchObject({
+      sessionId: "qs_test", actorUserId: "u_jesse", detail: { roles: ["peer_b"] },
+    });
   });
 
   // member_id is per connection, so one person in the room twice holds two, and it
@@ -1105,7 +1127,7 @@ describe("evictMember", () => {
 
     await evictMember(store, jesse, "qs_test", "m_a");
 
-    const rows = await store.auditForOrg("org_codenerd", 50);
+    const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
     expect(rows).toHaveLength(1);
     expect(rows[0].detail).toMatchObject({ member_id: "m_a", user_id: "u_peer" });
   });
@@ -1340,7 +1362,7 @@ describe("removal as one store operation", () => {
   // What is announced and audited follows the store's answer, and nothing the
   // handler predicted from its read. A door someone else shuts after that read is a
   // closing this call did not make: claiming it would announce a retirement twice and
-  // put a field in the audit row that the event stream contradicts.
+  // audit one this call never made, and the member's row would have to carry a guess.
   it("evictMember claims no closing for a door that shut between its read and the removal", async () => {
     const s = session({
       joinCodes: oneCode("BELL-LIVE-01"),
@@ -1369,10 +1391,9 @@ describe("removal as one store operation", () => {
   });
 
   // The eviction side of #117. Both calls see the member in and the door open; the
-  // store lets one of them remove, and the other lands on the idempotent path, where
-  // the door is no longer open. That one has to look again before it decides the
-  // door is still owed: from its own first read it would announce and audit a closing
-  // the winner already made.
+  // store lets one of them remove, and the other lands on its idempotent path, where
+  // the door is already gone. Neither the departure nor the closing is said twice,
+  // and the loser does not claim a retirement it did not make.
   it("evictMember announces once when two evictions race on one member", async () => {
     const s = session({
       joinCodes: oneCode("BELL-LIVE-01"),
@@ -1391,7 +1412,8 @@ describe("removal as one store operation", () => {
     expect(results.map((r) => r.ok)).toEqual([true, true]);
     expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
       .toEqual(["member_evicted", "invite_revoked"]);
-    expect(await store.auditForOrg("org_codenerd", 10)).toHaveLength(1);
+    expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+      .toEqual(["member_evicted", "invite_revoked"]);
     const retiring = results.filter((r) => r.ok && r.value.codeRetired !== null);
     expect(retiring, "exactly one call retired the door").toHaveLength(1);
   });

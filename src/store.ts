@@ -166,7 +166,11 @@ export interface RemovalOutcome {
   refused: "not_found" | "closed" | "frozen" | "forbidden" | null;
   /** True only when THIS call recorded the member out. */
   removed: boolean;
-  /** The role whose code this call retired, or null. */
+  /**
+   * The role whose code this call retired, or null. Not tied to `removed`: a member
+   * who was already out can still have a live code behind them, and shutting it is
+   * a write this call makes.
+   */
   codeRetired: string | null;
 }
 
@@ -179,9 +183,15 @@ export interface RemovalRequest {
   byUserId?: string;
   /** Written only if this call did the removing. */
   event: EventBody;
-  /** Retire this role's code, and write this event, if the code is still live. */
-  retire?: { role: string; event: EventBody };
-  /** Queued in the same transaction and delivered by the outbox. */
+  /**
+   * Retire this role's code, and write this event and queue this audit, if the code
+   * is still live. That holds whether or not this call removed the member: a live
+   * code behind one who is already out was never shut. The rows are queued only
+   * when a code was retired, so a row says what this call did and not what its
+   * caller expected to happen.
+   */
+  retire?: { role: string; event: EventBody; audit?: readonly AuditEntry[] };
+  /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
   audit: readonly AuditEntry[];
 }
 
@@ -421,10 +431,14 @@ export interface BellmanStore {
    * special.
    *
    * `removed: false` with `refused: null` is the idempotent path: the member was
-   * already out. Nothing is written and nothing is queued, so a retry announces
-   * no second departure. Closing the room if it has emptied is NOT part of this —
-   * `closeSessionIfEmpty` makes that decision atomically on its own, and folding
-   * it in here would close over a member who joined in the gap.
+   * already out. The departure is not written or queued again, so a retry
+   * announces no second one. What is still owed is a live code behind them: a
+   * leave retires none, so it was never shut, and shutting it is a write that has
+   * not happened yet and not a duplicate of one that has. `codeRetired` says so.
+   * With no live code, nothing is written and nothing is queued at all. Closing
+   * the room if it has emptied is NOT part of this — `closeSessionIfEmpty` makes
+   * that decision atomically on its own, and folding it in here would close over a
+   * member who joined in the gap.
    */
   removeMember(
     sessionId: string,
@@ -797,29 +811,41 @@ export class MemoryStore implements BellmanStore {
     }
     const m = s.members.find((mm) => mm.memberId === memberId);
     if (!m) return { refused: "not_found", ...none };
-    // Already out: the idempotent path. Writing nothing is the point of it.
-    if (!isActiveMember(m)) return { refused: null, ...none };
 
     // One value for "there is a live door to shut", so nothing downstream has to
     // re-derive it. Nothing prunes an expired record, so a code's presence in
-    // joinCodes is not the same as a door being open.
+    // joinCodes is not the same as a door being open. Decided before the member's
+    // state is looked at, because a live door is owed to one who is already out as
+    // much as to one who is not.
     const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
     const retiring = req.retire && rec && req.now <= rec.expiresAt
-      ? { role: req.retire.role, code: rec.code, event: req.retire.event }
+      ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
       : null;
 
-    m.leftAt = req.now;
-    this.appendNow(s, req.event);
+    // Already out: the idempotent path. The departure is not said again, which is
+    // the point of it. A live door behind them is a different matter: it was never
+    // shut, so shutting it is a write that has not happened yet and not a
+    // duplicate. With neither owed, nothing is written.
+    const leaving = isActiveMember(m);
+    if (!leaving && !retiring) return { refused: null, ...none };
+
+    if (leaving) {
+      m.leftAt = req.now;
+      this.appendNow(s, req.event);
+    }
     if (retiring) {
       this.byJoinCode.delete(retiring.code);
       delete s.joinCodes[retiring.role];
       this.appendNow(s, retiring.event);
     }
     // A falsy org names a stream nobody reads, and the Durable Objects store
-    // drops such an entry rather than file it, so this one does too.
-    this.recordAudit(req.audit.filter((e) => e.orgId));
+    // drops such an entry rather than file it, so this one does too. The member's
+    // rows, then the door's: the order the events were written in.
+    this.recordAudit(
+      [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
+    );
 
-    return { refused: null, removed: true, codeRetired: retiring?.role ?? null };
+    return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
   }
 
   /**

@@ -15,7 +15,7 @@
  * case still runs.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { BellmanStore, EventBody } from "../../src/store.js";
+import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js";
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
@@ -2382,6 +2382,177 @@ export function describeStoreContract(
       expect(outcome.removed).toBe(true);
       expect(outcome.codeRetired).toBeNull();
       expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_evicted"]);
+    });
+
+    // ------------------------------------- the door behind a member already out
+    //
+    // Not saying the departure twice is not licence to skip what is still owed. A live
+    // code behind a member who left on their own was never shut, so shutting it is a
+    // write that has not happened yet, and not a duplicate of one that has.
+
+    /** An eviction of `m_peer`: the departure, and the door behind it with its own audit row. */
+    const eviction = (now = 9_000_000): RemovalRequest => ({
+      now,
+      frozen: "refuse",
+      byUserId: "u_jesse",
+      event: { ...leaveEvent("m_peer"), type: "member_evicted" },
+      retire: {
+        role: "peer_b",
+        event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
+        audit: [auditRow("invite_revoked")],
+      },
+      audit: [auditRow("member_evicted")],
+    });
+
+    /** The creator, and `m_peer`, who has already left, with whatever codes the caller names. */
+    const roomWithDeparted = (joinCodes: ReturnType<typeof oneCode>) => session({
+      joinCodes,
+      members: [
+        member({ memberId: "m_creator" }),
+        member({ memberId: "m_peer", userId: "u_peer", leftAt: 5_000 }),
+      ],
+    });
+
+    it("removeMember shuts a live code behind a member who is already out, and says only that", async () => {
+      const s = roomWithDeparted(oneCode("BELL-LIVE-01"));
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      // Two answers, not one: nobody was removed, and a code was retired.
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: "peer_b" });
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt, "the original stamp stands")
+        .toBe(5_000);
+      expect(fresh.joinCodes["peer_b"]).toBeUndefined();
+      expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
+      // The door, and not the departure: member_evicted is not said a second time, by
+      // event or by row.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["invite_revoked"]);
+
+      // The cursor row ends at the one event written, or the next append overwrites it (#120).
+      await store.appendEvent(s.id, leaveEvent("m_creator"));
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["invite_revoked", "member_left"]);
+    });
+
+    it("removeMember shuts that door once: a repeat finds it gone and writes nothing", async () => {
+      const s = roomWithDeparted(oneCode("BELL-LIVE-01"));
+      await store.createSession(s);
+      await store.removeMember(s.id, "m_peer", eviction());
+
+      const again = await store.removeMember(s.id, "m_peer", eviction());
+
+      // It cannot repeat: the first call made the code no longer live.
+      expect(again).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["invite_revoked"]);
+    });
+
+    it("removeMember writes and queues nothing for a member who is already out, when their seat has no code", async () => {
+      // Passing `retire` does not make the call owe a write. With no door there is
+      // nothing to shut, and the departure is not said again.
+      const s = roomWithDeparted({});
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember writes and queues nothing for a member who is already out, when their seat's code has expired", async () => {
+      // Review Focus 3 on this path too: nothing prunes an expired record, so its
+      // presence is not an open door.
+      const s = roomWithDeparted({ peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction(Date.now()));
+
+      expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember queues the retirement's audit row after the member's, when it retires the code", async () => {
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+      // The member went, then the door shut: the events and the rows both.
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.type))
+        .toEqual(["member_evicted", "invite_revoked"]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    it("removeMember queues no retirement audit row when there was no live code to retire", async () => {
+      // A row for the door is a claim that this call shut it, so it is queued with the
+      // retirement and not with the request. Otherwise a caller that asked for a
+      // retirement that never happened would have audited one.
+      const s = session({
+        joinCodes: { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } },
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction(Date.now()));
+
+      expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_evicted"]);
+    });
+
+    it("removeMember queues no retirement audit row when it refuses", async () => {
+      const s = session({
+        closed: true,
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      const outcome = await store.removeMember(s.id, "m_peer", eviction());
+
+      expect(outcome).toEqual({ refused: "closed", removed: false, codeRetired: null });
+      expect((await store.getSession(s.id))!.closed).toBe(true);
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+      expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
+    });
+
+    it("removeMember files no row for an org-less entry, in audit or in retire.audit", async () => {
+      // A falsy org names a stream nobody reads. MemoryStore would file the row there
+      // all the same, and a Durable Object namespace takes "" as a name and would
+      // deliver into it, so the entry is dropped before it is queued. Both defences
+      // sit behind this answer in the Durable Object store (the producer's filter and
+      // the outbox's delivery guard), so what this pins there is the result; the
+      // producer's filter alone is what MemoryStore leaves to hold it.
+      const s = session({
+        joinCodes: oneCode("BELL-LIVE-01"),
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],
+      });
+      await store.createSession(s);
+
+      await store.removeMember(s.id, "m_peer", {
+        ...eviction(),
+        audit: [auditRow("member_evicted"), { ...auditRow("member_evicted"), orgId: "" }],
+        retire: {
+          role: "peer_b",
+          event: { ...leaveEvent("m_peer"), type: "invite_revoked" },
+          audit: [auditRow("invite_revoked"), { ...auditRow("invite_revoked"), orgId: "" }],
+        },
+      });
+
+      expect(await store.auditForOrg("", 10)).toEqual([]);
+      expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
+        .toEqual(["member_evicted", "invite_revoked"]);
     });
   });
 }

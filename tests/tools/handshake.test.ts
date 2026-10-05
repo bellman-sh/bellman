@@ -264,6 +264,44 @@ describe("INVARIANT 2 — two-phase connect", () => {
     expect(reused.text).toContain("not found or expired");
   });
 
+  // #116. The handler used to retire a filled room's codes in a second call, after the
+  // seat had committed. When that call threw, the joiner was in the room with no
+  // member_joined event, no audit row and no member_id returned, and the connect token
+  // that seated them is single use, so the retry could not replay. The seating retires the
+  // codes itself now, so a store whose second call fails strands nobody. This one throws
+  // from clearJoinCodes, and the handler no longer calls it.
+  it("seats the joiner and says so when the room fills, whatever clearJoinCodes would do", async () => {
+    const store = new MemoryStore();
+    store.clearJoinCodes = async () => { throw new Error("the second call, failing"); };
+    const failing = new Harness(store);
+    try {
+      const jesse = await failing.connect(DEV_KEY.jesse);
+      const peer = await failing.connect(DEV_KEY.peer);
+      const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+      const sessionId = String(started.data.session_id);
+      const joinCode = String(started.data.join_code);
+      const preview = await peer.call("bellman_connect", { join_code: joinCode });
+
+      const confirmed = await peer.call("bellman_confirm", {
+        connect_token: String(preview.data.connect_token), brief: brief(),
+      });
+
+      expect(confirmed.isError, confirmed.text).toBe(false);
+      const memberId = String(confirmed.data.member_id);
+      const room = (await store.getSession(sessionId))!;
+      expect(room.members.map((m) => m.memberId)).toContain(memberId);
+      const joined = (await store.eventsAfter(sessionId, 0)).filter((e) => e.type === "member_joined");
+      expect(joined.map((e) => e.fromMemberId), "the join was announced").toContain(memberId);
+      expect((await store.auditForOrg("org_codenerd", 50)).map((a) => a.action))
+        .toContain("brief_exchanged");
+      // And the code is dead, so the seating did what the handler's second call was for.
+      expect(room.joinCodes).toEqual({});
+      expect(await store.getSessionByJoinCode(joinCode)).toBeUndefined();
+    } finally {
+      await failing.close();
+    }
+  });
+
   it("keeps a swarm code alive until the session fills", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const peer = await h.connect(DEV_KEY.peer);

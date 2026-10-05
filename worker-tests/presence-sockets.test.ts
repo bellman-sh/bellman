@@ -230,6 +230,38 @@ describe("an open socket is liveness", () => {
     expect(stamped).toEqual([["m_a", "present"], ["m_b", "present"]]);
   });
 
+  /**
+   * #116 with #146. The seating retires a filled room's codes, and "filled" is the
+   * question the refusal asks: would a further joiner be refused. A quiet member on a
+   * socket is not reclaimable, so with it the room is full and the codes go. The same
+   * roster with no socket has a seat a further joiner could take, and they stay.
+   *
+   * The handler used to ask this with `connectedMembers`, and the seating asks it with
+   * the sockets read inside its own transaction. Two rooms with one roster, so the
+   * socket is the only difference between them.
+   */
+  it("retires the codes of a room a quiet member's socket keeps full, and not those of one it does not", async () => {
+    const held = await room([here("m_here"), quiet("m_quiet")], 3);
+    const free = await room([here("m_here"), quiet("m_quiet")], 3);
+    // Each room's own record: the fixture stamps an expiry from the clock as it is built,
+    // so two rooms made a millisecond apart do not hold equal records.
+    const heldDoors = (await held.store.getSession(held.id))!.joinCodes;
+    const freeDoors = (await free.store.getSession(free.id))!.joinCodes;
+    expect(Object.keys(heldDoors), "control: the first room holds a door").not.toEqual([]);
+    expect(Object.keys(freeDoors), "control: the second room holds a door").not.toEqual([]);
+    await open(held.id);
+    expect([...await held.store.connectedMembers(held.id)], "control: the socket vouches for it")
+      .toEqual(["m_quiet"]);
+
+    const withSocket = await seat(held.store, held.id);
+    const without = await seat(free.store, free.id);
+
+    expect(withSocket).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+    expect((await held.store.getSession(held.id))!.joinCodes).toEqual({});
+    expect(without).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+    expect((await free.store.getSession(free.id))!.joinCodes).toEqual(freeDoors);
+  });
+
   it("writes nothing to a closed room when its socket closes", async () => {
     // `touchMember`'s rule (src/rooms.ts): a closed room's record is over, and a
     // liveness write must not reopen it. The socket outlives the close of the

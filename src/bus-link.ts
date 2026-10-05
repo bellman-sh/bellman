@@ -129,7 +129,9 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
  */
 const ENDED_UPSTREAM: Partial<Record<StopReason, string>> = {
   closed: "the room is closed",
-  gone: "Bellman says the room is not there, or the member is not this identity's",
+  gone:
+    "Bellman says the room is not there, the member is not this identity's, " +
+    "or a creator removed the member this socket polls as",
   unauthorized: "Bellman no longer accepts this bridge's connection",
 };
 
@@ -233,15 +235,11 @@ export function createBusLink(opts: BusLinkOptions): BusLink {
       // poll, and a subscriber reading only `closed` would be handed an empty
       // active answer for ever and sleep only the poll floor (#113).
       //
-      // UNPINNED, and said so rather than left looking covered. Both ends of
-      // the chain have controls — the server's flag in
-      // worker-tests/removed-member-sync.test.ts, and `room-socket.ts` ending
-      // the room `gone`, which reddens when its own check is removed. This hop
-      // does not: reaching it needs a subscription already fallen back to
-      // polling AND a server answer carrying the flag, and an attempt at that
-      // in tests/bus-link.test.ts could not get the link to fall back at all.
-      // What is unverified is therefore narrow and explicit — that these two
-      // field copies happen — and a mutation setting either to `false` passes.
+      // Pinned by "ends the room when the poll says the member it polls as was
+      // removed" in tests/bus-link.test.ts: it refuses the socket so the link
+      // degrades to this poll, answers `removed` for the member the coordinator
+      // polls AS, and expects every member of the room handed back to its own
+      // polling. Setting either of these two copies to `false` reddens it.
       removed: out.removed === true,
     };
   }

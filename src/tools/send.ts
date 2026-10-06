@@ -1,6 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok } from "./kit.js";
+import {
+  ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok,
+} from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
@@ -153,6 +155,17 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       }
       // Validated for the same reason, and refused before the append: a payload the
       // shape rejects must leave neither an event nor a stamp behind.
+      //
+      // `approved` was never checked, and `action-state.ts` has to read it to tell
+      // "your human said no" from "nobody was there". A non-boolean reaching the log
+      // is a refusal that cannot be told from an approval afterwards, so it is
+      // refused here, where the caller can still fix it.
+      if (type === "action_response") {
+        const parsed = ActionResponseShape.safeParse(payload);
+        if (!parsed.success) {
+          return fail(`action_response payload must be { approved: boolean, result?: string }: ${parsed.error.issues[0]?.message}`);
+        }
+      }
       if (type === "progress") {
         const parsed = ProgressShape.safeParse(payload);
         if (!parsed.success) {

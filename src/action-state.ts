@@ -40,10 +40,26 @@ export interface OutstandingRequest {
   expires_at: string;
 }
 
-const approvedIn = (payload: unknown): boolean | undefined =>
-  typeof payload === "object" && payload !== null && "approved" in payload
-    ? Boolean((payload as { approved: unknown }).approved)
-    : undefined;
+/**
+ * What a response says, read so that only an actual approval reads as one.
+ *
+ * `Boolean(...)` was wrong in the one direction that matters: `Boolean("false")`
+ * is `true`, so a client answering `{ approved: "false" }` had its human's
+ * REFUSAL recorded as an approval — the exact distinction this module exists to
+ * make, inverted. `approved === true` approves; anything else that is present
+ * fails closed to `declined`, because a malformed answer is not a yes.
+ *
+ * An absent `approved` still counts as `answered`: the field is required at the
+ * tool boundary now (ActionResponseShape), so a response without one came from
+ * a build that predates it, and leaving the request outstanding for ever on a
+ * missing boolean is worse than recording that it was answered.
+ */
+const verdictOf = (payload: unknown): "answered" | "declined" => {
+  if (typeof payload !== "object" || payload === null || !("approved" in payload)) {
+    return "answered";
+  }
+  return (payload as { approved: unknown }).approved === true ? "answered" : "declined";
+};
 
 /**
  * The state of every `action_request` in `events`, keyed by cursor.
@@ -59,19 +75,46 @@ const approvedIn = (payload: unknown): boolean | undefined =>
  */
 export function actionStates(events: readonly SessionEvent[], now: number): Map<number, ActionState> {
   const states = new Map<number, ActionState>();
+  // Keyed by the refId STRING a response would have to carry, not by the number.
+  // `bellman_send` admits a response only when `String(req.cursor) === ref_id`,
+  // deliberately, so that "007" never answers cursor 7. Resolving with
+  // `Number(refId)` here was a looser rule than the one this module says it
+  // trusts, and would let a row that did not come through today's send path —
+  // written before that check, or by another writer — terminate a request it was
+  // never allowed to answer.
+  const byRef = new Map<string, number>();
+
   for (const e of events) {
     if (e.type !== "action_request") continue;
     states.set(e.cursor, now > e.at + ACTION_REQUEST_TTL_MS ? "expired" : "outstanding");
+    byRef.set(String(e.cursor), e.cursor);
   }
+
   for (const e of events) {
     if (e.type !== "action_response" || e.refId === null) continue;
-    const cursor = Number(e.refId);
-    if (!states.has(cursor)) continue;
+    const cursor = byRef.get(e.refId);
+    if (cursor === undefined) continue;
+
+    // THE FIRST ANSWER WINS, and a terminal state is not revisited.
+    //
+    // A room holds many members, and `bellman_send` refuses only a response to
+    // your OWN request — nothing stops a second member answering one another
+    // member's human has already answered. Last-writer-wins let a later
+    // `{approved: true}` overwrite an earlier refusal, so a human's "no" was
+    // reported to the requester as a yes. In a swarm the default seat holds
+    // `respond_actions`, so that is every joiner.
+    //
+    // Terminal means terminal: the requester has already been told, and
+    // `outstandingFor` stopped listing it on the first answer, so no second
+    // human was asked in any case.
+    const current = states.get(cursor);
+    if (current === "answered" || current === "declined") continue;
+
     // An answer beats the clock. A request that expired and was answered anyway
-    // is `answered`: the deadline exists to end the waiting, not to refuse a
+    // is answered: the deadline exists to end the waiting, not to refuse a
     // human who came back to it late, and the response path does not enforce it
     // either.
-    states.set(cursor, approvedIn(e.payload) === false ? "declined" : "answered");
+    states.set(cursor, verdictOf(e.payload));
   }
   return states;
 }

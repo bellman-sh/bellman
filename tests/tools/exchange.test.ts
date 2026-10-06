@@ -239,7 +239,7 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     const real = String(ask.data.cursor);
     const respond = (ref_id: string) => p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "action_response", ref_id, payload: { ok: true },
+      type: "action_response", ref_id, payload: { approved: true },
     });
 
     const refs = [

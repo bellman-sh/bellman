@@ -636,6 +636,13 @@ export interface BellmanStore {
    * index no longer grows for the life of an account and a dead room is paid for
    * once. `sessionsJoinedBy` keeps its rows deliberately; see there.
    *
+   * **It may return fewer than `limit` with more still to find.** The Durable
+   * Objects walk resolves each row in another object, so it is bounded by
+   * SWEEP_RPC_BUDGET and stops when it runs out rather than spending a Workers
+   * request'''s subrequest cap and throwing. The rows it dropped on the way are
+   * gone, so the next call starts further in; a caller that needs the whole set
+   * calls again rather than treating a short list as the end.
+   *
    * That promise has two exceptions, both in the Durable Objects store, and a
    * miss costs more than a row missing from a list: a lapse freezes the rooms
    * this names, so a room it misses is not frozen and keeps working on a plan
@@ -1487,6 +1494,18 @@ export class MemoryStore implements BellmanStore {
     this.wake(s);
   }
 }
+
+/**
+ * How many cross-object RPCs one `sessionsCreatedBy` walk may spend.
+ *
+ * The walk resolves each index row in another object and drops the dead ones,
+ * so its cost is in RPCs, and a Workers request is capped at 1,000 subrequests.
+ * Spending the cap throws and the whole call fails; stopping early returns a
+ * short list and leaves the rest for the next walk, which starts further in
+ * because the rows this one dropped are gone. Well under the platform cap, so
+ * the budget is reached long before anything is at risk of being refused.
+ */
+export const SWEEP_RPC_BUDGET = 300;
 
 export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
 export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

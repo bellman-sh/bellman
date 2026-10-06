@@ -79,6 +79,22 @@ export const CapabilitiesShape = z
  * without a denylist that falls behind the first name somebody forgets. The
  * payload is a claim about when it was sent, never about now (invariant 7).
  */
+/**
+ * An answer to an `action_request`. `approved` is a REQUIRED boolean, and that
+ * is the whole point of the shape: the field was unvalidated, so a client could
+ * send `{ approved: "false" }` and have a human's refusal read as an approval
+ * on the way back out (see `verdictOf` in src/action-state.ts). `result` is the
+ * sentence the requester is shown.
+ *
+ * Not strict, unlike the shapes above: an `action_response` payload is also
+ * carried to the peer as content, and a build that adds a field to it should
+ * not have the whole answer refused.
+ */
+export const ActionResponseShape = z.object({
+  approved: z.boolean(),
+  result: z.string().max(2_000).optional(),
+});
+
 export const ProgressShape = z.strictObject({
   note: z.string().min(1).max(500),
   step: z.string().max(40).optional(),
@@ -110,6 +126,22 @@ export class FrozenError extends Error {
   constructor() { super(FROZEN); }
 }
 
+/**
+ * An event the caller can rely on, or a throw.
+ *
+ * `appendEvent` returns null when the session froze, and both callers are past
+ * the point where returning a value is convenient — the member is already
+ * added, or the code already issued. Throwing keeps the null out of the happy
+ * path.
+ *
+ * **Nothing catches `FrozenError`.** It is thrown here and caught nowhere in
+ * `src/`, so it leaves the handler as an exception rather than as the `fail()`
+ * refusal the frozen guards produce — a caller that races a freeze gets a
+ * different shape from one that arrives after it. Worth knowing before relying
+ * on the two reading alike. (This docblock was stranded in `projections.ts` by
+ * the #92 split, above no declaration, and claimed "the tool's catch turns it
+ * into the same refusal as the guards"; there is no such catch.)
+ */
 export async function appendOrFrozen(
   s: BellmanStore,
   sessionId: string,

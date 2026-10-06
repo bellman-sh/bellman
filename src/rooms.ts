@@ -514,8 +514,19 @@ export async function issueInvite(
   // Refused rather than silently downgraded to a no-op: a caller that asked for
   // a code and got none must hear why, or it hands out a code that never came.
   if (previous) {
+    // Fails CLOSED, and the `me &&` shape it replaces did not. `gateSeat` has
+    // already established this member exists, so a miss here means the predicate
+    // moved under us — and the safe answer to "may this seat retire a code
+    // someone is holding" is no, not "skip the check". The old shape would have
+    // reopened the exact hole #90 closes the day `findMember` is narrowed (it
+    // tests `leftAt` separately in `gateSeat`, so that day is plausible).
+    //
+    // A second lookup rather than a value from `gateSeat`: that function re-reads
+    // the session after its touch, so the `me` it holds belongs to the record
+    // from before the write, and returning the stale one beside the fresh
+    // session would trade this hazard for a subtler one.
     const me = findMember(session, memberId, actor);
-    if (me && denyVerb(session, me, "revoke")) {
+    if (!me || denyVerb(session, me, "revoke")) {
       return refuse(
         "forbidden",
         `role "${issuedRole}" already has a live join code. Replacing it retires the one someone may be holding, so it needs the "revoke" verb as well as "invite" — your seat holds invite alone. Wait for that code to expire, or ask a seat that holds revoke.`

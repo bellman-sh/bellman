@@ -99,6 +99,71 @@ describe("actionStates", () => {
     expect([...states.keys()]).toEqual([2]);
   });
 
+  /**
+   * A room holds many members. `bellman_send` refuses only a response to your
+   * OWN request, so in a swarm — where the default seat holds `respond_actions`
+   * — any joiner can answer one another member's human has already answered.
+   * Last-writer-wins turned a refusal into an approval, which is the exact
+   * inversion this module exists to prevent.
+   */
+  it("keeps the first answer when a second member answers the same request", () => {
+    const states = actionStates(
+      [request(1), response(2, 1, false), response(3, 1, true)],
+      T0,
+    );
+    expect(states.get(1)).toBe("declined");
+  });
+
+  it("keeps the first answer in the other order too", () => {
+    // Not symmetry for its own sake: a rule of "declined wins" would pass the
+    // test above while still not being first-answer-wins.
+    const states = actionStates(
+      [request(1), response(2, 1, true), response(3, 1, false)],
+      T0,
+    );
+    expect(states.get(1)).toBe("answered");
+  });
+
+  /**
+   * `Boolean("false")` is `true`. Reading `approved` through it recorded a
+   * human's refusal as an approval — the one direction that must never happen,
+   * so anything present that is not exactly `true` fails closed.
+   */
+  it.each([
+    ["the string false", "false"],
+    ["the string no", "no"],
+    ["zero", 0],
+    ["null", null],
+    ["an empty string", ""],
+  ])("declines rather than approves when approved is %s", (_label, approved) => {
+    const e = event({ cursor: 2, type: "action_response", refId: "1", payload: { approved } });
+    expect(actionStates([request(1), e], T0).get(1)).toBe("declined");
+  });
+
+  it("approves only on a boolean true", () => {
+    const e = event({ cursor: 2, type: "action_response", refId: "1", payload: { approved: true } });
+    expect(actionStates([request(1), e], T0).get(1)).toBe("answered");
+  });
+
+  /**
+   * bellman_send admits a response only when `String(req.cursor) === ref_id`, so
+   * "007" never answers cursor 7. Resolving with `Number(refId)` here was looser
+   * than the check this module says it trusts, and would let a row that did not
+   * come through that path terminate a request it could not answer.
+   */
+  it.each(["007", "7.0", " 7", "+7", "7e0"])(
+    "does not let the ref %s terminate cursor 7",
+    (ref) => {
+      const e = event({ cursor: 8, type: "action_response", refId: ref, payload: { approved: true } });
+      expect(actionStates([request(7), e], T0).get(7)).toBe("outstanding");
+    },
+  );
+
+  it("does terminate on the exact decimal string, so the test above is about the form", () => {
+    const e = event({ cursor: 8, type: "action_response", refId: "7", payload: { approved: true } });
+    expect(actionStates([request(7), e], T0).get(7)).toBe("answered");
+  });
+
   it("ignores a response whose ref names no request in the log", () => {
     const states = actionStates([request(1), response(2, 99, true)], T0);
     expect(states.get(1)).toBe("outstanding");

@@ -166,7 +166,15 @@ If a room's creator has removed you, you still get the history up to and includi
       // being enough is a stored cursor for the last `action_request`, which
       // turns this into a bounded tail read.
       const everything = await s.eventsAfter(session_id, 0);
-      const visible = cut === undefined ? everything : everything.filter((e) => e.cursor <= cut);
+      // BOTH caps, not just the recorded one. `cut` is the removal as the record
+      // shows it; `removal` is the `member_evicted` found in the slice, and it
+      // exists because an eviction that committed after `me` was read leaves
+      // `cut === undefined` on a record that is already stale — the race line 148
+      // caps `all` for. Testing only `cut` here handed a member the room past
+      // their own removal through this field: every action_request appended after
+      // they were cut, with its sender's member id, label and cursor.
+      const stopAt = cut ?? removal?.cursor;
+      const visible = stopAt === undefined ? everything : everything.filter((e) => e.cursor <= stopAt);
       const outstanding = outstandingFor(visible, member_id, Date.now());
 
       return ok(

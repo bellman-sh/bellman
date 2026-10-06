@@ -16,7 +16,7 @@
  * reading one file's import list.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,11 +27,39 @@ const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 // thought, which is where it gets crossed in code next.
 const BANNED = ["@modelcontextprotocol/sdk", "cloudflare:workers"];
 
-const importsOf = (file: string): string[] =>
-  [...readFileSync(file, "utf8").matchAll(/(?:^|\n)\s*import\s[^;]*?from\s*["']([^"']+)["']/g)]
-    .map((m) => m[1]);
+/**
+ * Every specifier a module pulls in, by any edge that runs.
+ *
+ * Four forms, not one. Matching only `import ... from "x"` left
+ * `export { y } from "x"`, `export * from "x"`, a bare `import "x"` and a
+ * dynamic `import("x")` neither flagged nor followed — so a clean-looking module
+ * that merely re-exports an SDK-importing one made this return `[]` and the
+ * suite green, which is the one outcome a boundary test must not get wrong.
+ */
+const importsOf = (file: string): string[] => {
+  const text = readFileSync(file, "utf8");
+  const forms = [
+    /(?:^|\n)\s*(?:import|export)\s[^;]*?\sfrom\s*["']([^"']+)["']/g, // import/export ... from
+    /(?:^|\n)\s*export\s*\*\s*from\s*["']([^"']+)["']/g,              // export * from
+    /(?:^|\n)\s*import\s*["']([^"']+)["']/g,                            // bare side-effect
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,                          // dynamic
+  ];
+  return forms.flatMap((re) => [...text.matchAll(re)].map((m) => m[1]));
+};
 
-/** Every module reachable from `entry` by local imports, entry included. */
+/** Local specifiers this walk could not turn into a file. Must stay empty. */
+const unresolved: string[] = [];
+
+const fileFor = (from: string, spec: string): string | undefined => {
+  const base = resolve(dirname(from), spec.replace(/\.js$/, ""));
+  for (const candidate of [`${base}.ts`, `${base}/index.ts`, base]) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+  }
+  unresolved.push(`${relative(SRC, from)} -> ${spec}`);
+  return undefined;
+};
+
+/** Every module reachable from `entry` by local edges, entry included. */
 function reachable(entry: string): Map<string, string[]> {
   const seen = new Map<string, string[]>();
   const queue = [entry];
@@ -41,7 +69,11 @@ function reachable(entry: string): Map<string, string[]> {
     const specs = importsOf(file);
     seen.set(file, specs);
     for (const spec of specs) {
-      if (spec.startsWith(".")) queue.push(resolve(dirname(file), spec.replace(/\.js$/, ".ts")));
+      if (!spec.startsWith(".")) continue;
+      // Resolved rather than assumed: a specifier naming a directory index or a
+      // .json made `readFileSync` throw ENOENT and take the whole walk with it.
+      const next = fileFor(file, spec);
+      if (next !== undefined) queue.push(next);
     }
   }
   return seen;
@@ -67,6 +99,25 @@ describe("the projection layer stays importable from both transports", () => {
     const graph = reachable(resolve(SRC, "projections.ts"));
     expect(graph.size).toBeGreaterThan(1);
     expect([...graph.keys()].map((f) => relative(SRC, f))).toContain("roles.ts");
+  });
+
+  it("follows a re-export, not only a plain import", () => {
+    // The gap that mattered: `export { x } from "./sdk-thing.js"` pulls the SDK
+    // in just as surely, and the old regex saw neither the edge nor the module
+    // behind it. src/worker.ts re-exports, so it is a real example rather than
+    // a fixture.
+    const specs = importsOf(resolve(SRC, "worker.ts"));
+    expect(specs.length).toBeGreaterThan(0);
+    expect(importsOf(resolve(SRC, "server.ts"))).toContain("@modelcontextprotocol/sdk/server/mcp.js");
+  });
+
+  it("resolves every local specifier it meets", () => {
+    // An unresolvable specifier used to crash the walk with ENOENT; now it is
+    // recorded, and a walk that silently skipped edges would be a boundary test
+    // proving nothing.
+    reachable(resolve(SRC, "projections.ts"));
+    reachable(resolve(SRC, "public-event.ts"));
+    expect(unresolved).toEqual([]);
   });
 
   it("finds the SDK from src/server.ts, so the detector detects", () => {

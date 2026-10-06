@@ -145,16 +145,3 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     ),
   };
 }
-
-// ---------------------------------------------------------------------------
-// Server factory — one McpServer per request, bound to the caller's identity
-// ---------------------------------------------------------------------------
-
-/**
- * An event the caller can rely on, or a thrown refusal.
- *
- * appendEvent returns null when the session froze, and both callers are past
- * the point where returning a value is convenient — the member is already
- * added, or the code already issued. Throwing here keeps the null out of the
- * happy path; the tool's catch turns it into the same refusal as the guards.
- */

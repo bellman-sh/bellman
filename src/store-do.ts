@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { GrantDelete, GrantWrite } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
@@ -2575,22 +2576,37 @@ export class DurableObjectStore implements BellmanStore {
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const live: string[] = [];
     let startAfter: string | undefined;
+    // Every row costs cross-object RPCs — one `getSession`, plus one drop when
+    // it is dead — and a Workers request is capped at 1,000 subrequests. An
+    // account with thousands of closed rooms would spend the cap and throw
+    // "Too many subrequests", so the lapse walk would fail OUTRIGHT rather than
+    // return a short list. A short list is the right failure here: the rows this
+    // call dropped are gone for good, so the next walk starts further in and the
+    // tail is cleared across calls instead of in one that cannot finish.
+    //
+    // Counted in RPCs rather than rounds because a round's cost depends on
+    // `limit` and on how many of its rows are dead, so a round budget would mean
+    // something different for every caller.
+    let spent = 0;
 
-    while (live.length < limit) {
+    while (live.length < limit && spent < SWEEP_RPC_BUDGET) {
       // A full window each time, not `limit - live.length`: the rows that fail
       // are the ones being skipped, so asking for only what is still wanted
       // turns a page of closed rooms into one id per round trip.
       const page = await this.registry.createdIndexPage(userId, limit, startAfter);
+      spent++;
       if (page.length === 0) break;
 
       for (const id of page) {
-        if (live.length >= limit) break;
+        if (live.length >= limit || spent >= SWEEP_RPC_BUDGET) break;
         const session = await this.session(id).getSession();
+        spent++;
         if (session && !session.closed) {
           live.push(id);
           continue;
         }
         await this.registry.dropCreatedIndex(userId, id);
+        spent++;
       }
       // A short window means the range is exhausted; nothing follows to scan.
       if (page.length < limit) break;

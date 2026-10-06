@@ -45,18 +45,25 @@ const client = (id: string, expires_at: number | null): RegisteredClient => ({
   expires_at,
 });
 
+/** Remove the object's alarm, so a test can assert that a write puts one back. */
+const clearAlarm = () => inAuth((i) =>
+  (i as unknown as { ctx: { storage: { deleteAlarm(): Promise<void> } } }).ctx.storage.deleteAlarm());
+
 /** When the object's alarm is pointed at, or null when it has none. */
 const alarmAt = () => inAuth((i) =>
   (i as unknown as { ctx: { storage: { getAlarm(): Promise<number | null> } } }).ctx.storage.getAlarm());
 
 describe("the authorization object sweeps on an alarm", () => {
-  it("has no alarm until something is written", async () => {
-    // The control for every assertion below. AuthDO had none before #87, so a
-    // test that only ever saw one armed could not tell arming from inheriting.
-    expect(await alarmAt()).toBeNull();
-  });
+  it("arms itself on a write, starting from no alarm", async () => {
+    // The alarm is CLEARED first rather than assumed absent. The object is
+    // shared across this file's tests — which is why every count here is a
+    // delta — so "it had no alarm" only holds while this runs first, and an
+    // assertion that silently depends on test order is the one that stops
+    // distinguishing "armed itself" from "inherited an alarm" the day someone
+    // reorders the file.
+    await clearAlarm();
+    expect(await alarmAt(), "the clear is the control for the assertion below").toBeNull();
 
-  it("arms itself on the first registration", async () => {
     await inAuth((i) => i.registerClient(client("c_first", null)));
 
     const at = await alarmAt();
@@ -64,6 +71,29 @@ describe("the authorization object sweeps on an alarm", () => {
     // At the interval, not sooner: nothing is known to be reclaimable yet.
     expect(at! - Date.now()).toBeGreaterThan(SWEEP_INTERVAL_MS / 2);
     expect(at! - Date.now()).toBeLessThanOrEqual(SWEEP_INTERVAL_MS);
+  });
+
+  /**
+   * The `!complete` arm, which had no test at all: `grep SWEEP_RESUME_MS` matched
+   * only its definition and its one use. The reclaim test below drives a pass
+   * that completes and asserts only that the alarm is non-null, so it would pass
+   * identically if the ternary always chose the interval — and an inverted
+   * ternary would make a mid-keyspace stop wait five minutes per page, which is
+   * #51's starvation reached from the other direction.
+   */
+  it("resumes almost at once when a sweep stops mid-keyspace", async () => {
+    // One more than PURGE_BATCH (200), so the first page cannot reach the end.
+    await inAuth(async (i) => {
+      for (let n = 0; n < 201; n++) await i.registerClient(client(`c_bulk_${n}`, 1_000));
+    });
+
+    expect(await runDurableObjectAlarm(authStub())).toBe(true);
+
+    const at = await alarmAt();
+    expect(at).not.toBeNull();
+    // Seconds, not minutes. The cursor is only worth keeping if something comes
+    // back for it.
+    expect(at! - Date.now()).toBeLessThan(SWEEP_INTERVAL_MS / 10);
   });
 
   it("reclaims a lapsed registration when the alarm fires, and re-arms", async () => {

@@ -199,8 +199,15 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
        * have made it. The decision stays here, beside the verb check and the
        * payload validation that already established what this send is.
        */
+      // `stampActionRequest` rides the append for `creditReport`'s reason: it is
+      // a write on the session record that has to land with the event or not at
+      // all. The stamp is what lets `bellman_sync` skip reading the log on a
+      // room that has no request inside the TTL — which is every room that does
+      // not use action requests, and most that do, most of the time (#81).
       const extras: AppendExtras | undefined =
-        type === "progress" ? { creditReport: true } : undefined;
+        type === "progress" ? { creditReport: true }
+        : type === "action_request" ? { stampActionRequest: true }
+        : undefined;
 
       let event: SessionEvent;
       let replayed = false;

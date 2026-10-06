@@ -167,7 +167,15 @@ function memberRow(
   if (extras.markRemoved !== undefined) {
     members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
   }
-  return members === s.members ? {} : { session: { ...s, members } };
+  // Monotonic, for the reason MemoryStore's copy gives. Computed before the
+  // early return below, because this rule can need a session row written when
+  // the member rules did not.
+  const stamp = extras.stampActionRequest
+    ? Math.max(s.lastActionRequestAt ?? 0, event.at)
+    : s.lastActionRequestAt;
+
+  if (members === s.members && stamp === s.lastActionRequestAt) return {};
+  return { session: { ...s, members, lastActionRequestAt: stamp } };
 }
 
 /**

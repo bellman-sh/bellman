@@ -1623,6 +1623,52 @@ export function describeStoreContract(
           .find((m) => m.memberId === "m_creator")!.lastReportAt;
       const unstamped = () => session({ members: [member({ lastReportAt: undefined })] });
 
+      /**
+       * The room's most recent action_request, which is what lets bellman_sync
+       * decide whether reading the log is worth it at all (#81). Both stores
+       * have to agree, or the Durable Object answers "nothing outstanding" for
+       * a room MemoryStore reports requests in.
+       */
+      describe("the action request stamp", () => {
+        const asked = () => ({
+          type: "action_request" as const,
+          fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+          payload: { ask: "deploy" }, refId: null,
+        });
+        const stamped = async (id: string) =>
+          (await store.getSession(id))! as { lastActionRequestAt?: number };
+
+        it("is absent until an append asks for it", async () => {
+          const s = session({});
+          (await store.createSession(s));
+          (await store.appendEvent(s.id, asked()));
+
+          expect((await stamped(s.id)).lastActionRequestAt).toBeUndefined();
+        });
+
+        it("records the event's own time when asked", async () => {
+          const s = session({});
+          (await store.createSession(s));
+
+          const event = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+
+          expect((await stamped(s.id)).lastActionRequestAt).toBe(event.at);
+        });
+
+        it("only ever moves forward", async () => {
+          // A replay re-asserts the stamp, as creditReport does, and must not be
+          // able to pull it back — an older value would hide a live request from
+          // the poll, which is the one failure this field can cause.
+          const s = session({});
+          (await store.createSession(s));
+          const first = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+          const second = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+
+          expect(second.at).toBeGreaterThanOrEqual(first.at);
+          expect((await stamped(s.id)).lastActionRequestAt).toBe(second.at);
+        });
+      });
+
       it("stamps the sender at the event's own time", async () => {
         const s = unstamped();
         (await store.createSession(s));

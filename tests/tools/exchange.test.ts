@@ -8,11 +8,12 @@
  *              request_actions must be explicitly granted.
  * INVARIANT 8: no shared mutable state between sessions — message-passing only.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
+import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
 
 let h: Harness;
 
@@ -206,6 +207,67 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     });
     expect(quiet.isError, quiet.text).toBe(false);
     expect(quiet.data.outstanding).toBeUndefined();
+  });
+
+  /**
+   * The cost of `outstanding`, which is the reason for the stamp on the record.
+   *
+   * Computing it means reading the log from cursor 0 — a request made before
+   * `since_cursor` is still outstanding, so a slice cannot answer it. Done
+   * unconditionally that is a full read per poll, per member, for the life of a
+   * room, including every room that never uses action requests at all.
+   */
+  const countsLogReads = async (run: () => Promise<unknown>) => {
+    const real = h.store.eventsAfter.bind(h.store);
+    let fromZero = 0;
+    h.store.eventsAfter = async (id: string, after: number) => {
+      if (after === 0) fromZero++;
+      return real(id, after);
+    };
+    try {
+      await run();
+    } finally {
+      h.store.eventsAfter = real;
+    }
+    return fromZero;
+  };
+
+  it("reads no log at all on a room that has never had an action request", async () => {
+    const p = await pairUp(h);
+    await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "message", payload: { text: "nothing to approve here" },
+    });
+
+    const reads = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+
+    expect(reads).toBe(0);
+  });
+
+  it("reads the log while a request is live, and stops once it has expired", async () => {
+    const p = await pairUp(h);
+    await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+
+    // Live: the read happens, and it is what finds the request. Without this the
+    // test above would pass against a guard that never reads anything.
+    const live = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+    expect(live).toBe(1);
+
+    // Expired: the newest request is past the TTL, so every request is, and the
+    // answer is the empty list without reading for it.
+    vi.setSystemTime(Date.now() + ACTION_REQUEST_TTL_MS + 1_000);
+    const stale = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+    expect(stale).toBe(0);
+    vi.useRealTimers();
   });
 
   it("requires action_response to reference a real request", async () => {

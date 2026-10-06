@@ -8,7 +8,7 @@ import { findMember, sessionStatus, touchMember } from "../rooms.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
-import { outstandingFor } from "../action-state.js";
+import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   // --------------------------------------------------------------- bellman_sync
@@ -165,7 +165,28 @@ If a room's creator has removed you, you still get the history up to and includi
       // the room's TTL rather than by anything here, and the fix if it stops
       // being enough is a stored cursor for the last `action_request`, which
       // turns this into a bounded tail read.
-      const everything = await s.eventsAfter(session_id, 0);
+      // The guard that keeps this off the common path. `lastActionRequestAt` is
+      // the only thing read from the record here, and it decides whether the log
+      // is worth reading at all — never what any request's state is, which stays
+      // derived.
+      //
+      // Absent: no `action_request` has ever been appended, so nothing can be
+      // outstanding. Older than the TTL: the NEWEST request has expired, so all
+      // of them have. Either way the answer is the empty list, and a full read
+      // of the log would produce it the expensive way — on every poll, from
+      // every watcher, for the whole life of a room that may never use the
+      // feature at all.
+      //
+      // What is left unbounded is a room with a request inside the last half
+      // hour, which still reads its whole log. That is the set actually using
+      // the feature, and bounding it further needs a floor cursor this stamp
+      // cannot give: a response may sit far behind the newest request, so there
+      // is no single cursor to start from without tracking the oldest OPEN one.
+      const stampedAt = (session as { lastActionRequestAt?: number }).lastActionRequestAt;
+      const mayHaveOutstanding =
+        stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS;
+
+      const everything = mayHaveOutstanding ? await s.eventsAfter(session_id, 0) : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
       // exists because an eviction that committed after `me` was read leaves

@@ -421,6 +421,14 @@ export interface AppendExtras {
    * `markRemoved` for why the two writes cannot be separated (#113).
    */
   markRemoved?: string;
+  /**
+   * Record the event's own `at` as the room's most recent `action_request`.
+   *
+   * Passed by `bellman_send` on an `action_request` append. Monotonic, and
+   * re-asserted on an idempotent replay for `creditReport`'s reason: a caller
+   * retrying cannot know whether the first attempt landed it.
+   */
+  stampActionRequest?: boolean;
 }
 
 export interface BellmanStore {
@@ -1194,6 +1202,12 @@ export class MemoryStore implements BellmanStore {
       members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
     }
     if (members !== s.members) s.members = members;
+    // Monotonic, so a replay of an older append cannot pull the stamp back and
+    // make a live request invisible to the poll.
+    if (extras.stampActionRequest) {
+      const stored = s as { lastActionRequestAt?: number };
+      stored.lastActionRequestAt = Math.max(stored.lastActionRequestAt ?? 0, event.at);
+    }
   }
 
   async appendEventOnce(

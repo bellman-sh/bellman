@@ -27,13 +27,22 @@
  * The method under test is always the one held. Held in its transaction, a call keeps every
  * other call out whatever shape that call has, so holding the interfering call instead
  * would pass for a method under test left on the plain shape.
+ *
+ * The held cases cannot reach what the purge does. The registry they fill holds only
+ * permanent clients, so the purge that runs inside the transaction reclaims nothing, and
+ * what it does with something to reclaim (delete the lapsed clients and stale buckets, take
+ * them off the count, set or clear the backoff mark) goes through the transaction's handle
+ * in code no held case executes. A handle that was wrong there would leave the registry full
+ * for good, refusing every registration, and nothing else would say so. The last describe of
+ * the registration cases runs it, unheld, and once with the insert interrupted, which takes
+ * the purge back with it.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import type { AuthDO } from "../src/oauth/store.js";
 import {
-  CLIENT_CAP, CLIENT_COUNT_KEY, REGISTRATIONS_PER_HOUR, SESSION_TOUCH_MS, SESSION_TTL_MS,
-  type PanelSession, type RegisteredClient,
+  CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, REGISTRATIONS_PER_HOUR, SESSION_TOUCH_MS,
+  SESSION_TTL_MS, type PanelSession, type RegisteredClient,
 } from "../src/oauth/storage.js";
 import type { Identity } from "../src/types.js";
 
@@ -150,16 +159,61 @@ const keysUnder = (name: string, prefix: string) =>
   runInDurableObject<AuthDO, string[]>(auth(name), async (_instance, ctx) =>
     [...(await ctx.storage.list({ prefix })).keys()]);
 
-describe("admitRegistration, the first call held between its read and its write", () => {
-  const NOW = Date.now();
+/** Every row an object holds, so "nothing changed" means nothing at all. */
+const everything = (name: string) =>
+  runInDurableObject<AuthDO, Record<string, unknown>>(auth(name), async (_instance, ctx) =>
+    Object.fromEntries(await ctx.storage.list()));
 
-  /** Permanent, so nothing here lapses and the purge has nothing to take. */
-  const client = (id: string): RegisteredClient => ({
-    client_id: id, redirect_uris: [], created_at: 1, expires_at: null,
+/**
+ * Make any write that carries a row under `prefix` throw while `outage.on` is set, through
+ * either handle a method writes with: `storage.put`, or the `put` of the txn handed to a
+ * `storage.transaction` closure. `hits` counts the writes refused, so a test can tell the hook
+ * sat on the write it names. The state is an object the test holds, so the interruption can be
+ * over by the time of the retry, and the hook lives on the instance, which the abort in
+ * afterEach discards.
+ */
+const interruptWritesTo = (name: string, prefix: string, outage: { on: boolean; hits: number }) =>
+  runInDurableObject<AuthDO, void>(auth(name), (_instance, ctx) => {
+    type Call = (...args: unknown[]) => Promise<unknown>;
+    const storage = ctx.storage as unknown as { put: Call; transaction: Call };
+    const carries = (arg: unknown) =>
+      typeof arg === "string"
+        ? arg.startsWith(prefix)
+        : typeof arg === "object" && arg !== null && Object.keys(arg).some((k) => k.startsWith(prefix));
+    const refusing = (put: Call): Call => (...args) => {
+      if (outage.on && carries(args[0])) {
+        outage.hits++;
+        throw new Error("interrupted");
+      }
+      return put(...args);
+    };
+    const put = storage.put.bind(storage);
+    const transaction = storage.transaction.bind(storage);
+    Object.defineProperty(ctx.storage, "put", { configurable: true, value: refusing(put) });
+    Object.defineProperty(ctx.storage, "transaction", {
+      configurable: true,
+      value: (closure: (txn: object) => Promise<unknown>, ...rest: unknown[]) =>
+        transaction((txn: object) => closure(new Proxy(txn, {
+          get(target, prop) {
+            const member = Reflect.get(target, prop, target) as unknown;
+            if (typeof member !== "function") return member;
+            const bound = (member as Call).bind(target);
+            return prop === "put" ? refusing(bound) : bound;
+          },
+        })), ...rest),
+    });
   });
-  const admit = async (name: string, id: string, ip: string | null) =>
-    auth(name).admitRegistration(client(id), ip, NOW);
 
+const NOW = Date.now();
+
+/** Permanent unless told otherwise, so nothing lapses by accident and a purge has nothing to take. */
+const client = (id: string, over: Partial<RegisteredClient> = {}): RegisteredClient => ({
+  client_id: id, redirect_uris: [], created_at: 1, expires_at: null, ...over,
+});
+const admit = async (name: string, id: string, ip: string | null, now = NOW) =>
+  auth(name).admitRegistration(client(id), ip, now);
+
+describe("admitRegistration, the first call held between its read and its write", () => {
   it("admits exactly one of two registrations when one slot is left under the cap", async () => {
     // The object has counted: its counter says one short of the cap. Nothing else about it
     // matters, and the rows themselves are not needed to put it there.
@@ -208,6 +262,87 @@ describe("admitRegistration, the first call held between its read and its write"
       + `that had used ${used.length}`;
     expect([...outcomes].sort(), where).toEqual(["ok", "rate_limited"]);
     expect(clients, where).toHaveLength(1);
+  });
+});
+
+describe("admitRegistration at the cap, with something for the purge inside its transaction", () => {
+  /**
+   * At the cap by its counter, with two clients that have lapsed and two address buckets that
+   * have gone stale: one wholly, so a purge drops it, and one in part, so a purge rewrites it
+   * without its old stamp.
+   */
+  const crowded = (): Record<string, unknown> => ({
+    [CLIENT_COUNT_KEY]: CLIENT_CAP,
+    "client:c_lapsed_a": client("c_lapsed_a", { expires_at: 1 }),
+    "client:c_lapsed_b": client("c_lapsed_b", { expires_at: 2 }),
+    "reg:198.51.100.7": [1],
+    "reg:198.51.100.8": [1, NOW - 1_000],
+  });
+
+  it("evicts the lapsed clients and the stale buckets, and admits into the room it made", async () => {
+    // The call is unheld; what is under test is the purge's own work, run through the
+    // transaction's handle.
+    const name = "race-evict";
+    await seed(name, crowded());
+
+    const outcome = await admit(name, "c_new", null);
+
+    const clients = await keysUnder(name, "client:");
+    const counted = await auth(name).countClients();
+    const where = `the call answered ${outcome}; the object stores ${JSON.stringify(clients)} `
+      + `and counts ${counted} against a cap of ${CLIENT_CAP}`;
+    expect(outcome, where).toBe("ok");
+    expect(clients, where).toEqual(["client:c_new"]);
+    expect(counted, where).toBe(CLIENT_CAP - 1);
+    expect(await keysUnder(name, "reg:"), "the wholly stale bucket was not dropped, or the other was")
+      .toEqual(["reg:198.51.100.8"]);
+    expect(
+      await auth(name).countRecentRegistrations("198.51.100.8", 0),
+      "the partly stale bucket was not rewritten without its old stamp"
+    ).toBe(1);
+  });
+
+  it("marks a purge that found nothing, and does not scan the full registry again until the mark has passed", async () => {
+    // Refusing a full registry writes no per-address state, so it can be retried without limit,
+    // and what keeps each retry cheap is the mark the first fruitless purge sets. It is set inside
+    // the transaction and read inside the next one.
+    const name = "race-backoff";
+    await seed(name, {
+      [CLIENT_COUNT_KEY]: CLIENT_CAP,
+      "client:c_permanent": client("c_permanent"),
+    });
+
+    expect(await admit(name, "c_first", null), "control: the registry is full").toBe("full");
+    // A client lapses after that scan. Inside the backoff nothing looks for it.
+    await seed(name, { "client:c_lapsed": client("c_lapsed", { expires_at: 1 }) });
+    expect(await admit(name, "c_second", null), "the full registry was scanned again inside the backoff")
+      .toBe("full");
+    // Once the mark has passed the scan runs, finds it, and admits.
+    expect(await admit(name, "c_third", null, NOW + PURGE_BACKOFF_MS), "after the backoff the purge made no room")
+      .toBe("ok");
+  });
+
+  it("leaves the registry exactly as it was when the insert is interrupted, the purge included, and the retry finishes", async () => {
+    // Everything the call did before the insert (it deleted the lapsed clients and the stale
+    // bucket, took them off the count and rewrote the other bucket) is in the transaction, so an
+    // interruption at the insert takes it all back. A purge that committed before the insert, as
+    // it did when this was a plain read and then writes, would leave its part behind, and the
+    // cases above cannot tell: they only look at what a call that finishes leaves.
+    const name = "race-evict-interrupted";
+    await seed(name, crowded());
+    const asSeeded = await everything(name);
+    const outage = { on: true, hits: 0 };
+    await interruptWritesTo(name, "client:c_new", outage);
+
+    await expect(admit(name, "c_new", null)).rejects.toThrow(/interrupted/);
+
+    expect(outage.hits, "control: the interruption landed on the insert").toBeGreaterThan(0);
+    expect(await everything(name), "the interrupted call left part of its work behind").toEqual(asSeeded);
+
+    outage.on = false;
+    expect(await admit(name, "c_new", null), "the retry did not admit").toBe("ok");
+    expect(await keysUnder(name, "client:")).toEqual(["client:c_new"]);
+    expect(await auth(name).countClients()).toBe(CLIENT_CAP - 1);
   });
 });
 

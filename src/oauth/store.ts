@@ -42,7 +42,10 @@ const PURGE_BATCH = 200;
  * What a method reads and writes through: the object's own storage, or the transaction it
  * is inside. The helpers a transaction calls take this and have no default for it, as
  * SessionDO's `nextCursor(txn)` takes the transaction, so that what runs inside a
- * transaction can be read off the code and a caller has to say which it means.
+ * transaction can be read off the code and a caller has to say which it means. That is a
+ * convention and not what makes the transaction hold: on this object's storage a call
+ * through `ctx.storage` inside the closure is part of the transaction too
+ * (docs/ARCHITECTURE.md section 9, runtime fact 6).
  */
 type Rows = Pick<DurableObjectTransaction, "get" | "put" | "delete" | "list">;
 

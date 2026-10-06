@@ -953,7 +953,7 @@ overtaking each other on the way to the registry), so
 `worker-tests/reconcile-race.test.ts` holds one reconcile open inside it and
 shows that the lock is what keeps the order.
 
-**What the runtime does.** Five facts, each measured on workerd rather than read
+**What the runtime does.** Six facts, each measured on workerd rather than read
 off its documentation, decide how code here is written.
 
 1. **`setAlarm` inside a `ctx.storage.transaction()` closure commits with that
@@ -1026,6 +1026,30 @@ off its documentation, decide how code here is written.
    "apply"; and calling the bare function drops `this`. `Reflect.apply` is the one
    form that does none of these. Each failure reddened all 131 contract cases at
    once and none of them is visible against a plain-object fake.
+6. **On a SQLite-backed object, a write made through `ctx.storage` inside a
+   `ctx.storage.transaction()` closure is part of that transaction.** Inside the
+   closure `ctx.storage` and the `txn` share one view. Each reads what the other has
+   written and not yet committed, the write commits with the closure, and when the
+   closure throws it is gone along with the `txn`'s own. So a stray `ctx.storage` call
+   inside a closure does not make the closure unsound, and nobody has to hunt for one to
+   show that a closure holds. Passing `txn` to the helpers a closure calls (`stored(txn)`,
+   `nextCursor(txn)`, `AuthDO`'s `rows`) is still the convention, because it shows a
+   reader where the transaction's boundary is and does not lean on this fact, but it is
+   not what makes the transaction hold. Fact 1 is this one seen through `setAlarm`: its
+   test arms the alarm through `ctx.storage` inside the closure. All four classes here
+   are SQLite-backed (`wrangler.toml`). The KV-backed flavour was not measured, and
+   nothing here uses it.
+
+   It was found by a deliberate break: making `AuthDO.#bumpCount` write through
+   `this.ctx.storage` inside `admitRegistration`'s transaction left every test green,
+   and a probe showed why. `worker-tests/storage-handles-in-transaction.test.ts` holds
+   the fact on its own, on workerd 1.20260926.1 (pinned in `worker-tests/package.json`),
+   for each of the four classes. It checks the object is SQLite-backed, writes through
+   both handles in a closure that throws, aborts the object and reads both rows back
+   from a new instance, does the same with a closure that commits, and reads each
+   handle's view of the other's write mid-closure. If it fails, a `ctx.storage` call
+   inside a closure is no longer inside the transaction and the convention becomes a
+   requirement; the test is not wrong.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`

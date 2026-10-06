@@ -23,7 +23,13 @@ producing bugs. Read it before changing how the pieces fit together.
 
 ## Layout
 
-- `src/server.ts` — the tools. One `McpServer` per request, bound to a caller identity.
+- `src/server.ts` — `buildServer` and nothing else: one `McpServer` per request,
+  bound to a caller identity, composed from `src/tools/`.
+- `src/tools/` — one file per tool, plus `kit.ts` for what they share (the MCP
+  result shape, the zod input shapes). A new tool is a new file here.
+- `src/projections.ts` — `Session` in, wire object out. Runtime-free on purpose,
+  so the HTTP routes can import it without the MCP SDK; `src/public-event.ts` is
+  the same layer. `tests/projections.test.ts` asserts that, transitively.
 - `src/store.ts` — `BellmanStore`, the storage boundary, plus `MemoryStore`.
 - `src/store-do.ts` — the Durable Objects implementation that serves production.
 - `src/oauth/` — the authorization server: tokens, storage, providers, routes.

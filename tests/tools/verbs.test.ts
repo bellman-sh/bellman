@@ -632,14 +632,30 @@ describe("platform role and room role are different things", () => {
   // chaining and a helper handed the identity all slip past it, so the behavioural
   // tests above are the real guard.
   it("leaves identity.role used only by bellman_audit", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const { readFileSync, readdirSync } = await import("node:fs");
+    // The whole tool layer, not one path. #92 split the tools out of
+    // server.ts, and an invariant pinned to a single file stops holding the
+    // moment the code it guards moves to another — which is exactly what
+    // happened to this assertion. Reading the directory also means a tool
+    // added later is covered by existing, rather than by someone remembering
+    // to add it here.
+    const tools = new URL("../../src/tools/", import.meta.url);
+    const files = [
+      new URL("../../src/server.ts", import.meta.url),
+      ...readdirSync(tools).filter((f) => f.endsWith(".ts")).map((f) => new URL(f, tools)),
+    ];
     const readsRole = /identity\s*(?:\.\s*role\b|\[\s*(['"])role\1\s*\])/;
-    const hits = src.split("\n")
-      .map((line, i) => [i + 1, line] as const)
-      .filter(([, line]) => readsRole.test(line));
-    expect(hits.length, `identity.role at lines ${hits.map(([n]) => n).join(", ")}`).toBe(1);
+    const hits = files.flatMap((url) =>
+      readFileSync(url, "utf8").split("\n")
+        .map((line, i) => [`${url.pathname.split("/").pop()}:${i + 1}`, line] as const)
+        .filter(([, line]) => readsRole.test(line))
+    );
+    expect(hits.length, `identity.role at ${hits.map(([where]) => where).join(", ")}`).toBe(1);
     expect(hits[0][1]).toContain("the audit log requires the admin role");
+    // Where the one hit is, is the positive control. A scan that never reached
+    // src/tools/ would report zero and fail above; naming the file proves the
+    // read got there rather than passing on an empty list.
+    expect(hits[0][0]).toMatch(/^audit\.ts:/);
   });
 
   it("never names Identity in src/roles.ts's code", async () => {

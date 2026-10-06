@@ -1079,7 +1079,7 @@ derived from state already committed, so a miss costs a row in one listing — a
 room that a lapsed plan does not freeze, or a room missing from a joined listing
 — never the room itself. That is the reasoning for logging rather than
 retrying, and it is the same window the outbox closes elsewhere. Room activity
-is audited by `audit()` in `src/server.ts`, which calls `AuditDO.append`
+is audited by `audit()` in `src/rooms.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes and the rows of a
 leave or an eviction are guaranteed to reach the audit stream. A removal's rows
 are queued by `removeMember` in its own transaction, and every path it does not

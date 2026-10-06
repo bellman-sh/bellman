@@ -430,7 +430,8 @@ describe("what a caller holding the binding can reach", () => {
     const stored = () =>
       runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.get("client:c_lapsed"));
     // A public method answers, so a refusal below is about the method and not the stub.
-    expect(await stub.countClients()).toBeTypeOf("number");
+    const count = await stub.countClients();
+    expect(count).toBeTypeOf("number");
     expect(await stored()).toBeDefined();
 
     // Clearing the seeded counter is what makes clientCount's refusal state-visible.
@@ -438,7 +439,7 @@ describe("what a caller holding the binding can reach", () => {
     // control above have both already seeded it, so with the key in place a clientCount
     // that ran would change nothing and only the name assertion could catch it. Cleared,
     // the key coming back is proof one of them ran: clientCount would re-seed it and
-    // bumpCount would write seed + 1000.
+    // bumpCount would write it, whatever it was handed.
     const counter = () =>
       runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.get("clients:count"));
     await runInDurableObject(authStub(), (_i: AuthDO, ctx) => ctx.storage.delete("clients:count"));
@@ -455,12 +456,12 @@ describe("what a caller holding the binding can reach", () => {
     // have rewritten, and the lapsed registration is still stored, which purge would have
     // swept.
     //
-    // Nothing here compares counts across that deletion. `count` was read before it, and
-    // carries the off-by-one in #122: registerClient on an unseeded object stores 2 for
-    // one client, because the seed lists the key it has already written. Re-seeding after
-    // the delete gives the true 1, so asserting the two are equal would fail now and
-    // would fail again, the other way, once #122 is fixed.
     expect(await counter()).toBeUndefined();
     expect(await stored()).toBeDefined();
+    // The count the object held and the one it seeds again from the rows agree. They did not
+    // while registerClient counted a client twice on an object that had not counted yet
+    // (#122): `count` read 2 for one client and the rows say 1, and that is why this once
+    // compared nothing across the deletion. Last, because reading the count seeds it again.
+    expect(await stub.countClients(), "re-seeded from the rows").toBe(count);
   });
 });

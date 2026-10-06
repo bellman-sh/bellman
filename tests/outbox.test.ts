@@ -171,6 +171,36 @@ describe("outbox", () => {
     expect(next).toBe(1_000 + backoffMs(1));
   });
 
+  /**
+   * #123. A reconcile holds one user's lock across this drain, so what the drain
+   * costs when the downstream is down decides whether a backlog can be felt by
+   * a user who has nothing to do with it.
+   *
+   * It costs one delivery attempt, whatever the depth: the loop returns at the
+   * first failure instead of working through the queue. Measured on workerd at
+   * depths 1 to 1,000, the hold was flat at about 2 ms while a succeeding drain
+   * of the same queue rose to 718 ms. That is why #123 was closed without a
+   * change, and the two depths here are what keeps it true — a drain that
+   * carried on past a failure would deliver 500 times in the second case and
+   * turn a stuck audit object into every reconcile's problem.
+   */
+  it.each([2, 500])("attempts one delivery and no more when the head fails, at depth %i", async (depth) => {
+    const storage = fakeStorage();
+    await storage.put(enqueueRows(0, Array.from({ length: depth }, (_, n) => ({
+      id: `i${n}`, kind: "audit", payload: n,
+    }))));
+
+    let attempts = 0;
+    const next = await drain(storage, async () => { attempts++; throw new Error("AuditDO is down"); }, 1_000);
+
+    // One attempt, not `depth` of them. The cost of a failing drain does not
+    // grow with the queue behind the failure.
+    expect(attempts).toBe(1);
+    // Nothing was delivered, so nothing was deleted: every row is still queued.
+    expect((await storage.list({ prefix: OUTBOX_PREFIX })).size).toBe(depth);
+    expect(next).toBe(1_000 + backoffMs(1));
+  });
+
   it("backs off by doubling to a five-minute cap", () => {
     expect(backoffMs(1)).toBe(1_000);
     expect(backoffMs(2)).toBe(2_000);

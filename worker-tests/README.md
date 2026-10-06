@@ -21,7 +21,7 @@ gets a genuine vitest 4 tree with `vite` intact and the root keeps vitest 5. Thi
 directory is therefore NOT an npm workspace of the root, and `npm install` here
 is separate from `npm install` there.
 
-## Three things that will bite whoever touches this
+## What will bite whoever touches this
 
 **`--legacy-peer-deps` is required to install, for an unrelated reason.** npm
 10.9.2's arborist crashes with `Cannot read properties of null (reading
@@ -43,6 +43,24 @@ cannot be used to simulate hibernation; `evictAllDurableObjects()` hibernates
 them and is what `ws-delivery.test.ts` uses. The two are not
 interchangeable — evict also drains in-flight long polls, so a test that needs
 an in-memory waiter destroyed still wants abort.
+
+**Do not measure time in here, and do not report by logging.** Two traps, both
+hit while measuring #123.
+
+A *passing* test's `console.log` is suppressed when stdout is not a TTY, so a
+probe that prints its results reads as green with its output nowhere — the same
+shape as a probe whose cells never ran. End a probe by **throwing** its results,
+so green means it did not run.
+
+And the pool's clock is the harness. The same cell measured **66 ms early in a
+file and 1,304 ms late**, and appending once to each of N distinct `AuditDO`s
+went from 1.7 to 50.5 ms/append as N grew, with no outbox or drain anywhere near
+it — the pool resets and aborts objects between tests and that bookkeeping
+accumulates. In real workerd that curve is flat. Use this program for **counts**
+(rows delivered, calls made, state left behind), which no clock affects; for a
+millisecond, run a throwaway worker under `wrangler dev` and time it from a
+client outside the isolate, subclassing the real Durable Object so the code under
+measurement is the production one.
 
 **The pool's config API changed at 0.22.0.** There is no
 `@cloudflare/vitest-pool-workers/config` subpath and no `defineWorkersConfig`;

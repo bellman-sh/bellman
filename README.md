@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`). Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can issue a fresh code — one per role — to add members later.
+One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`), and the same code as a link for pasting into chat (`https://bellman.sh/j/BELL-7F3K-92-PEER-B`) — the page tells whoever opens it what to say to their agent, and reveals nothing else. Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can issue a fresh code — one per role — to add members later.
 
 ## Why MCP as the rendezvous
 
@@ -24,7 +24,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
-| `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. |
+| `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
 ## What a send proves

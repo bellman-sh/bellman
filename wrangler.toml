@@ -64,7 +64,7 @@ persist = true
 #   npx wrangler secret put STRIPE_API_KEY        (restricted: Subscriptions read)
 #   npx wrangler secret put STRIPE_PAYMENT_LINKS
 [vars]
-BELLMAN_BILLING = "shadow"
+BELLMAN_BILLING = "on"
 
 # Where the control panel is served from. Comma-separated; bare origins, no
 # trailing slash — the Origin header carries neither, and parsePanelOrigins

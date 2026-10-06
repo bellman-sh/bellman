@@ -106,8 +106,19 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   async registerClient(client: RegisteredClient): Promise<void> {
     const key = `${CLIENT}${client.client_id}`;
     const existed = (await this.ctx.storage.get(key)) !== undefined;
-    await this.ctx.storage.put(key, client);
-    if (!existed) await this.#bumpCount(1);
+    // Counted before the key is written, and used for the new count rather than read again
+    // (#122). An object that has not counted yet seeds its counter by listing the client
+    // keys, so a read after the put lists this client too and the one added for it makes
+    // two. The wrong number is stored, and a stored counter is never recounted, so the
+    // object stays one ahead and closes registration a client early for good.
+    //
+    // The key and that count go in one put. As two writes, an interruption between them
+    // stored the client and not its count, and the object stayed one behind for good, which
+    // opens the cap late: the direction purgeStale closes below. A key that already exists
+    // changes no count, so it is written alone.
+    const before = existed ? undefined : await this.#clientCount();
+    if (before === undefined) await this.ctx.storage.put(key, client);
+    else await this.ctx.storage.put({ [key]: client, [COUNT]: before + 1 });
   }
 
   /**
@@ -196,7 +207,10 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * Counted once and then maintained, because Durable Object storage has no
    * count API and the alternative is list()ing up to CLIENT_CAP entries on
    * every registration. Every insert and delete goes through registerClient or
-   * purgeStale, which are the only two places this moves.
+   * purgeStale, which are the only two places this moves. Both read it before they touch
+   * a key, because the seed lists the keys: read after, it would count the change itself
+   * (#122). registerClient writes it with the key in one put, and purgeStale hands it to
+   * #bumpCount, which has to follow its sweep.
    *
    * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
    * Object answers RPC for every method on its class, and TypeScript's `private` is erased
@@ -214,8 +228,16 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
   }
 
-  async #bumpCount(by: number): Promise<void> {
-    await this.ctx.storage.put(COUNT, Math.max(0, (await this.#clientCount()) + by));
+  /**
+   * Store the count as `before` plus `by`, where `before` is what #clientCount said BEFORE
+   * the keys changed. It is a parameter and not a read here because this runs after the
+   * change, and a read then seeds an uncounted object from keys that already show it: the
+   * change is counted twice, a registration too high and a purge too low (#122). Taking
+   * the number makes the order something a caller has to state, where a read inside would
+   * be right in every case but the first.
+   */
+  async #bumpCount(by: number, before: number): Promise<void> {
+    await this.ctx.storage.put(COUNT, Math.max(0, before + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
@@ -246,11 +268,22 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * way for the same reason.
    */
   async purgeStale(now: number): Promise<Reclaimed> {
+    // Counted before the sweep deletes anything, for registerClient's reason from the other
+    // side (#122). An object that has not counted yet seeds from the keys that are left,
+    // which already leave out what this pass deletes, and taking those off again stores a
+    // count too low. That is the direction that matters: the cap opens late.
+    //
+    // This seeds the counter on every call, where it used to wait for a pass that reclaimed
+    // something. That costs the production path nothing: admitRegistration reads the count
+    // before it purges, so the key is already there and this is one single-key read. Only a
+    // direct purgeStale on an uncounted object pays for the seed, and it is the one that
+    // needed it.
+    const before = await this.#clientCount();
     const clients = await sweepPage<RegisteredClient>(
       this.sweepStorage, CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,
       (c) => (hasLapsed(c, now) ? { action: "delete" } : { action: "keep" })
     );
-    if (clients.reclaimed > 0) await this.#bumpCount(-clients.reclaimed);
+    if (clients.reclaimed > 0) await this.#bumpCount(-clients.reclaimed, before);
 
     const buckets = await sweepPage<number[]>(
       this.sweepStorage, REG, REG_CURSOR_KEY, PURGE_BATCH,

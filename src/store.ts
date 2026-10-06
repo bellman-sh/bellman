@@ -815,8 +815,11 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(id);
     if (!s) return undefined;
     this.expireIfDue(s, Date.now());
-    const { events: _events, ...rest } = detach(s);
-    return rest;
+    // The events come off before the copy, not after it (#134): detach is a deep clone,
+    // so cloning first paid for the room's whole history on every call and then threw it
+    // away. expireIfDue has already run on `s`, so nothing it did is skipped by cloning later.
+    const { events: _events, ...rest } = s;
+    return detach(rest);
   }
 
   async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {

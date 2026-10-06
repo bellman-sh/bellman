@@ -199,16 +199,19 @@ describe("a removed member's bellman_sync on the real object", () => {
     expect(cut, "arrangement: the removal is committed").toBeDefined();
     expect((await store.eventsAfter(id, 0)).map((e) => e.type)).toEqual(["member_evicted", "message"]);
 
-    // Handed to the poll's one read of the record, and to nothing else: the removal and the
-    // message above have already read theirs.
-    const read = vi.spyOn(store, "getSession").mockResolvedValueOnce(before);
+    // Handed to every read the poll makes of the record, and to nothing else: the removal and
+    // the message above have already read theirs. Every read and not only the first, because a
+    // poll that asked to wait reads again once it returns (#74), for the status, and that read
+    // is of a record that shows the cut. Left fresh, a handler could take its cap from it and
+    // this case would pass with the slice doing none of the work.
+    const read = vi.spyOn(store, "getSession").mockResolvedValue(before);
     const answer = await asMember.call("bellman_sync", {
       session_id: id, member_id: "m_target", since_cursor: 0, wait_seconds: 20,
     });
     // The control this case stands on. If the handler stopped reading its record through the
     // object replaced above, it would be answering from a fresh one, the cut arm would
     // apply, and everything below would pass for nothing.
-    expect(read, "the poll read its record through the interposed store").toHaveBeenCalledTimes(1);
+    expect(read, "the poll read its record through the interposed store").toHaveBeenCalled();
 
     expect(answer.isError, answer.text).toBe(false);
     const events = envelopes(answer.data.events).map((e) => e.data as { cursor: number; type: string });

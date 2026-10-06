@@ -795,13 +795,18 @@ which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
-`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember` and the two
-appends are single transactions. An append carries the rows that belong with its
+`moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember`, the two
+appends and the expiry are single transactions. An append carries the rows that belong with its
 event — the cursor, an idempotency key's record, and for a `progress` send the
 sending member's own `lastReportAt`. That last one was a second `updateMember`
 call after the append returned, which is a second transaction with the wake
 between them: a due tick could read the committed event while the stale stamp
-still named that member silent, and a retry skipped the patch outright.
+still named that member silent, and a retry skipped the patch outright. The
+expiry is the same shape with the room's close in place of a member's stamp: it
+commits the close, the registry removals its codes owe and the `session_expired`
+event together ([#124](../../../issues/124)). Split, an interruption after the
+close left a room closed with no event, and nothing wrote one afterwards, because
+the retry finds the room closed and has nothing to expire.
 `updateMember`, `closeSession` and
 `freezeSession` are single invocations that await only storage. The input gate
 covers those, and a transaction would be the stronger form: it holds even if an

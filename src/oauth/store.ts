@@ -106,14 +106,19 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   async registerClient(client: RegisteredClient): Promise<void> {
     const key = `${CLIENT}${client.client_id}`;
     const existed = (await this.ctx.storage.get(key)) !== undefined;
-    // Counted before the key is written, and handed to #bumpCount rather than read there
+    // Counted before the key is written, and used for the new count rather than read again
     // (#122). An object that has not counted yet seeds its counter by listing the client
     // keys, so a read after the put lists this client too and the one added for it makes
     // two. The wrong number is stored, and a stored counter is never recounted, so the
     // object stays one ahead and closes registration a client early for good.
+    //
+    // The key and that count go in one put. As two writes, an interruption between them
+    // stored the client and not its count, and the object stayed one behind for good, which
+    // opens the cap late: the direction purgeStale closes below. A key that already exists
+    // changes no count, so it is written alone.
     const before = existed ? undefined : await this.#clientCount();
-    await this.ctx.storage.put(key, client);
-    if (before !== undefined) await this.#bumpCount(1, before);
+    if (before === undefined) await this.ctx.storage.put(key, client);
+    else await this.ctx.storage.put({ [key]: client, [COUNT]: before + 1 });
   }
 
   /**
@@ -203,8 +208,9 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * count API and the alternative is list()ing up to CLIENT_CAP entries on
    * every registration. Every insert and delete goes through registerClient or
    * purgeStale, which are the only two places this moves. Both read it before they touch
-   * a key and pass it to #bumpCount, because the seed lists the keys: read after, it would
-   * count the change itself (#122).
+   * a key, because the seed lists the keys: read after, it would count the change itself
+   * (#122). registerClient writes it with the key in one put, and purgeStale hands it to
+   * #bumpCount, which has to follow its sweep.
    *
    * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
    * Object answers RPC for every method on its class, and TypeScript's `private` is erased

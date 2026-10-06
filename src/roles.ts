@@ -15,9 +15,16 @@ import type { StoredSession } from "./stored-session.js";
  * Object.prototype happens to have no `can`, so this is not what stops
  * `roles["constructor"]` today — RoleKeyShape's ban is. It is here so the
  * accessor stays total under a rewrite.
+ *
+ * The optional chain is the other half of total, and `hasOwn` alone was not it
+ * (#91): an own key is not proof of a `RoleDef`, and a key mapping to null or
+ * undefined threw a TypeError on `.can` — the exact failure failing closed
+ * exists to avoid. Both are needed. `hasOwn` rejects an inherited role that
+ * does have a `can`, which the chain alone would return; the chain survives a
+ * malformed own value, which `hasOwn` alone did not. There is a test for each.
  */
 export function verbsOfRole(manifest: RoomManifest, role: string): readonly Verb[] {
-  return Object.hasOwn(manifest.roles, role) ? manifest.roles[role].can : [];
+  return Object.hasOwn(manifest.roles, role) ? manifest.roles[role]?.can ?? [] : [];
 }
 
 /**
@@ -28,10 +35,12 @@ export function verbsOfRole(manifest: RoomManifest, role: string): readonly Verb
  * `Object.hasOwn` rather than a bare lookup, so the accessor stays total under a
  * rewrite. `roles["constructor"]` on a plain object is the inherited Object
  * function, which has no `reports`, but relying on that is relying on the shape
- * of something else.
+ * of something else. The optional chain carries the other half, for the reason
+ * `verbsOfRole` gives: #91 was reported against that accessor and this one had
+ * it too, being the other place `manifest.roles` is indexed.
  */
 export function mustReport(manifest: RoomManifest, role: string): boolean {
-  return Object.hasOwn(manifest.roles, role) ? manifest.roles[role].reports : false;
+  return Object.hasOwn(manifest.roles, role) ? manifest.roles[role]?.reports ?? false : false;
 }
 
 /**

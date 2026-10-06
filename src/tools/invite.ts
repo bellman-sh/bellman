@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
+import { joinUrl } from "../codes.js";
 import type { Identity } from "../types.js";
 import { MAX_ROLE_KEY_LENGTH } from "../manifest.js";
 import { issueInvite, revokeInvite } from "../rooms.js";
@@ -24,7 +25,7 @@ Omitting \`role\` issues for the room's default seat. Omitting it when revoking 
 \`invite\` opens a door that is shut. \`revoke\` shuts one that is open and leaves it shut. Replacing a live code is both at once, so it takes both. A seat holding \`invite\` and not \`revoke\` cannot cut off a code someone is holding — the connect preview has always implied that, and it is now also true.
 
 Args: session_id, member_id (yours), role (optional), revoke (default false)
-Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
+Returns: { join_code, join_url, join_code_expires_at, role, replaced_previous, share_instructions } or { revoked: true, roles }
 Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
 Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replacing a live code needs both; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
@@ -44,13 +45,17 @@ Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replac
       }
       const r = await issueInvite(s, identity, session_id, member_id, role);
       if (!r.ok) return fail(r.reason);
+      const url = joinUrl(r.value.code);
       return ok({
         join_code: r.value.code,
+        join_url: url,
         join_code_expires_at: new Date(r.value.expiresAt).toISOString(),
         role: r.value.role,
         replaced_previous: r.value.replacedPrevious,
         share_instructions:
-          `Give this code to the joining session. It seats them as "${r.value.role}". Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
+          `Share this link with the joining session's human: ${url} — the page tells them what to say to their agent. ` +
+          `The code in it, ${r.value.code}, seats them as "${r.value.role}". ` +
+          `Any code issued earlier for that role has stopped working; other roles' codes are unaffected.`,
       });
     }
   );

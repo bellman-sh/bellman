@@ -28,3 +28,35 @@ describe("bellman_start", () => {
     expect(String(started.data.join_url)).toMatch(/^https:\/\/bellman\.sh\/j\/BELL-/);
   });
 });
+
+describe("bellman_invite", () => {
+  it("returns the link, and leads the sharing instructions with it", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, {
+      manifest: manifestFixture({ preset: "swarm" }),
+    });
+    const issued = await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId, role: "helper",
+    });
+    expect(issued.isError, issued.text).toBe(false);
+
+    const url = String(issued.data.join_url);
+    expect(url).toBe(joinUrl(String(issued.data.join_code)));
+    expect(String(issued.data.share_instructions)).toContain(url);
+    expect(String(issued.data.share_instructions)).toContain(String(issued.data.join_code));
+    expect(String(issued.data.share_instructions)).toContain('"helper"');
+  });
+
+  // Review Focus 3: a revoke returns join_code: null and must not invent a link for it.
+  it("returns no link when revoking", async () => {
+    const { creator, sessionId, creatorMemberId } = await pairUp(h, {
+      manifest: manifestFixture({ preset: "swarm" }),
+    });
+    const revoked = await creator.call("bellman_invite", {
+      session_id: sessionId, member_id: creatorMemberId, revoke: true,
+    });
+    expect(revoked.isError, revoked.text).toBe(false);
+    expect(revoked.data.revoked).toBe(true);
+    expect("join_url" in revoked.data).toBe(false);
+    expect(JSON.stringify(revoked.data)).not.toContain("bellman.sh/j/");
+  });
+});

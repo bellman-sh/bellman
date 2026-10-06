@@ -396,6 +396,13 @@ Then: normalise, build the draft with the normalised item as its payload,
 append with `extras.surface`, audit `sent_surface` with `{ key, kind, chars }`
 or `{ key, removed: true }`.
 
+That sequence — guard, validate, read the rows, append, audit — is one
+operation, `writeSurface` in `src/rooms.ts`, the way `issueInvite` is. The
+`surface` branch of `bellman_send` calls it and maps the `RoomResult`, and so
+does piece 3's `PUT /rooms/:id/surface/:key`. Two transports, one write path:
+the reason `rooms.ts` exists, applied before the second transport arrives
+rather than after.
+
 The count and the ends check read the rows first, one `surfaceOf` call, then
 append. That is a read-then-write and the window is open: two writers can both
 add a 64th item, or a connector can name a key removed a millisecond earlier.
@@ -517,11 +524,11 @@ Two rules this repo has paid for, applying to every test above:
 | `src/store.ts` | `AppendExtras.surface`; `surfaceOf` on the interface and in `MemoryStore`; the extra applied in both appends |
 | `src/store-do.ts` | `sf:` rows; `extraRows` (was `memberRow`) returns puts and deletes; `#writeEvent` applies both; `surfaceOf` on `SessionDO` and the facade |
 | `src/tools/kit.ts` | `surface` in `SEND_KINDS`; `SEND_VERB.surface`; `SurfaceShape` |
-| `src/tools/send.ts` | the `surface` branch: guard, validate, count, ends, extras, audit; the two exemptions |
+| `src/tools/send.ts` | the `surface` branch calls `writeSurface` and maps its result; the two exemptions |
 | `src/tools/sync.ts` | `surface_cursor`; the `surface` flag; the cut |
 | `src/tools/connect.ts`, `src/tools/confirm.ts` | the index; the envelopes |
 | `src/projections.ts` | `surfaceIndex`, `surfaceItems` |
-| `src/rooms.ts` | `readSurface(store, session, cut?)` for both transports |
+| `src/rooms.ts` | `writeSurface` — guard, validate, count, ends, extras, audit — and `readSurface(store, session, cut?)`, for both transports |
 | `skills/room-manifest/SKILL.md` | the verb row; the preset tables |
 | `README.md` | the `bellman_send` row; the verbs line; a short "The working surface" section |
 | `docs/ARCHITECTURE.md` | §5 a "The working surface" subsection; §8 the roadmap; §11 re-measured |

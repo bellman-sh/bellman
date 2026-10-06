@@ -495,12 +495,51 @@ export async function issueInvite(
   }
 
   const issuedRole = role ?? session.manifest.defaultRole;
-  const previous = Boolean(session.joinCodes[issuedRole]);
+
+  // Replacing a LIVE code is the `revoke` authority, not the `invite` one (#90).
+  // Issuing used to retire the previous code unconditionally, so a seat holding
+  // `invite` alone could cut off a code someone was holding just by minting.
+  // `bellman_connect` shows a joiner's human `your_verbs` before any of their
+  // context crosses, and `invite` without `revoke` reads there as "this seat
+  // cannot take a live code away" — a preview promising more restriction than
+  // the room enforced. The verbs now mean what that preview implies: `invite`
+  // opens a door that is shut, `revoke` shuts one that is open, and replacing a
+  // live code is both, so it needs both.
+  //
+  // **The decision goes to the store, and that is the fix for the second bug
+  // here.** This used to read the roster, see no live code, and then call
+  // `setJoinCode`, which wrote unconditionally — so two callers holding `invite`
+  // and not `revoke` could both observe no live code, and the second would
+  // retire the first's with neither of them allowed to. Found in review on the
+  // PR. The store is the only place that holds the record and the write
+  // together, so it is the only place the two can be one decision; here we say
+  // only what this seat is ALLOWED to do, and it says what was there.
+  //
+  // Fails closed. `gateSeat` has already established this member exists, so a
+  // miss means the predicate moved under us, and the safe answer to "may this
+  // seat retire a code someone is holding" is no.
+  const me = findMember(session, memberId, actor);
+  const mayReplaceLive = me !== undefined && denyVerb(session, me, "revoke") === null;
+
+  const now = Date.now();
   const code = renderJoinCode(issuedRole);
-  const expiresAt = Date.now() + JOIN_CODE_TTL;
-  if (!(await store.setJoinCode(sessionId, issuedRole, code, expiresAt))) {
-    return refuse("frozen", FROZEN);
+  const expiresAt = now + JOIN_CODE_TTL;
+  const set = await store.setJoinCode(sessionId, issuedRole, code, expiresAt, {
+    replaceLive: mayReplaceLive,
+    now,
+  });
+  if (!set.ok) {
+    // Refused rather than silently downgraded to a no-op: a caller that asked
+    // for a code and got none must hear why, or it hands out one that never came.
+    return set.reason === "frozen"
+      ? refuse("frozen", FROZEN)
+      : refuse(
+          "forbidden",
+          `role "${issuedRole}" already has a live join code. Replacing it retires the one someone may be holding, so it needs the "revoke" verb as well as "invite" — your seat holds invite alone. Wait for that code to expire, or ask a seat that holds revoke.`
+        );
   }
+  const previous = set.replacedLive;
+
   await store.appendEvent(session.id, {
     type: "invite_issued",
     fromMemberId: memberId,

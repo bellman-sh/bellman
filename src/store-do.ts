@@ -1,7 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import type { GrantDelete, GrantWrite } from "./store.js";
+import { SWEEP_RPC_BUDGET } from "./store.js";
+import type { GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
@@ -166,7 +167,15 @@ function memberRow(
   if (extras.markRemoved !== undefined) {
     members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
   }
-  return members === s.members ? {} : { session: { ...s, members } };
+  // Monotonic, for the reason MemoryStore's copy gives. Computed before the
+  // early return below, because this rule can need a session row written when
+  // the member rules did not.
+  const stamp = extras.stampActionRequest
+    ? Math.max(s.lastActionRequestAt ?? 0, event.at)
+    : s.lastActionRequestAt;
+
+  if (members === s.members && stamp === s.lastActionRequestAt) return {};
+  return { session: { ...s, members, lastActionRequestAt: stamp } };
 }
 
 /**
@@ -225,7 +234,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   private driver = new OutboxDriver(
     this.ctx.storage,
     (row) => this.#deliver(row),
-    () => this.derivedDue()
+    () => this.#derivedDue()
   );
 
   /**
@@ -306,6 +315,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * them in production, since every await between their read and their write is
    * storage, and the transaction is the stronger form. The appends were converted
    * after the local test pool lost writes in them (see appendEventOnce).
+   *
+   * **Still TypeScript-`private`, and alone among this class's readers in that
+   * (#126).** `events`, `nextCursor` and `derivedDue` are `#private`, because a
+   * Durable Object answers RPC for every method it has and TypeScript's
+   * `private` is erased at compile time. This one cannot follow them yet: three
+   * race tests patch it ON THE PROTOTYPE to hold the first read of the session
+   * open — `holdFirstReadOfTheSession` in removal-race, session-close-join-race
+   * and heartbeat-tick-race — and a `#private` method is not on the prototype to
+   * patch. They guard real atomicity bugs, so the conversion waits on moving
+   * them to another seam rather than on weakening them.
+   *
+   * Patching `ctx.storage.get` is the obvious replacement and is not a straight
+   * swap: this reads through whatever `from` it is given, so a read inside a
+   * transaction goes to `txn.get` and never touches `ctx.storage.get` at all.
+   *
+   * The exposure is redundant either way — `getSession` returns this record over
+   * RPC already — which is why #126 called the family tidying and not a
+   * vulnerability.
    */
   private async stored(
     from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
@@ -313,6 +340,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return hydrateStoredSession(await from.get("session"));
   }
 
+  /**
+   * TypeScript-`private` rather than `#private`, for the reason `stored` gives
+   * and a third kind of cost (#126). `tests/store-do-wiring.test.ts` overrides
+   * it on the INSTANCE to make a frame fail to build and to pin D5's ordering —
+   * read, then attach, accept and send, with nothing yielding in between. An
+   * override cannot shadow a `#private` method, so converting this would retire
+   * both.
+   */
   private async events(after = 0): Promise<SessionEvent[]> {
     const map = await this.ctx.storage.list<SessionEvent>({
       prefix: "e:",
@@ -330,6 +365,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cursors stay contiguous, so nothing downstream can tell (#120). Every caller reads
    * it inside the transaction that writes the event, which is the same reasoning as
    * stored() gives for the session record.
+   *
+   * TypeScript-`private` rather than `#private`, for the reason `stored` gives
+   * and the same cost (#126): `session-append-race.test.ts` patches it on the
+   * prototype to hand two appends the same cursor, which is the #120 collision
+   * this docblock is about. A `#private` method is not there to patch, and that
+   * test is the only thing standing between #120 and a silent recurrence.
    */
   private async nextCursor(txn: DurableObjectTransaction): Promise<number> {
     return ((await txn.get<number>("cursor")) ?? 0) + 1;
@@ -820,12 +861,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * already holds would end with it dropped from the index while the session still
    * lists it.
    */
-  async setJoinCode(role: string, code: string, expiresAt: number): Promise<boolean> {
-    const set = await this.ctx.storage.transaction(async (txn) => {
+  async setJoinCode(
+    role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
+    const outcome = await this.ctx.storage.transaction<SetJoinCode>(async (txn) => {
       const s = await this.stored(txn);
-      if (!s) return false;
-      if (s.frozenAt !== null) return false;
-      const previous = s.joinCodes[role]?.code;
+      if (!s) return { ok: false, reason: "frozen" };
+      if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+
+      // The `revoke` authority, decided inside the transaction that writes.
+      // Deciding it from a record read earlier let two callers holding `invite`
+      // alone both see no live code, and the second retire the first's (#90,
+      // found in review). Live and not merely present: an expired record shuts
+      // no door, so minting over it is opening rather than replacing.
+      const existing = s.joinCodes[role];
+      const live = existing !== undefined && guard.now <= existing.expiresAt;
+      if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
+
+      const previous = existing?.code;
       const rows = await this.driver.enqueue(txn, [
         ...(previous ? [dropCodeIntent(previous)] : []),
         putCodeIntent(code, s.id),
@@ -834,10 +888,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         session: { ...s, joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } } },
         ...rows,
       });
-      return true;
+      return { ok: true, replacedLive: live };
     });
-    if (set) await this.driver.deliverNow();
-    return set;
+    if (outcome.ok) await this.driver.deliverNow();
+    return outcome;
   }
 
   /**
@@ -1635,7 +1689,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * past, and it would fire again for as long as the session existed. It has no
    * tick to send either, which is why the early return covers both.
    */
-  private async derivedDue(): Promise<Map<string, number>> {
+  async #derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
     if (!s || s.closed) return new Map();
     const due = new Map([["ttl", s.expiresAt]]);
@@ -2175,10 +2229,39 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
   }
 
-  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+  /**
+   * One window of this person's created-room index, ids only, starting after
+   * `startAfter` when given.
+   *
+   * Paged rather than limited, because the registry cannot tell a live room from
+   * a closed one — the room is in another object — so the caller that CAN
+   * (`DurableObjectStore.sessionsCreatedBy`) walks these windows and keeps going
+   * until it has `limit` live ids. Applying `limit` here was the bug: a lapse
+   * walk spent its whole budget on closed rooms and never reached the live ones,
+   * which silently did nothing for exactly the accounts that use Bellman most
+   * (#75).
+   */
+  async createdIndexPage(userId: string, limit: number, startAfter?: string): Promise<string[]> {
     const prefix = `us:${userId}:`;
-    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    const map = await this.ctx.storage.list<number>({
+      prefix,
+      limit,
+      ...(startAfter === undefined ? {} : { startAfter: `${prefix}${startAfter}` }),
+    });
     return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /**
+   * Forget that this person created this room. Called by the sweep above as it
+   * meets a closed room, so a dead row is paid for once rather than on every
+   * listing for the life of the account — the index was never pruned at all
+   * before (#75, #115).
+   *
+   * Only the `us:` half. `um:` is history and keeps its rows deliberately: its
+   * contract is rooms a person HELD a handle in, closed ones included.
+   */
+  async dropCreatedIndex(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`us:${userId}:${sessionId}`);
   }
 
   /**
@@ -2403,9 +2486,10 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number
-  ): Promise<boolean> {
-    return this.session(sessionId).setJoinCode(role, code, expiresAt);
+    sessionId: string, role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
+    return this.session(sessionId).setJoinCode(role, code, expiresAt, guard);
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
@@ -2490,8 +2574,71 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
+  /**
+   * Rooms this person created that a lapse could still freeze.
+   *
+   * The registry holds the index and cannot read a room's state; the room is in
+   * another object. So the paging is here: ask for a window of ids, resolve
+   * each, keep the live ones, and go back for more until `limit` is met or the
+   * range runs out. `limit` therefore counts live rooms, which is what every
+   * caller meant by it.
+   *
+   * Closed is the whole predicate, and `getSession` is what decides it: it runs
+   * the TTL check, so a room past its expiry reads closed here even if no alarm
+   * has fired yet. A room that is merely frozen stays — a lapse freezing an
+   * already-frozen room is harmless, and leaving it out would hide it from the
+   * one listing that can find it again.
+   *
+   * The drop is a second write into a second object with no transaction
+   * spanning it, the gap docs/ARCHITECTURE.md section 9 describes — and the
+   * cheapest instance of it in the codebase. A drop that dies leaves the row it
+   * was going to remove, which is the state this call already tolerates and
+   * repairs on the next walk.
+   */
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
-    return this.registry.sessionsCreatedBy(userId, limit);
+    const live: string[] = [];
+    let startAfter: string | undefined;
+    // The budget bounds the SWEEPING, not the rooms the caller asked for, and
+    // that distinction is the whole of it. Counting live rows against it made
+    // the contract above false: with `limit` above the budget and every row
+    // live, the walk stopped early having dropped nothing, and because
+    // `startAfter` is local to one call the next call began at the beginning and
+    // returned the same short page for ever. No progress, no error, no way to
+    // tell.
+    //
+    // So a live row costs nothing here. It is what the caller asked for, it is
+    // bounded by `limit`, and choosing a `limit` one request can resolve is the
+    // caller's to do. What is unbounded without this is the DEAD tail — an
+    // account with thousands of closed rooms — and spending a Workers request's
+    // 1,000-subrequest cap on it throws, failing the walk outright rather than
+    // returning a short list. Those rows are dropped as they are met, so the
+    // next walk really does start further in.
+    let swept = 0;
+
+    while (live.length < limit && swept < SWEEP_RPC_BUDGET) {
+      // A full window each time, not `limit - live.length`: the rows that fail
+      // are the ones being skipped, so asking for only what is still wanted
+      // turns a page of closed rooms into one id per round trip.
+      const page = await this.registry.createdIndexPage(userId, limit, startAfter);
+      if (page.length === 0) break;
+
+      for (const id of page) {
+        if (live.length >= limit || swept >= SWEEP_RPC_BUDGET) break;
+        const session = await this.session(id).getSession();
+        if (session && !session.closed) {
+          live.push(id);
+          continue;
+        }
+        await this.registry.dropCreatedIndex(userId, id);
+        // The resolve that found it dead and the drop that removed it: the two
+        // calls this row cost that the caller did not ask for.
+        swept += 2;
+      }
+      // A short window means the range is exhausted; nothing follows to scan.
+      if (page.length < limit) break;
+      startAfter = page[page.length - 1];
+    }
+    return live;
   }
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {

@@ -29,6 +29,27 @@ export interface StoredSession extends Omit<Session, "events"> {
    * which `lastReport` dates from `joinedAt` for one that has never answered.
    */
   lastTickAt?: number;
+  /**
+   * When the most recent `action_request` was appended (#81).
+   *
+   * Bookkeeping for one question `bellman_sync` has to answer on every poll:
+   * are there outstanding action requests? The answer is DERIVED from the event
+   * log and stays derived — this never says what any request's state is. It
+   * says whether the log is worth reading at all.
+   *
+   * Two things fall out of it, and the second is why it is a timestamp rather
+   * than a cursor. Absent means no `action_request` has ever been appended
+   * here, so nothing can be outstanding. Present but older than
+   * ACTION_REQUEST_TTL_MS means the NEWEST request has expired, so every
+   * request has, and nothing can be outstanding then either. Only a room with a
+   * request inside the window pays for the read.
+   *
+   * Absent on records written before this landed, which reads as "no requests"
+   * — wrong for a room that had one in the last half hour at the moment of
+   * deploy, and self-correcting on its next `action_request`. A listing that is
+   * briefly short beats a migration over rooms that expire anyway.
+   */
+  lastActionRequestAt?: number;
 }
 
 /**

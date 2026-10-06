@@ -405,6 +405,15 @@ export type EventWrite =
  * commit together or a reader can be refused at a cursor no stored event
  * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
  */
+/**
+ * What `setJoinCode` did, which a boolean could not say once the write became
+ * conditional: `frozen` and `live_code_exists` are different refusals and the
+ * caller answers them with different sentences.
+ */
+export type SetJoinCode =
+  | { ok: true; replacedLive: boolean }
+  | { ok: false; reason: "frozen" | "live_code_exists" };
+
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -421,6 +430,14 @@ export interface AppendExtras {
    * `markRemoved` for why the two writes cannot be separated (#113).
    */
   markRemoved?: string;
+  /**
+   * Record the event's own `at` as the room's most recent `action_request`.
+   *
+   * Passed by `bellman_send` on an `action_request` append. Monotonic, and
+   * re-asserted on an idempotent replay for `creditReport`'s reason: a caller
+   * retrying cannot know whether the first attempt landed it.
+   */
+  stampActionRequest?: boolean;
 }
 
 export interface BellmanStore {
@@ -449,8 +466,29 @@ export interface BellmanStore {
   /** Retire every live code — a pair session filling, a session closing. Idempotent. */
   clearJoinCodes(sessionId: string): Promise<void>;
 
-  /** Issue a code for one role, retiring only that role's previous code. False means frozen. */
-  setJoinCode(sessionId: string, role: string, code: string, expiresAt: number): Promise<boolean>;
+  /**
+   * Issue a code for one role, retiring only that role's previous code.
+   *
+   * `guard.replaceLive` is the `revoke` authority, and it is decided HERE rather
+   * than by the caller because the two cannot be separated. `issueInvite` used
+   * to read the roster, see no live code, and then call this — so two callers
+   * holding `invite` and not `revoke` could both observe no live code, and the
+   * second write would retire the first's code with neither of them allowed to
+   * (#90, found in review). The check and the write are one operation now: this
+   * is the only place that can make them one, because it is the only place that
+   * holds the record and the write together.
+   *
+   * `now` is a parameter so that liveness is the caller's clock, as it is for
+   * `seatMember`: an expired code is not a live one, and minting over it is
+   * opening a shut door rather than replacing an open one.
+   */
+  setJoinCode(
+    sessionId: string,
+    role: string,
+    code: string,
+    expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode>;
   /**
    * Append a member to a session, unless it is frozen or closed. False means
    * refused — frozen, closed, or no such session — and a caller that has to say
@@ -617,9 +655,36 @@ export interface BellmanStore {
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
-   * Sessions this user created, newest first is not promised — only that a
-   * lapsed plan can find the rooms it has to freeze. The create *counts* used
-   * for quota cannot answer that: they are timestamps, not identities.
+   * Sessions this user created that are not closed — newest first is not
+   * promised, only that a lapsed plan can find the rooms it has to freeze. The
+   * create *counts* used for quota cannot answer that: they are timestamps, not
+   * identities.
+   *
+   * Closed rooms are left out, and `limit` counts the rooms returned rather than
+   * the index rows read. Both halves are the same fix: the listing applied
+   * `limit` to raw rows, so a prolific account's walk filled its window with
+   * long-dead rooms and never reached the live ones — a freeze that silently did
+   * nothing for exactly the accounts that use Bellman most (#75, #115). A room
+   * past its TTL counts as closed here whether or not its alarm has fired.
+   *
+   * A frozen room is still listed. Freezing one twice is harmless, and leaving it
+   * out would hide it from the only listing that can find it again.
+   *
+   * The rows of the closed rooms it passes are deleted as it meets them, so the
+   * index no longer grows for the life of an account and a dead room is paid for
+   * once. `sessionsJoinedBy` keeps its rows deliberately; see there.
+   *
+   * **It may return fewer than `limit` when it meets a long run of closed
+   * rooms.** The Durable Objects walk resolves each row in another object, and
+   * the work it spends on rows the caller did not ask for — resolving a closed
+   * one, then dropping it — is bounded by SWEEP_RPC_BUDGET, so a dead tail
+   * cannot spend a Workers request's subrequest cap and throw. Live rows do not
+   * count against that budget: they are what was asked for, `limit` bounds them,
+   * and choosing a limit one request can resolve is the caller's part.
+   *
+   * A short list therefore always means progress was made — the rows it passed
+   * are deleted, so the next call starts further in. A caller that needs the
+   * whole set calls again rather than treating a short list as the end.
    *
    * That promise has two exceptions, both in the Durable Objects store, and a
    * miss costs more than a row missing from a list: a lapse freezes the rooms
@@ -651,6 +716,12 @@ export interface BellmanStore {
    * it is meant for do not agree on what counts as current: the control panel
    * hides closed rooms, a freeze sweep wants exactly the live ones. Encoding
    * either answer here would make one of them filter twice.
+   *
+   * **Closed rooms are listed, and this index is not pruned** — the two ways it
+   * differs from `sessionsCreatedBy`, and both follow from the sentence above.
+   * This answers which rooms a person HELD a handle in, so a closed one is the
+   * history being asked for rather than a tombstone, and a row whose room has
+   * closed is still a true answer. The growth is the cost of that promise.
    *
    * Order is not promised, and it differs between the stores — insertion order
    * in MemoryStore, key order in the Durable Objects store — so which rooms
@@ -850,16 +921,23 @@ export class MemoryStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number
-  ): Promise<boolean> {
+    sessionId: string, role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
     const s = this.sessions.get(sessionId);
-    if (!s) return false;
-    if (s.frozenAt !== null) return false;
+    if (!s) return { ok: false, reason: "frozen" };
+    if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
     const previous = s.joinCodes[role];
+    // Live, not merely present: an expired record shuts no door.
+    const live = previous !== undefined && guard.now <= previous.expiresAt;
+    if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
+    // No awaits between the test above and the writes below, which is what makes
+    // this atomic here — the same arrangement appendEvent and addMember use. The
+    // Durable Object gets it from a transaction instead.
     if (previous) this.byJoinCode.delete(previous.code); // only THIS role's old code
     s.joinCodes[role] = { code, expiresAt };
     this.byJoinCode.set(code, sessionId);
-    return true;
+    return { ok: true, replacedLive: live };
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {
@@ -1103,7 +1181,27 @@ export class MemoryStore implements BellmanStore {
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
-    return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
+    const mine = this.byCreator.get(userId);
+    if (!mine) return [];
+    const live: string[] = [];
+    for (const id of mine) {
+      if (live.length >= limit) break;
+      const s = this.sessions.get(id);
+      // `expireIfDue` first, for the same reason getSession calls it: a room past
+      // its TTL is closed whether or not anything has written that down yet, and
+      // a sweep that read the flag alone would keep every expired room in the
+      // window until something else happened to touch it.
+      if (s) this.expireIfDue(s, Date.now());
+      if (s && !s.closed) {
+        live.push(id);
+        continue;
+      }
+      // Self-healing, and the reason `limit` can now be trusted: the row goes as
+      // it is encountered, so a walk pays for a dead room once rather than on
+      // every listing forever (#75).
+      mine.delete(id);
+    }
+    return live;
   }
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
@@ -1146,6 +1244,12 @@ export class MemoryStore implements BellmanStore {
       members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
     }
     if (members !== s.members) s.members = members;
+    // Monotonic, so a replay of an older append cannot pull the stamp back and
+    // make a live request invisible to the poll.
+    if (extras.stampActionRequest) {
+      const stored = s as { lastActionRequestAt?: number };
+      stored.lastActionRequestAt = Math.max(stored.lastActionRequestAt ?? 0, event.at);
+    }
   }
 
   async appendEventOnce(
@@ -1446,6 +1550,18 @@ export class MemoryStore implements BellmanStore {
     this.wake(s);
   }
 }
+
+/**
+ * How many cross-object RPCs one `sessionsCreatedBy` walk may spend.
+ *
+ * The walk resolves each index row in another object and drops the dead ones,
+ * so its cost is in RPCs, and a Workers request is capped at 1,000 subrequests.
+ * Spending the cap throws and the whole call fails; stopping early returns a
+ * short list and leaves the rest for the next walk, which starts further in
+ * because the rows this one dropped are gone. Well under the platform cap, so
+ * the budget is reached long before anything is at risk of being refused.
+ */
+export const SWEEP_RPC_BUDGET = 300;
 
 export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
 export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

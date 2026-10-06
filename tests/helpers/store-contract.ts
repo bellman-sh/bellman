@@ -178,10 +178,78 @@ export function describeStoreContract(
       expect(await store.getSessionByJoinCode("BELL-SHUT-01")).toBeUndefined();
     });
 
+    /**
+     * The `revoke` authority, decided where the write happens (#90).
+     *
+     * `issueInvite` used to read the roster, see no live code, and then call
+     * this — so two callers holding `invite` and not `revoke` could both observe
+     * no live code and the second would retire the first's. The check and the
+     * write have to be one operation, and this is the only place that can make
+     * them one. Both stores answer alike or the race is closed in memory and
+     * open in production.
+     */
+    describe("replacing a live code", () => {
+      const live = () => Date.now() + JOIN_CODE_TTL;
+
+      it("refuses, and writes nothing, when the caller may not replace", async () => {
+        const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+        (await store.createSession(s));
+
+        const out = await store.setJoinCode(
+          s.id, "peer_b", "BELL-NEWW-02", live(), { replaceLive: false, now: Date.now() },
+        );
+
+        expect(out).toEqual({ ok: false, reason: "live_code_exists" });
+        // The old code still resolves and the new one never existed: a refusal
+        // that half-applied would be worse than one that let the mint through.
+        expect((await store.getSessionByJoinCode("BELL-AAAA-01"))?.role).toBe("peer_b");
+        expect(await store.getSessionByJoinCode("BELL-NEWW-02")).toBeUndefined();
+      });
+
+      it("replaces, and says so, when the caller may", async () => {
+        const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+        (await store.createSession(s));
+
+        const out = await store.setJoinCode(
+          s.id, "peer_b", "BELL-NEWW-02", live(), { replaceLive: true, now: Date.now() },
+        );
+
+        expect(out).toEqual({ ok: true, replacedLive: true });
+        expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
+        expect((await store.getSessionByJoinCode("BELL-NEWW-02"))?.role).toBe("peer_b");
+      });
+
+      it("lets a seat that may not replace mint over an EXPIRED code", async () => {
+        // An expired record shuts no door, so minting over it is opening one.
+        // Without this the guard would read as "one code per role, ever".
+        const s = session({ joinCodes: { peer_b: { code: "BELL-OLDD-01", expiresAt: 1 } } });
+        (await store.createSession(s));
+
+        const out = await store.setJoinCode(
+          s.id, "peer_b", "BELL-NEWW-02", live(), { replaceLive: false, now: Date.now() },
+        );
+
+        expect(out).toEqual({ ok: true, replacedLive: false });
+        expect((await store.getSessionByJoinCode("BELL-NEWW-02"))?.role).toBe("peer_b");
+      });
+
+      it("opens a role that has no code at all", async () => {
+        const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
+        (await store.createSession(s));
+
+        const out = await store.setJoinCode(
+          s.id, "peer_a", "BELL-NEWW-02", live(), { replaceLive: false, now: Date.now() },
+        );
+
+        expect(out).toEqual({ ok: true, replacedLive: false });
+        expect((await store.getSessionByJoinCode("BELL-NEWW-02"))?.role).toBe("peer_a");
+      });
+    });
+
     it("holds a live code for two roles at once, each resolving to its own role", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       expect((await store.getSessionByJoinCode("BELL-AAAA-01"))?.role).toBe("peer_b");
       expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.role).toBe("peer_a");
@@ -191,9 +259,9 @@ export function describeStoreContract(
     it("issuing for one role leaves another role's code resolving", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
-      (await store.setJoinCode(s.id, "peer_a", "BELL-DDDD-04", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-DDDD-04", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       expect(await store.getSessionByJoinCode("BELL-CCCC-03")).toBeUndefined();
       expect((await store.getSessionByJoinCode("BELL-DDDD-04"))?.role).toBe("peer_a");
@@ -203,7 +271,7 @@ export function describeStoreContract(
     it("consuming one role's code leaves the other resolving", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       (await store.consumeJoinCode(s.id, "peer_b"));
 
@@ -214,7 +282,7 @@ export function describeStoreContract(
     it("clearJoinCodes retires every code, idempotently", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       (await store.clearJoinCodes(s.id));
 
@@ -227,7 +295,7 @@ export function describeStoreContract(
     it("closing a session clears every code, not just the default role's", async () => {
       const s = session({ joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       (await store.closeSession(s.id));
 
@@ -742,7 +810,7 @@ export function describeStoreContract(
         joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
       });
       (await store.createSession(s));
-      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       (await store.closeSessionIfEmpty(s.id));
 
@@ -1018,7 +1086,7 @@ export function describeStoreContract(
       (await store.freezeSession(s.id, Date.now()));
 
       expect(await store.addMember(s.id, member({ memberId: "m_late" }))).toBe(false);
-      expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEW-01", Date.now() + 60_000)).toBe(false);
+      expect((await store.setJoinCode(s.id, "peer_b", "BELL-NEW-01", Date.now() + 60_000, { replaceLive: true, now: Date.now() })).ok).toBe(false);
       expect(await store.appendEvent(s.id, {
         type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
         fromLabel: "jesse", payload: { text: "nope" }, refId: null,
@@ -1066,6 +1134,63 @@ export function describeStoreContract(
       }
 
       expect(await store.sessionsCreatedBy("u_jesse", 2)).toHaveLength(2);
+    });
+
+    /**
+     * A lapse freezes the rooms this names, so a closed one is budget spent on
+     * nothing. The index was never pruned and `limit` was applied to raw rows,
+     * so a prolific account's walk filled its window with long-dead rooms and
+     * never reached the live ones — the freeze then silently did nothing for
+     * exactly the accounts that use Bellman most (#75, #115).
+     */
+    it("leaves closed rooms out of the created listing", async () => {
+      (await store.createSession(session({ id: "qs_open", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_shut", createdBy: "u_jesse" })));
+      await store.closeSession("qs_shut");
+
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_open"]);
+    });
+
+    it("counts live rooms against the limit, not index rows", async () => {
+      // The closed rooms are created FIRST, so in both stores they sort and
+      // insert ahead of the live ones. Applying the limit to rows returns a
+      // window of nothing but tombstones; applying it to live rooms walks past
+      // them. That ordering is the whole point of the test.
+      for (const id of ["qs_dead_1", "qs_dead_2", "qs_dead_3"]) {
+        (await store.createSession(session({ id, createdBy: "u_jesse" })));
+        await store.closeSession(id);
+      }
+      (await store.createSession(session({ id: "qs_live_1", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_live_2", createdBy: "u_jesse" })));
+
+      expect((await store.sessionsCreatedBy("u_jesse", 2)).sort())
+        .toEqual(["qs_live_1", "qs_live_2"]);
+    });
+
+    it("forgets a closed room's row, so the walk pays for it once", async () => {
+      (await store.createSession(session({ id: "qs_gone", createdBy: "u_jesse" })));
+      await store.closeSession("qs_gone");
+      // The first call sweeps it. The second must not see it even though
+      // nothing closed anything in between — that is what proves the row was
+      // dropped rather than merely filtered out on the way past.
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual([]);
+      (await store.createSession(session({ id: "qs_kept", createdBy: "u_jesse" })));
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_kept"]);
+    });
+
+    /**
+     * The other index keeps its closed rooms, deliberately and unlike the one
+     * above: it answers which rooms a person HELD a handle in, so a closed room
+     * is the history being asked for rather than a tombstone.
+     */
+    it("keeps closed rooms in the joined listing", async () => {
+      (await store.createSession(session({
+        id: "qs_was_mine", createdBy: "u_jesse",
+        members: [member({ userId: "u_jesse" })],
+      })));
+      await store.closeSession("qs_was_mine");
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_was_mine"]);
     });
 
     /**
@@ -1566,6 +1691,52 @@ export function describeStoreContract(
           .find((m) => m.memberId === "m_creator")!.lastReportAt;
       const unstamped = () => session({ members: [member({ lastReportAt: undefined })] });
 
+      /**
+       * The room's most recent action_request, which is what lets bellman_sync
+       * decide whether reading the log is worth it at all (#81). Both stores
+       * have to agree, or the Durable Object answers "nothing outstanding" for
+       * a room MemoryStore reports requests in.
+       */
+      describe("the action request stamp", () => {
+        const asked = () => ({
+          type: "action_request" as const,
+          fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+          payload: { ask: "deploy" }, refId: null,
+        });
+        const stamped = async (id: string) =>
+          (await store.getSession(id))! as { lastActionRequestAt?: number };
+
+        it("is absent until an append asks for it", async () => {
+          const s = session({});
+          (await store.createSession(s));
+          (await store.appendEvent(s.id, asked()));
+
+          expect((await stamped(s.id)).lastActionRequestAt).toBeUndefined();
+        });
+
+        it("records the event's own time when asked", async () => {
+          const s = session({});
+          (await store.createSession(s));
+
+          const event = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+
+          expect((await stamped(s.id)).lastActionRequestAt).toBe(event.at);
+        });
+
+        it("only ever moves forward", async () => {
+          // A replay re-asserts the stamp, as creditReport does, and must not be
+          // able to pull it back — an older value would hide a live request from
+          // the poll, which is the one failure this field can cause.
+          const s = session({});
+          (await store.createSession(s));
+          const first = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+          const second = (await store.appendEvent(s.id, asked(), { stampActionRequest: true }))!;
+
+          expect(second.at).toBeGreaterThanOrEqual(first.at);
+          expect((await stamped(s.id)).lastActionRequestAt).toBe(second.at);
+        });
+      });
+
       it("stamps the sender at the event's own time", async () => {
         const s = unstamped();
         (await store.createSession(s));
@@ -1946,7 +2117,7 @@ export function describeStoreContract(
       const a = session({ joinCodes: oneCode("BELL-AAAA-01") });
       (await store.createSession(a));
 
-      (await store.setJoinCode(a.id, "peer_b", "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(a.id, "peer_b", "BELL-BBBB-02", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       expect(await store.getSessionByJoinCode("BELL-AAAA-01")).toBeUndefined();
       expect((await store.getSessionByJoinCode("BELL-BBBB-02"))?.session.id).toBe(a.id);
@@ -1958,7 +2129,7 @@ export function describeStoreContract(
       (await store.createSession(a));
       (await store.consumeJoinCode(a.id, "peer_b"));
 
-      (await store.setJoinCode(a.id, "peer_b", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL));
+      (await store.setJoinCode(a.id, "peer_b", "BELL-CCCC-03", Date.now() + JOIN_CODE_TTL, { replaceLive: true, now: Date.now() }));
 
       expect((await store.getSessionByJoinCode("BELL-CCCC-03"))?.session.id).toBe(a.id);
     });

@@ -197,8 +197,8 @@ describe("a member alone in a ticking room", () => {
       payload: { note: "still resolving the manifest" },
     });
     expect(out.isError, out.text).toBe(false);
-    // Nobody to deliver to, said plainly rather than by refusing the send.
-    expect(out.data.delivered_to).toEqual([]);
+    // An empty room, said plainly rather than by refusing the send.
+    expect(out.data.room_members).toEqual([]);
 
     // And the stamp landed, so the next tick has something to read.
     const me = (await h.store.getSession(sessionId))!.members

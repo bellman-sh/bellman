@@ -8,11 +8,12 @@
  *              request_actions must be explicitly granted.
  * INVARIANT 8: no shared mutable state between sessions — message-passing only.
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
+import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
 
 let h: Harness;
 
@@ -142,6 +143,216 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     expect(String(res.data.note)).toContain("HUMAN must approve");
   });
 
+  /**
+   * #81. A request nobody answers used to be indistinguishable from one nobody
+   * saw: `refId` was the whole model and there was no state anywhere. It now
+   * ends in answered, declined or expired, and `bellman_sync` reports the ones
+   * that have not — on the poll rather than as a second event, because the
+   * request already interrupted once when it arrived.
+   */
+  it("reports an unanswered action_request to both members, and says whose it is", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Pull the last 50 failed webhooks" },
+    });
+    expect(ask.isError, ask.text).toBe(false);
+
+    const mine = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(mine.data.outstanding).toHaveLength(1);
+    expect((mine.data.outstanding as { cursor: number; mine: boolean }[])[0])
+      .toMatchObject({ cursor: ask.data.cursor, mine: true });
+
+    // The same request, read by the peer whose human owes the answer.
+    const theirs = await p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
+    });
+    expect((theirs.data.outstanding as { mine: boolean }[])[0].mine).toBe(false);
+  });
+
+  it("stops reporting it once the peer's human has answered", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+    // Outstanding first, or the assertion after the answer proves nothing: an
+    // always-absent field would pass it.
+    const before = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(before.data.outstanding).toHaveLength(1);
+
+    const answer = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: false, result: "not this week" },
+    });
+    expect(answer.isError, answer.text).toBe(false);
+
+    const after = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    // Absent rather than empty, like `replayed` and `removed`: a quiet room's
+    // poll does not grow a field saying nothing is pending.
+    expect(after.data.outstanding).toBeUndefined();
+  });
+
+  it("leaves the field off a poll with nothing pending", async () => {
+    const p = await pairUp(h);
+    const quiet = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(quiet.isError, quiet.text).toBe(false);
+    expect(quiet.data.outstanding).toBeUndefined();
+  });
+
+  /**
+   * The cost of `outstanding`, which is the reason for the stamp on the record.
+   *
+   * Computing it means reading the log from cursor 0 — a request made before
+   * `since_cursor` is still outstanding, so a slice cannot answer it. Done
+   * unconditionally that is a full read per poll, per member, for the life of a
+   * room, including every room that never uses action requests at all.
+   */
+  const countsLogReads = async (run: () => Promise<unknown>) => {
+    const real = h.store.eventsAfter.bind(h.store);
+    let fromZero = 0;
+    h.store.eventsAfter = async (id: string, after: number) => {
+      if (after === 0) fromZero++;
+      return real(id, after);
+    };
+    try {
+      await run();
+    } finally {
+      h.store.eventsAfter = real;
+    }
+    return fromZero;
+  };
+
+  it("reads no log at all on a room that has never had an action request", async () => {
+    const p = await pairUp(h);
+    await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "message", payload: { text: "nothing to approve here" },
+    });
+
+    const reads = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+
+    expect(reads).toBe(0);
+  });
+
+  it("reads the log while a request is live, and stops once it has expired", async () => {
+    const p = await pairUp(h);
+    await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+
+    // Live: the read happens, and it is what finds the request. Without this the
+    // test above would pass against a guard that never reads anything.
+    const live = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+    expect(live).toBe(1);
+
+    // Expired: the newest request is past the TTL, so every request is, and the
+    // answer is the empty list without reading for it.
+    vi.setSystemTime(Date.now() + ACTION_REQUEST_TTL_MS + 1_000);
+    const stale = await countsLogReads(() => p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    }));
+    expect(stale).toBe(0);
+    vi.useRealTimers();
+  });
+
+  /**
+   * The case the stamp exists for, and the one it broke.
+   *
+   * A long poll holds for up to `wait_seconds` and reads its session record
+   * BEFORE the wait. The append that wakes it may be the very `action_request`
+   * the stamp is deciding about: off the pre-wait snapshot the stamp is absent,
+   * so the log read is skipped and the response carries the request event with
+   * no `outstanding` beside it. The record this poll answers with is the one to
+   * read.
+   */
+  it("reports outstanding on a long poll that a first action request wakes", async () => {
+    const p = await pairUp(h);
+    // Start from the room's current cursor so the poll genuinely waits rather
+    // than returning the join events at once.
+    const caught = await p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
+    });
+    const from = Number(caught.data.cursor);
+
+    const poll = p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      since_cursor: from, wait_seconds: 5,
+    });
+    // Let the waiter register before the append that wakes it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+    expect(ask.isError, ask.text).toBe(false);
+
+    const out = await poll;
+    expect(out.isError, out.text).toBe(false);
+    // The event arrived...
+    expect((out.data.events as unknown[]).length).toBeGreaterThan(0);
+    // ...and so did the thing that says it is waiting on someone.
+    expect(out.data.outstanding).toHaveLength(1);
+    expect((out.data.outstanding as { cursor: number }[])[0].cursor)
+      .toBe(Number(ask.data.cursor));
+  });
+
+  /**
+   * First answer wins in the FEED, not only in the derived state.
+   *
+   * `action-state.ts` already ignores a second response, so the state was
+   * right — but the event was appended anyway and every member reads the feed,
+   * so a requester saw a refusal followed by somebody else's approval with
+   * nothing saying the second does not count.
+   */
+  it("refuses a second answer to a request that already has one", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+
+    const first = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: false, result: "not this week" },
+    });
+    expect(first.isError, first.text).toBe(false);
+
+    const second = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: true, result: "actually go ahead" },
+    });
+
+    expect(second.isError).toBe(true);
+    expect(second.text).toContain("already answered");
+
+    // And the feed carries one answer, not two — which is the thing a requester
+    // reads. The derived state was already right; this is about what it sees.
+    const sync = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    const answers = (sync.data.events as { data?: { type?: string } }[])
+      .filter((e) => e.data?.type === "action_response");
+    expect(answers).toHaveLength(1);
+  });
+
   it("requires action_response to reference a real request", async () => {
     const p = await pairUp(h);
 
@@ -173,7 +384,7 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     const real = String(ask.data.cursor);
     const respond = (ref_id: string) => p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
-      type: "action_response", ref_id, payload: { ok: true },
+      type: "action_response", ref_id, payload: { approved: true },
     });
 
     const refs = [
@@ -329,7 +540,7 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
 
 // ---------------------------------------------------------------------------
 describe("send / sync / leave mechanics", () => {
-  it("delivers a message to the peer and reports the recipients", async () => {
+  it("appends a message for the peer and reports who was in the room", async () => {
     const p = await pairUp(h);
     const sent = await p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
@@ -337,7 +548,7 @@ describe("send / sync / leave mechanics", () => {
     });
 
     expect(sent.isError, sent.text).toBe(false);
-    expect(sent.data.delivered_to).toEqual(["jesse@codenerd"]);
+    expect(sent.data.room_members).toEqual(["jesse@codenerd"]);
 
     const sync = await p.creator.call("bellman_sync", {
       session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,

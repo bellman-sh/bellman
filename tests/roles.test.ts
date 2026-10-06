@@ -58,6 +58,21 @@ describe("verbsOfRole", () => {
     const inherited = { ...swarm, roles: Object.create({ inherited: { can: ["send"] } }) };
     expect(verbsOfRole(inherited, "inherited")).toEqual([]);
   });
+
+  // The other half of total, and what hasOwn alone did not give (#91). An own
+  // key proves a key, not a RoleDef; `.can` on null threw, which is the failure
+  // failing closed exists to avoid. Nothing writes a manifest like this today —
+  // resolveManifest builds every entry — but the docblock claimed the accessor
+  // was total under a rewrite, and against these it was not.
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["a string", "lead"],
+    ["an object with no can", { description: "x" }],
+  ])("holds nothing for an own role whose value is %s", (_label, value) => {
+    const malformed = { ...swarm, roles: { ...swarm.roles, broken: value } } as never;
+    expect(verbsOfRole(malformed, "broken")).toEqual([]);
+  });
 });
 
 describe("denyVerb", () => {
@@ -148,5 +163,17 @@ describe("mustReport", () => {
       roles: Object.create({ inherited: { can: [], description: null, reports: true } }),
     };
     expect(mustReport(inherited, "inherited")).toBe(false);
+  });
+
+  // #91 was filed against verbsOfRole. This accessor is the other place
+  // manifest.roles is indexed and had the same gap, so it gets the same test.
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["a string", "lead"],
+    ["an object with no reports", { can: [] }],
+  ])("is asked for nothing by an own role whose value is %s", (_label, value) => {
+    const malformed = { ...m, roles: { ...m.roles, broken: value } } as never;
+    expect(mustReport(malformed, "broken")).toBe(false);
   });
 });

@@ -373,13 +373,18 @@ describe("bellman_send — the verb guard comes first", () => {
 // `revoke` distinct, so a seat may hold one without the other and the guard
 // respects that rather than treating revoke as a weaker invite.
 describe("bellman_invite — invite and revoke are separate verbs", () => {
-  it("lets a joiner who holds invite reopen the room", async () => {
-    // A swarm room, so there is capacity for a third member and the code is usable.
+  /**
+   * A swarm room (capacity for a third member, so a code is usable) whose
+   * joiner seat holds `invite` without `revoke`. bellman_start mints for the
+   * DEFAULT seat, so `guest` has a live code and `lead` has none — which is
+   * what separates the two cases #90 created.
+   */
+  const guestWhoCanInvite = async (guestVerbs: string[] = ["send", "invite"]) => {
     const creator = await h.connect(DEV_KEY.jesse);
     const started = await creator.call("bellman_start", {
       manifest: {
         room: "guest-can-invite", mode: "swarm",
-        roles: { lead: { can: ALL_VERBS }, guest: { can: ["send", "invite"] } },
+        roles: { lead: { can: ALL_VERBS }, guest: { can: guestVerbs } },
         default_role: "guest", creator_role: "lead",
       },
       brief: brief(),
@@ -392,13 +397,50 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
       connect_token: preview.data.connect_token, brief: brief(),
     });
     expect(confirmed.isError, confirmed.text).toBe(false);
+    return {
+      joiner,
+      sessionId: String(started.data.session_id),
+      memberId: String(confirmed.data.member_id),
+    };
+  };
 
-    const reissued = await joiner.call("bellman_invite", {
-      session_id: String(started.data.session_id),
-      member_id: String(confirmed.data.member_id),
+  it("lets a seat holding invite open a door that is shut", async () => {
+    const { joiner, sessionId, memberId } = await guestWhoCanInvite();
+    // `lead` has no live code, so this mints without retiring anything. That is
+    // what `invite` alone buys after #90.
+    const issued = await joiner.call("bellman_invite", {
+      session_id: sessionId, member_id: memberId, role: "lead",
     });
-    expect(reissued.isError, reissued.text).toBe(false);
-    expect(String(reissued.data.join_code)).toMatch(/^BELL-/);
+    expect(issued.isError, issued.text).toBe(false);
+    expect(String(issued.data.join_code)).toMatch(/^BELL-/);
+    expect(issued.data.replaced_previous).toBe(false);
+  });
+
+  it("refuses a seat holding invite alone the replacement of a live code", async () => {
+    const { joiner, sessionId, memberId } = await guestWhoCanInvite();
+    // No role named, so this is the default seat — whose code from bellman_start
+    // is still live. Minting would retire a code someone may be holding, which
+    // is the `revoke` authority and not the `invite` one (#90). Before that, this
+    // call succeeded and silently cut the holder off.
+    const res = await joiner.call("bellman_invite", {
+      session_id: sessionId, member_id: memberId,
+    });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("already has a live join code");
+    expect(res.text).toContain('"revoke"');
+  });
+
+  it("lets a seat holding both replace a live code", async () => {
+    // The control for the refusal above: the same call against the same live
+    // code, from a seat that holds revoke too. Without this, the refusal could
+    // be passing on something other than the verb.
+    const { joiner, sessionId, memberId } = await guestWhoCanInvite(ALL_VERBS);
+    const res = await joiner.call("bellman_invite", {
+      session_id: sessionId, member_id: memberId,
+    });
+    expect(res.isError, res.text).toBe(false);
+    expect(String(res.data.join_code)).toMatch(/^BELL-/);
+    expect(res.data.replaced_previous).toBe(true);
   });
 
   it("refuses invite to a seat that lacks it, naming the verb", async () => {
@@ -632,14 +674,30 @@ describe("platform role and room role are different things", () => {
   // chaining and a helper handed the identity all slip past it, so the behavioural
   // tests above are the real guard.
   it("leaves identity.role used only by bellman_audit", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync(new URL("../../src/server.ts", import.meta.url), "utf8");
+    const { readFileSync, readdirSync } = await import("node:fs");
+    // The whole tool layer, not one path. #92 split the tools out of
+    // server.ts, and an invariant pinned to a single file stops holding the
+    // moment the code it guards moves to another — which is exactly what
+    // happened to this assertion. Reading the directory also means a tool
+    // added later is covered by existing, rather than by someone remembering
+    // to add it here.
+    const tools = new URL("../../src/tools/", import.meta.url);
+    const files = [
+      new URL("../../src/server.ts", import.meta.url),
+      ...readdirSync(tools).filter((f) => f.endsWith(".ts")).map((f) => new URL(f, tools)),
+    ];
     const readsRole = /identity\s*(?:\.\s*role\b|\[\s*(['"])role\1\s*\])/;
-    const hits = src.split("\n")
-      .map((line, i) => [i + 1, line] as const)
-      .filter(([, line]) => readsRole.test(line));
-    expect(hits.length, `identity.role at lines ${hits.map(([n]) => n).join(", ")}`).toBe(1);
+    const hits = files.flatMap((url) =>
+      readFileSync(url, "utf8").split("\n")
+        .map((line, i) => [`${url.pathname.split("/").pop()}:${i + 1}`, line] as const)
+        .filter(([, line]) => readsRole.test(line))
+    );
+    expect(hits.length, `identity.role at ${hits.map(([where]) => where).join(", ")}`).toBe(1);
     expect(hits[0][1]).toContain("the audit log requires the admin role");
+    // Where the one hit is, is the positive control. A scan that never reached
+    // src/tools/ would report zero and fail above; naming the file proves the
+    // read got there rather than passing on an empty list.
+    expect(hits[0][0]).toMatch(/^audit\.ts:/);
   });
 
   it("never names Identity in src/roles.ts's code", async () => {

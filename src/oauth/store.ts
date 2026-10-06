@@ -272,6 +272,12 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     // side (#122). An object that has not counted yet seeds from the keys that are left,
     // which already leave out what this pass deletes, and taking those off again stores a
     // count too low. That is the direction that matters: the cap opens late.
+    //
+    // This seeds the counter on every call, where it used to wait for a pass that reclaimed
+    // something. That costs the production path nothing: admitRegistration reads the count
+    // before it purges, so the key is already there and this is one single-key read. Only a
+    // direct purgeStale on an uncounted object pays for the seed, and it is the one that
+    // needed it.
     const before = await this.#clientCount();
     const clients = await sweepPage<RegisteredClient>(
       this.sweepStorage, CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,

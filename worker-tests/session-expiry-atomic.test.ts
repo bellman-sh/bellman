@@ -9,12 +9,20 @@
  * to expire. A poll waiting on the room's last word never got it.
  *
  * The interruption here is a write that throws, which is what the isolate going away
- * leaves behind: whatever had committed stays, whatever had not never lands. It is aimed
- * at each of the two writes in turn. The event's is the one that used to be second, so
- * it is the one that fails on the old shape: the close had committed and the event had
- * not. The close's was always first, so nothing was committed before it and the old
- * shape passes there. It is aimed at anyway, so a split the other way round, the event
- * first and the close second, cannot pass either.
+ * leaves behind: whatever had committed stays, whatever had not never lands. In the code as
+ * it stands the expiry's transaction makes exactly one write: a single put carrying the
+ * session, the event, the cursor and the registry's rows. `enqueue` only reads and arms the
+ * alarm, and `nextCursor` only reads, so there is no second write for anything to land
+ * between. The drain that follows the commit is the outbox's, and is not part of it.
+ *
+ * The cases are keyed on the rows a write carries, once on the event's and once on the
+ * session's. Today both land on that one put, so both stand for the same interruption. They
+ * are two because they are what a split would pull apart, in either order. With the event
+ * second, which is how it used to be, the write that carries it lands after the close, so
+ * the room is closed with no event. With the event first, the write that carries the session
+ * lands second, so the event is stored and the room is not closed. Each order fails the
+ * cases keyed on the write that lands second and passes the ones keyed on the write that
+ * lands first, and a single put passes them all.
  *
  * Both ways into an expiry run every case, since a read that finds the room lapsed and
  * the TTL alarm reach `#expireIfDue` separately and a room is expired by whichever
@@ -129,7 +137,7 @@ const interruptWritesTo = (id: string, prefix: string, outage: { on: boolean; hi
     });
   });
 
-/** The two ways a lapsed room gets expired, against each of the two writes that could fail. */
+/** The two ways a lapsed room gets expired. */
 const WAYS = [
   { way: "a read that finds the room lapsed", expire: (store: DurableObjectStore, id: string) => store.getSession(id) },
   {
@@ -138,9 +146,10 @@ const WAYS = [
       runInDurableObject(sessionStub(id), (instance: SessionDO) => instance.alarm()),
   },
 ];
+/** The rows an interruption is keyed on. One put carries both today; see the header. */
 const WRITES = [
-  { write: "the event's write", prefix: "e:" },
-  { write: "the close's write", prefix: "session" },
+  { write: "a write carrying the event row", prefix: "e:" },
+  { write: "a write carrying the session row", prefix: "session" },
 ];
 const CASES = WAYS.flatMap((way) => WRITES.map((write) => ({ ...way, ...write })));
 

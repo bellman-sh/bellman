@@ -337,7 +337,7 @@ describe("issueInvite", () => {
   // nothing may be announced or audited for a code that was never set.
   it("announces and audits nothing when the store refuses the code", async () => {
     await store.createSession(session({ maxMembers: 4 }));
-    vi.spyOn(store, "setJoinCode").mockResolvedValueOnce(false);
+    vi.spyOn(store, "setJoinCode").mockResolvedValueOnce({ ok: false, reason: "frozen" });
 
     const r = await issueInvite(store, jesse, "qs_test", "m_creator");
 
@@ -357,8 +357,8 @@ describe("issueInvite", () => {
   it("completes, unannounced, when the room freezes after the code was set", async () => {
     await store.createSession(session({ maxMembers: 4 }));
     const setJoinCode = store.setJoinCode.bind(store);
-    store.setJoinCode = async (sessionId, role, code, expiresAt) => {
-      const set = await setJoinCode(sessionId, role, code, expiresAt);
+    store.setJoinCode = async (sessionId, role, code, expiresAt, guard) => {
+      const set = await setJoinCode(sessionId, role, code, expiresAt, guard);
       await store.freezeSession(sessionId, Date.now());
       return set;
     };

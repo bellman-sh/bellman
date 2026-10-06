@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { GrantDelete, GrantWrite } from "./store.js";
+import type { GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
 } from "./types.js";
@@ -861,12 +861,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * already holds would end with it dropped from the index while the session still
    * lists it.
    */
-  async setJoinCode(role: string, code: string, expiresAt: number): Promise<boolean> {
-    const set = await this.ctx.storage.transaction(async (txn) => {
+  async setJoinCode(
+    role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
+    const outcome = await this.ctx.storage.transaction<SetJoinCode>(async (txn) => {
       const s = await this.stored(txn);
-      if (!s) return false;
-      if (s.frozenAt !== null) return false;
-      const previous = s.joinCodes[role]?.code;
+      if (!s) return { ok: false, reason: "frozen" };
+      if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+
+      // The `revoke` authority, decided inside the transaction that writes.
+      // Deciding it from a record read earlier let two callers holding `invite`
+      // alone both see no live code, and the second retire the first's (#90,
+      // found in review). Live and not merely present: an expired record shuts
+      // no door, so minting over it is opening rather than replacing.
+      const existing = s.joinCodes[role];
+      const live = existing !== undefined && guard.now <= existing.expiresAt;
+      if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
+
+      const previous = existing?.code;
       const rows = await this.driver.enqueue(txn, [
         ...(previous ? [dropCodeIntent(previous)] : []),
         putCodeIntent(code, s.id),
@@ -875,10 +888,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         session: { ...s, joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } } },
         ...rows,
       });
-      return true;
+      return { ok: true, replacedLive: live };
     });
-    if (set) await this.driver.deliverNow();
-    return set;
+    if (outcome.ok) await this.driver.deliverNow();
+    return outcome;
   }
 
   /**
@@ -2473,9 +2486,10 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number
-  ): Promise<boolean> {
-    return this.session(sessionId).setJoinCode(role, code, expiresAt);
+    sessionId: string, role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
+    return this.session(sessionId).setJoinCode(role, code, expiresAt, guard);
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {

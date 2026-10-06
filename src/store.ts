@@ -405,6 +405,15 @@ export type EventWrite =
  * commit together or a reader can be refused at a cursor no stored event
  * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
  */
+/**
+ * What `setJoinCode` did, which a boolean could not say once the write became
+ * conditional: `frozen` and `live_code_exists` are different refusals and the
+ * caller answers them with different sentences.
+ */
+export type SetJoinCode =
+  | { ok: true; replacedLive: boolean }
+  | { ok: false; reason: "frozen" | "live_code_exists" };
+
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -457,8 +466,29 @@ export interface BellmanStore {
   /** Retire every live code — a pair session filling, a session closing. Idempotent. */
   clearJoinCodes(sessionId: string): Promise<void>;
 
-  /** Issue a code for one role, retiring only that role's previous code. False means frozen. */
-  setJoinCode(sessionId: string, role: string, code: string, expiresAt: number): Promise<boolean>;
+  /**
+   * Issue a code for one role, retiring only that role's previous code.
+   *
+   * `guard.replaceLive` is the `revoke` authority, and it is decided HERE rather
+   * than by the caller because the two cannot be separated. `issueInvite` used
+   * to read the roster, see no live code, and then call this — so two callers
+   * holding `invite` and not `revoke` could both observe no live code, and the
+   * second write would retire the first's code with neither of them allowed to
+   * (#90, found in review). The check and the write are one operation now: this
+   * is the only place that can make them one, because it is the only place that
+   * holds the record and the write together.
+   *
+   * `now` is a parameter so that liveness is the caller's clock, as it is for
+   * `seatMember`: an expired code is not a live one, and minting over it is
+   * opening a shut door rather than replacing an open one.
+   */
+  setJoinCode(
+    sessionId: string,
+    role: string,
+    code: string,
+    expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode>;
   /**
    * Append a member to a session, unless it is frozen or closed. False means
    * refused — frozen, closed, or no such session — and a caller that has to say
@@ -891,16 +921,23 @@ export class MemoryStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number
-  ): Promise<boolean> {
+    sessionId: string, role: string, code: string, expiresAt: number,
+    guard: { replaceLive: boolean; now: number },
+  ): Promise<SetJoinCode> {
     const s = this.sessions.get(sessionId);
-    if (!s) return false;
-    if (s.frozenAt !== null) return false;
+    if (!s) return { ok: false, reason: "frozen" };
+    if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
     const previous = s.joinCodes[role];
+    // Live, not merely present: an expired record shuts no door.
+    const live = previous !== undefined && guard.now <= previous.expiresAt;
+    if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
+    // No awaits between the test above and the writes below, which is what makes
+    // this atomic here — the same arrangement appendEvent and addMember use. The
+    // Durable Object gets it from a transaction instead.
     if (previous) this.byJoinCode.delete(previous.code); // only THIS role's old code
     s.joinCodes[role] = { code, expiresAt };
     this.byJoinCode.set(code, sessionId);
-    return true;
+    return { ok: true, replacedLive: live };
   }
 
   async addMember(sessionId: string, member: Member): Promise<boolean> {

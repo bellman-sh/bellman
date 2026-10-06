@@ -265,7 +265,7 @@ describe("bellman_invite", () => {
     const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     const sessionId = String(started.data.session_id);
     const creatorMemberId = String(started.data.member_id);
-    await h.store.setJoinCode(sessionId, "helper", "BELL-EXPIRED-01-HELPER", Date.now() - 1);
+    await h.store.setJoinCode(sessionId, "helper", "BELL-EXPIRED-01-HELPER", Date.now() - 1, { replaceLive: true, now: Date.now() });
     const before = await eventCount(sessionId);
 
     const revoked = await creator.call("bellman_invite", { session_id: sessionId, member_id: creatorMemberId, revoke: true });

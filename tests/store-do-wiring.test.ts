@@ -389,7 +389,7 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     await legacy.consumeJoinCode("peer_b");
     await legacy.clearJoinCodes();
     // False means refused — here, because the row reads as gone.
-    expect(await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000)).toBe(false);
+    expect((await legacy.setJoinCode("peer_b", "BELL-NEW-02", Date.now() + 60_000, { replaceLive: true, now: Date.now() })).ok).toBe(false);
     await legacy.addMember(member({ memberId: "m_joiner", userId: "u_peer" }));
     await legacy.updateMember("m_creator", { leftAt: Date.now() });
     await legacy.closeSession();
@@ -499,7 +499,7 @@ describe("closing a session drops its registry rows", () => {
     const { store, registryStorage } = await worldOn(storeDo);
     const s = session({ id: "qs_closing", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
     await store.createSession(s);
-    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000, { replaceLive: true, now: Date.now() });
 
     await store.closeSession(s.id);
 
@@ -531,7 +531,7 @@ describe("closing an empty room drops its registry rows, and only when it closes
       joinCodes: oneCode("BELL-AAAA-01", "peer_b"),
     });
     await store.createSession(s);
-    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000, { replaceLive: true, now: Date.now() });
     expect(Object.keys(registryStorage.snapshot()), "setup: the rows are there to drop")
       .toEqual(expect.arrayContaining(["jc:BELL-AAAA-01", "jc:BELL-CCCC-03"]));
 
@@ -548,7 +548,7 @@ describe("closing an empty room drops its registry rows, and only when it closes
     const { store, registryStorage } = await worldOn(storeDo);
     const s = session({ id: "qs_occupied", joinCodes: oneCode("BELL-AAAA-01", "peer_b") });
     await store.createSession(s);
-    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000);
+    await store.setJoinCode(s.id, "peer_a", "BELL-CCCC-03", Date.now() + 60_000, { replaceLive: true, now: Date.now() });
 
     expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
 
@@ -568,7 +568,7 @@ describe("closing an empty room drops its registry rows, and only when it closes
       storeDo,
       currentRow({ members: [member({ leftAt: Date.now() })] }),
     );
-    await store.setJoinCode(LEGACY_ID, "peer_b", "BELL-AAAA-01", Date.now() + 60_000);
+    await store.setJoinCode(LEGACY_ID, "peer_b", "BELL-AAAA-01", Date.now() + 60_000, { replaceLive: true, now: Date.now() });
     expect(await legacy.closeSessionIfEmpty(), "setup: closed inside the object only").toBe(true);
     expect(Object.keys(registryStorage.snapshot()), "setup: the row outlived the close")
       .toContain("jc:BELL-AAAA-01");

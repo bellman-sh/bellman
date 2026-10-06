@@ -179,7 +179,7 @@ const liveDoor = (code: string): JoinCodeRecord => ({ code, expiresAt: Date.now(
 
 /** Plant `record` for `DOOR` through the production path, and check it is live. */
 async function plantDoor(s: DurableObjectStore, id: string, record: JoinCodeRecord): Promise<void> {
-  expect(await s.setJoinCode(id, DOOR, record.code, record.expiresAt), "control: the door was planted")
+  expect((await s.setJoinCode(id, DOOR, record.code, record.expiresAt, { replaceLive: true, now: Date.now() })).ok, "control: the door was planted")
     .toBe(true);
   expect(await s.getSessionByJoinCode(record.code), "control: the door is live before the call")
     .toBeDefined();

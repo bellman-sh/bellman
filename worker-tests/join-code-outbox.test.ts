@@ -230,7 +230,7 @@ it("queues nothing, and arms nothing, when setJoinCode is refused", async () => 
   const parked = await parkAlarm(id);
   const before = await everything(id);
 
-  expect(await store.setJoinCode(id, "peer_b", NEW, live())).toBe(false);
+  expect((await store.setJoinCode(id, "peer_b", NEW, live(), { replaceLive: true, now: Date.now() })).ok).toBe(false);
 
   expect(await everything(id)).toEqual(before);
   expect(await armedAlarm(id)).toBe(parked);
@@ -245,7 +245,7 @@ it("queues nothing, and arms nothing, for a session that does not exist", async 
   const store = new DurableObjectStore(env as never);
   const id = "qs_nobody";
 
-  expect(await store.setJoinCode(id, "peer_b", NEW, live())).toBe(false);
+  expect((await store.setJoinCode(id, "peer_b", NEW, live(), { replaceLive: true, now: Date.now() })).ok).toBe(false);
   await store.consumeJoinCode(id, "peer_b");
   await store.clearJoinCodes(id);
 
@@ -309,7 +309,7 @@ const SITES: Site[] = [
   {
     name: "setJoinCode, replacing a role's code",
     given: holdTwo,
-    act: (store, id) => store.setJoinCode(id, "peer_b", NEW, live()),
+    act: (store, id) => store.setJoinCode(id, "peer_b", NEW, live(), { replaceLive: true, now: Date.now() }),
     // The drop goes ahead of the put, so the rotated-out code stops resolving before
     // its replacement starts and never the reverse.
     owes: (id) => [drop(A), put(NEW, id)],
@@ -318,7 +318,7 @@ const SITES: Site[] = [
   {
     name: "setJoinCode, for a role with no code",
     given: (store, id) => store.createSession(session({ id, joinCodes: oneCode(A, "peer_b") })),
-    act: (store, id) => store.setJoinCode(id, "peer_a", NEW, live()),
+    act: (store, id) => store.setJoinCode(id, "peer_a", NEW, live(), { replaceLive: true, now: Date.now() }),
     owes: (id) => [put(NEW, id)],
     after: (id) => [id, undefined, id],
   },
@@ -418,7 +418,7 @@ it("keeps a code registered when it is issued again to the role that holds it", 
   const store = new DurableObjectStore(env as never);
   await store.createSession(session({ id: "qs_again", joinCodes: oneCode(A, "peer_b") }));
 
-  expect(await store.setJoinCode("qs_again", "peer_b", A, live())).toBe(true);
+  expect((await store.setJoinCode("qs_again", "peer_b", A, live(), { replaceLive: true, now: Date.now() })).ok).toBe(true);
 
   expect(await indexed(A)).toEqual(["qs_again"]);
   expect((await store.getSessionByJoinCode(A))?.role).toBe("peer_b");

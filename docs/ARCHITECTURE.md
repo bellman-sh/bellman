@@ -900,9 +900,28 @@ It is used three times:
   the grant's own transaction. Auditing afterwards loses them: a delete that
   committed and then failed to audit answers `missing` on retry. The rule for
   what a grant change records lives once, in `src/grant-audit.ts`.
+
+  **This queue holds only `audit` rows**, and the registry's `#deliver` throws
+  `outbox: unknown kind` for anything else. The object is a singleton shared by
+  every room and every org; its *queue* is not. Room traffic — a code issued,
+  reissued, consumed or expired — is queued in that room's own `SessionDO` and
+  arrives here as a `putJoinCode` RPC (the bullet below), never as a row in this
+  queue. So the only writers that can make it deep are grant changes: two
+  operator routes and `reconcilePurchase`, at most two rows each, with no bulk
+  path. #123 read the singleton as meaning otherwise, and that is the
+  distinction it turned on.
+
+  An org-less grant queues **nothing** (`hasOrg`, `src/grant-audit.ts`), and only
+  `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro` or `free`
+  purchase reconcile owes no audit row at all — and still calls `deliverNow()`,
+  draining whatever other orgs left behind. That is the hold time #123 asked
+  about, measured below.
 - **`SessionDO → RegistryDO` ([#62](../../../issues/62)).** `createSession`,
   `setJoinCode`, `consumeJoinCode`, `clearJoinCodes` and expiry queue the
-  registry's index write in the session's own transaction. Only a *missing*
+  registry's index write in the session's own transaction — in **that session's**
+  queue, delivered as a plain `putJoinCode` or `dropJoinCode` call on the
+  registry, so it never becomes a row the registry's own drain has to clear.
+  Only a *missing*
   entry, a session holding a code nothing resolves, was open: a stale `jc:` row
   was already inert, because `getSessionByJoinCode` re-reads the session and
   requires the code to still be in its `joinCodes`.
@@ -945,6 +964,35 @@ It depends on three things:
   is `deliverNow()`; the alarm retries whatever did not land, outside the lock.
   A registry that stops answering delays one user's reconciles and links, and
   nobody else's.
+
+**What that one attempt costs ([#123](../../../issues/123)).** `deliverNow()`
+drains the whole queue, and the rows in it belong to other orgs, so a user's
+lock is held across work that has nothing to do with them. What makes this
+acceptable is that **a failing head costs one delivery attempt whatever the
+depth behind it**: `drain` returns at the first failure rather than working
+through the queue, so a backlog that grew *because* delivery is failing is
+drained in constant time. Only a backlog of deliverable rows is drained in full,
+and that one empties itself, because every guarded write drains inline.
+
+Measured on workerd through `wrangler dev`, timed from outside the isolate: a
+failing head held a guarded grant write to **2–3 ms at depths 1 through 1,000**,
+where a succeeding drain of the same queue rose to **718 ms at 0.71 ms/row**. At
+that rate the added hold reaches 100 ms at roughly **140 rows**, against an
+actual depth of single digits to low tens — a burst of N concurrent grant writes
+builds a queue of about N and clears it at ~2 ms each. So the case that makes the
+registry's queue deep is the case that drains in constant time, which is why
+holding a user's lock across `deliverNow()` was left as it is.
+
+The limit of that finding: one *attempt* is not one *fast* attempt. The
+measurement refuses a row before the RPC, where a real outage fails after
+attempting it, so against an `AuditDO` that is timing out rather than refusing,
+the hold is that timeout. Unmeasured. It argues the same way — the variable is
+the downstream's response time, not the depth behind it — but a deep queue is
+not what to watch. `drain` logs from the fifth consecutive failure
+(`NOISY_AFTER`) and `drainLoop` logs the pass cap with the queue depth, which is
+the signal to alarm on. `tests/outbox.test.ts` pins the one-attempt behaviour at
+two depths, so an edit that made `drain` carry on past a failure turns the
+constant case into the linear one and reddens.
 
 The #69 race was not reproduced. With the lock removed, overlapping reconciles
 came out in order in all 1,200 rounds tried, across four shapes. The window exists by

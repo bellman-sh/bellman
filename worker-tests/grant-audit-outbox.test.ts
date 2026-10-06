@@ -6,7 +6,70 @@ import { DurableObjectStore, type AuditDO, type RegistryDO } from "../src/store-
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow } from "../src/outbox.js";
 import type { AuditEntry, PlanGrant } from "../src/types.js";
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Wait for a condition, or fail the test instead of hanging it. */
+async function until(condition: () => boolean, what: string, ms = 4_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`gave up waiting for ${what}`);
+    await sleep(2);
+  }
+}
+
+/** Whether `promise` settles within `ms`; false means it is still waiting. */
+const settlesWithin = (promise: Promise<unknown>, ms: number) =>
+  Promise.race([promise.then(() => true, () => true), sleep(ms).then(() => false)]);
+
+/**
+ * An append the test has told to wait. `held` is set when it arrives, and it goes through
+ * once `release()` is called. The append polls a timer for that rather than awaiting a
+ * promise the test made, because the object it is in is waiting on something only
+ * another request can change.
+ */
+interface Hold {
+  held: boolean;
+  released: boolean;
+  release(): void;
+}
+
+const holds: Hold[] = [];
+const inFlight: Promise<unknown>[] = [];
+
+function newHold(): Hold {
+  const hold: Hold = { held: false, released: false, release: () => { hold.released = true; } };
+  holds.push(hold);
+  return hold;
+}
+
+/**
+ * Remember a call a test starts and may not get to await, so that a test that fails
+ * while the audit object is held does not have the objects torn down underneath that
+ * call, and report that instead of its own failure.
+ */
+function track<T>(promise: Promise<T>): Promise<T> {
+  inFlight.push(promise.then(() => undefined, () => undefined));
+  return promise;
+}
+
+/**
+ * How long a call is given to answer while the audit object is held. A registry that is
+ * serving answers in milliseconds: a held read took 2 ms at most on a quiet machine, and
+ * 79 ms at most with 32 busy loops starving the run. So this measures nothing. It is only
+ * the point at which silence is read as "held".
+ */
+const ANSWER_DEADLINE_MS = 4_000;
+
+/** `call`'s answer, having checked that it came while the audit object was still held. */
+async function answeredWhileHeld<T>(call: Promise<T>, what: string): Promise<T> {
+  const settled = await settlesWithin(call, ANSWER_DEADLINE_MS);
+  expect(settled, `${what} was held until the audit object answered`).toBe(true);
+  return call;
+}
+
 afterEach(async () => {
+  for (const hold of holds.splice(0)) hold.release();
+  await Promise.race([Promise.allSettled(inFlight.splice(0)), sleep(2_000)]);
   await reset();
   await abortAllDurableObjects();
 });
@@ -603,15 +666,22 @@ it("drops a queued entry that names no org, instead of filing it under a name", 
 
 /**
  * Make an org's audit object slow, or unable to take an entry, from the inside: its
- * every append opens a transaction, so that is where it is held up or refused.
+ * every append opens a transaction, so that is where it is held up or refused. A `hold`
+ * makes it wait for the test instead of for a time: the append arrives, sets `held`, and
+ * goes through once the test releases it.
  */
-const misbehaving = (orgId: string, how: { down: boolean; delayMs: number }) =>
+const misbehaving = (orgId: string, how: { down: boolean; delayMs: number; hold?: Hold }) =>
   runInDurableObject(auditStream(orgId), async (_i: AuditDO, ctx) => {
     type Call = (...args: unknown[]) => Promise<unknown>;
     const open = (ctx.storage as unknown as { transaction: Call }).transaction.bind(ctx.storage);
     Object.defineProperty(ctx.storage, "transaction", {
       configurable: true,
       value: async (...args: unknown[]) => {
+        const { hold } = how;
+        if (hold) {
+          hold.held = true;
+          await until(() => hold.released, "the audit object's hold to be released", 15_000);
+        }
         if (how.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, how.delayMs));
         if (how.down) throw new Error("audit object down");
         return open(...args);
@@ -673,31 +743,42 @@ it.each(FOUR_WRITES)(
  * Delivery waits for the audit object, and nothing may hold the registry while it
  * does. Every other call to this object waits for a transaction closure to commit,
  * so a delivery made inside one would hold every plan lookup, which is what each
- * sign-in does, for as long as the audit object takes to answer. By then the write
- * has committed, and a read is served while the entry is still on its way. For each
- * of the four writes, because each has a transaction of its own.
+ * sign-in does, until the audit object answered. By then the write has committed, and
+ * a read is served while the entry is still on its way. For each of the four writes,
+ * because each has a transaction of its own.
+ *
+ * The audit object is HELD for this and not slowed, as the registry is in
+ * join-code-outbox.test.ts, which gives the reason at length. A read required to come
+ * back inside a fixed time measures the runner as much as the object: that file's read
+ * took 362 ms against a limit of 350 on a shared CI runner, for a read the object had
+ * served all along. Holding the append until the read has been answered makes "the
+ * entry is still on its way" something the test arranged, and not a time it hopes has
+ * not run out.
  */
 it.each(FOUR_WRITES)(
   "$name serves other calls while it waits for the audit object",
   async ({ run, visible }) => {
     const store = new DurableObjectStore(env as never);
-    await misbehaving("org_mine", { down: false, delayMs: 500 });
+    const auditHold = newHold();
+    await misbehaving("org_mine", { down: false, delayMs: 0, hold: auditHold });
 
-    const started = Date.now();
-    const write = run(store, { actorUserId: "u_admin" });
-    // Past the commit, inside the delivery.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const read = await store.getGrant("github:4242");
-    const readTook = Date.now() - started;
+    const write = track(run(store, { actorUserId: "u_admin" }));
+    // Past the commit, inside the delivery: the audit object has been told and has not
+    // answered.
+    await until(() => auditHold.held, "the delivery to reach the audit object");
+    const read = await answeredWhileHeld(
+      track(store.getGrant("github:4242")), "a read of the grant");
+    // The delivery is still waiting on the audit object, or being served meanwhile says
+    // nothing. A write that did not wait would have answered by now, so this only gives
+    // it the chance to show.
+    expect(await settlesWithin(write, 100), "the write answered before the audit object did")
+      .toBe(false);
+    auditHold.release();
     await write;
-    const writeTook = Date.now() - started;
 
     // The change is already there, and the entry is not.
     if (visible) expect(read).toMatchObject({ orgId: "org_mine" });
     else expect(read).toBeUndefined();
-    expect(readTook).toBeLessThan(350);
-    // The delivery did take that long, or being served early says nothing.
-    expect(writeTook).toBeGreaterThanOrEqual(450);
   }
 );
 

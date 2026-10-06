@@ -969,12 +969,17 @@ off its documentation, decide how code here is written.
 2. **Everything awaited inside a transaction closure holds every other call to
    that object until it commits.** With a 250 ms await inside `AuditDO.append`'s
    closure, a `recent()` issued mid-closure waited 220 ms; a registry call made
-   inside a closure held a read for 510 ms against the tests' 350 ms limit. So
+   inside a closure held a read for 510 ms, which was as long as the registry took
+   to answer. So
    **never put a cross-object call inside a transaction**. The closure queues and the wrapper delivers after the
    commit (`putGrantIfOwned` calls `#putGrantIfOwnedTxn`, then `deliverNow()`).
    The `serves other calls while it waits` tests in
    `worker-tests/grant-audit-outbox.test.ts` and
-   `worker-tests/join-code-outbox.test.ts` fail if a delivery moves back in.
+   `worker-tests/join-code-outbox.test.ts` fail if a delivery moves back in. They
+   hold the downstream write open and read in the meantime, so what they check is
+   that the read was answered while the write was still waiting. They once checked
+   that it came back inside 350 ms, and a CI runner took 362 ms to sleep and make one
+   call, so a correct room failed.
 3. **TypeScript `private` is erased, and a Durable Object answers RPC for every
    method on its class.** A plain stub's `putGrantIfOwnedTxn` returned
    `"written"`, and `expireIfDue` took a forged session record naming another

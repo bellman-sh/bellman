@@ -796,7 +796,8 @@ a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
 `moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember`, the two
-appends and the expiry are single transactions. An append carries the rows that belong with its
+appends, the expiry, and `AuthDO`'s `admitRegistration`, `touchSession` and `replanSession`
+are single transactions. An append carries the rows that belong with its
 event — the cursor, an idempotency key's record, and for a `progress` send the
 sending member's own `lastReportAt`. That last one was a second `updateMember`
 call after the append returned, which is a second transaction with the wake

@@ -781,3 +781,41 @@ it("does not answer over RPC for the method that wakes the waiting polls", async
   expect(real).not.toBeNull();
   expect(await poll).toEqual([real]);
 });
+
+/**
+ * The read-only methods converted in #126: `derivedDue`, which was the only one of the four with no
+ * test reaching for it. `stored`, `nextCursor` and `events` are deliberately
+ * not converted — see their docblocks in src/store-do.ts. Six tests patch those
+ * three, on the prototype or on the instance, to open the windows they guard.
+ * The #59/#62/#69 branch converted the
+ * methods that WRITE to `#private`, because a Durable Object answers RPC for
+ * every method on its class and TypeScript's `private` is erased at compile
+ * time. These four were left as TypeScript-private on the grounds that they
+ * only read, which is true and is not the same as harmless: `stored` hands back
+ * the whole room record, every member's brief included.
+ *
+ * The exposure was redundant rather than new — everything these return is
+ * reachable through the object's public reads — so this is tidying, and the
+ * assertion is what keeps it tidy. Reverting any one conversion reddens it.
+ */
+it("does not answer over RPC for the one reader nothing patches", async () => {
+  const store = new DurableObjectStore(env as never);
+  const id = "qs_rpc_reads";
+  await store.createSession(session({ id, joinCodes: {} }));
+  const stub = sessionStub(id) as unknown as
+    Record<string, (...args: unknown[]) => Promise<unknown>>;
+  // A public read answers, so the refusals below are about the methods and not
+  // the stub — without this the test would pass against a stub that answered
+  // nothing at all.
+  expect(await stub.eventsAfter(0)).toEqual([]);
+
+  const answered = (call: Promise<unknown>) =>
+    call.then(() => "answered", (err: unknown) => String(err));
+  const outcomes = {
+    derivedDue: await answered(stub.derivedDue()),
+  };
+
+  for (const [name, outcome] of Object.entries(outcomes)) {
+    expect(outcome, name).toMatch(/does not implement/);
+  }
+});

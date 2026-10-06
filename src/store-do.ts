@@ -225,7 +225,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   private driver = new OutboxDriver(
     this.ctx.storage,
     (row) => this.#deliver(row),
-    () => this.derivedDue()
+    () => this.#derivedDue()
   );
 
   /**
@@ -306,6 +306,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * them in production, since every await between their read and their write is
    * storage, and the transaction is the stronger form. The appends were converted
    * after the local test pool lost writes in them (see appendEventOnce).
+   *
+   * **Still TypeScript-`private`, and alone among this class's readers in that
+   * (#126).** `events`, `nextCursor` and `derivedDue` are `#private`, because a
+   * Durable Object answers RPC for every method it has and TypeScript's
+   * `private` is erased at compile time. This one cannot follow them yet: three
+   * race tests patch it ON THE PROTOTYPE to hold the first read of the session
+   * open — `holdFirstReadOfTheSession` in removal-race, session-close-join-race
+   * and heartbeat-tick-race — and a `#private` method is not on the prototype to
+   * patch. They guard real atomicity bugs, so the conversion waits on moving
+   * them to another seam rather than on weakening them.
+   *
+   * Patching `ctx.storage.get` is the obvious replacement and is not a straight
+   * swap: this reads through whatever `from` it is given, so a read inside a
+   * transaction goes to `txn.get` and never touches `ctx.storage.get` at all.
+   *
+   * The exposure is redundant either way — `getSession` returns this record over
+   * RPC already — which is why #126 called the family tidying and not a
+   * vulnerability.
    */
   private async stored(
     from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
@@ -313,6 +331,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return hydrateStoredSession(await from.get("session"));
   }
 
+  /**
+   * TypeScript-`private` rather than `#private`, for the reason `stored` gives
+   * and a third kind of cost (#126). `tests/store-do-wiring.test.ts` overrides
+   * it on the INSTANCE to make a frame fail to build and to pin D5's ordering —
+   * read, then attach, accept and send, with nothing yielding in between. An
+   * override cannot shadow a `#private` method, so converting this would retire
+   * both.
+   */
   private async events(after = 0): Promise<SessionEvent[]> {
     const map = await this.ctx.storage.list<SessionEvent>({
       prefix: "e:",
@@ -330,6 +356,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cursors stay contiguous, so nothing downstream can tell (#120). Every caller reads
    * it inside the transaction that writes the event, which is the same reasoning as
    * stored() gives for the session record.
+   *
+   * TypeScript-`private` rather than `#private`, for the reason `stored` gives
+   * and the same cost (#126): `session-append-race.test.ts` patches it on the
+   * prototype to hand two appends the same cursor, which is the #120 collision
+   * this docblock is about. A `#private` method is not there to patch, and that
+   * test is the only thing standing between #120 and a silent recurrence.
    */
   private async nextCursor(txn: DurableObjectTransaction): Promise<number> {
     return ((await txn.get<number>("cursor")) ?? 0) + 1;
@@ -1635,7 +1667,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * past, and it would fire again for as long as the session existed. It has no
    * tick to send either, which is why the early return covers both.
    */
-  private async derivedDue(): Promise<Map<string, number>> {
+  async #derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
     if (!s || s.closed) return new Map();
     const due = new Map([["ttl", s.expiresAt]]);

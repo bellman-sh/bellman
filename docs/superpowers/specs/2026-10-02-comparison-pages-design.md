@@ -61,6 +61,15 @@ ChatGPT, Codex and Dots — into one place, with Pages as the shared artifact.
 It is the closest thing to Bellman any major vendor has shipped, so leaving it
 out would make the section look evasive within a month of publishing.
 
+**Conductor is the seventh, added 2026-10-06.** It is the funded form of the
+question #83 opened with — why not just orchestrate? — and since July it has
+been multiplayer: teammates open the same workspace, watch the same transcript
+and prompt the same agent. Every one of those teammates is a member of one
+organisation and every agent is one Conductor launched. That is the tenancy
+boundary Space draws, reached from the other side, and a developer evaluating
+Bellman is likelier to have Conductor installed than anything else on this
+list.
+
 The pages are ordered by **how far outside you the thing can reach**, which is
 the one axis that separates all six from Bellman (D7). Subagents reach inside
 one session; Space reaches across one organisation; Bellman is the only one
@@ -74,6 +83,7 @@ that reaches past the account entirely.
 | `/compare/managed-agents` | Claude Managed Agents |
 | `/compare/openrig` | OpenRig |
 | `/compare/frameworks` | CrewAI, LangGraph, AutoGen |
+| `/compare/conductor` | Conductor, and its multiplayer workspaces |
 | `/compare/chatgpt-space` | ChatGPT Space, Pages and Dots |
 
 ### D3 — Generated from a config, the way `pricing.html` already is.
@@ -258,6 +268,24 @@ truthful distinction is the tenancy boundary, not the person boundary.
 orchestrators complements rather than competitors and points at #85. The
 OpenRig page must not contradict it.
 
+### Conductor
+
+Checked 2026-10-06 against version 0.90.0 and the published docs.
+
+| Fact | Source |
+|---|---|
+| A Mac app that runs Claude Code, Codex, Cursor and OpenCode in parallel, each in an isolated git worktree; you review the diffs and merge | `conductor.build`, `/docs` |
+| Conductor Cloud (0.78.0, 2026-07-30): isolated microVMs with the repo and dependencies pre-installed; sandboxes come up in seconds and run for hours | `/changelog` |
+| Multiplayer (early access in 0.77.0, 2026-07-23): workspaces belong to a Cloud organisation and are shared with the team; a link "opens the workspace in Conductor for any member of the organization"; "the transcript and new agent output update live for everyone"; avatars, typing indicators, Follow, Reassign | `/docs/cloud/collaboration` |
+| Hosted MCP server at `api.conductor.build/mcp`, Streamable HTTP, OAuth or API key; 24 tools including `create_workspace`, `send_message`, `list_messages`, `get_session_status`; the docs describe delegating to an agent and reading its transcript, and no agent-to-agent messaging | `/docs/api/mcp` |
+| Pricing: Free is the local product with your own subscriptions and keys; Pro is $50/month and adds cloud workspaces, multiplayer "with up to 5 Pro users", the API and the mobile app; Teams is $60/user/month with collaboration "for teams of any size"; Enterprise adds SAML SSO and SCIM | `/pricing` |
+| Conductor for iOS shipped in 0.90.0 on 2026-10-02 | `/changelog` |
+| Melty Labs, YC S24; $22M Series A from Spark and Matrix, announced 2026-03-30 | `/blog`, YC |
+| Whether a workspace can be shared with someone outside the organisation | **unconfirmed — say nothing.** The docs say "any member of the organization" and nothing more |
+
+**Do not claim** Conductor is single-player or single-machine. It is neither,
+and the OpenRig correction on #85 is why this row is here.
+
 ### CrewAI, LangGraph, AutoGen
 
 | Fact | Source |
@@ -401,10 +429,35 @@ and the claims are not.
 - **Do not claim** Space is single-player, or that it cannot involve other
   people. See the facts table.
 
+### `/compare/conductor`
+
+- **Question:** Why not just use Conductor?
+- **Answer:** Conductor runs a team of coding agents for you — isolated
+  workspaces on your Mac or in its cloud, a dashboard, diffs, merge — and since
+  July it is multiplayer: anyone in your organisation can open a workspace,
+  watch the transcript and prompt the agent live. Every agent is one you
+  launched and every person is in your organisation. Bellman starts at that
+  edge.
+- **Decision:** Use Conductor to run your own agents in parallel and watch them
+  with your team. Use Bellman when a member is an agent you did not launch, or
+  a person outside your organisation.
+- **Axes:** what an agent is · who hosts it · who can be in it · what a member
+  needs from you (a paid seat vs. the code) · how agents relate (parallel vs.
+  peers) · what its MCP server is (a control plane vs. a rendezvous) · clients.
+- **Better at:** the whole run-and-review workflow; cloud workspaces that
+  outlive your laptop; a multiplayer that is a real product — live transcript,
+  avatars, typing, follow, reassign; an iOS app; bring-your-own subscription;
+  an MCP server any session of yours can delegate to.
+- **Tone:** as OpenRig: the better tool for a team running its own agents, and
+  most teams are that team. Say so. The line to land is *Conductor runs your
+  agents; Bellman is where your agents meet agents that are not yours.*
+- **Do not claim** it is single-machine, or that multiplayer is only watching —
+  teammates can prompt. See the facts table.
+
 ### `/compare/` index
 
-Routes the question — six cards, each the question rather than the product
-name — then **the reach ladder from D7 as the matrix**: one row per subject,
+Routes the question — one card per page, each the question rather than the
+product name — then **the reach ladder from D7 as the matrix**: one row per subject,
 ordered by how far outside you it reaches, Bellman last. That table is the
 section's whole argument in one screen. Carries the token block once.
 

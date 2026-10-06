@@ -142,6 +142,72 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     expect(String(res.data.note)).toContain("HUMAN must approve");
   });
 
+  /**
+   * #81. A request nobody answers used to be indistinguishable from one nobody
+   * saw: `refId` was the whole model and there was no state anywhere. It now
+   * ends in answered, declined or expired, and `bellman_sync` reports the ones
+   * that have not — on the poll rather than as a second event, because the
+   * request already interrupted once when it arrived.
+   */
+  it("reports an unanswered action_request to both members, and says whose it is", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Pull the last 50 failed webhooks" },
+    });
+    expect(ask.isError, ask.text).toBe(false);
+
+    const mine = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(mine.data.outstanding).toHaveLength(1);
+    expect((mine.data.outstanding as { cursor: number; mine: boolean }[])[0])
+      .toMatchObject({ cursor: ask.data.cursor, mine: true });
+
+    // The same request, read by the peer whose human owes the answer.
+    const theirs = await p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
+    });
+    expect((theirs.data.outstanding as { mine: boolean }[])[0].mine).toBe(false);
+  });
+
+  it("stops reporting it once the peer's human has answered", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+    // Outstanding first, or the assertion after the answer proves nothing: an
+    // always-absent field would pass it.
+    const before = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(before.data.outstanding).toHaveLength(1);
+
+    const answer = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: false, result: "not this week" },
+    });
+    expect(answer.isError, answer.text).toBe(false);
+
+    const after = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    // Absent rather than empty, like `replayed` and `removed`: a quiet room's
+    // poll does not grow a field saying nothing is pending.
+    expect(after.data.outstanding).toBeUndefined();
+  });
+
+  it("leaves the field off a poll with nothing pending", async () => {
+    const p = await pairUp(h);
+    const quiet = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(quiet.isError, quiet.text).toBe(false);
+    expect(quiet.data.outstanding).toBeUndefined();
+  });
+
   it("requires action_response to reference a real request", async () => {
     const p = await pairUp(h);
 

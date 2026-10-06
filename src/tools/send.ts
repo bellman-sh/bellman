@@ -22,6 +22,7 @@ Args:
       "message"        — free-form text for the peer agent+human
       "artifact"       — code/doc/data payload ({ name, content })
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
+                         It ends in exactly one of three states and cannot sit between them: answered, declined (a human said no), or expired (30 minutes passed and nobody did). Silence and refusal are different answers, and this is what tells them apart. Until it ends it appears in every member's bellman_sync as \`outstanding\`. An answer that arrives after the deadline still lands and still counts.
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.

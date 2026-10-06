@@ -8,6 +8,7 @@ import { findMember, sessionStatus, touchMember } from "../rooms.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
+import { outstandingFor } from "../action-state.js";
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   // --------------------------------------------------------------- bellman_sync
@@ -22,7 +23,8 @@ Args:
   - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor, removed? }
+Returns: { events[] (untrusted envelopes, your own events excluded), cursor, removed?, outstanding? }
+outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
 removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.
 If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
@@ -150,6 +152,23 @@ If a room's creator has removed you, you still get the history up to and includi
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
       const foreign = all.filter((e) => e.fromMemberId !== member_id);
 
+      // Every event, not the slice. A request made before `since_cursor` is
+      // still outstanding, and the point of this list is what the caller is
+      // WAITING ON rather than what just happened — a slice would show a
+      // request once, on the poll that carried it, and never again.
+      //
+      // Capped at the cut for the same reason the slice is: a removed member
+      // reads its history and nothing after it (#113), and a request that
+      // arrived after they were cut is not theirs to answer or to wait on.
+      //
+      // The cost is a full read of the log on every poll. That is bounded by
+      // the room's TTL rather than by anything here, and the fix if it stops
+      // being enough is a stored cursor for the last `action_request`, which
+      // turns this into a bounded tail read.
+      const everything = await s.eventsAfter(session_id, 0);
+      const visible = cut === undefined ? everything : everything.filter((e) => e.cursor <= cut);
+      const outstanding = outstandingFor(visible, member_id, Date.now());
+
       return ok(
         {
           events: foreign.map((e) =>
@@ -157,6 +176,16 @@ If a room's creator has removed you, you still get the history up to and includi
           ),
           cursor,
           session_status: status,
+          // Only when there are any, as `replayed` and `ambient` are: a client
+          // that has never heard of it keeps working, and a quiet room's poll
+          // does not grow a field saying nothing is pending.
+          //
+          // It rides the poll rather than arriving as an event, deliberately.
+          // An `action_request` already interrupts once (src/attention.ts); a
+          // second event re-raising it would interrupt a working member again
+          // for something it is not being asked to do now. This is here for
+          // when it looks, which is what looking is for.
+          ...(outstanding.length > 0 ? { outstanding } : {}),
           // Only when true, as `replayed` and `ambient` are: a client that has
           // never heard of it keeps working, and the twelve-field shape every
           // other poll returns does not change.

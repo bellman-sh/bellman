@@ -617,9 +617,24 @@ export interface BellmanStore {
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
-   * Sessions this user created, newest first is not promised — only that a
-   * lapsed plan can find the rooms it has to freeze. The create *counts* used
-   * for quota cannot answer that: they are timestamps, not identities.
+   * Sessions this user created that are not closed — newest first is not
+   * promised, only that a lapsed plan can find the rooms it has to freeze. The
+   * create *counts* used for quota cannot answer that: they are timestamps, not
+   * identities.
+   *
+   * Closed rooms are left out, and `limit` counts the rooms returned rather than
+   * the index rows read. Both halves are the same fix: the listing applied
+   * `limit` to raw rows, so a prolific account's walk filled its window with
+   * long-dead rooms and never reached the live ones — a freeze that silently did
+   * nothing for exactly the accounts that use Bellman most (#75, #115). A room
+   * past its TTL counts as closed here whether or not its alarm has fired.
+   *
+   * A frozen room is still listed. Freezing one twice is harmless, and leaving it
+   * out would hide it from the only listing that can find it again.
+   *
+   * The rows of the closed rooms it passes are deleted as it meets them, so the
+   * index no longer grows for the life of an account and a dead room is paid for
+   * once. `sessionsJoinedBy` keeps its rows deliberately; see there.
    *
    * That promise has two exceptions, both in the Durable Objects store, and a
    * miss costs more than a row missing from a list: a lapse freezes the rooms
@@ -651,6 +666,12 @@ export interface BellmanStore {
    * it is meant for do not agree on what counts as current: the control panel
    * hides closed rooms, a freeze sweep wants exactly the live ones. Encoding
    * either answer here would make one of them filter twice.
+   *
+   * **Closed rooms are listed, and this index is not pruned** — the two ways it
+   * differs from `sessionsCreatedBy`, and both follow from the sentence above.
+   * This answers which rooms a person HELD a handle in, so a closed one is the
+   * history being asked for rather than a tombstone, and a row whose room has
+   * closed is still a true answer. The growth is the cost of that promise.
    *
    * Order is not promised, and it differs between the stores — insertion order
    * in MemoryStore, key order in the Durable Objects store — so which rooms
@@ -1103,7 +1124,27 @@ export class MemoryStore implements BellmanStore {
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
-    return [...(this.byCreator.get(userId) ?? [])].slice(0, limit);
+    const mine = this.byCreator.get(userId);
+    if (!mine) return [];
+    const live: string[] = [];
+    for (const id of mine) {
+      if (live.length >= limit) break;
+      const s = this.sessions.get(id);
+      // `expireIfDue` first, for the same reason getSession calls it: a room past
+      // its TTL is closed whether or not anything has written that down yet, and
+      // a sweep that read the flag alone would keep every expired room in the
+      // window until something else happened to touch it.
+      if (s) this.expireIfDue(s, Date.now());
+      if (s && !s.closed) {
+        live.push(id);
+        continue;
+      }
+      // Self-healing, and the reason `limit` can now be trusted: the row goes as
+      // it is encountered, so a walk pays for a dead room once rather than on
+      // every listing forever (#75).
+      mine.delete(id);
+    }
+    return live;
   }
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {

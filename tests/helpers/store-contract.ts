@@ -1069,6 +1069,63 @@ export function describeStoreContract(
     });
 
     /**
+     * A lapse freezes the rooms this names, so a closed one is budget spent on
+     * nothing. The index was never pruned and `limit` was applied to raw rows,
+     * so a prolific account's walk filled its window with long-dead rooms and
+     * never reached the live ones — the freeze then silently did nothing for
+     * exactly the accounts that use Bellman most (#75, #115).
+     */
+    it("leaves closed rooms out of the created listing", async () => {
+      (await store.createSession(session({ id: "qs_open", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_shut", createdBy: "u_jesse" })));
+      await store.closeSession("qs_shut");
+
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_open"]);
+    });
+
+    it("counts live rooms against the limit, not index rows", async () => {
+      // The closed rooms are created FIRST, so in both stores they sort and
+      // insert ahead of the live ones. Applying the limit to rows returns a
+      // window of nothing but tombstones; applying it to live rooms walks past
+      // them. That ordering is the whole point of the test.
+      for (const id of ["qs_dead_1", "qs_dead_2", "qs_dead_3"]) {
+        (await store.createSession(session({ id, createdBy: "u_jesse" })));
+        await store.closeSession(id);
+      }
+      (await store.createSession(session({ id: "qs_live_1", createdBy: "u_jesse" })));
+      (await store.createSession(session({ id: "qs_live_2", createdBy: "u_jesse" })));
+
+      expect((await store.sessionsCreatedBy("u_jesse", 2)).sort())
+        .toEqual(["qs_live_1", "qs_live_2"]);
+    });
+
+    it("forgets a closed room's row, so the walk pays for it once", async () => {
+      (await store.createSession(session({ id: "qs_gone", createdBy: "u_jesse" })));
+      await store.closeSession("qs_gone");
+      // The first call sweeps it. The second must not see it even though
+      // nothing closed anything in between — that is what proves the row was
+      // dropped rather than merely filtered out on the way past.
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual([]);
+      (await store.createSession(session({ id: "qs_kept", createdBy: "u_jesse" })));
+      expect(await store.sessionsCreatedBy("u_jesse", 10)).toEqual(["qs_kept"]);
+    });
+
+    /**
+     * The other index keeps its closed rooms, deliberately and unlike the one
+     * above: it answers which rooms a person HELD a handle in, so a closed room
+     * is the history being asked for rather than a tombstone.
+     */
+    it("keeps closed rooms in the joined listing", async () => {
+      (await store.createSession(session({
+        id: "qs_was_mine", createdBy: "u_jesse",
+        members: [member({ userId: "u_jesse" })],
+      })));
+      await store.closeSession("qs_was_mine");
+
+      expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual(["qs_was_mine"]);
+    });
+
+    /**
      * The panel's main screen splits rooms a person created from rooms they
      * joined, and only the first had an index. `um:` is the second.
      *

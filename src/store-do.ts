@@ -2175,10 +2175,39 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.put(`us:${userId}:${sessionId}`, Date.now());
   }
 
-  async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
+  /**
+   * One window of this person's created-room index, ids only, starting after
+   * `startAfter` when given.
+   *
+   * Paged rather than limited, because the registry cannot tell a live room from
+   * a closed one — the room is in another object — so the caller that CAN
+   * (`DurableObjectStore.sessionsCreatedBy`) walks these windows and keeps going
+   * until it has `limit` live ids. Applying `limit` here was the bug: a lapse
+   * walk spent its whole budget on closed rooms and never reached the live ones,
+   * which silently did nothing for exactly the accounts that use Bellman most
+   * (#75).
+   */
+  async createdIndexPage(userId: string, limit: number, startAfter?: string): Promise<string[]> {
     const prefix = `us:${userId}:`;
-    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    const map = await this.ctx.storage.list<number>({
+      prefix,
+      limit,
+      ...(startAfter === undefined ? {} : { startAfter: `${prefix}${startAfter}` }),
+    });
     return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /**
+   * Forget that this person created this room. Called by the sweep above as it
+   * meets a closed room, so a dead row is paid for once rather than on every
+   * listing for the life of the account — the index was never pruned at all
+   * before (#75, #115).
+   *
+   * Only the `us:` half. `um:` is history and keeps its rows deliberately: its
+   * contract is rooms a person HELD a handle in, closed ones included.
+   */
+  async dropCreatedIndex(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`us:${userId}:${sessionId}`);
   }
 
   /**
@@ -2490,8 +2519,52 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
+  /**
+   * Rooms this person created that a lapse could still freeze.
+   *
+   * The registry holds the index and cannot read a room's state; the room is in
+   * another object. So the paging is here: ask for a window of ids, resolve
+   * each, keep the live ones, and go back for more until `limit` is met or the
+   * range runs out. `limit` therefore counts live rooms, which is what every
+   * caller meant by it.
+   *
+   * Closed is the whole predicate, and `getSession` is what decides it: it runs
+   * the TTL check, so a room past its expiry reads closed here even if no alarm
+   * has fired yet. A room that is merely frozen stays — a lapse freezing an
+   * already-frozen room is harmless, and leaving it out would hide it from the
+   * one listing that can find it again.
+   *
+   * The drop is a second write into a second object with no transaction
+   * spanning it, the gap docs/ARCHITECTURE.md section 9 describes — and the
+   * cheapest instance of it in the codebase. A drop that dies leaves the row it
+   * was going to remove, which is the state this call already tolerates and
+   * repairs on the next walk.
+   */
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
-    return this.registry.sessionsCreatedBy(userId, limit);
+    const live: string[] = [];
+    let startAfter: string | undefined;
+
+    while (live.length < limit) {
+      // A full window each time, not `limit - live.length`: the rows that fail
+      // are the ones being skipped, so asking for only what is still wanted
+      // turns a page of closed rooms into one id per round trip.
+      const page = await this.registry.createdIndexPage(userId, limit, startAfter);
+      if (page.length === 0) break;
+
+      for (const id of page) {
+        if (live.length >= limit) break;
+        const session = await this.session(id).getSession();
+        if (session && !session.closed) {
+          live.push(id);
+          continue;
+        }
+        await this.registry.dropCreatedIndex(userId, id);
+      }
+      // A short window means the range is exhausted; nothing follows to scan.
+      if (page.length < limit) break;
+      startAfter = page[page.length - 1];
+    }
+    return live;
   }
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {

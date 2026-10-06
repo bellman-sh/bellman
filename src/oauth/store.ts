@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   CLIENT_CAP, CLIENT_COUNT_KEY, PURGE_BACKOFF_MS, PURGE_IDLE_KEY,
-  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS,
+  REGISTRATIONS_PER_HOUR, REGISTRATION_WINDOW_MS, SWEEP_INTERVAL_MS, SWEEP_RESUME_MS,
   clientCount, hasLapsed, purgeDue, sessionDead, sweepPage, touchDue,
   type Admission, type AuthCode, type AuthStorage, type CounterStorage,
   type PanelSession, type Reclaimed, type RefreshToken, type RegisteredClient,
@@ -142,6 +142,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
   async registerClient(client: RegisteredClient): Promise<void> {
     await this.#insertClient(this.ctx.storage, client);
+    await this.#armSweep(SWEEP_INTERVAL_MS);
   }
 
   /**
@@ -199,7 +200,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     ip: string | null,
     now: number
   ): Promise<Admission> {
-    return this.ctx.storage.transaction<Admission>(async (txn) => {
+    const outcome = await this.ctx.storage.transaction<Admission>(async (txn) => {
       const bucket = ip ? `${REG}${ip}` : undefined;
       const inWindow = async (key: string) =>
         ((await txn.get<number[]>(key)) ?? []).filter(
@@ -240,6 +241,20 @@ export class AuthDO extends DurableObject<BellmanEnv> {
       if (bucket) await txn.put(bucket, [...recent, now]);
       return "ok";
     });
+
+    // The sweep's arming, and this is the path that does it in production:
+    // `registerClient` has no production caller, as the note above says, so
+    // arming only there would leave this object with no alarm at all.
+    //
+    // AFTER the transaction, not inside it. `setAlarm` within a
+    // `ctx.storage.transaction()` closure commits with that transaction
+    // (ARCHITECTURE.md section 9, first runtime fact) — exactly what the outbox
+    // needs and not what this needs. The sweep is maintenance, not something a
+    // registration owes; a missed arm is recovered by the next registration,
+    // where a lost outbox alarm would leave a row with nothing scheduled to
+    // deliver it.
+    await this.#armSweep(SWEEP_INTERVAL_MS);
+    return outcome;
   }
 
   /**
@@ -266,6 +281,49 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    */
   #clientCount(rows: Rows): Promise<number> {
     return clientCount(counterOver(rows), CLIENT, PURGE_BATCH);
+  }
+
+  /**
+   * Point the alarm at `Date.now() + delayMs`, unless it already points somewhere
+   * earlier. One alarm per object, so arming is a negotiation rather than a set:
+   * moving it later would push back a sweep something else is waiting on, and
+   * moving it earlier is always safe because a sweep that finds nothing re-arms
+   * at the interval.
+   */
+  async #armSweep(delayMs: number): Promise<void> {
+    const at = Date.now() + delayMs;
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || at < current) await this.ctx.storage.setAlarm(at);
+  }
+
+  /**
+   * Sweep lapsed registrations and empty rate-limit buckets, then re-arm (#87).
+   *
+   * `admitRegistration` reclaims inline when the cap is in the way, and that is
+   * what keeps a table full of registrations nobody signed in with from blocking
+   * a real client. This is the other half: that path runs only when someone is
+   * registering AND the table is already full, so with no alarm a table of
+   * lapsed records sits there for as long as nobody tries. `SessionDO` has
+   * enforced session TTL with an alarm since it was written; this object had
+   * none at all.
+   *
+   * Re-arms on both outcomes and at different distances. A pass that reached the
+   * end of the keyspace waits the interval; one that stopped mid-keyspace
+   * resumes almost at once, because a cursor is only worth keeping if something
+   * comes back for it.
+   *
+   * The re-arm is in a `finally`, and that is the point of it. A throw in the
+   * sweep would otherwise skip `setAlarm`, and the runtime retries a failed
+   * alarm handler a bounded number of times and then stops — after which this
+   * object never sweeps again, with nothing to notice.
+   */
+  async alarm(): Promise<void> {
+    let complete = false;
+    try {
+      ({ complete } = await this.purgeStale(Date.now()));
+    } finally {
+      await this.ctx.storage.setAlarm(Date.now() + (complete ? SWEEP_INTERVAL_MS : SWEEP_RESUME_MS));
+    }
   }
 
   /**

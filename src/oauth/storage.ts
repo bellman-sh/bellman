@@ -218,6 +218,28 @@ export function hasLapsed(client: Pick<RegisteredClient, "expires_at">, now: num
 }
 
 export const CLIENT_COUNT_KEY = "clients:count";
+/**
+ * How often the authorization object sweeps lapsed registrations (#87).
+ *
+ * Correctness does not depend on it. `getClient` expires a lapsed registration
+ * on read, so the sweep only reclaims the SPACE the cap counts, and a late
+ * sweep is a late sweep rather than a wrong answer. Five minutes is chosen
+ * against the cap rather than against any TTL: registrations are rate limited
+ * per hour, so the client population moves on an hourly scale, and sweeping at
+ * the shortest TTL in play (a 60-second authorization code, which is consumed
+ * on use anyway) would be alarms spent on nothing.
+ */
+export const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+
+/**
+ * How soon a sweep that did not reach the end of the keyspace resumes.
+ *
+ * `purgeStale` pages with a cursor, so one pass may stop mid-keyspace. Waiting
+ * a full interval to continue would be the starvation #51 round 3 produced,
+ * arrived at from the other direction.
+ */
+export const SWEEP_RESUME_MS = 1_000;
+
 export const PURGE_IDLE_KEY = "clients:purgeIdleUntil";
 
 /** How long to stop scanning after a pass that reclaimed nothing. */

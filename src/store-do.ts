@@ -4,7 +4,7 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent,
+  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -22,6 +22,7 @@ import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from 
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
+import { applySurfaceWrite } from "./surface.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -47,6 +48,9 @@ import { reviving } from "./rpc-error.js";
 
 const CURSOR_PAD = 12;
 const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0")}`;
+/** One row per surface item (#129). The key is a slug, so the prefix is injective. */
+const surfaceKey = (key: string) => `sf:${key}`;
+const SURFACE_PREFIX = "sf:";
 const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 /**
  * Delivered intent ids, so a redelivered audit entry is applied once.
@@ -154,12 +158,19 @@ const auditIntent = (entry: AuditEntry): OutboxIntent => ({
  * a plain stub forge one of these into any room. The rules it applies
  * (`creditReport`, `markRemoved`) are shared with MemoryStore and belong to
  * neither store.
+ *
+ * The surface row (#129) joins the member rules here. It needs the row it
+ * replaces, which is a storage read, so this is async and takes the
+ * transaction: read and write stay one unit, as `stored(txn)` and
+ * `nextCursor(txn)` are. A removal is a `delete`, which a put map cannot
+ * carry, so the result names both the rows to put and the keys to delete.
  */
-function memberRow(
+async function extraRows(
+  txn: DurableObjectTransaction,
   s: StoredSession,
   event: SessionEvent,
   extras: AppendExtras,
-): Record<string, unknown> {
+): Promise<{ puts: Record<string, unknown>; deletes: string[] }> {
   let members = s.members;
   if (extras.creditReport) {
     members = creditReport(members, event.fromMemberId, event.at) ?? members;
@@ -167,15 +178,28 @@ function memberRow(
   if (extras.markRemoved !== undefined) {
     members = markRemoved(members, extras.markRemoved, event.cursor, event.at) ?? members;
   }
-  // Monotonic, for the reason MemoryStore's copy gives. Computed before the
-  // early return below, because this rule can need a session row written when
-  // the member rules did not.
+  // Monotonic, for the reason MemoryStore's copy gives.
   const stamp = extras.stampActionRequest
     ? Math.max(s.lastActionRequestAt ?? 0, event.at)
     : s.lastActionRequestAt;
 
-  if (members === s.members && stamp === s.lastActionRequestAt) return {};
-  return { session: { ...s, members, lastActionRequestAt: stamp } };
+  const puts: Record<string, unknown> = {};
+  const deletes: string[] = [];
+  let surfaceCursor = s.surfaceCursor ?? 0;
+  if (extras.surface !== undefined) {
+    const key = surfaceKey(extras.surface.key);
+    const verdict = applySurfaceWrite(await txn.get<SurfaceRow>(key), event, extras.surface);
+    if (verdict === "remove") deletes.push(key);
+    else if (verdict !== null) puts[key] = verdict;
+    if (verdict !== null) surfaceCursor = Math.max(surfaceCursor, event.cursor);
+  }
+
+  const changed =
+    members !== s.members || stamp !== s.lastActionRequestAt || surfaceCursor !== (s.surfaceCursor ?? 0);
+  if (changed) {
+    puts.session = { ...s, members, lastActionRequestAt: stamp, surfaceCursor };
+  }
+  return { puts, deletes };
 }
 
 /**
@@ -385,7 +409,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * contiguous, so nothing downstream can tell.
    *
    * It writes into the transaction the cursor was read in (see nextCursor), so the
-   * read and this write are one unit.
+   * read and this write are one unit. `deletes` are the rows a removal owes, and
+   * they commit with the event for the same reason the puts do.
    *
    * `#private`, because it writes the event and any extra rows its caller supplies, and a
    * Durable Object answers RPC for every method on its class: TypeScript's `private` is
@@ -394,11 +419,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async #writeEvent(
     txn: DurableObjectTransaction,
     e: SessionEvent,
-    extra: Record<string, unknown> = {}
+    extra: Record<string, unknown> = {},
+    deletes: readonly string[] = [],
   ): Promise<void> {
     await txn.put<unknown>({
       [eventKey(e.cursor)]: e, cursor: e.cursor, ...extra,
     });
+    // A removed surface row (#129), in the same transaction as the event that
+    // removed it. After the put: a key is never both put and deleted here.
+    for (const key of deletes) await txn.delete(key);
   }
 
   async createSession(s: Session): Promise<void> {
@@ -1117,7 +1146,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // departure is `written[0]` whenever there is one: the order above is the
       // member then the door, and a member who was already out has no departure.
       //
-      // `markRemoved` when the caller asked to cut, which is the rule `memberRow`
+      // `markRemoved` when the caller asked to cut, which is the rule `extraRows`
       // applies for an append's `markRemoved` extra — one piece of code shared
       // with MemoryStore, so the two stores cannot record a cut differently
       // (#113). Without it a removal routed through here would stamp `leftAt` and
@@ -1330,7 +1359,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
-      await this.#writeEvent(txn, next, memberRow(s, next, extras));
+      const owed = await extraRows(txn, s, next, extras);
+      await this.#writeEvent(txn, next, owed.puts, owed.deletes);
       return next;
     });
     if (event) this.#wake(event);
@@ -1383,8 +1413,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // why the put is guarded on the row being empty. `original` and not `e`,
         // because `markRemoved` records the cut at the cursor the key names and
         // `e` has none.
-        const owed = memberRow(s, original, extras);
-        if (Object.keys(owed).length > 0) await txn.put<unknown>(owed);
+        const owed = await extraRows(txn, s, original, extras);
+        if (Object.keys(owed.puts).length > 0) await txn.put<unknown>(owed.puts);
+        for (const key of owed.deletes) await txn.delete(key);
         return { outcome: "replayed", event: original };
       }
 
@@ -1396,10 +1427,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // interruption leaves the event stored with no key naming it, and the
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
-      await this.#writeEvent(txn, event, {
-        [storageKey]: stored,
-        ...memberRow(s, event, extras),
-      });
+      const owed = await extraRows(txn, s, event, extras);
+      await this.#writeEvent(txn, event, { [storageKey]: stored, ...owed.puts }, owed.deletes);
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -1423,6 +1452,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   async eventAt(cursor: number): Promise<SessionEvent | undefined> {
     return this.ctx.storage.get<SessionEvent>(eventKey(cursor));
+  }
+
+  /**
+   * Every surface row (#129), in key order — `list` returns keys sorted, which
+   * is the order the contract promises. A read, so it answers RPC like
+   * `eventsAfter` does.
+   */
+  async surfaceOf(): Promise<SurfaceRow[]> {
+    const map = await this.ctx.storage.list<SurfaceRow>({ prefix: SURFACE_PREFIX });
+    return [...map.values()];
   }
 
   /**
@@ -2668,6 +2707,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
     return this.session(sessionId).eventAt(cursor);
+  }
+
+  async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
+    return this.session(sessionId).surfaceOf();
   }
 
   async waitForEvents(

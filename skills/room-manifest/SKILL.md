@@ -47,14 +47,14 @@ What each preset expands to:
 
 | Role | Can | |
 |---|---|---|
-| `peer_a` | send, request_actions, respond_actions, invite, revoke | creator |
+| `peer_a` | send, request_actions, respond_actions, invite, revoke, write_surface | creator |
 | `peer_b` | send, request_actions, respond_actions | default |
 
 **`swarm`** — mode `swarm`. Fills to the plan's member limit.
 
 | Role | Can | |
 |---|---|---|
-| `lead` | send, invite, revoke, request_actions, respond_actions | creator |
+| `lead` | send, invite, revoke, request_actions, respond_actions, write_surface | creator |
 | `helper` | send, request_actions, respond_actions | default |
 | `observer` | *(nothing)* | reads only |
 
@@ -62,7 +62,7 @@ What each preset expands to:
 
 | Role | Can | |
 |---|---|---|
-| `author` | send, invite, revoke, request_actions, respond_actions | creator |
+| `author` | send, invite, revoke, request_actions, respond_actions, write_surface | creator |
 | `reviewer` | send, respond_actions | default |
 
 `reviewer` answers action requests but cannot start one. That asymmetry is the
@@ -97,10 +97,16 @@ The set is closed. A role can hold any subset of these and nothing else:
 | `revoke` | revoking a join code |
 | `request_actions` | sending `action_request` events |
 | `respond_actions` | sending `action_response` events |
+| `write_surface` | `bellman_send` type `surface` — writing or removing an item on the room's working surface |
 
 Every member can always `bellman_sync` and `bellman_leave`, whatever their
 role. There is no verb for either, and none for reading — a seat with `can: []`
 still sees everything in the room.
+
+Reading the surface is never gated either: every member reads it on join and
+on `bellman_sync`, and only a seat holding `write_surface` changes it. The
+`pair`, `swarm` and `review` presets give it to the creator's seat alone, so a
+room has one writer unless its manifest says otherwise.
 
 There is no `audit` verb and no `close_room` verb, and adding either to a `can`
 list fails. `bellman_audit` takes no session, so it is org-wide and no room role
@@ -176,7 +182,7 @@ purpose: Cut and verify the weekly release
 mode: swarm
 roles:
   conductor:
-    can: [send, invite, revoke, request_actions, respond_actions]
+    can: [send, invite, revoke, request_actions, respond_actions, write_surface]
     description: Drives the release and decides who joins.
   release_agent:
     can: [send, respond_actions]

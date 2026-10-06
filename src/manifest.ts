@@ -10,9 +10,12 @@ import type { PresetName, RoleDef, RoomManifest, Verb } from "./types.js";
  * takes no session, so it is org-wide and no room role can gate it. No tool closes a room on a member's
  * say-so: a room ends when its last member leaves. Each verb returns in the PR that adds its operation.
  * Adding one sooner lets a role's `can` promise something no code can keep.
+ *
+ * `write_surface` (#129) gates `bellman_send type: "surface"`, the one write to
+ * the room's working surface. Reading it is never gated, as reading never is.
  */
 export const VERBS = [
-  "send", "invite", "revoke", "request_actions", "respond_actions",
+  "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
 ] as const satisfies readonly Verb[];
 
 export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
@@ -238,8 +241,8 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       peer_a: role(
-        ["send", "request_actions", "respond_actions", "invite", "revoke"],
-        "Creator. Equal in conversation, holds room control.",
+        ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface"],
+        "Creator. Equal in conversation, holds room control and writes the surface.",
       ),
       peer_b: role(
         ["send", "request_actions", "respond_actions"],
@@ -253,8 +256,8 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "swarm",
     roles: {
       lead: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions"],
-        "Runs the room: controls who can join.",
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        "Runs the room: controls who can join, and writes the surface.",
       ),
       helper: role(
         ["send", "request_actions", "respond_actions"],
@@ -269,8 +272,8 @@ const PRESETS: Record<PresetName, PresetBody> = {
     mode: "pair",
     roles: {
       author: role(
-        ["send", "invite", "revoke", "request_actions", "respond_actions"],
-        "Brought the work. Can ask the reviewer to do things, when the reviewer allows it.",
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        "Brought the work. Can ask the reviewer to do things, when the reviewer allows it. Writes the surface.",
       ),
       reviewer: role(
         ["send", "respond_actions"],

@@ -48,6 +48,12 @@ export const ATTENTION = {
    * notes landing in a peer's context every few minutes are worse than silence.
    */
   progress: "ambient",
+  /**
+   * A surface write does not interrupt either (#129): a peer that cares is
+   * already looking, and a plan edit landing mid-turn in every member's context
+   * is worse than silence. A watcher on a socket or a poll still sees it land.
+   */
+  surface: "ambient",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

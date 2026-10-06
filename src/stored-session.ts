@@ -50,12 +50,22 @@ export interface StoredSession extends Omit<Session, "events"> {
    * briefly short beats a migration over rooms that expire anyway.
    */
   lastActionRequestAt?: number;
+  /**
+   * The cursor of the last `surface` event that changed a row (#129): a write
+   * that replaced or added one, or a removal that deleted one. A removal of a
+   * key that held nothing does not move it. Moves in the same put as the row,
+   * monotonically, so a poll can report "the surface moved" off the record it
+   * already read, with no row read. Absent on rows written before this landed;
+   * `hydrateStoredSession` lifts it to 0 and `surfaceCursor` in surface.ts
+   * reads it through `?? 0` for the in-memory store, which does not hydrate.
+   */
+  surfaceCursor?: number;
 }
 
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Four changes to the stored shape landed after the sessions now in production
+ * Five changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -80,8 +90,10 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   invents nothing. Left alone, both read as `undefined`, which is neither: a
  *   guard written `=== null` misses the cadence and goes on to do arithmetic with
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
+ * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
+ *   existed has never had a row change, which is what 0 says.
  *
- * All four live here, in one gate, rather than in separate functions that could drift.
+ * All five live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -98,6 +110,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     ...row,
     manifest: withHeartbeatDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
+    surfaceCursor: row.surfaceCursor ?? 0,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

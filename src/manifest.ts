@@ -103,6 +103,23 @@ const HeartbeatOnShape = z.string().max(8);
 const RESERVED_ROLE_KEYS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
 
 /**
+ * One slug grammar for every externally supplied key that becomes a lookup key:
+ * role keys here, surface keys in surface.ts. `noun` is only the wording of the
+ * two messages, so a surface key is refused as a surface key.
+ */
+export function slugShape(noun: string) {
+  return z.string()
+    .refine(
+      (key) => !RESERVED_ROLE_KEYS.has(key),
+      `${noun} must not be one of: ${[...RESERVED_ROLE_KEYS].join(", ")}`,
+    )
+    .regex(
+      new RegExp(`^[a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}$`),
+      `${noun} must match [a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}`,
+    );
+}
+
+/**
  * The one definition of a legal role key. Validate every externally supplied
  * role name with it before using the name as a lookup key: banning a name from
  * `roles` does not make a lookup by that name safe — `roles["constructor"]` on a
@@ -111,15 +128,7 @@ const RESERVED_ROLE_KEYS: ReadonlySet<string> = new Set(["__proto__", "construct
  * The ban is checked first on purpose. `__proto__` also fails the regex, but
  * "reserved" is the more useful thing to tell the author.
  */
-export const RoleKeyShape = z.string()
-  .refine(
-    (key) => !RESERVED_ROLE_KEYS.has(key),
-    `role keys must not be one of: ${[...RESERVED_ROLE_KEYS].join(", ")}`,
-  )
-  .regex(
-    new RegExp(`^[a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}$`),
-    `role keys must match [a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}`,
-  );
+export const RoleKeyShape = slugShape("role keys");
 
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),

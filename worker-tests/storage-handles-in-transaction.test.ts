@@ -19,9 +19,9 @@
  * has to be read again. Do not fix the test.
  *
  * It runs against all four Durable Object classes, since the fact is claimed for all four.
- * The first case of each checks that the object is SQLite-backed (`ctx.storage.sql` exists
- * only there), so a class moved to the other storage fails on that and not on an assertion
- * after it that would be puzzling.
+ * The first case of each checks the premise: that the object has the SQLite storage API,
+ * `ctx.storage.sql`, which `new_sqlite_classes` in wrangler.toml is what gives a class. The
+ * other storage was not measured.
  *
  * What it can and cannot see. It sees outcomes: after a commit both rows survive an abort,
  * after a throw neither does, and mid-closure each handle reads the other's write. It does not
@@ -65,7 +65,7 @@ const VIA_STORAGE = "probe:via_storage";
 const VALUE = { hello: "world" };
 
 describe.each(CLASSES)("%s", (binding) => {
-  it("is SQLite-backed, which is what the fact is about", async () => {
+  it("has the SQLite storage API, which is what the fact is about", async () => {
     await inProbe(binding, (_instance, ctx) => {
       expect(ctx.storage.sql).toBeDefined();
     });

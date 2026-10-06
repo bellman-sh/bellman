@@ -1044,12 +1044,12 @@ off its documentation, decide how code here is written.
    `this.ctx.storage` inside `admitRegistration`'s transaction left every test green,
    and a probe showed why. `worker-tests/storage-handles-in-transaction.test.ts` holds
    the fact on its own, on workerd 1.20260926.1 (pinned in `worker-tests/package.json`),
-   for each of the four classes. It checks the object is SQLite-backed, writes through
-   both handles in a closure that throws, aborts the object and reads both rows back
-   from a new instance, does the same with a closure that commits, and reads each
-   handle's view of the other's write mid-closure. If it fails, a `ctx.storage` call
-   inside a closure is no longer inside the transaction and the convention becomes a
-   requirement; the test is not wrong.
+   for each of the four classes. It checks the object has the SQLite storage API,
+   writes through both handles in a closure that throws, aborts the object and reads
+   both rows back from a new instance, does the same with a closure that commits, and
+   reads each handle's view of the other's write mid-closure. If it fails, a
+   `ctx.storage` call inside a closure is no longer inside the transaction and the
+   convention becomes a requirement; the test is not wrong.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`

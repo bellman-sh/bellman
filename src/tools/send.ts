@@ -33,7 +33,7 @@ Args:
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
 Returns: { room_members, cursor, replayed? }
-  - room_members: who was in the room when this was appended. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
+  - room_members: the OTHER active members this call saw just before appending — your own seat is not in it, and on a replayed send it is who was there at the retry rather than at the original append. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
   - replayed: true means this key had already been used and nothing new was sent.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
       inputSchema: {
@@ -141,6 +141,32 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
           return fail(`no action_request with cursor id ${ref_id}.`);
         }
         if (req.fromMemberId === member_id) return fail("you cannot respond to your own action_request.");
+
+        // First answer wins, and it has to win HERE and not only in the
+        // derivation. `action-state.ts` already ignores a second response, so
+        // the STATE was right — but the event was still appended, and
+        // `bellman_sync` hands every member the feed, so a requester saw a
+        // refusal followed by somebody else's approval with nothing marking the
+        // second as ignored. In a swarm the default seat holds `respond_actions`,
+        // so that is every joiner.
+        //
+        // A read from the request's cursor forward, which is the one place a
+        // response to it can be. On this path and not the poll's: answering is
+        // human-paced and rare, where a poll runs every 25 seconds per member.
+        //
+        // This NARROWS the race rather than closing it. Two responses in flight
+        // can both pass this and both append — the cross-object gap
+        // docs/ARCHITECTURE.md section 9 describes, which a conditional append
+        // in the store would be the real answer to. The derivation stays the
+        // backstop, so the state is right either way; this is what keeps the
+        // feed from showing an answer that does not count.
+        const answered = (await s.eventsAfter(session_id, req.cursor))
+          .find((e) => e.type === "action_response" && e.refId === ref_id);
+        if (answered) {
+          return fail(
+            `action_request ${ref_id} was already answered by ${answered.fromLabel}. The first answer is the one that counts, so this one would be ignored.`
+          );
+        }
       }
       // Validated here so an invalid brief never appends an event; applied
       // after the append, because a send the store refuses must not leave a
@@ -261,7 +287,17 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         // It does NOT answer who can read this either, and used to say it did.
         // A member who left of their own accord goes on reading the room and
         // is not listed here (#113 R3). The two predicates are different on
-        // purpose: this one answers who is in the room.
+        // purpose.
+        //
+        // Nor is it quite "who was in the room when this was appended", which is
+        // what the description used to claim. `others` is the roster this call
+        // read BEFORE its append, minus the sender, so it is the other active
+        // members observed just before the attempt — and on a replay it is the
+        // roster at the retry, not at the original append (the comment above
+        // says so and the description now does too). Making it literally
+        // append-time would mean the store returning the roster it committed
+        // against, which is a change to the append's contract and not to this
+        // line.
         room_members: others.map((m) => m.label),
         cursor: event.cursor,
         ...(replayed ? { replayed: true } : {}),

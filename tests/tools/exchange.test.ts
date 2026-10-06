@@ -270,6 +270,89 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     vi.useRealTimers();
   });
 
+  /**
+   * The case the stamp exists for, and the one it broke.
+   *
+   * A long poll holds for up to `wait_seconds` and reads its session record
+   * BEFORE the wait. The append that wakes it may be the very `action_request`
+   * the stamp is deciding about: off the pre-wait snapshot the stamp is absent,
+   * so the log read is skipped and the response carries the request event with
+   * no `outstanding` beside it. The record this poll answers with is the one to
+   * read.
+   */
+  it("reports outstanding on a long poll that a first action request wakes", async () => {
+    const p = await pairUp(h);
+    // Start from the room's current cursor so the poll genuinely waits rather
+    // than returning the join events at once.
+    const caught = await p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: 0,
+    });
+    const from = Number(caught.data.cursor);
+
+    const poll = p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      since_cursor: from, wait_seconds: 5,
+    });
+    // Let the waiter register before the append that wakes it.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+    expect(ask.isError, ask.text).toBe(false);
+
+    const out = await poll;
+    expect(out.isError, out.text).toBe(false);
+    // The event arrived...
+    expect((out.data.events as unknown[]).length).toBeGreaterThan(0);
+    // ...and so did the thing that says it is waiting on someone.
+    expect(out.data.outstanding).toHaveLength(1);
+    expect((out.data.outstanding as { cursor: number }[])[0].cursor)
+      .toBe(Number(ask.data.cursor));
+  });
+
+  /**
+   * First answer wins in the FEED, not only in the derived state.
+   *
+   * `action-state.ts` already ignores a second response, so the state was
+   * right — but the event was appended anyway and every member reads the feed,
+   * so a requester saw a refusal followed by somebody else's approval with
+   * nothing saying the second does not count.
+   */
+  it("refuses a second answer to a request that already has one", async () => {
+    const p = await pairUp(h);
+    const ask = await p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId,
+      type: "action_request", payload: { ask: "Deploy to prod" },
+    });
+
+    const first = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: false, result: "not this week" },
+    });
+    expect(first.isError, first.text).toBe(false);
+
+    const second = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+      type: "action_response", ref_id: String(ask.data.cursor),
+      payload: { approved: true, result: "actually go ahead" },
+    });
+
+    expect(second.isError).toBe(true);
+    expect(second.text).toContain("already answered");
+
+    // And the feed carries one answer, not two — which is the thing a requester
+    // reads. The derived state was already right; this is about what it sees.
+    const sync = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    const answers = (sync.data.events as { data?: { type?: string } }[])
+      .filter((e) => e.data?.type === "action_response");
+    expect(answers).toHaveLength(1);
+  });
+
   it("requires action_response to reference a real request", async () => {
     const p = await pairUp(h);
 

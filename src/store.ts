@@ -644,12 +644,17 @@ export interface BellmanStore {
    * index no longer grows for the life of an account and a dead room is paid for
    * once. `sessionsJoinedBy` keeps its rows deliberately; see there.
    *
-   * **It may return fewer than `limit` with more still to find.** The Durable
-   * Objects walk resolves each row in another object, so it is bounded by
-   * SWEEP_RPC_BUDGET and stops when it runs out rather than spending a Workers
-   * request'''s subrequest cap and throwing. The rows it dropped on the way are
-   * gone, so the next call starts further in; a caller that needs the whole set
-   * calls again rather than treating a short list as the end.
+   * **It may return fewer than `limit` when it meets a long run of closed
+   * rooms.** The Durable Objects walk resolves each row in another object, and
+   * the work it spends on rows the caller did not ask for — resolving a closed
+   * one, then dropping it — is bounded by SWEEP_RPC_BUDGET, so a dead tail
+   * cannot spend a Workers request's subrequest cap and throw. Live rows do not
+   * count against that budget: they are what was asked for, `limit` bounds them,
+   * and choosing a limit one request can resolve is the caller's part.
+   *
+   * A short list therefore always means progress was made — the rows it passed
+   * are deleted, so the next call starts further in. A caller that needs the
+   * whole set calls again rather than treating a short list as the end.
    *
    * That promise has two exceptions, both in the Durable Objects store, and a
    * miss costs more than a row missing from a list: a lapse freezes the rooms

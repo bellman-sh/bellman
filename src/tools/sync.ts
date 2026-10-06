@@ -102,11 +102,14 @@ If a room's creator has removed you, you still get the history up to and includi
       // and not from the record it was handed. This record is used for the status alone:
       // the removal's cap and the `removed` flag below keep the record the call began
       // with, and say why in their own comments.
-      const status = sessionStatus(
-        cut === undefined && wait_seconds > 0
-          ? (await s.getSession(session_id)) ?? session
-          : session
-      );
+      //
+      // Captured rather than consumed inline, because the action-request stamp
+      // below wants the same thing for the same reason and must not pay for a
+      // second read to get it.
+      const answering = cut === undefined && wait_seconds > 0
+        ? (await s.getSession(session_id)) ?? session
+        : session;
+      const status = sessionStatus(answering);
 
       // A removal that committed after `me` was read is not on `me`. The record,
       // `touchMember` and the event read above are separate calls, and on Workers
@@ -182,9 +185,28 @@ If a room's creator has removed you, you still get the history up to and includi
       // the feature, and bounding it further needs a floor cursor this stamp
       // cannot give: a response may sit far behind the newest request, so there
       // is no single cursor to start from without tracking the oldest OPEN one.
-      const stampedAt = (session as { lastActionRequestAt?: number }).lastActionRequestAt;
+      // From the record this poll ANSWERS with, not the one it began with. A long
+      // poll holds for up to `wait_seconds`, and the append that wakes it may be
+      // the very `action_request` this is deciding about: read off the pre-wait
+      // snapshot the stamp was absent, so the read was skipped and the response
+      // carried the request event with no `outstanding` entry beside it — the
+      // one case the field exists for, missing it.
+      const stampedAt = (answering as { lastActionRequestAt?: number }).lastActionRequestAt;
+
+      // Or the slice itself carries one. The stamp is a separate write from the
+      // event, so between this poll's record read and its event read a request
+      // can land that the record does not know about yet. The events are the
+      // truth here as everywhere; the stamp is only the cheap way to skip them.
+      // Within the TTL, not merely present: a request older than that is expired
+      // and cannot be outstanding, so an old one sitting in the slice of a poll
+      // that asked from cursor 0 must not drag the whole log back in.
+      const askedInSlice = read.some(
+        (e) => e.type === "action_request" && Date.now() <= e.at + ACTION_REQUEST_TTL_MS
+      );
+
       const mayHaveOutstanding =
-        stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS;
+        askedInSlice
+        || (stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS);
 
       const everything = mayHaveOutstanding ? await s.eventsAfter(session_id, 0) : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
@@ -196,7 +218,17 @@ If a room's creator has removed you, you still get the history up to and includi
       // they were cut, with its sender's member id, label and cursor.
       const stopAt = cut ?? removal?.cursor;
       const visible = stopAt === undefined ? everything : everything.filter((e) => e.cursor <= stopAt);
-      const outstanding = outstandingFor(visible, member_id, Date.now());
+      // A member who has left or been removed is told nothing is waiting on
+      // them, because nothing can be: `bellman_send` refuses their handle, so an
+      // `action_response` is not a thing they can produce. `mine: false` says
+      // "the room is waiting on your human", and saying that to someone who
+      // cannot answer is the same class of untruth as the rest of this branch.
+      //
+      // Their OWN requests still show. Those are what they were waiting on when
+      // they went, and reading the room is something a departed member may still
+      // do — the eviction cut above already bounds how much.
+      const outstanding = outstandingFor(visible, member_id, Date.now())
+        .filter((o) => o.mine || isActiveMember(me));
 
       return ok(
         {

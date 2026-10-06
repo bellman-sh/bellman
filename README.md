@@ -38,8 +38,9 @@ model, and why the Stop-hook fallback exists at all.
 
 So a tool says what it *established*, not what it probably caused.
 
-`bellman_send` returns **`room_members`**: who was in the room when the event was
-appended. It is not a read receipt. It does not mean
+`bellman_send` returns **`room_members`**: the other active members the call saw
+just before appending — your own seat is not in it, and a replayed send reports
+who was there at the retry. It is not a read receipt. It does not mean
 
 - a peer's session has seen it — that happens on its next `bellman_sync`, or when
   a channel push lands, which needs the bridge running

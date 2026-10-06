@@ -2584,37 +2584,41 @@ export class DurableObjectStore implements BellmanStore {
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const live: string[] = [];
     let startAfter: string | undefined;
-    // Every row costs cross-object RPCs — one `getSession`, plus one drop when
-    // it is dead — and a Workers request is capped at 1,000 subrequests. An
-    // account with thousands of closed rooms would spend the cap and throw
-    // "Too many subrequests", so the lapse walk would fail OUTRIGHT rather than
-    // return a short list. A short list is the right failure here: the rows this
-    // call dropped are gone for good, so the next walk starts further in and the
-    // tail is cleared across calls instead of in one that cannot finish.
+    // The budget bounds the SWEEPING, not the rooms the caller asked for, and
+    // that distinction is the whole of it. Counting live rows against it made
+    // the contract above false: with `limit` above the budget and every row
+    // live, the walk stopped early having dropped nothing, and because
+    // `startAfter` is local to one call the next call began at the beginning and
+    // returned the same short page for ever. No progress, no error, no way to
+    // tell.
     //
-    // Counted in RPCs rather than rounds because a round's cost depends on
-    // `limit` and on how many of its rows are dead, so a round budget would mean
-    // something different for every caller.
-    let spent = 0;
+    // So a live row costs nothing here. It is what the caller asked for, it is
+    // bounded by `limit`, and choosing a `limit` one request can resolve is the
+    // caller's to do. What is unbounded without this is the DEAD tail — an
+    // account with thousands of closed rooms — and spending a Workers request's
+    // 1,000-subrequest cap on it throws, failing the walk outright rather than
+    // returning a short list. Those rows are dropped as they are met, so the
+    // next walk really does start further in.
+    let swept = 0;
 
-    while (live.length < limit && spent < SWEEP_RPC_BUDGET) {
+    while (live.length < limit && swept < SWEEP_RPC_BUDGET) {
       // A full window each time, not `limit - live.length`: the rows that fail
       // are the ones being skipped, so asking for only what is still wanted
       // turns a page of closed rooms into one id per round trip.
       const page = await this.registry.createdIndexPage(userId, limit, startAfter);
-      spent++;
       if (page.length === 0) break;
 
       for (const id of page) {
-        if (live.length >= limit || spent >= SWEEP_RPC_BUDGET) break;
+        if (live.length >= limit || swept >= SWEEP_RPC_BUDGET) break;
         const session = await this.session(id).getSession();
-        spent++;
         if (session && !session.closed) {
           live.push(id);
           continue;
         }
         await this.registry.dropCreatedIndex(userId, id);
-        spent++;
+        // The resolve that found it dead and the drop that removed it: the two
+        // calls this row cost that the caller did not ask for.
+        swept += 2;
       }
       // A short window means the range is exhausted; nothing follows to scan.
       if (page.length < limit) break;

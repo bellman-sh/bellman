@@ -169,20 +169,33 @@ describe("AuthDO sessions", () => {
   // it. The record a touch returns cannot: one that stored the new time and handed
   // back the stale record passes every assertion made through its return value.
   // Nor can the stored value, because a write of the record already there leaves
-  // it unchanged. So this counts storage.put inside the object. The second touch
-  // is the positive control: it is one past the threshold and must count exactly
-  // one write, which shows the counter sees real ones. It sees storage.put and
-  // nothing else: a skip path that wrote through storage.transaction() would not
-  // be counted.
-  it("does not call storage.put while last_used_at is fresh, and does once it is stale", async () => {
+  // it unchanged. So this counts the puts the object makes inside it: through
+  // storage.put, and through the txn handed to a storage.transaction closure, which
+  // is where touchSession writes. A counter that saw only the first would read zero
+  // for a write made through a transaction. The second touch is the positive
+  // control that says so: it is one past the threshold and must count exactly one
+  // write, which shows the counter sees real ones. It counts puts and nothing else:
+  // a skip path that wrote some other way would not be counted.
+  it("does not put while last_used_at is fresh, and does once it is stale", async () => {
     const o = auth("s-put-count");
     await o.putSession("sid", panelSession());
 
     const [skipped, stale] = await runInDurableObject(o, async (instance: AuthDO, ctx) => {
-      const storage = ctx.storage as unknown as { put: (...a: unknown[]) => Promise<void> };
+      type Call = (...a: unknown[]) => Promise<unknown>;
+      const storage = ctx.storage as unknown as { put: Call; transaction: Call };
       const real = storage.put.bind(storage);
+      const open = storage.transaction.bind(storage);
       let puts = 0;
       storage.put = (...a: unknown[]) => { puts++; return real(...a); };
+      storage.transaction = (closure: unknown, ...rest: unknown[]) =>
+        open((txn: object) => (closure as (txn: object) => Promise<unknown>)(new Proxy(txn, {
+          get(target, prop) {
+            const member = Reflect.get(target, prop, target) as unknown;
+            if (typeof member !== "function") return member;
+            const bound = (member as Call).bind(target);
+            return prop === "put" ? (...a: unknown[]) => { puts++; return bound(...a); } : bound;
+          },
+        })), ...rest);
       try {
         await instance.touchSession("sid", T0 + SESSION_TOUCH_MS); // exactly the threshold: a skip
         const afterSkip = puts;
@@ -190,6 +203,7 @@ describe("AuthDO sessions", () => {
         return [afterSkip, puts - afterSkip];
       } finally {
         delete (storage as { put?: unknown }).put;
+        delete (storage as { transaction?: unknown }).transaction;
       }
     });
 
@@ -258,9 +272,11 @@ describe("AuthDO sessions", () => {
 
   // The window touchSession is one call to close. Sent together, a sign-out is
   // delivered either before the touch or after it, and either way the session
-  // ends dead. A touchSession that yielded to the event loop between deciding to
-  // write and writing would let the delete in between, and its write would
-  // bring the record back. The same assertion Task 1 makes of MemoryAuthStore.
+  // ends dead. That is the plain race, and it cannot tell a transaction from the
+  // input gate: while every await between the read and the write is storage, the
+  // gate serialises the two and this passes without one. worker-tests/
+  // auth-race.test.ts holds the touch open between its read and its write, which
+  // can. The same assertion Task 1 makes of MemoryAuthStore.
   it("is not undone by a sign-out sent alongside a touch", async () => {
     const o = auth("s-touch-inflight");
     await o.putSession("sid", panelSession());
@@ -464,11 +480,11 @@ describe("AuthDO replanSession", () => {
     expect(await o.touchSession("sid", T0 + 1)).toBeUndefined();
   });
 
-  // The input gate is what keeps a sign-out from landing between this method's
-  // read and its write. Sent together, the delete is delivered either before the
-  // call or after it, and either way the session ends dead. A replanSession that
-  // yielded to the event loop between its read and its write would let the
-  // delete in between, and its write would bring the record back.
+  // A sign-out must not land between this method's read and its write. Sent
+  // together, the delete is delivered either before the call or after it, and
+  // either way the session ends dead. As for touchSession, that is the plain race
+  // and it cannot tell a transaction from the input gate; worker-tests/
+  // auth-race.test.ts holds the replan open between its read and its write.
   it("is not undone by a sign-out sent alongside it", async () => {
     const o = auth("s-replan-inflight");
     await o.putSession("sid", panelSession());

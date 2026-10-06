@@ -40,10 +40,9 @@ const PURGE_BATCH = 200;
 
 /**
  * What a method reads and writes through: the object's own storage, or the transaction it
- * is inside. Inside a transaction every read and write has to go through its `txn`, because
- * one made through `ctx.storage` is not part of it. So the helpers a transaction calls take
- * this, and have no default for it: a caller that forgot to hand over the transaction would
- * read and write outside it, and nothing would say so.
+ * is inside. The helpers a transaction calls take this and have no default for it, as
+ * SessionDO's `nextCursor(txn)` takes the transaction, so that what runs inside a
+ * transaction can be read off the code and a caller has to say which it means.
  */
 type Rows = Pick<DurableObjectTransaction, "get" | "put" | "delete" | "list">;
 
@@ -180,9 +179,17 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * token and every browser session, so what goes inside it is storage and nothing slower.
    * worker-tests/auth-race.test.ts holds a call at exactly that point.
    *
-   * Every read and write inside goes through `txn`, since one made through
-   * `this.ctx.storage` is not part of the transaction. That is why #insertClient,
-   * #purgeStale and #clientCount take the handle they work through.
+   * Every read and write inside goes through `txn`, as SessionDO's transactions do, and
+   * #insertClient, #purgeStale and #clientCount take the handle they work through so that
+   * it does.
+   *
+   * Not every method here has been converted. takeCode, takeRefresh, markClientUsed,
+   * putRefresh, registerClient and purgeStale still read and then write. They are
+   * unconverted, not exempt: the input gate covers them in production, since every await
+   * between their read and their write is storage, and the transaction is the stronger
+   * form. registerClient and purgeStale have no production caller: /register goes through
+   * admitRegistration, which runs their bodies as #insertClient and #purgeStale inside its
+   * own transaction. They are public because `AuthStorage` declares them.
    */
   async admitRegistration(
     client: RegisteredClient,

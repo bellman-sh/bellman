@@ -702,7 +702,9 @@ Args:
   - ref_id: required for action_response
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
 
-Returns: { delivered_to, cursor, replayed? } — replayed: true means this key had already been used and nothing new was sent.
+Returns: { room_members, cursor, replayed? }
+  - room_members: who was in the room when this was appended. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
+  - replayed: true means this key had already been used and nothing new was sent.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
       inputSchema: {
         session_id: z.string().min(4),
@@ -768,7 +770,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       }
 
       // Hoisted past the guard, not moved into it: the capability checks below,
-      // and `delivered_to` in the result, read it on every kind.
+      // and `room_members` in the result, read it on every kind.
       const others = activeMembers(session).filter((m) => m.memberId !== member_id);
       // A progress report answers the SERVER's tick, not a peer. Its readers are the
       // room's log and the next tick's snapshot, both of which exist with nobody
@@ -903,11 +905,16 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         // The members active NOW, not the ones active when this was first
         // appended, and no history is kept to do better.
         //
-        // It does NOT answer who can read this, and used to say it did. A
-        // member who left of their own accord goes on reading the room and is
-        // not listed here (#113 R3). The two predicates are different on
+        // This was `delivered_to` until #82. The name claimed a delivery the
+        // server cannot observe: appending an event is not a peer reading it,
+        // and a comment retracting the claim does not outrank the identifier
+        // the model reads in every result. The honest predicate is the name.
+        //
+        // It does NOT answer who can read this either, and used to say it did.
+        // A member who left of their own accord goes on reading the room and
+        // is not listed here (#113 R3). The two predicates are different on
         // purpose: this one answers who is in the room.
-        delivered_to: others.map((m) => m.label),
+        room_members: others.map((m) => m.label),
         cursor: event.cursor,
         ...(replayed ? { replayed: true } : {}),
         note: type === "action_request"

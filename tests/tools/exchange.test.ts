@@ -329,7 +329,7 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
 
 // ---------------------------------------------------------------------------
 describe("send / sync / leave mechanics", () => {
-  it("delivers a message to the peer and reports the recipients", async () => {
+  it("appends a message for the peer and reports who was in the room", async () => {
     const p = await pairUp(h);
     const sent = await p.joiner.call("bellman_send", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
@@ -337,7 +337,7 @@ describe("send / sync / leave mechanics", () => {
     });
 
     expect(sent.isError, sent.text).toBe(false);
-    expect(sent.data.delivered_to).toEqual(["jesse@codenerd"]);
+    expect(sent.data.room_members).toEqual(["jesse@codenerd"]);
 
     const sync = await p.creator.call("bellman_sync", {
       session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,

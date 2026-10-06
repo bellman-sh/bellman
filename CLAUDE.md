@@ -46,6 +46,16 @@ or *peers*, where a peer is any other member rather than a counterpart.
 - **`main` moves only through merges.** Feature work happens on a branch, lands
   by PR. This repo is colocated with [jj](https://jj-vcs.github.io): a detached
   git HEAD is normal, and `jj` is the tool to drive it.
+- **The store is truth; the channel is transport.** A room is its event log.
+  Every path that log takes to a member — the `bellman_sync` long poll, a `/ws`
+  frame, the Stop-hook fallback — may be late or dropped, so `bellman_sync` is
+  authoritative and a push is a convenience. A tool's return says what the call
+  *established*, never what it probably caused: `bellman_send` returns
+  `room_members` (who was in the room at append — not a read receipt), and
+  `session_status` is read after a poll's wait so it is never older than the
+  events beside it (#74), while still saying nothing about whether anyone is
+  listening. Naming a return for its likely effect rather than its actual claim
+  is the bug #82 fixed; don't reintroduce it.
 - **Every `BellmanStore` method is async**, including ones `MemoryStore` answers
   instantly. A Durable Objects port resolves a join code in one object and the
   session in another, and every cross-object hop is RPC. A synchronous signature

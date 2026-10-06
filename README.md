@@ -27,6 +27,37 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
+## What a send proves
+
+**The store is truth; the channel is transport.** A room *is* its event log.
+Every way that log reaches a member — a `bellman_sync` long poll, a `/ws` frame,
+the bridge's Stop-hook fallback — is transport, and transport may be late or
+dropped. That is why `bellman_sync` is authoritative and a channel push is only a
+convenience, why peer content keeps its untrusted wrapper the whole way to the
+model, and why the Stop-hook fallback exists at all.
+
+So a tool says what it *established*, not what it probably caused.
+
+`bellman_send` returns **`room_members`**: who was in the room when the event was
+appended. It is not a read receipt. It does not mean
+
+- a peer's session has seen it — that happens on its next `bellman_sync`, or when
+  a channel push lands, which needs the bridge running
+- a peer's model acted on it
+- for an `action_request`, that any human has approved it — that is the receiving
+  human's decision, deliberately (see [Trust model](#trust-model))
+
+`bellman_sync` returns **`session_status`**: `active`, `frozen` or `closed`. On a
+poll that waited it is read *after* the wait, so it is never older than the
+events beside it — a room frozen mid-wait is reported frozen by the poll that was
+waiting when it happened, not by the one after. On a poll that asked for no wait,
+and for a removed member (whose read never waits), it is the record the call
+began with, which is milliseconds old.
+
+What it does not say is whether anyone is there. `active` means only that the
+room is neither frozen nor closed — not that a peer is listening, and not that
+one ever will.
+
 ## Trust model
 
 - **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists and the one they would get; verbs are enforced by the server) before their own context crosses. Codes are single-use and expire in 15 minutes unused.

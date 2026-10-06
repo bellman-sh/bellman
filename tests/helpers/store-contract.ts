@@ -19,6 +19,8 @@ import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
+import { surfaceCursor } from "../../src/surface.js";
+import type { SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session } from "./fixtures.js";
 
 /**
@@ -1810,6 +1812,139 @@ export function describeStoreContract(
         (await store.appendEventOnce(s.id, reported(), "p-0001", { creditReport: true }));
 
         expect(await stampOf(s.id)).toBe(later);
+      });
+    });
+
+    /**
+     * The working surface's rows (#129). The store writes the row it is handed
+     * in the event's own transaction, under the monotonic rule in surface.ts,
+     * and never asks what a `surface` event means.
+     */
+    describe("the surface rows", () => {
+      const plan = (body = "1. read\n2. write"): SurfaceItem => ({
+        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null,
+      });
+      const wrote = (item: SurfaceItem | null = plan()): EventBody => ({
+        type: "surface",
+        fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+        payload: item ?? { key: "plan", remove: true }, refId: null,
+      });
+      const cursorOf = async (id: string) => surfaceCursor((await store.getSession(id))!);
+
+      it("answers nothing for a room with no surface, and for no room at all", async () => {
+        const s = session({});
+        await store.createSession(s);
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await store.surfaceOf("qs_nobody")).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
+      });
+
+      it("writes the row with the event's cursor and moves surfaceCursor, in one append", async () => {
+        const s = session({});
+        await store.createSession(s);
+
+        const event = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
+
+        expect(await store.surfaceOf(s.id)).toEqual([
+          { ...plan(), cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+        ]);
+        expect(await cursorOf(s.id)).toBe(event.cursor);
+      });
+
+      /** Type-agnostic: a `surface` event with no extra writes no row. */
+      it("writes no row when the append does not ask for one", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote());
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
+      });
+
+      it("replaces the row on a later write to the same key", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const second = (await store.appendEvent(
+          s.id, wrote(plan("revised")), { surface: { key: "plan", item: plan("revised") } },
+        ))!;
+
+        const rows = await store.surfaceOf(s.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ body: "revised", cursor: second.cursor });
+        expect(await cursorOf(s.id)).toBe(second.cursor);
+      });
+
+      it("sorts rows by key", async () => {
+        const s = session({});
+        await store.createSession(s);
+        for (const key of ["zeta", "alpha", "mid"]) {
+          const item = { ...plan(), key };
+          await store.appendEvent(s.id, wrote(item), { surface: { key, item } });
+        }
+        expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["alpha", "mid", "zeta"]);
+      });
+
+      it("removes the row and moves the cursor; removing nothing moves neither", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const gone = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(gone.cursor);
+
+        const again = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(again.cursor).toBeGreaterThan(gone.cursor);
+        expect(await cursorOf(s.id), "a removal of nothing is not a change").toBe(gone.cursor);
+      });
+
+      /**
+       * A replay re-applies the extra with the original event (as creditReport's
+       * replay does), and the monotonic rule makes that a no-op against a newer
+       * row: one event per key, and the newest write stands.
+       */
+      it("replays through appendEventOnce without duplicating or regressing", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        if (first.outcome !== "appended") throw new Error(`first write said ${first.outcome}`);
+
+        const newer = (await store.appendEvent(
+          s.id, wrote(plan("newer")), { surface: { key: "plan", item: plan("newer") } },
+        ))!;
+
+        const retry = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        expect(retry.outcome).toBe("replayed");
+
+        const rows = await store.surfaceOf(s.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ body: "newer", cursor: newer.cursor });
+        expect(await cursorOf(s.id)).toBe(newer.cursor);
+        expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
+      });
+
+      it("hands back detached rows", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const [row] = await store.surfaceOf(s.id);
+        row.body = "scribbled on";
+
+        expect((await store.surfaceOf(s.id))[0].body).toBe("1. read\n2. write");
+      });
+
+      it("writes neither event nor row into a frozen room", async () => {
+        const s = session({ frozenAt: 1 });
+        await store.createSession(s);
+        expect(await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } })).toBeNull();
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
       });
     });
 

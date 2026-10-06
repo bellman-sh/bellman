@@ -517,17 +517,17 @@ Two rules this repo has paid for, applying to every test above:
 | File | Change |
 |---|---|
 | `src/types.ts` | `EventType` += `surface`; `Verb` += `write_surface`; `SurfaceKind`, `Placement`, `SurfaceItem`, `SurfaceRow` |
-| `src/surface.ts` | **new**, runtime-free — key shape, bounds, kind table, `applySurfaceWrite`, `surfaceCursor` |
+| `src/surface.ts` | **new**, runtime-free — key shape, bounds, kind table, the payload shapes and `normalizeSurfaceWrite` (here and not in `kit.ts`, because `rooms.ts` needs them and `kit.ts` imports `rooms.ts`), `applySurfaceWrite`, `surfaceCursor` |
 | `src/stored-session.ts` | `surfaceCursor?` on `StoredSession`, lifted to 0 in `hydrateStoredSession` |
 | `src/manifest.ts` | `write_surface` in `VERBS` and the three creator seats; `slugShape` factory |
 | `src/attention.ts` | `surface: "ambient"` |
 | `src/store.ts` | `AppendExtras.surface`; `surfaceOf` on the interface and in `MemoryStore`; the extra applied in both appends |
 | `src/store-do.ts` | `sf:` rows; `extraRows` (was `memberRow`) returns puts and deletes; `#writeEvent` applies both; `surfaceOf` on `SessionDO` and the facade |
-| `src/tools/kit.ts` | `surface` in `SEND_KINDS`; `SEND_VERB.surface`; `SurfaceShape` |
+| `src/tools/kit.ts` | `surface` in `SEND_KINDS`; `SEND_VERB.surface` |
 | `src/tools/send.ts` | the `surface` branch calls `writeSurface` and maps its result; the two exemptions |
 | `src/tools/sync.ts` | `surface_cursor`; the `surface` flag; the cut |
 | `src/tools/connect.ts`, `src/tools/confirm.ts` | the index; the envelopes |
-| `src/projections.ts` | `surfaceIndex`, `surfaceItems` |
+| `src/projections.ts` | `surfaceIndex`, `surfaceItem` |
 | `src/rooms.ts` | `writeSurface` — guard, validate, count, ends, extras, audit — and `readSurface(store, session, cut?)`, for both transports |
 | `skills/room-manifest/SKILL.md` | the verb row; the preset tables |
 | `README.md` | the `bellman_send` row; the verbs line; a short "The working surface" section |

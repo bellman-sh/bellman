@@ -495,7 +495,34 @@ export async function issueInvite(
   }
 
   const issuedRole = role ?? session.manifest.defaultRole;
-  const previous = Boolean(session.joinCodes[issuedRole]);
+  const existing = session.joinCodes[issuedRole];
+  // Live, not merely present. A code past its 15 minutes shuts no door, so
+  // minting over it is opening one rather than replacing one — and `joinCodes`
+  // keeps expired records, which only stop resolving.
+  const previous = existing !== undefined && Date.now() <= existing.expiresAt;
+
+  // Replacing a live code is the `revoke` authority, not the `invite` one (#90).
+  // Issuing used to retire the previous code unconditionally, so a seat holding
+  // `invite` alone could cut off a code someone was holding just by minting.
+  // `bellman_connect` shows a joiner's human `your_verbs` before any of their
+  // context crosses, and `invite` without `revoke` reads there as "this seat
+  // cannot take a live code away" — a preview promising more restriction than
+  // the room enforced. The verbs now mean what that preview implies: `invite`
+  // opens a door that is shut, `revoke` shuts one that is open, and replacing a
+  // live code is both, so it needs both.
+  //
+  // Refused rather than silently downgraded to a no-op: a caller that asked for
+  // a code and got none must hear why, or it hands out a code that never came.
+  if (previous) {
+    const me = findMember(session, memberId, actor);
+    if (me && denyVerb(session, me, "revoke")) {
+      return refuse(
+        "forbidden",
+        `role "${issuedRole}" already has a live join code. Replacing it retires the one someone may be holding, so it needs the "revoke" verb as well as "invite" — your seat holds invite alone. Wait for that code to expire, or ask a seat that holds revoke.`
+      );
+    }
+  }
+
   const code = renderJoinCode(issuedRole);
   const expiresAt = Date.now() + JOIN_CODE_TTL;
   if (!(await store.setJoinCode(sessionId, issuedRole, code, expiresAt))) {

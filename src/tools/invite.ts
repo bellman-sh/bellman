@@ -17,16 +17,16 @@ export function registerInvite(server: McpServer, identity: Identity, s: Bellman
 
 A code expires 15 minutes after it is issued, and a pair session consumes its code once full. That is deliberate: a code is a short-lived invitation, not a room address. Issuing a new one is how you add a member later, so a long-running swarm room does not have to gather everyone in the first 15 minutes.
 
-A room mints one live code per role. Issuing for a role RETIRES that role's previous code immediately and leaves every other role's code alone — so you can hand a reviewer code and a contributor code to different people.
+A room mints one live code per role, and roles are independent — you can hand a reviewer code and a contributor code to different people. Issuing for a role with NO live code opens that door. Issuing for one that has a live code retires the code someone may be holding, so that needs the \`revoke\` verb as well as \`invite\`; without it the call is refused and the live code stands. An expired code is not live, so minting over one is only ever opening.
 
 Omitting \`role\` issues for the room's default seat. Omitting it when revoking retires EVERY code: over-revoking is recoverable by minting again, while under-revoking leaves a door open behind someone who believes they shut it. Pass a role to revoke exactly one.
 
-So \`invite\` already invalidates an outstanding code, because issuing retires it. \`revoke\` is the narrower authority: close the door and leave it closed. A seat holding \`invite\` but not \`revoke\` can still cut off a code someone is holding, by minting a new one.
+\`invite\` opens a door that is shut. \`revoke\` shuts one that is open and leaves it shut. Replacing a live code is both at once, so it takes both. A seat holding \`invite\` and not \`revoke\` cannot cut off a code someone is holding — the connect preview has always implied that, and it is now also true.
 
 Args: session_id, member_id (yours), role (optional), revoke (default false)
 Returns: { join_code, join_code_expires_at, role, replaced_previous } or { revoked: true, roles }
 Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
-Errors: issuing needs the \`invite\` verb and revoking needs \`revoke\`; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
+Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replacing a live code needs both; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),

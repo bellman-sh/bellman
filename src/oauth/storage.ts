@@ -399,7 +399,8 @@ export interface AuthStorage {
    * Splitting these across calls is a check-then-act race: every request in a
    * burst reads the same count below the limit, then every one of them writes,
    * and the advertised bound only holds for traffic that arrives single file.
-   * Implementations must not yield between the check and the write.
+   * Implementations must not let another call in between the check and the write:
+   * the in-memory store by never yielding, AuthDO by running both in one transaction.
    */
   admitRegistration(client: RegisteredClient, ip: string | null, now: number): Promise<Admission>;
   /** Undefined for an unknown client, and for one whose registration lapsed. */
@@ -436,7 +437,8 @@ export interface AuthStorage {
    * Not a get and a put from the caller. The caller is the Worker and the
    * record is in a Durable Object, so two calls have a window between them;
    * this is the same reason admitRegistration is one method. Implementations
-   * must not yield between the read and the write.
+   * must not let another call in between the read and the write, in either of the
+   * ways admitRegistration names.
    *
    * Undefined for an unknown session and for a dead one, and a dead one is
    * dropped rather than left for a sweep — so a clock that moves backwards
@@ -448,7 +450,8 @@ export interface AuthStorage {
    *
    * Merges identity and plan_source into the stored record and sets replanned_at
    * to `now`, writes nothing else, and does nothing at all when the record is
-   * gone. Implementations must not yield between the read and the write.
+   * gone. Implementations must not let another call in between the read and the
+   * write, in either of the ways admitRegistration names.
    *
    * Resolves true when it merged, and false when there was no session to merge
    * into, whether it was signed out, swept or never stored. False tells the

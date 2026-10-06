@@ -38,6 +38,43 @@ const REG_CURSOR_KEY = "regs:cursor";
 /** How much stale data one registration is willing to clear. */
 const PURGE_BATCH = 200;
 
+/**
+ * What a method reads and writes through: the object's own storage, or the transaction it
+ * is inside. The helpers a transaction calls take this and have no default for it, as
+ * SessionDO's `nextCursor(txn)` takes the transaction, so that what runs inside a
+ * transaction can be read off the code and a caller has to say which it means. That is a
+ * convention and not what makes the transaction hold: on this object's storage a call
+ * through `ctx.storage` inside the closure is part of the transaction too
+ * (docs/ARCHITECTURE.md section 9, runtime fact 6).
+ */
+type Rows = Pick<DurableObjectTransaction, "get" | "put" | "delete" | "list">;
+
+/**
+ * The counter's storage, as an adapter so the counting logic itself stays in
+ * storage.ts and runs under plain Node in tests — the same split BillingLedger
+ * uses.
+ */
+const counterOver = (rows: Rows): CounterStorage => ({
+  get: <T>(key: string) => rows.get<T>(key),
+  put: <T>(key: string, value: T) => rows.put(key, value),
+  listKeys: async (prefix, startAfter, limit) => [
+    ...(await rows.list({ prefix, limit, ...(startAfter ? { startAfter } : {}) })).keys(),
+  ],
+});
+
+/** The same split, for the cursored sweeps: logic in storage.ts, storage here. */
+const sweepOver = (rows: Rows): SweepStorage => ({
+  get: <T>(key: string) => rows.get<T>(key),
+  put: <T>(key: string, value: T) => rows.put(key, value),
+  delete: async (key: string) => void (await rows.delete(key)),
+  deleteMany: async (keys: string[]) => void (await rows.delete(keys)),
+  listEntries: async <T>(prefix: string, startAfter: string | undefined, limit: number) => [
+    ...(await rows.list<T>({ prefix, limit, ...(startAfter ? { startAfter } : {}) })).entries(),
+  ],
+  lastKey: async (prefix: string) =>
+    [...(await rows.list({ prefix, reverse: true, limit: 1 })).keys()][0],
+});
+
 export class AuthDO extends DurableObject<BellmanEnv> {
   /**
    * What Stripe says each customer is paying for. The logic is BillingLedger,
@@ -104,8 +141,16 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   async registerClient(client: RegisteredClient): Promise<void> {
+    await this.#insertClient(this.ctx.storage, client);
+  }
+
+  /**
+   * registerClient's body, over the handle its caller reads and writes through, so that
+   * admitRegistration can run it inside its transaction.
+   */
+  async #insertClient(rows: Rows, client: RegisteredClient): Promise<void> {
     const key = `${CLIENT}${client.client_id}`;
-    const existed = (await this.ctx.storage.get(key)) !== undefined;
+    const existed = (await rows.get(key)) !== undefined;
     // Counted before the key is written, and used for the new count rather than read again
     // (#122). An object that has not counted yet seeds its counter by listing the client
     // keys, so a read after the put lists this client too and the one added for it makes
@@ -116,116 +161,111 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     // stored the client and not its count, and the object stayed one behind for good, which
     // opens the cap late: the direction purgeStale closes below. A key that already exists
     // changes no count, so it is written alone.
-    const before = existed ? undefined : await this.#clientCount();
-    if (before === undefined) await this.ctx.storage.put(key, client);
-    else await this.ctx.storage.put({ [key]: client, [COUNT]: before + 1 });
+    const before = existed ? undefined : await this.#clientCount(rows);
+    if (before === undefined) await rows.put(key, client);
+    else await rows.put({ [key]: client, [COUNT]: before + 1 });
   }
 
   /**
-   * One RPC, and it awaits nothing but storage. That is what makes it atomic:
-   * the input gate holds other events off for the duration, so no concurrent
-   * registration can pass the same check before this one writes. (A method that
-   * awaited the network would not get that — see the ledger comment above.)
+   * One RPC and one transaction, and everything it awaits is storage. The window check, the
+   * purge, the cap check and the insert are a single unit, so no concurrent registration can
+   * pass the same check before this one writes.
+   *
+   * That is what the input gate gave it before, implicitly: it holds other events off while
+   * a storage operation is outstanding, so a read and then a put is atomic as long as every
+   * await between them is storage, and nothing in the code said so. (A method that awaited
+   * the network would not get that — see the ledger comment above.) The transaction says it,
+   * and it keeps holding if a later edit puts an await on anything else in between (a fetch,
+   * a timer), the one case the gate does not cover. That is a net under a mistake and not a
+   * licence for one: the closure holds every other call to this object until it commits
+   * (docs/ARCHITECTURE.md section 9, runtime fact 2), and this object also answers every
+   * token and every browser session, so what goes inside it is storage and nothing slower.
+   * worker-tests/auth-race.test.ts holds a call at exactly that point.
+   *
+   * Every read and write inside goes through `txn`, as SessionDO's transactions do, and
+   * #insertClient, #purgeStale and #clientCount take the handle they work through so that
+   * it does.
+   *
+   * Not every method here has been converted. takeCode, takeRefresh, markClientUsed,
+   * putRefresh, registerClient and purgeStale still read and then write. They are
+   * unconverted, not exempt: the input gate covers them in production, since every await
+   * between their read and their write is storage, and the transaction is the stronger
+   * form. registerClient and purgeStale have no production caller: /register goes through
+   * admitRegistration, which runs their bodies as #insertClient and #purgeStale inside its
+   * own transaction. They are public because `AuthStorage` declares them.
    */
   async admitRegistration(
     client: RegisteredClient,
     ip: string | null,
     now: number
   ): Promise<Admission> {
-    const bucket = ip ? `${REG}${ip}` : undefined;
-    const inWindow = async (key: string) =>
-      ((await this.ctx.storage.get<number[]>(key)) ?? []).filter(
-        (at) => at >= now - REGISTRATION_WINDOW_MS
-      );
+    return this.ctx.storage.transaction<Admission>(async (txn) => {
+      const bucket = ip ? `${REG}${ip}` : undefined;
+      const inWindow = async (key: string) =>
+        ((await txn.get<number[]>(key)) ?? []).filter(
+          (at) => at >= now - REGISTRATION_WINDOW_MS
+        );
 
-    let recent: number[] = [];
-    if (bucket) {
-      recent = await inWindow(bucket);
-      if (recent.length >= REGISTRATIONS_PER_HOUR) return "rate_limited";
-    }
-
-    // Evict before testing the cap, or anyone who fills the table with clients
-    // they never signed in with blocks every real client until the next purge.
-    //
-    // Only when the cap is in the way, and only when the last scan found
-    // something. A full registry is refused without writing per-IP state, so it
-    // can be retried without limit — what has to stay bounded is the work each
-    // retry costs, which was a scan per request.
-    if ((await this.#clientCount()) >= CLIENT_CAP) {
-      const idleUntil = await this.ctx.storage.get<number>(PURGE_IDLE_KEY);
-      if (purgeDue(idleUntil, now)) {
-        const { clients, buckets, complete } = await this.purgeStale(now);
-        // Backing off on any empty pass would starve whatever sits behind the
-        // current page. Only a pass that reached the end of the keyspace has
-        // actually established there is nothing to reclaim.
-        if (complete && clients + buckets === 0) {
-          await this.ctx.storage.put(PURGE_IDLE_KEY, now + PURGE_BACKOFF_MS);
-        }
-        // That sweep may have pruned or dropped this address's bucket, so the
-        // read taken before it is no longer what is stored.
-        if (bucket) recent = await inWindow(bucket);
+      let recent: number[] = [];
+      if (bucket) {
+        recent = await inWindow(bucket);
+        if (recent.length >= REGISTRATIONS_PER_HOUR) return "rate_limited";
       }
-      if ((await this.#clientCount()) >= CLIENT_CAP) return "full";
-    }
 
-    await this.registerClient(client);
-    if (bucket) await this.ctx.storage.put(bucket, [...recent, now]);
-    return "ok";
+      // Evict before testing the cap, or anyone who fills the table with clients
+      // they never signed in with blocks every real client until the next purge.
+      //
+      // Only when the cap is in the way, and only when the last scan found
+      // something. A full registry is refused without writing per-IP state, so it
+      // can be retried without limit — what has to stay bounded is the work each
+      // retry costs, which was a scan per request.
+      if ((await this.#clientCount(txn)) >= CLIENT_CAP) {
+        const idleUntil = await txn.get<number>(PURGE_IDLE_KEY);
+        if (purgeDue(idleUntil, now)) {
+          const { clients, buckets, complete } = await this.#purgeStale(txn, now);
+          // Backing off on any empty pass would starve whatever sits behind the
+          // current page. Only a pass that reached the end of the keyspace has
+          // actually established there is nothing to reclaim.
+          if (complete && clients + buckets === 0) {
+            await txn.put(PURGE_IDLE_KEY, now + PURGE_BACKOFF_MS);
+          }
+          // That sweep may have pruned or dropped this address's bucket, so the
+          // read taken before it is no longer what is stored.
+          if (bucket) recent = await inWindow(bucket);
+        }
+        if ((await this.#clientCount(txn)) >= CLIENT_CAP) return "full";
+      }
+
+      await this.#insertClient(txn, client);
+      if (bucket) await txn.put(bucket, [...recent, now]);
+      return "ok";
+    });
   }
-
-  /**
-   * The counter's storage, as an adapter so the counting logic itself stays in
-   * storage.ts and runs under plain Node in tests — the same split BillingLedger
-   * uses above.
-   */
-  /** The same split, for the cursored sweeps: logic in storage.ts, storage here. */
-  private sweepStorage: SweepStorage = {
-    get: <T>(key: string) => this.ctx.storage.get<T>(key),
-    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
-    delete: async (key: string) => void (await this.ctx.storage.delete(key)),
-    deleteMany: async (keys: string[]) => void (await this.ctx.storage.delete(keys)),
-    listEntries: async <T>(prefix: string, startAfter: string | undefined, limit: number) => [
-      ...(
-        await this.ctx.storage.list<T>({ prefix, limit, ...(startAfter ? { startAfter } : {}) })
-      ).entries(),
-    ],
-    lastKey: async (prefix: string) =>
-      [...(await this.ctx.storage.list({ prefix, reverse: true, limit: 1 })).keys()][0],
-  };
-
-  private counterStorage: CounterStorage = {
-    get: <T>(key: string) => this.ctx.storage.get<T>(key),
-    put: <T>(key: string, value: T) => this.ctx.storage.put(key, value),
-    listKeys: async (prefix, startAfter, limit) => [
-      ...(
-        await this.ctx.storage.list({ prefix, limit, ...(startAfter ? { startAfter } : {}) })
-      ).keys(),
-    ],
-  };
 
   /**
    * Counted once and then maintained, because Durable Object storage has no
    * count API and the alternative is list()ing up to CLIENT_CAP entries on
-   * every registration. Every insert and delete goes through registerClient or
-   * purgeStale, which are the only two places this moves. Both read it before they touch
+   * every registration. Every insert and delete goes through #insertClient or
+   * #purgeStale, which are the only two places this moves. Both read it before they touch
    * a key, because the seed lists the keys: read after, it would count the change itself
-   * (#122). registerClient writes it with the key in one put, and purgeStale hands it to
+   * (#122). #insertClient writes it with the key in one put, and #purgeStale hands it to
    * #bumpCount, which has to follow its sweep.
    *
-   * This and the two below that write, #bumpCount and #purge, are `#private`. A Durable
-   * Object answers RPC for every method on its class, and TypeScript's `private` is erased
-   * at compile time, so `private` would leave all three answering. Nothing outside this
-   * class calls them, so none of them has a reason to.
+   * This and the methods beside it that write, #insertClient, #bumpCount, #purgeStale,
+   * #purge and #purgeSessions, are `#private`. A Durable Object answers RPC for every
+   * method on its class, and TypeScript's `private` is erased at compile time, so
+   * `private` would leave all of them answering. Nothing outside this class calls them, so
+   * none of them has a reason to.
    *
    * That is the whole of it: less surface, not a protected counter. `registerClient`,
    * `markClientUsed` and `purgeStale` are public because `AuthStorage` declares them, and
    * over a stub `purgeStale(now + 48h)` sweeps a registration that has not lapsed while
-   * `registerClient` moves the counter. Anyone who could reach these three could already
-   * reach those. This one only seeds the counter from the keys that are there, and is
-   * private because it belongs to the same group, not because the seed needs guarding.
+   * `registerClient` moves the counter. Anyone who could reach the private ones could
+   * already reach those. This one only seeds the counter from the keys that are there, and
+   * is private because it belongs to the same group, not because the seed needs guarding.
    */
-  #clientCount(): Promise<number> {
-    return clientCount(this.counterStorage, CLIENT, PURGE_BATCH);
+  #clientCount(rows: Rows): Promise<number> {
+    return clientCount(counterOver(rows), CLIENT, PURGE_BATCH);
   }
 
   /**
@@ -236,8 +276,8 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * the number makes the order something a caller has to state, where a read inside would
    * be right in every case but the first.
    */
-  async #bumpCount(by: number, before: number): Promise<void> {
-    await this.ctx.storage.put(COUNT, Math.max(0, before + by));
+  async #bumpCount(rows: Rows, by: number, before: number): Promise<void> {
+    await rows.put(COUNT, Math.max(0, before + by));
   }
 
   async getClient(clientId: string): Promise<RegisteredClient | undefined> {
@@ -268,6 +308,14 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * way for the same reason.
    */
   async purgeStale(now: number): Promise<Reclaimed> {
+    return this.#purgeStale(this.ctx.storage, now);
+  }
+
+  /**
+   * purgeStale over the handle its caller reads and writes through, so that admitRegistration
+   * can sweep inside its transaction.
+   */
+  async #purgeStale(rows: Rows, now: number): Promise<Reclaimed> {
     // Counted before the sweep deletes anything, for registerClient's reason from the other
     // side (#122). An object that has not counted yet seeds from the keys that are left,
     // which already leave out what this pass deletes, and taking those off again stores a
@@ -278,15 +326,15 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     // before it purges, so the key is already there and this is one single-key read. Only a
     // direct purgeStale on an uncounted object pays for the seed, and it is the one that
     // needed it.
-    const before = await this.#clientCount();
+    const before = await this.#clientCount(rows);
     const clients = await sweepPage<RegisteredClient>(
-      this.sweepStorage, CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,
+      sweepOver(rows), CLIENT, CLIENT_CURSOR_KEY, PURGE_BATCH,
       (c) => (hasLapsed(c, now) ? { action: "delete" } : { action: "keep" })
     );
-    if (clients.reclaimed > 0) await this.#bumpCount(-clients.reclaimed, before);
+    if (clients.reclaimed > 0) await this.#bumpCount(rows, -clients.reclaimed, before);
 
     const buckets = await sweepPage<number[]>(
-      this.sweepStorage, REG, REG_CURSOR_KEY, PURGE_BATCH,
+      sweepOver(rows), REG, REG_CURSOR_KEY, PURGE_BATCH,
       (stamps) => {
         const recent = stamps.filter((at) => at >= now - REGISTRATION_WINDOW_MS);
         // An empty bucket is deleted, not stored empty: otherwise one key per
@@ -299,7 +347,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
 
     // Freeing something un-sticks admission immediately, rather than leaving it
     // waiting out a backoff that is no longer true.
-    if (clients.reclaimed + buckets.reclaimed > 0) await this.ctx.storage.delete(PURGE_IDLE_KEY);
+    if (clients.reclaimed + buckets.reclaimed > 0) await rows.delete(PURGE_IDLE_KEY);
 
     return {
       clients: clients.reclaimed,
@@ -310,7 +358,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   async countClients(): Promise<number> {
-    return this.#clientCount();
+    return this.#clientCount(this.ctx.storage);
   }
 
   async countRegistrationBuckets(): Promise<number> {
@@ -372,36 +420,40 @@ export class AuthDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * One RPC, awaiting nothing but storage — which is what makes it atomic. The
-   * input gate holds other events off for the duration, so a concurrent request
-   * for the same session cannot read the pre-touch value and write over this
-   * one. Splitting it into a get and a put from the Worker is the window this
-   * exists to close, the same way admitRegistration does.
+   * One RPC and one transaction, so a concurrent request for the same session cannot read
+   * the pre-touch value and write over this one. Splitting it into a get and a put from the
+   * Worker is the window this exists to close, the same way admitRegistration does.
+   *
+   * It awaits nothing but storage, which is why the input gate covered it before the
+   * transaction did, for the reason admitRegistration gives. The transaction holds if that
+   * stops being true.
    */
   async touchSession(id: string, now: number): Promise<PanelSession | undefined> {
     const key = `${SESSION}${id}`;
-    const stored = await this.ctx.storage.get<PanelSession>(key);
-    if (!stored) return undefined;
-    if (sessionDead(stored, now)) {
-      // Dropped here rather than left to the sweep, so a dead session is
-      // terminal the moment it is first read as dead.
-      await this.ctx.storage.delete(key);
-      return undefined;
-    }
-    // After the dead check and never before it: touchDue says only whether the
-    // stored time is stale, so asked first it would serve a session that is past
-    // its ceiling. See touchDue and MemoryAuthStore.touchSession.
-    if (!touchDue(stored, now)) return stored;
-    const touched: PanelSession = { ...stored, last_used_at: now };
-    await this.ctx.storage.put(key, touched);
-    return touched;
+    return this.ctx.storage.transaction<PanelSession | undefined>(async (txn) => {
+      const stored = await txn.get<PanelSession>(key);
+      if (!stored) return undefined;
+      if (sessionDead(stored, now)) {
+        // Dropped here rather than left to the sweep, so a dead session is
+        // terminal the moment it is first read as dead.
+        await txn.delete(key);
+        return undefined;
+      }
+      // After the dead check and never before it: touchDue says only whether the
+      // stored time is stale, so asked first it would serve a session that is past
+      // its ceiling. See touchDue and MemoryAuthStore.touchSession.
+      if (!touchDue(stored, now)) return stored;
+      const touched: PanelSession = { ...stored, last_used_at: now };
+      await txn.put(key, touched);
+      return touched;
+    });
   }
 
   /**
-   * One RPC, awaiting nothing but storage, for the reason touchSession is. The
-   * input gate covers the read and the write together, so a sign-out cannot land
-   * between them and be written over, and another request's touch cannot land
-   * between them and be reverted.
+   * One RPC and one transaction, for the reason touchSession is. The read and the write
+   * are a single unit, so a sign-out cannot land between them and be written over, and
+   * another request's touch cannot land between them and be reverted. It awaits nothing but
+   * storage, which is what let the input gate cover it before, as it did touchSession.
    *
    * It writes its three fields onto the record as it is stored now, and onto
    * nothing when there is none, and says which it did. The caller read its copy
@@ -416,15 +468,17 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     now: number
   ): Promise<boolean> {
     const key = `${SESSION}${id}`;
-    const stored = await this.ctx.storage.get<PanelSession>(key);
-    if (!stored) return false;
-    // Typed, as touchSession's record is, so that a field written under the
-    // wrong name fails typecheck:worker instead of being stored as an extra one.
-    const replanned: PanelSession = {
-      ...stored, identity, plan_source: planSource, replanned_at: now,
-    };
-    await this.ctx.storage.put(key, replanned);
-    return true;
+    return this.ctx.storage.transaction<boolean>(async (txn) => {
+      const stored = await txn.get<PanelSession>(key);
+      if (!stored) return false;
+      // Typed, as touchSession's record is, so that a field written under the
+      // wrong name fails typecheck:worker instead of being stored as an extra one.
+      const replanned: PanelSession = {
+        ...stored, identity, plan_source: planSource, replanned_at: now,
+      };
+      await txn.put(key, replanned);
+      return true;
+    });
   }
 
   async deleteSession(id: string): Promise<void> {
@@ -444,7 +498,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     const now = Date.now();
     await sweepPage<PanelSession>(
       // The cursor lives outside the prefix, as #purge's does.
-      this.sweepStorage, SESSION, `cursor:${SESSION}`, PURGE_BATCH,
+      sweepOver(this.ctx.storage), SESSION, `cursor:${SESSION}`, PURGE_BATCH,
       (value) => (sessionDead(value, now) ? { action: "delete" } : { action: "keep" })
     );
   }
@@ -464,7 +518,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     await sweepPage<{ expires_at: number }>(
       // The cursor must live outside the prefix it tracks, or the sweep lists
       // its own cursor as an entry and can set the cursor to itself.
-      this.sweepStorage, prefix, `cursor:${prefix}`, PURGE_BATCH,
+      sweepOver(this.ctx.storage), prefix, `cursor:${prefix}`, PURGE_BATCH,
       (value) => (value.expires_at < now ? { action: "delete" } : { action: "keep" })
     );
   }

@@ -32,7 +32,70 @@ import { JOIN_CODE_TTL } from "../src/store.js";
 // fixture reads as GONE and every assertion below would fail against correct code.
 import { member, oneCode, session } from "../tests/helpers/fixtures.js";
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** Wait for a condition, or fail the test instead of hanging it. */
+async function until(condition: () => boolean, what: string, ms = 4_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`gave up waiting for ${what}`);
+    await sleep(2);
+  }
+}
+
+/** Whether `promise` settles within `ms`; false means it is still waiting. */
+const settlesWithin = (promise: Promise<unknown>, ms: number) =>
+  Promise.race([promise.then(() => true, () => true), sleep(ms).then(() => false)]);
+
+/**
+ * A write the test has told to wait. `held` is set when it arrives, and it goes through
+ * once `release()` is called. The write polls a timer for that rather than awaiting a
+ * promise the test made, because the object it is in is waiting on something only
+ * another request can change.
+ */
+interface Hold {
+  held: boolean;
+  released: boolean;
+  release(): void;
+}
+
+const holds: Hold[] = [];
+const inFlight: Promise<unknown>[] = [];
+
+function newHold(): Hold {
+  const hold: Hold = { held: false, released: false, release: () => { hold.released = true; } };
+  holds.push(hold);
+  return hold;
+}
+
+/**
+ * Remember a call a test starts and may not get to await, so that a test that fails
+ * while the registry is still held does not have the objects torn down underneath that
+ * call, and report that instead of its own failure.
+ */
+function track<T>(promise: Promise<T>): Promise<T> {
+  inFlight.push(promise.then(() => undefined, () => undefined));
+  return promise;
+}
+
+/**
+ * How long a call is given to answer while the registry is held. A room that is serving
+ * answers in milliseconds: a held read took 2 ms at most on a quiet machine, and 79 ms at
+ * most with 32 busy loops starving the run. So this measures nothing. It is only the
+ * point at which silence is read as "held".
+ */
+const ANSWER_DEADLINE_MS = 4_000;
+
+/** `call`'s answer, having checked that it came while the registry was still held. */
+async function answeredWhileHeld<T>(call: Promise<T>, what: string): Promise<T> {
+  const settled = await settlesWithin(call, ANSWER_DEADLINE_MS);
+  expect(settled, `${what} was held until the registry answered`).toBe(true);
+  return call;
+}
+
 afterEach(async () => {
+  for (const hold of holds.splice(0)) hold.release();
+  await Promise.race([Promise.allSettled(inFlight.splice(0)), sleep(2_000)]);
   await reset();
   await abortAllDurableObjects();
 });
@@ -148,9 +211,11 @@ const failWritesTo = (id: string, prefix: string, onFail: () => void) =>
 /**
  * Make the registry slow, or unable to take a join-code write, from the inside: every put
  * and delete of a `jc:` row waits `delayMs` and then goes through, or is refused while
- * `down` is set. The state is an object the test holds, so it can change its mind.
+ * `down` is set. A `hold` makes it wait for the test instead of for a time: the write
+ * arrives, sets `held`, and goes through once the test releases it. The state is an
+ * object the test holds, so it can change its mind.
  */
-const flaky = (how: { down: boolean; delayMs: number }) =>
+const flaky = (how: { down: boolean; delayMs: number; hold?: Hold }) =>
   runInDurableObject(registry(), async (_i: RegistryDO, ctx) => {
     type Call = (...args: unknown[]) => Promise<unknown>;
     for (const method of ["put", "delete"]) {
@@ -159,6 +224,11 @@ const flaky = (how: { down: boolean; delayMs: number }) =>
         configurable: true,
         value: async (...args: unknown[]) => {
           if (typeof args[0] === "string" && args[0].startsWith("jc:")) {
+            const { hold } = how;
+            if (hold) {
+              hold.held = true;
+              await until(() => hold.released, "the registry's hold to be released", 15_000);
+            }
             if (how.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, how.delayMs));
             if (how.down) throw new Error("registry down");
           }
@@ -488,44 +558,41 @@ it.each([
  * other calls in. Drained first, a read arriving while the registry answers would see the
  * room closed with no expiry event, and a poll waiting for that event would wait on the
  * registry too. A registry call made inside the transaction would hold the read until it
- * committed. The registry is slow here so there is time to look, and the read is issued
- * while it is still being told.
+ * committed. The registry is held here, so there is as long as it takes to look, and the
+ * calls are made while it is still being told. Held and not slowed, for the reason given
+ * on the delivery test below.
  */
 it("shows an expiry's event to every call before it waits on the registry", async () => {
   const store = new DurableObjectStore(env as never);
   const id = "qs_midway";
   await store.createSession(twoCodes(id));
   await lapse(id);
-  await flaky({ down: false, delayMs: 300 });
-  let wokenAt = 0;
-  const poll = store.waitForEvents(id, 0, 5_000).then((events) => {
-    wokenAt = Date.now();
-    return events;
-  });
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  const registryHold = newHold();
+  await flaky({ down: false, delayMs: 0, hold: registryHold });
+  const poll = track(store.waitForEvents(id, 0, 5_000));
+  // Long enough for the poll to register before the expiry wakes it.
+  await sleep(50);
 
-  const started = Date.now();
-  let expiredAt = 0;
-  const expiring = store.getSession(id).then(() => { expiredAt = Date.now(); });
-  // Past the commit, inside the drain.
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const midway = await store.getSession(id);
+  const expiring = track(store.getSession(id));
+  // Past the commit, inside the drain: the registry has been told to drop a code and has
+  // not answered.
+  await until(() => registryHold.held, "the drain to reach the registry");
+  const midway = await answeredWhileHeld(track(store.getSession(id)), "a read of the room");
   // getSession no longer carries events (#25): it returns the session record
-  // and members only, so a caller that wants history asks for it. Read before
-  // midwayAt so the timing assertion below still measures the same window.
-  const midwayEvents = await store.eventsAfter(id, 0);
-  const midwayAt = Date.now();
-  const woken = await poll;
+  // and members only, so a caller that wants history asks for it.
+  const midwayEvents = await answeredWhileHeld(
+    track(store.eventsAfter(id, 0)), "a read of its events");
+  const woken = await answeredWhileHeld(poll, "the poll waiting for the expiry");
+  // The drain is still waiting on the registry, or being answered meanwhile says nothing.
+  // One that did not wait would have answered by now, so this only gives it the chance to show.
+  expect(await settlesWithin(expiring, 100), "the expiry finished before the registry answered")
+    .toBe(false);
+  registryHold.release();
   await expiring;
 
   expect(woken.map((e) => e.type)).toEqual(["session_expired"]);
   expect(midway?.closed).toBe(true);
   expect(midwayEvents.map((e) => e.type)).toEqual(["session_expired"]);
-  // Both were answered while the registry was still being told. It takes two removals at
-  // 300 ms each, so the drain finishes long after.
-  expect(midwayAt - started).toBeLessThan(350);
-  expect(wokenAt - started).toBeLessThan(350);
-  expect(expiredAt - started).toBeGreaterThanOrEqual(550);
 });
 
 /**
@@ -570,12 +637,22 @@ it.each(ATOMIC)(
 /**
  * Delivery waits for the registry, and nothing may hold the room while it does. Every
  * other call to this object waits for a transaction closure to commit, so a registry
- * call made inside one would hold every read of the room for as long as the registry
- * takes to answer. By then the write has committed, and a read is served while the
- * registry is still being told. The write answers only once the registry is current: a
- * delivery that was started and not waited for would return while the entry was still on
- * its way, and usually the read that follows would win the race anyway, which is why the
- * time the write takes is checked too.
+ * call made inside one would hold every read of the room until the registry answered.
+ * By then the write has committed, and a read is served while the registry is still being
+ * told. The write answers only once the registry is current: a delivery that was started
+ * and not waited for would return while the entry was still on its way, and usually the
+ * read that follows would win the race anyway, which is why the write is checked too.
+ *
+ * The registry is HELD for this and not slowed. Its write waits until the test lets it
+ * through, which the test does once the read has been answered, so "the registry is still
+ * being told" is arranged by the test and does not depend on a clock. It was a 500 ms
+ * delay with the read required to come back inside 350 ms, and that measured the runner
+ * as much as the room: a shared CI runner took 362 ms to sleep 100 ms and make one call,
+ * for a read the room had served all along. Holding the read to the write's own time
+ * instead would have helped little where one registry write is made, because that
+ * delivery ends 500 ms in and a read at 362 ms is 140 ms from the end of it. Held, a read
+ * fails only by going unanswered for ANSWER_DEADLINE_MS, and then the room is the only
+ * thing that can have been in its way.
  */
 it.each([CREATE, ...SITES])(
   "$name serves other calls while it waits for the registry, and answers once it has",
@@ -583,21 +660,22 @@ it.each([CREATE, ...SITES])(
     const store = new DurableObjectStore(env as never);
     const id = "qs_busy";
     await site.given(store, id);
-    await flaky({ down: false, delayMs: 500 });
+    const registryHold = newHold();
+    await flaky({ down: false, delayMs: 0, hold: registryHold });
 
-    const started = Date.now();
-    const write = site.act(store, id);
-    // Past the commit, inside the delivery.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    const read = await store.getSession(id);
-    const readTook = Date.now() - started;
+    const write = track(site.act(store, id));
+    // Past the commit, inside the delivery: the registry has been told and has not answered.
+    await until(() => registryHold.held, "the delivery to reach the registry");
+    const read = await answeredWhileHeld(track(store.getSession(id)), "a read of the room");
+    // The delivery is still waiting on the registry, or being served meanwhile says nothing.
+    // A write that did not wait would have answered by now, so this only gives it the
+    // chance to show.
+    expect(await settlesWithin(write, 100), "the write answered before the registry did")
+      .toBe(false);
+    registryHold.release();
     await write;
-    const writeTook = Date.now() - started;
 
     expect(read).toBeDefined();
-    expect(readTook).toBeLessThan(350);
-    // The delivery did take that long, or being served early says nothing.
-    expect(writeTook).toBeGreaterThanOrEqual(450);
     expect(await indexed(A, B, NEW)).toEqual(site.after(id));
   }
 );

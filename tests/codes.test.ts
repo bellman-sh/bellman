@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   generateConnectToken, generateSessionId, normalizeJoinCode, renderJoinCode, MAX_JOIN_CODE_LENGTH,
+  joinUrl, JOIN_URL_BASE,
 } from "../src/codes.js";
 import { MAX_ROLE_KEY_LENGTH } from "../src/manifest.js";
 
@@ -78,5 +79,22 @@ describe("identifiers", () => {
   it("mints unique identifiers", () => {
     const ids = new Set(Array.from({ length: 1_000 }, generateSessionId));
     expect(ids.size).toBe(1_000);
+  });
+});
+
+describe("join links", () => {
+  /** The page is rendered from the code alone, so the code must arrive in the URL untouched. */
+  it("prefixes the base and changes nothing else", () => {
+    const code = renderJoinCode("reviewer");
+    expect(joinUrl(code)).toBe(`https://bellman.sh/j/${code}`);
+    expect(JOIN_URL_BASE).toBe("https://bellman.sh/j/");
+  });
+
+  it("puts the whole code in the last path segment, hyphens and all", () => {
+    const code = renderJoinCode("peer_a"); // renders as ...-PEER-A
+    const url = new URL(joinUrl(code));
+    expect(url.hostname).toBe("bellman.sh");
+    expect(url.pathname).toBe(`/j/${code}`);
+    expect(url.search).toBe("");
   });
 });

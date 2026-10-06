@@ -161,15 +161,23 @@ const lapse = (id: string) =>
 /**
  * Turn the inline delivery off, on the instance the session's calls are served by. With
  * it off a write commits and queues what it owes and does not try to deliver it, which
- * is what the isolate going away just before that attempt would amount to. TypeScript's
- * `private` is a compile-time check, so the test can reach the field; nothing in the
- * production class exists for the purpose, and nothing public could, because every
- * method on a Durable Object is reachable over RPC.
+ * is what the isolate going away just before that attempt would amount to. The re-arm
+ * some writes make after the delivery goes with it, because an isolate that was gone
+ * would not have made it either. A seating re-arms for the marker its own commit left,
+ * which is dated at that commit, so with only the delivery off its alarm was due at once
+ * (probed: -1 to 0 ms from now, against 5000 ms after consumeJoinCode or clearJoinCodes),
+ * and the real alarm drained the queue before the test had looked at it or run the
+ * alarm itself.
+ * TypeScript's `private` is a compile-time check, so the test can reach the field;
+ * nothing in the production class exists for the purpose, and nothing public could,
+ * because every method on a Durable Object is reachable over RPC.
  */
-type Driver = { deliverNow?: () => Promise<void> };
+type Driver = { deliverNow?: () => Promise<void>; reArm?: () => Promise<void> };
 const deliveryOff = (id: string) =>
   runInDurableObject(sessionStub(id), (instance: SessionDO) => {
-    (instance as unknown as { driver: Driver }).driver.deliverNow = async () => {};
+    const driver = (instance as unknown as { driver: Driver }).driver;
+    driver.deliverNow = async () => {};
+    driver.reArm = async () => {};
   });
 
 /**

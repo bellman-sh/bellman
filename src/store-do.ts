@@ -1413,9 +1413,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // why the put is guarded on the row being empty. `original` and not `e`,
         // because `markRemoved` records the cut at the cursor the key names and
         // `e` has none.
-        const owed = await extraRows(txn, s, original, extras);
+        //
+        // All but the surface write, so `extraRows` is handed the extras without
+        // it. The row committed with the event in one transaction, so there is
+        // nothing to repair, and whatever has happened to the key since carries a
+        // higher cursor. A removal leaves no tombstone, so re-applying the
+        // original write would read no row to compare against and could only put
+        // back what was removed. It also means a replay deletes nothing.
+        const owed = await extraRows(txn, s, original, { ...extras, surface: undefined });
         if (Object.keys(owed.puts).length > 0) await txn.put<unknown>(owed.puts);
-        for (const key of owed.deletes) await txn.delete(key);
         return { outcome: "replayed", event: original };
       }
 

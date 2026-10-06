@@ -445,8 +445,13 @@ export interface AppendExtras {
    * or equal one is a no-op, `item: null` removes. The row and `surfaceCursor`
    * on the record commit with the event or not at all — a poll reads the
    * cursor off the record and a reader reads the row, and the two must not be
-   * allowed to disagree. Re-applied on an idempotent replay with the ORIGINAL
-   * event, which the rule makes a no-op or a repair, never a regression.
+   * allowed to disagree.
+   *
+   * NOT applied on an idempotent replay, unlike the extras above. The row went
+   * in with the event in one transaction, so a replay has nothing to repair, and
+   * whatever has happened to the key since carries a higher cursor. A removal
+   * leaves no tombstone, so re-applying the original write would find no row to
+   * compare against and could only put back what was removed.
    */
   surface?: SurfaceWrite;
 }
@@ -1278,8 +1283,12 @@ export class MemoryStore implements BellmanStore {
       const rows = this.surfaces.get(s.id) ?? new Map<string, SurfaceRow>();
       const verdict = applySurfaceWrite(rows.get(extras.surface.key), event, extras.surface);
       if (verdict !== null) {
+        // Copied in, as the event is in `appendNow`: the item holds objects of its
+        // own (`placement`, `ends`), and storing the caller's would let a caller
+        // that kept them rewrite the row. The Durable Object store gets the copy
+        // from the RPC boundary.
         if (verdict === "remove") rows.delete(extras.surface.key);
-        else rows.set(extras.surface.key, verdict);
+        else rows.set(extras.surface.key, detach(verdict));
         this.surfaces.set(s.id, rows);
         // Monotonic, as the action-request stamp is: a change moves it forward
         // and nothing moves it back.
@@ -1323,7 +1332,13 @@ export class MemoryStore implements BellmanStore {
       // not `e`, so `markRemoved` sees the cursor the key names: a replay
       // re-asserts the same cut, and `markRemoved` answers `null` once it is
       // recorded.
-      this.applyExtras(s, original, extras);
+      //
+      // All but the surface write. The row went in with the event in one
+      // transaction, so there is nothing to repair, and whatever has happened to
+      // the key since carries a higher cursor. A removal leaves no tombstone, so
+      // re-applying the original write would find no row to compare against and
+      // could only put back what was removed.
+      this.applyExtras(s, original, { ...extras, surface: undefined });
       return { outcome: "replayed", event: detach(original) };
     }
 

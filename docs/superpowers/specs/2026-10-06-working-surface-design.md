@@ -187,9 +187,14 @@ how long it is kept — see D11.
 
 A write to a key replaces the row if the event's cursor is higher than the
 row's, and is a no-op otherwise. On a fresh append it is always higher. On an
-idempotent replay, `appendEventOnce` re-applies the extra with the original
-event, and the rule makes that a repair or a no-op and never a regression —
-the same shape `creditReport` and `markRemoved` have.
+idempotent replay, `appendEventOnce` applies no surface write at all. The row
+committed with the event in one transaction, so a replay has nothing to repair,
+and anything that has happened to the key since carries a higher cursor. A
+removal leaves no tombstone, so re-applying the original write would find no row
+to compare against and could only put back what was removed.
+`creditReport` and `markRemoved` are different, and a replay does re-assert
+them: a stamp or a cut only moves forward, so re-asserting one is a repair or a
+no-op. A row can be deleted, and then nothing is left to compare.
 
 Two writers in one room are the manifest's choice (D8), and when they race the
 later append wins. **This is the one corner cut.** The scribe spec's D6 refused a

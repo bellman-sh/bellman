@@ -1900,9 +1900,9 @@ export function describeStoreContract(
       });
 
       /**
-       * A replay re-applies the extra with the original event (as creditReport's
-       * replay does), and the monotonic rule makes that a no-op against a newer
-       * row: one event per key, and the newest write stands.
+       * A replay applies no surface write (the row went in with the event), so it
+       * neither duplicates the event nor moves the row: one event per key, and the
+       * newest write stands.
        */
       it("replays through appendEventOnce without duplicating or regressing", async () => {
         const s = session({});
@@ -1928,6 +1928,33 @@ export function describeStoreContract(
         expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
       });
 
+      /**
+       * A removal leaves no tombstone, so a replay that applied the original write
+       * would see no row, accept the older cursor, and put back what was removed.
+       * The row went in with the event, so a replay has nothing to repair and
+       * applies no surface write at all.
+       */
+      it("a replay after a removal does not resurrect the row", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        if (first.outcome !== "appended") throw new Error(`first write said ${first.outcome}`);
+
+        const gone = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+
+        const retry = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+
+        expect(retry.outcome).toBe("replayed");
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id), "the replay moved nothing").toBe(gone.cursor);
+        expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
+      });
+
       it("hands back detached rows", async () => {
         const s = session({});
         await store.createSession(s);
@@ -1937,6 +1964,29 @@ export function describeStoreContract(
         row.body = "scribbled on";
 
         expect((await store.surfaceOf(s.id))[0].body).toBe("1. read\n2. write");
+      });
+
+      /**
+       * The write side of "hands back detached rows". The item an append is given
+       * holds objects of its own (`placement`, `ends`), and a caller that keeps a
+       * reference to them must not be able to reach into the stored row. The
+       * Durable Object store gets that from the RPC boundary; MemoryStore has to
+       * copy on the way in, as it does for the event.
+       */
+      it("stores a copy of what it is handed, not the caller's own objects", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const placement = { x: 1, y: 2, w: 3, h: 4 };
+        const ends = { from: "plan", to: "risks" };
+        const item: SurfaceItem = { ...plan(), key: "edge", kind: "connector", ends, placement };
+        await store.appendEvent(s.id, wrote(item), { surface: { key: "edge", item } });
+
+        placement.x = 999;
+        ends.to = "scribbled on";
+
+        const [row] = await store.surfaceOf(s.id);
+        expect(row.placement).toEqual({ x: 1, y: 2, w: 3, h: 4 });
+        expect(row.ends).toEqual({ from: "plan", to: "risks" });
       });
 
       it("writes neither event nor row into a frozen room", async () => {

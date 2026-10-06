@@ -976,7 +976,7 @@ Expected: PASS, including the nine new "the surface rows" cases against `Durable
 
 - [ ] **Step 9: Break the transaction to see the control**
 
-In `extraRows`, temporarily `return { puts, deletes: [] }` (drop the delete). Run `npm run test:worker -- -t "removes the row"`: the removal case goes red against the Durable Object (the row survives). Restore.
+In `extraRows`, temporarily `return { puts, deletes: [] }` (drop the delete). Run `npm --prefix worker-tests run test -- -t "removes the row"`: the removal case goes red against the Durable Object (the row survives). Restore.
 
 - [ ] **Step 10: Commit**
 

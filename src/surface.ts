@@ -35,11 +35,13 @@ export type SurfaceWrite = { key: string; item: SurfaceItem | null };
  * The monotonic rule (spec D6), shared by both stores.
  *
  * A write replaces the row if the event's cursor is higher than the row's, and
- * is a no-op otherwise. On a fresh append the cursor is always higher. On an
- * idempotent replay `appendEventOnce` re-applies the extra with the ORIGINAL
- * event, whose cursor is at or behind whatever the row holds, so a replay is a
- * repair or a no-op and never a regression — the shape `creditReport` and
- * `markRemoved` have.
+ * is a no-op otherwise. A fresh append's cursor is always higher, so on that
+ * path the guard never refuses; it keeps the rule safe for an event that is not
+ * the newest. An idempotent replay never reaches it: `appendEventOnce` applies
+ * no surface write on a replay. The row went in with the event in one
+ * transaction, so there is nothing to repair, and a removal leaves no
+ * tombstone, so this rule handed the original event for a removed key would see
+ * no row to compare against and put the item back.
  *
  * Returns the row to store, "remove" to delete the row, or null for no change.
  * Removing a key that holds nothing is null: the cursor records changes, not

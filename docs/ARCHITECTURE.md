@@ -25,7 +25,7 @@ member limit, join codes can be reissued to add people later, and a long-lived
 hub room ([#18](../../../issues/18)) is meant to accumulate members over weeks.
 Where this document says *peer* it means any other member, not a counterpart.
 
-That is the whole product. The exclusions are worth stating precisely, because
+That is the whole product. The exclusions need stating precisely, because
 they are the design:
 
 | Bellman does | Bellman does not |

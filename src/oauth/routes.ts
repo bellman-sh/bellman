@@ -1,4 +1,4 @@
-import { entitlementsFor } from "../auth.js";
+import { ENTITLEMENTS, entitlementsFor } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
@@ -1195,8 +1195,8 @@ export async function handleOAuth(
         // "never lapses" — the opposite of what the caller asked for.
         return oauthError("invalid_request", "expiresAt must be a number of milliseconds, or null");
       }
-      if (!body.plan || !["free", "pro", "team"].includes(body.plan)) {
-        return oauthError("invalid_request", "plan must be free, pro or team");
+      if (typeof body.plan !== "string" || !Object.hasOwn(ENTITLEMENTS, body.plan)) {
+        return oauthError("invalid_request", `plan must be one of ${Object.keys(ENTITLEMENTS).join(", ")}`);
       }
       if (!body.role || !["member", "admin"].includes(body.role)) {
         return oauthError("invalid_request", "role must be member or admin");

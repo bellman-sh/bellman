@@ -20,6 +20,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ENTITLEMENTS } from "../src/auth.js";
 import type { Identity, Plan, Role } from "../src/types.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -35,7 +36,7 @@ export interface IdentitySpec extends Identity {
   claude_code?: boolean;
 }
 
-const PLANS: Plan[] = ["free", "pro", "team"];
+const PLANS = Object.keys(ENTITLEMENTS) as Plan[];
 const ROLES: Role[] = ["member", "admin"];
 
 export function newKey(): string {

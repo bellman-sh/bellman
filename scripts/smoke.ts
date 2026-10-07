@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   console.log(`   join code: ${joinCode}`);
 
   const gated = await call(peer, "bellman_start", { manifest: { room: "smoke", preset: "swarm" }, brief: peerBrief });
-  assert(gated.isError && gated.text.includes("pro or team"), "free plan blocked from swarm (create-side gating)");
+  assert(gated.isError && gated.text.includes("pro, max or team"), "free plan blocked from swarm (create-side gating)");
 
   console.log("\n— join flow: preview → confirm —");
   const blocked = await call(outsider, "bellman_connect", { join_code: joinCode });

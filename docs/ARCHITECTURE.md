@@ -668,7 +668,7 @@ store deletes the key, whatever the put said. The route maps that one class to
 stores, over R2 in workerd.
 
 The quota is two numbers on the session record: `blobBytesCeiling`, stamped
-at creation from the creator's plan (`blobBytesPerRoom`: 50 MB, 500 MB, 5 GB)
+at creation from the creator's plan (`blobBytesPerRoom`: 50 MB on free, 500 MB on pro, 5 GB on max and team)
 as `maxMembers` is, so a room never consults a plan again and every member
 shares the room's ceiling; and `blobBytes`, the sum charged so far, raised in
 one `SessionDO` transaction by `chargeBlobBytes`. That call takes no ceiling:
@@ -1061,7 +1061,7 @@ It is used three times:
   distinction it turned on.
 
   An org-less grant queues **nothing** (`hasOrg`, `src/grant-audit.ts`), and only
-  `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro` or `free`
+  `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro`, `max` or `free`
   purchase reconcile owes no audit row at all — and still calls `deliverNow()`,
   draining whatever other orgs left behind. That is the hold time #123 asked
   about, measured below.

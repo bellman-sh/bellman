@@ -1146,15 +1146,18 @@ export function createBridge(opts: BridgeOptions) {
    * is read on each call. The post carries the bearer the bridge holds and sets
    * Content-Length itself — the route requires it, a real fetch keeps a
    * caller's value when it matches the body, and a fake server's Request
-   * computes none. The placement is the upstream bellman_send, observed like
-   * any other so the membership it reveals is watched. A placement the server
-   * refuses, for whatever reason, is reported with the blob's id, bytes and
-   * type: the bytes are stored and charged, and the caller places them again
-   * (as a file, if an image was the trouble) rather than uploading twice.
+   * computes none. A 401 is answered once, by asking the held connection to
+   * refresh the sign-in and posting again if the bearer changed. The placement
+   * is the upstream bellman_send, observed like any other so the membership it
+   * reveals is watched. A placement the server refuses, for whatever reason, is
+   * reported with the blob's id, bytes and type: the bytes are stored and
+   * charged, and the caller places them again (as a file, if an image was the
+   * trouble) rather than uploading twice.
    */
   async function uploadAndPlace(args: Record<string, unknown>): Promise<CallToolResult> {
     const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
-    if (!opts.upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
+    const upload = opts.upload;
+    if (!upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
     const sessionId = String(args.session_id ?? "");
     const memberId = String(args.member_id ?? "");
     const path = String(args.path ?? "");
@@ -1170,20 +1173,38 @@ export function createBridge(opts: BridgeOptions) {
     const claimed = typeFromExtension(path);
     const kind = args.kind === "file" || args.kind === "image" ? args.kind : isImageType(claimed) ? "image" : "file";
 
-    const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/blobs`, opts.upload.serverUrl);
+    const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/blobs`, upload.serverUrl);
     target.searchParams.set("member_id", memberId);
     target.searchParams.set("name", basename(path));
-    let response: Response;
-    try {
-      response = await (opts.upload.fetchImpl ?? fetch)(target, {
+    const post = (bearer: string): Promise<Response> =>
+      (upload.fetchImpl ?? fetch)(target, {
         method: "POST",
         headers: {
-          authorization: `Bearer ${await opts.upload.bearer()}`,
+          authorization: `Bearer ${bearer}`,
           "content-type": claimed,
           "content-length": String(file.bytes.byteLength),
         },
         body: file.bytes,
       });
+    let response: Response;
+    try {
+      const bearer = await upload.bearer();
+      response = await post(bearer);
+      if (response.status === 401) {
+        // The bearer is read from the credential file, and a signed-in access token lasts ten minutes, with nothing
+        // refreshing it between calls. The MCP transport does, on a 401 of its own, and writes the new token to
+        // that file (src/signin.ts). So it is given one: a tools/list through the connection the bridge holds,
+        // whose failure, or the sign-in it could not complete, changes nothing here. The post is repeated once,
+        // and only if the bearer read now is not the one just refused: a BELLMAN_KEY cannot be refreshed, and a
+        // second post of up to 25 MB that must fail the same way is not a retry. A 401 that stays is reported as it
+        // was.
+        await remote().then((connection) => connection.listTools()).catch(() => undefined);
+        const fresh = await upload.bearer();
+        if (fresh !== bearer) {
+          await response.body?.cancel().catch(() => undefined);
+          response = await post(fresh);
+        }
+      }
     } catch (e) {
       return fail(`upload failed: ${(e as Error).message}`);
     }

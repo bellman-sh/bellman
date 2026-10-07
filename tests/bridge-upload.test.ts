@@ -252,6 +252,54 @@ describe("bellman_upload", () => {
     expect(sends).toBe(0);
   });
 
+  // A signed-in bearer is the cached access token, which lasts ten minutes. The bridge cannot refresh it itself;
+  // the MCP transport does, on a 401 of its own, and writes the new token where `bearer` reads it. So a 401 on
+  // the post is answered by asking the held connection for something, and posting again if the bearer changed.
+  // Here the connection's tools/list is what swaps the token: all the bridge can see of a refresh is the file.
+  const uploadingThrough = async (bearer: () => string, onList: () => void) => {
+    const through = createBridge({
+      delivery: "channel",
+      remote: async () => {
+        const upstream = await remoteFor();
+        return { ...upstream, listTools: () => (onList(), upstream.listTools()) };
+      },
+      upload: { serverUrl: `${ISSUER}/mcp`, bearer, fetchImpl: recording },
+    });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "refreshing", version: "0.0.1" });
+    await Promise.all([through.server.connect(serverSide), c.connect(clientSide)]);
+    try {
+      const res = (await c.callTool({
+        name: "bellman_upload",
+        arguments: { session_id: ROOM, member_id: "m_creator", path: file("n.md", "x"), key: "n" },
+      })) as CallToolResult;
+      return { isError: Boolean(res.isError), text: (res.content as { text: string }[]).map((b) => b.text).join("\n") };
+    } finally {
+      await through.close();
+      await c.close();
+    }
+  };
+
+  it("answers a 401 by letting the connection refresh the sign-in, then posts once more", async () => {
+    let token = "qk_expired";
+    let listed = 0;
+    const out = await uploadingThrough(() => token, () => {
+      listed++;
+      token = DEV_KEY.jesse;
+    });
+    expect(out.isError, out.text).toBe(false);
+    expect({ fetches, listed, sends }).toEqual({ fetches: 2, listed: 1, sends: 1 });
+    expect((await fake.store.surfaceOf(ROOM)).map((row) => row.key)).toEqual(["n"]);
+  });
+
+  it("reports a 401 as it was, without a second post, when the bearer is the one that was refused", async () => {
+    const out = await uploadingThrough(() => "qk_not_a_key", () => {});
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("upload refused (401)");
+    expect({ fetches, sends }).toEqual({ fetches: 1, sends: 0 });
+    expect(await fake.store.surfaceOf(ROOM)).toEqual([]);
+  });
+
   it("fails plainly on a bridge with no upload target", async () => {
     const bare = createBridge({ delivery: "channel", remote: remoteFor });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();

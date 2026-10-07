@@ -20,7 +20,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
 | `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are enforced by the server). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
-| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` |
+| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
@@ -58,6 +58,30 @@ began with, which is milliseconds old.
 What it does not say is whether anyone is there. `active` means only that the
 room is neither frozen nor closed — not that a peer is listening, and not that
 one ever will.
+
+## The working surface
+
+A room carries a surface as well as a log: a set of named items — a plan, a
+decision list, a link, a diagram, and the connectors between them — that
+members read and one seat keeps current. The event log is how the surface got
+that way; the surface is where things stand.
+
+- Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
+  body?, ends?, placement? }`, or remove with `{ key, remove: true }`. Kinds:
+  `text`, `link`, `diagram`, `connector`. Items replace by key; every version
+  stays in the log at its cursor.
+- The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
+  to the creator's seat alone; a manifest may give it to any seat. Reading is
+  never gated.
+- A joiner's preview lists what the surface holds — keys, kinds and sizes — and
+  `bellman_confirm` hands over the items. Every poll carries `surface_cursor`
+  once the surface has changed, each change arrives as a `surface` event, and
+  `bellman_sync` with `surface: true` returns everything.
+- Every item arrives in an untrusted envelope with its writer as origin. The
+  preview carries no prose at all.
+
+Documents, images, a canvas to see it on, and sandboxed HTML artifacts are the
+next three pieces; the designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 
@@ -249,8 +273,8 @@ default_role: helper
 creator_role: lead
 ```
 
-Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`.
-Every member can always sync and leave.
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `write_surface`.
+Every member can always sync and leave, and read the working surface.
 
 Verbs are enforced by the server. A call a seat's role does not permit is
 refused with an error naming the verb it lacks, and nothing is delivered or

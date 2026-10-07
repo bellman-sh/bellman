@@ -27,7 +27,7 @@ Args:
 
 Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, surface_cursor?, surface?, removed?, outstanding? }
 surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for all of them.
-A member a creator removed sees only items changed at or before its cut, and surface_cursor is the last of those.
+A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
 outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
 removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.

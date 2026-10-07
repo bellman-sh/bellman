@@ -233,7 +233,16 @@ field, no threshold the server has to hold.
 A removed member (#113) reads its history up to its cut and nothing after, so a
 `surface: true` read for one returns only items whose current cursor is at or
 before the cut. An item rewritten after the cut is omitted; its earlier version
-is still in the member's event history. The sync description says so.
+is still in the member's event history. The cursors it is told are derived from
+the items it is shown, never read off the record: `surface.cursor` and
+`surface_cursor` are the largest cursor among the visible rows, and 0 when there
+are none. The record's number capped at the cut would claim a change at the cut
+when nothing had changed by then, and would tell a member removed from a
+still-empty room that the surface moved after it was out. The derived number can
+understate, because a removal before the cut leaves no row, and never
+overstates. So `surface_cursor` appears on a removed member's poll only when it
+asked for `surface: true`: a poll that asked for no surface reads no rows and has
+none to send. The sync description says so.
 
 On a poll that waits, the rows are read after the wait, as `session_status` is
 (#74), so the surface a poll returns is never older than the events beside it.

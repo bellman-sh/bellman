@@ -12,6 +12,7 @@ import { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 
@@ -21,7 +22,7 @@ let base: string;
 
 beforeAll(async () => {
   store = new MemoryStore();
-  const app = createApp(store);
+  const app = createApp(store, new MemoryBlobStore());
   http = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });

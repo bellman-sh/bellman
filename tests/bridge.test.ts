@@ -19,6 +19,7 @@ import {
 } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { readServer, writeServer } from "../src/credentials.js";
 import { connectSignedIn } from "../src/signin.js";
@@ -54,7 +55,7 @@ interface Session {
 async function remoteFor(store: BellmanStore, key: string): Promise<Remote> {
   const identity = resolveIdentity(`Bearer ${key}`);
   if (!identity) throw new Error(`unknown dev key ${key}`);
-  const server = buildServer(identity, store);
+  const server = buildServer(identity, store, new MemoryBlobStore());
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "bridge-remote", version: "0.0.1" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);

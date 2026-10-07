@@ -26,6 +26,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/bridge.js";
 import { buildServer } from "../src/server.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
@@ -66,7 +67,7 @@ async function bundleTools(): Promise<string[]> {
     delivery: "hook",
     inboxDir,
     remote: async (): Promise<Remote> => {
-      const server = buildServer(identity, store);
+      const server = buildServer(identity, store, new MemoryBlobStore());
       const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "bridge-remote", version: "0.0.1" });
       await Promise.all([server.connect(serverSide), client.connect(clientSide)]);

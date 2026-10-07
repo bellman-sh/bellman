@@ -3,6 +3,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { resolveIdentity } from "./auth.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
+import type { BlobStore } from "./blobs.js";
 
 /**
  * Builds the HTTP surface around an injected store.
@@ -11,7 +12,7 @@ import type { BellmanStore } from "./store.js";
  * an ephemeral port with their own store, and so a Workers/DO port can reuse
  * the routing without Node's listener.
  */
-export function createApp(store: BellmanStore): Express {
+export function createApp(store: BellmanStore, blobs: BlobStore): Express {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
 
@@ -35,7 +36,7 @@ export function createApp(store: BellmanStore): Express {
       return;
     }
     try {
-      const server = buildServer(identity, store);
+      const server = buildServer(identity, store, blobs);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

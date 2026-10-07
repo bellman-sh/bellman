@@ -8,9 +8,10 @@ import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
 import { FROZEN, activeMembers, audit, findMember, touchMember, writeSurface } from "../rooms.js";
 import type { AppendExtras, BellmanStore, EventWrite } from "../store.js";
+import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 
-export function registerSend(server: McpServer, identity: Identity, s: BellmanStore): void {
+export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
   // --------------------------------------------------------------- bellman_send
   server.registerTool(
     "bellman_send",
@@ -28,8 +29,8 @@ Args:
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
-      "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement? } or { key, remove: true }.
-                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
+      "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, blob? } or { key, remove: true }.
+                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
                          Needs the write_surface verb. Items replace by key; at most 64 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Both bounds matter: a deeply nested payload can be small and still be undeliverable, so flatten rather than nest.
   - ref_id: required for action_response
@@ -56,7 +57,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
       // Handled before the common guards below, which writeSurface runs itself.
       if (type === "surface") {
-        const out = await writeSurface(s, identity, session_id, member_id, payload, idempotency_key);
+        const out = await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key);
         if (!out.ok) return fail(out.reason);
         return ok({
           room_members: out.value.roomMembers,

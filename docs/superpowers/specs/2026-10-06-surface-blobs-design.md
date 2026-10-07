@@ -44,7 +44,9 @@ The key prefix is the ownership. A download route for room A can only `get`
 under `rooms/A/`, so a blob id from another room does not resolve, and nothing
 has to check a table to know whose bytes these are. The object's own metadata
 is the metadata: `httpMetadata.contentType` as validated at upload, and
-`customMetadata` carrying `name`, `by` (the uploading member) and `at`. No row
+`customMetadata` carrying `name` (percent-encoded, since custom metadata travels
+as header values and the stored alphabet is ASCII), `by` (the uploading member)
+and `at`. No row
 in the room object describes a blob, because a row and an object are two
 systems with no transaction between them, and the one that holds the bytes is
 the one that cannot lie about them.

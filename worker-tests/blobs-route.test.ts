@@ -111,6 +111,61 @@ describe("the Worker serves /rooms/:id/blobs", () => {
     expect((await bucket.list({ prefix: `rooms/${room}/` })).objects).toEqual([]);
     expect(blobBytesUsed((await store.getSession(room))!)).toBe(0);
   });
+
+  // The whole-branch review's third finding: a non-ASCII name had only ever been sent through MemoryBlobStore.
+  // R2 keeps a name in customMetadata, which travels as an HTTP header value, so the store encodes it and the
+  // bucket holds ASCII. The raw read below is the check that can go red: with the encoding dropped the metadata
+  // is the name itself, and the simulator would happily hand that back, so only this line sees the difference.
+  it("keeps a non-ASCII name percent-encoded in the bucket, and serves it back under the same name", async () => {
+    const room = "qs_blobs_unicode";
+    const store = new DurableObjectStore(workerEnv as never);
+    await store.createSession(session({ id: room, members: [member()] }));
+
+    const body = text("# notes\n");
+    const name = "résumé (1).md";
+    const uploaded = await call(`/rooms/${room}/blobs?member_id=m_creator&name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEY}`, "content-type": "text/markdown", "content-length": String(body.byteLength) },
+      body: stream(body),
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id, name: answered } = (await uploaded.json()) as { blob_id: string; name: string };
+    expect(answered).toBe(name);
+
+    const bucket = (env as unknown as { BLOBS: R2Bucket }).BLOBS;
+    const object = await bucket.head(`rooms/${room}/${blob_id}`);
+    expect(object?.customMetadata?.name).toBe("r%C3%A9sum%C3%A9%20(1).md");
+
+    const served = await call(`/rooms/${room}/blobs/${blob_id}`, { headers: { authorization: `Bearer ${KEY}` } });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20%281%29.md");
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(body);
+  });
+
+  // The route's own comment says a zero-byte file is a file. Over memory it always was; over R2 the body goes
+  // through a FixedLengthStream(0), which this is the first request to build.
+  it("takes a zero-byte upload over the real bucket: 201, nothing charged, and an empty download", async () => {
+    const room = "qs_blobs_empty";
+    const store = new DurableObjectStore(workerEnv as never);
+    await store.createSession(session({ id: room, members: [member()] }));
+
+    const uploaded = await call(`/rooms/${room}/blobs?member_id=m_creator&name=empty.txt`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEY}`, "content-type": "text/plain", "content-length": "0" },
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id, bytes } = (await uploaded.json()) as { blob_id: string; bytes: number };
+    expect(bytes).toBe(0);
+    expect(blobBytesUsed((await store.getSession(room))!)).toBe(0);
+
+    const bucket = (env as unknown as { BLOBS: R2Bucket }).BLOBS;
+    expect((await bucket.head(`rooms/${room}/${blob_id}`))?.size).toBe(0);
+
+    const served = await call(`/rooms/${room}/blobs/${blob_id}`, { headers: { authorization: `Bearer ${KEY}` } });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-length")).toBe("0");
+    expect((await served.arrayBuffer()).byteLength).toBe(0);
+  });
 });
 
 const PANEL = "https://dash.example.test";

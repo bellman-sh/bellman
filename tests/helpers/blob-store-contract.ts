@@ -100,6 +100,23 @@ export function describeBlobStoreContract(name: string, makeStore: () => BlobSto
       await refusal("55".repeat(16), stream(text("toolong"), 3), 3);
     });
 
+    // A name is the client's word and is any text, and R2 keeps it in metadata that travels as an HTTP header
+    // value. Over memory this is the identity; over R2 it is the store's own encoding and decoding agreeing, which
+    // is the one thing the simulator would let a missing encoding get away with. The percent sign is the case an
+    // encoding that did not escape its own escape would turn into a different name on the way back.
+    it("round-trips a name that is not ASCII, or that holds a percent sign, through head and get", async () => {
+      const names = ["résumé (1).md", "报告 最终版.pdf", "100% a%41.txt"];
+      for (const [i, name] of names.entries()) {
+        const id = `7${i}`.repeat(16);
+        await store.put(sid, id, stream(text("x")), meta(1, { name }));
+        expect((await store.head(sid, id))?.name, `head: ${name}`).toBe(name);
+        const got = await store.get(sid, id);
+        if (got === null || "unchanged" in got) throw new Error("expected the object");
+        expect(got.name, `get: ${name}`).toBe(name);
+        await drain(got.body);
+      }
+    });
+
     it("replaces an object put again under the same id", async () => {
       await store.put(sid, "44".repeat(16), stream(text("one")), meta(3));
       await store.put(sid, "44".repeat(16), stream(text("two!")), meta(4, { name: "two.txt" }));

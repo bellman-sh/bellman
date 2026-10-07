@@ -22,8 +22,10 @@ export class R2BlobStore implements BlobStore {
     const key = blobKey(sessionId, id);
     const options: R2PutOptions = {
       httpMetadata: { contentType: meta.type },
-      // Strings only: that is what customMetadata holds.
-      customMetadata: { name: meta.name, by: meta.by, at: String(meta.at) },
+      // Strings only: that is what customMetadata holds, and they travel as HTTP header values. The local
+      // simulator takes any string where the service may not, so what is stored is ASCII: the name is
+      // percent-encoded here and decoded in `metaOf`. `by` and `at` are ASCII already.
+      customMetadata: { name: encodeURIComponent(meta.name), by: meta.by, at: String(meta.at) },
     };
     if (body instanceof ArrayBuffer) {
       // R2 would store a buffer of any length happily; an object is exactly as long as its metadata says.
@@ -98,7 +100,7 @@ function metaOf(object: R2Object): BlobMeta {
   return {
     bytes: object.size,
     type: object.httpMetadata?.contentType ?? OCTET_STREAM,
-    name: object.customMetadata?.name ?? "",
+    name: decodeURIComponent(object.customMetadata?.name ?? ""),
     by: object.customMetadata?.by ?? "",
     at: Number(object.customMetadata?.at ?? 0),
     etag: object.httpEtag,

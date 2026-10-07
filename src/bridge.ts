@@ -10,11 +10,13 @@ import {
   CallToolRequestSchema,
   ErrorCode,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
   type CallToolResult,
   type ListResourcesResult,
+  type ListResourceTemplatesResult,
   type ReadResourceResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
@@ -73,6 +75,8 @@ const START_NOTE =
   ".bellman/room.yaml, read from the directory this session was started in, as the manifest (the same " +
   "object, written as YAML). A manifest you pass wins over the file. With no such file and no manifest " +
   "the call fails, so pass one.";
+/** The code MCP reserves for a resource that does not exist; the SDK's ErrorCode enum has no name for it. */
+const RESOURCE_NOT_FOUND = -32002 as ErrorCode;
 const ROOM_DIR = ".bellman";
 const ROOM_FILE = join(ROOM_DIR, "room.yaml");
 /**
@@ -93,6 +97,7 @@ export interface Remote {
    * a read as not found.
    */
   listResources?(): Promise<ListResourcesResult>;
+  listResourceTemplates?(): Promise<ListResourceTemplatesResult>;
   readResource?(params: { uri: string }): Promise<ReadResourceResult>;
   close(): Promise<void>;
 }
@@ -108,6 +113,7 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
     listTools: () => client.listTools(),
     callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
     listResources: () => client.listResources(),
+    listResourceTemplates: () => client.listResourceTemplates(),
     readResource: (params) => client.readResource(params),
     close: () => client.close(),
   };
@@ -529,11 +535,14 @@ export function createBridge(opts: BridgeOptions) {
     };
     // The optional resource calls ride along only when the connection has them,
     // so a Remote without resources stays one without resources (#28).
-    const { listResources, readResource } = fresh;
+    const { listResources, listResourceTemplates, readResource } = fresh;
     const self: Remote = {
       listTools: () => fresh.listTools().catch(fail),
       callTool: (params) => fresh.callTool(params).catch(fail),
       ...(listResources ? { listResources: () => listResources.call(fresh).catch(fail) } : {}),
+      ...(listResourceTemplates
+        ? { listResourceTemplates: () => listResourceTemplates.call(fresh).catch(fail) }
+        : {}),
       ...(readResource
         ? { readResource: (params: { uri: string }) => readResource.call(fresh, params).catch(fail) }
         : {}),
@@ -571,10 +580,18 @@ export function createBridge(opts: BridgeOptions) {
     return r.listResources ? r.listResources() : { resources: [] };
   });
 
+  // A host that sees `resources` enumerates templates too. Claude Desktop does,
+  // and "Method not found" there is what the bundle would show for a server
+  // that simply has none.
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    const r = await remote();
+    return r.listResourceTemplates ? r.listResourceTemplates() : { resourceTemplates: [] };
+  });
+
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
     const r = await remote();
     if (!r.readResource) {
-      throw new McpError(ErrorCode.InvalidParams, `resource not found: ${request.params.uri}`);
+      throw new McpError(RESOURCE_NOT_FOUND, `resource not found: ${request.params.uri}`);
     }
     return r.readResource({ uri: request.params.uri });
   });

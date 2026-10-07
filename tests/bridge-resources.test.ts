@@ -67,6 +67,10 @@ describe("the bridge and UI resources", () => {
     const page = contents[0] as { mimeType?: string; text?: string };
     expect(page.mimeType).toBe(APP_MIME_TYPE);
     expect(/^<!doctype html>/i.test(page.text!.trimStart())).toBe(true);
+
+    // A host that sees `resources` enumerates templates too; "Method not found"
+    // there is what the Desktop bundle would show for a server that has none.
+    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
   });
 
   it("answers an empty list, and a not-found read, for a remote that serves no resources", async () => {
@@ -77,7 +81,9 @@ describe("the bridge and UI resources", () => {
     };
     const { host } = await bridged(async () => bare);
     expect(await host.listResources()).toEqual({ resources: [] });
-    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toThrow(/not found/i);
+    expect(await host.listResourceTemplates()).toEqual({ resourceTemplates: [] });
+    // -32002 is the code MCP reserves for a resource that does not exist.
+    await expect(host.readResource({ uri: APP_RESOURCE_URI })).rejects.toMatchObject({ code: -32002 });
   });
 
   it("arms no watcher from a bellman_rooms result", async () => {

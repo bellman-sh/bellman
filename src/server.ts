@@ -10,6 +10,7 @@ import { registerSync } from "./tools/sync.js";
 import { registerLeave } from "./tools/leave.js";
 import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
+import { registerAppResource } from "./ui/resource.js";
 
 const SERVER_NAME = "bellman-mcp-server";
 const SERVER_VERSION = "0.1.0";
@@ -28,7 +29,8 @@ const SERVER_VERSION = "0.1.0";
  * The call order below is the order the tools are registered in, and it is the
  * order they were registered in before the split. `extension/manifest.json`
  * declares the same list by hand for the Claude Desktop bundle, and
- * `tests/extension.test.ts` asserts the two against each other.
+ * `tests/extension.test.ts` asserts the two against each other. The resource is
+ * registered last; it is not a tool, and the manifest does not list it.
  */
 export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
@@ -42,6 +44,10 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);
+
+  // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect
+  // and bellman_rooms through it; every other host ignores it (D10).
+  registerAppResource(server);
 
   return server;
 }

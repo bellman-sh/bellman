@@ -8,6 +8,7 @@ import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from ".
 import { activeMembers, audit, seatedMembers } from "../rooms.js";
 import { CONNECT_TOKEN_TTL } from "../store.js";
 import type { BellmanStore } from "../store.js";
+import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConnect(server: McpServer, identity: Identity, s: BellmanStore): void {
   // ------------------------------------------------------------ bellman_connect
@@ -52,6 +53,9 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
         // visible by design and the claim cannot be rescued.
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
+      // Rendered as the join screen by a host that supports MCP Apps; the text
+      // result is unchanged for every other host (#28).
+      _meta: APP_UI_META,
     },
     async ({ join_code }): Promise<ToolResult> => {
       const hit = await s.getSessionByJoinCode(normalizeJoinCode(join_code));

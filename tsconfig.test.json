@@ -13,10 +13,12 @@
   // only tsc skips them. Delete the two test entries when Worker-side tests get their own
   // tsconfig project. #12 has since created worker-tests/ with its own program, so they
   // could likely go now; that migration is not part of this change.
+  // `src/blobs-r2.ts` (#183) is a Workers file for the same reason, and is kept out the same way.
   "exclude": [
     "src/worker.ts",
     "src/store-do.ts",
     "src/oauth/store.ts",
+    "src/blobs-r2.ts",
     "tests/store-do-wiring.test.ts",
     "tests/worker-ws.test.ts"
   ],

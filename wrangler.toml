@@ -36,6 +36,13 @@ class_name = "AuditDO"
 name = "AUTH"
 class_name = "AuthDO"
 
+# The room blob store (#183): one bucket, keyed rooms/<sessionId>/<blobId>, and
+# private — every byte leaves through the download route, under membership.
+# `npx wrangler r2 bucket create bellman-blobs` once, before the first deploy.
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "bellman-blobs"
+
 # SQLite-backed Durable Objects. Required on the Workers Free plan, and the
 # storage API is identical to the KV-backed flavour.
 [[migrations]]

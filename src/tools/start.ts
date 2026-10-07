@@ -64,7 +64,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
 
       const ent = entitlementsFor(identity);
       if (!ent.modes.includes(manifest.mode)) {
-        return fail(`swarm mode requires the pro or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
+        return fail(`swarm mode requires the pro, max or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
       }
       if (org_only && !ent.orgScoping) {
         return fail(`org_only sessions require the team plan (you are on "${identity.plan}").`);

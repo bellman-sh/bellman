@@ -100,6 +100,7 @@ Plans gate **creating** a room, not joining one. Anyone signed in can be invited
 | --- | --- | --- | --- | --- | --- |
 | `free` | pair | 2 | 4 hours | 20 | |
 | `pro` | pair, swarm | 8 | 72 hours | 500 | |
+| `max` | pair, swarm | 25 | 14 days | 2,000 | team-sized rooms for one person, no org |
 | `team` | pair, swarm | 25 | 30 days | 5,000 | `org_only` scoping, audit trail |
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
@@ -244,7 +245,7 @@ Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscr
 
 **Plans are mutually exclusive, and a subscription sells exactly one.** Build the catalogue so no subscription can carry prices for two; one that does grants nothing at all and logs which plans it named, rather than picking a winner by Stripe's item order. Several items of the *same* plan are fine — that is quantity, not conflict.
 
-**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
+**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro or max purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
 
 Billing only ever touches grants it wrote. An operator override in `BELLMAN_USERS` beats a purchase outright — `/upgrade` stops before Stripe rather than take money that would change nothing — and a grant an admin wrote by hand is left alone, with the clash logged for a human. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
 

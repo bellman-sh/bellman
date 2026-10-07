@@ -801,6 +801,31 @@ describe("granting plans at runtime", () => {
     expect(await config.plans!.getGrant("github:99")).toBeUndefined();
   });
 
+  it("accepts a max grant", async () => {
+    const token = await tokenFor(admin);
+
+    const res = await call("/admin/grants", as(token, {
+      method: "POST",
+      body: JSON.stringify({ key: "github:98", plan: "max", role: "member", orgId: "org_example" }),
+    }));
+
+    expect(res.status).toBe(201);
+    expect(await config.plans!.getGrant("github:98")).toMatchObject({ plan: "max" });
+  });
+
+  it("refuses a plan that names no plan, including one hasOwn would coerce to a name", async () => {
+    const token = await tokenFor(admin);
+
+    for (const plan of ["enterprise", ["max"], 1, null]) {
+      const res = await call("/admin/grants", as(token, {
+        method: "POST",
+        body: JSON.stringify({ key: "github:96", plan, role: "member", orgId: "org_example" }),
+      }));
+      expect(res.status, JSON.stringify(plan)).toBe(400);
+    }
+    expect(await config.plans!.getGrant("github:96")).toBeUndefined();
+  });
+
   it("refuses a team or admin grant with no org, which would be inert", async () => {
     const token = await tokenFor(admin);
 

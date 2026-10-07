@@ -952,7 +952,7 @@ It is used three times:
   distinction it turned on.
 
   An org-less grant queues **nothing** (`hasOrg`, `src/grant-audit.ts`), and only
-  `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro` or `free`
+  `team` is org-scoped (`ENTITLEMENTS`, `src/auth.ts`). So a `pro`, `max` or `free`
   purchase reconcile owes no audit row at all — and still calls `deliverNow()`,
   draining whatever other orgs left behind. That is the hold time #123 asked
   about, measured below.

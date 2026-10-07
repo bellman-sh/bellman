@@ -234,7 +234,7 @@ Returns: { source, label, plan, role, org_id } when source is "oauth" — this b
 const UPLOAD_TOOL: Tool = {
   name: "bellman_upload",
   title: "Upload a file and place it on the room's surface",
-  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file or image item, in one call. Local to this bridge: the server has no binary channel, so a hosted connector uploads through the control panel instead.
+  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file or image item, in one call. Local to this bridge: the server has no binary channel, and a hosted connector has no bellman_upload; the control panel's upload comes with the canvas.
 
 Args:
   - session_id, member_id: your handles from start/confirm; the seat must hold write_surface

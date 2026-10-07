@@ -119,6 +119,15 @@ describe("bellman_upload", () => {
     expect(tool.annotations?.readOnlyHint).toBe(false);
   });
 
+  // What the agent is told, which is the artifact: the root a path must be under, and what a hosted connector
+  // has instead, which is nothing yet. The panel's upload is piece 3, so the description must not say it exists.
+  it("tells the agent where it may read from, and that a hosted connector has no such tool", async () => {
+    const description = (await client.listTools()).tools.find((t) => t.name === "bellman_upload")!.description!;
+    expect(description).toContain("a regular file under the upload root (the directory the bridge was started in, or BELLMAN_UPLOAD_ROOT; / for any file)");
+    expect(description).toContain("a hosted connector has no bellman_upload; the control panel's upload comes with the canvas");
+    expect(description).not.toContain("uploads through the control panel");
+  });
+
   it("uploads a regular file and places it as a file item, in one call", async () => {
     const path = file("notes.md", "# notes\n");
     const out = await upload({ path, key: "notes", title: "Notes" });

@@ -20,6 +20,8 @@ import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import { JOIN_CODE_TTL, isActiveMember, type BellmanStore, type EventBody } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
+import { surfaceItem } from "./projections.js";
+import { surfaceCursor } from "./surface.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -233,6 +235,27 @@ export function findMember(s: StoredSession, memberId: string, identity: Identit
 
 export const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
+
+/**
+ * The surface as a member reads it (#129, D7): every row in an envelope, and
+ * the record's cursor of the last change.
+ *
+ * `cut` is a removed member's cursor (#113): such a member reads its history
+ * up to the `member_evicted` event that removed it and nothing after, so rows
+ * changed past the cut are left out and the cursor is capped there. An item
+ * rewritten after the cut is omitted outright; its earlier version is still
+ * in that member's event history.
+ */
+export async function readSurface(
+  store: BellmanStore,
+  session: StoredSession,
+  cut?: number,
+) {
+  const rows = await store.surfaceOf(session.id);
+  const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
+  const cursor = cut === undefined ? surfaceCursor(session) : Math.min(surfaceCursor(session), cut);
+  return { cursor, items: visible.map(surfaceItem) };
+}
 
 /**
  * Which orgs get a row for this action, and what it says. One rule, in one

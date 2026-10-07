@@ -2195,9 +2195,11 @@ record, so a poll that does not ask for the surface never reads one. The row
 is written by `#writeEvent` in the transaction that stores the `surface`
 event, through `AppendExtras.surface`, the `creditReport` pattern: the caller
 says what to index and the store writes the event and the row together. Last
-write wins per key, monotonic by cursor, which is what makes an idempotent
-replay — re-applied with the original event — a repair or a no-op and never a
-regression (`applySurfaceWrite`, `src/surface.ts`, one rule for both stores).
+write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface.ts`,
+one rule for both stores). An idempotent replay applies no surface write: the
+row went in with the event in one transaction, so there is nothing to repair,
+and a removal leaves no tombstone, so re-applying could only put back what was
+removed.
 The record gains one number, `surfaceCursor`, moved in the same put, so
 `bellman_sync` reports "the surface moved" off the record it already read.
 

@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md]
-last-verified-against-source: 77396879
-last-updated: 2026-10-03
+last-verified-against-source: 745c74d
+last-updated: 2026-10-06
 ---
 
 # Bellman Architecture
@@ -61,7 +61,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>nine MCP tools"]
+        MCP["/mcp<br/>ten MCP tools,<br/>one UI resource"]
         WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
@@ -98,7 +98,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the nine tools work over plain remote MCP. The bridge exists
+use Bellman** — the ten tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
@@ -182,7 +182,7 @@ flowchart TB
 | Claude Code, terminal, `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
-| Claude Desktop, consumer app | yes | none | manual `bellman_sync` until MCP Apps ([#28](../../../issues/28)) |
+| Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room without asking the agent |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
 Two consequences:
@@ -745,7 +745,7 @@ flowchart TB
     subgraph C["Surfaces beyond /mcp"]
         C1["#49 HTTP API"]
         C2["#48 browser session"]
-        C3["#28 MCP Apps UI"]
+        C3["#28 MCP Apps UI — shipped"]
         C4["#43 one poll per member"]
     end
     subgraph D["Organisations"]
@@ -1209,14 +1209,16 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~4,960** | every request, whether or not you are in a room |
+| Tool definitions | **~5,816** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
+| `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-03, after #111. The three rows
-below that one are from the original measurement and have not been re-measured
-since.
+Tool definitions were re-measured on 2026-10-03, after #111, and again on
+2026-10-06, after #28 added `bellman_rooms` (255 tokens by the method below;
+the total was 4,962 before it). The three rows below the first are from the
+original measurement and have not been re-measured since.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as

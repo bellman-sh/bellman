@@ -231,7 +231,7 @@ describe("channel delivery", () => {
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
     expect(names).toEqual([
       "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
-      "bellman_invite", "bellman_leave", "bellman_send", "bellman_start",
+      "bellman_invite", "bellman_leave", "bellman_rooms", "bellman_send", "bellman_start",
       "bellman_sync", "bellman_whoami",
     ]);
   });
@@ -719,7 +719,7 @@ describe("bellman_whoami", () => {
 
   const remoteToolNames = [
     "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
-    "bellman_invite", "bellman_leave", "bellman_send", "bellman_start",
+    "bellman_invite", "bellman_leave", "bellman_rooms", "bellman_send", "bellman_start",
     "bellman_sync",
   ];
 

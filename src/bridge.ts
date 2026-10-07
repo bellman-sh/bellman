@@ -8,8 +8,14 @@ import {
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
   CallToolRequestSchema,
+  ErrorCode,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema,
   type CallToolResult,
+  type ListResourcesResult,
+  type ReadResourceResult,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
@@ -35,6 +41,7 @@ import type { EventType } from "./types.js";
  *     .bellman/room.yaml when that file exists, and says so on stderr. Its
  *     listing says the same and marks manifest optional, because a host that
  *     honours the schema it is shown would otherwise never make that call.
+ *   - It proxies the server's UI resource too, for hosts that render MCP Apps (#28).
  *   - It watches the tool results go by. Whenever a call reveals a membership
  *     (start, confirm, or a send/sync after a restart), it arms a watcher that
  *     long-polls bellman_sync for that member. Given a `bus` it asks the local
@@ -79,6 +86,14 @@ const MAX_ROOM_FILE_BYTES = 64 * 1024;
 export interface Remote {
   listTools(): Promise<{ tools: Tool[] }>;
   callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult>;
+  /**
+   * The two requests a host that renders MCP Apps makes, forwarded unchanged
+   * (#28). Optional, because a Remote is also what tests hand in, and most of
+   * them have no resources to serve: absent, the bridge lists none and refuses
+   * a read as not found.
+   */
+  listResources?(): Promise<ListResourcesResult>;
+  readResource?(params: { uri: string }): Promise<ReadResourceResult>;
   close(): Promise<void>;
 }
 
@@ -92,6 +107,8 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
   return {
     listTools: () => client.listTools(),
     callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
+    listResources: () => client.listResources(),
+    readResource: (params) => client.readResource(params),
     close: () => client.close(),
   };
 }
@@ -510,9 +527,16 @@ export function createBridge(opts: BridgeOptions) {
       if (unauthorized(err)) retire();
       throw err;
     };
+    // The optional resource calls ride along only when the connection has them,
+    // so a Remote without resources stays one without resources (#28).
+    const { listResources, readResource } = fresh;
     const self: Remote = {
       listTools: () => fresh.listTools().catch(fail),
       callTool: (params) => fresh.callTool(params).catch(fail),
+      ...(listResources ? { listResources: () => listResources.call(fresh).catch(fail) } : {}),
+      ...(readResource
+        ? { readResource: (params: { uri: string }) => readResource.call(fresh, params).catch(fail) }
+        : {}),
       close: () => fresh.close(),
     };
     return self;
@@ -522,8 +546,8 @@ export function createBridge(opts: BridgeOptions) {
     { name: "bellman", version: VERSION },
     {
       capabilities: delivery === "channel"
-        ? { tools: {}, experimental: { "claude/channel": {} } }
-        : { tools: {} },
+        ? { tools: {}, resources: {}, experimental: { "claude/channel": {} } }
+        : { tools: {}, resources: {} },
       instructions: delivery === "channel" ? CHANNEL_INSTRUCTIONS : HOOK_INSTRUCTIONS,
     }
   );
@@ -534,6 +558,25 @@ export function createBridge(opts: BridgeOptions) {
     const listed = tools.map(advertised);
     const local = delivery === "hook" ? [WAIT_TOOL, WHOAMI_TOOL] : [WHOAMI_TOOL];
     return { tools: [...listed, ...local] };
+  });
+
+  /**
+   * The UI resource, forwarded. A host that renders MCP Apps reads the page a
+   * tool's _meta names over this same connection, and over stdio this bridge IS
+   * the connection (#28, spec D13). Nothing is cached or rewritten: the remote
+   * is the one copy of the page, as it is of every tool.
+   */
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    const r = await remote();
+    return r.listResources ? r.listResources() : { resources: [] };
+  });
+
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const r = await remote();
+    if (!r.readResource) {
+      throw new McpError(ErrorCode.InvalidParams, `resource not found: ${request.params.uri}`);
+    }
+    return r.readResource({ uri: request.params.uri });
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

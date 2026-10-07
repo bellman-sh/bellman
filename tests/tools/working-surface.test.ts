@@ -277,3 +277,94 @@ describe("how the write reaches a peer", () => {
     expect(event.data.payload).toMatchObject({ key: "plan", body: "1. read\n2. write" });
   });
 });
+
+describe("bellman_sync and the surface", () => {
+  const poll = (p: PairedSession, extra: Record<string, unknown> = {}) =>
+    p.joiner.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: p.joinerCursor, ...extra,
+    });
+
+  it("carries surface_cursor only once the surface has changed", async () => {
+    const p = await pairUp(h);
+    const before = await poll(p);
+    expect(before.data).not.toHaveProperty("surface_cursor");
+    expect(before.data).not.toHaveProperty("surface");
+
+    const wrote = await write(p, plan());
+    const after = await poll(p);
+    expect(after.data.surface_cursor).toBe(wrote.data.cursor);
+    expect(after.data).not.toHaveProperty("surface");
+  });
+
+  it("returns every item in an envelope when asked", async () => {
+    const p = await pairUp(h);
+    await write(p, plan());
+    await write(p, { key: "pr", kind: "link", body: "https://example.com/pr/1" });
+    const out = await poll(p, { surface: true });
+    expect(out.isError, out.text).toBe(false);
+    const surface = out.data.surface as {
+      cursor: number; items: { trust: string; origin: { memberId: string }; data: { key: string } }[];
+    };
+    expect(surface.cursor).toBe(out.data.surface_cursor);
+    expect(surface.items.map((i) => i.data.key)).toEqual(["plan", "pr"]);
+    for (const item of surface.items) {
+      expect(item.trust).toBe("untrusted");
+      expect(item.origin.memberId).toBe(p.creatorMemberId);
+    }
+  });
+
+  // Review Focus 5, first half: read after the wait, like session_status.
+  it("reads the surface after a wait, so the item that woke the poll is in it", async () => {
+    class ParkingStore extends MemoryStore {
+      onPark: (() => void) | null = null;
+      override waitForEvents(sessionId: string, cursor: number, waitMs: number) {
+        const out = super.waitForEvents(sessionId, cursor, waitMs);
+        this.onPark?.();
+        return out;
+      }
+    }
+    const store = new ParkingStore();
+    const hh = new Harness(store);
+    try {
+      const p = await pairUp(hh);
+      store.onPark = () => { void write(p, plan()); };
+      const out = await p.joiner.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: p.joinerCursor,
+        wait_seconds: 5, surface: true,
+      });
+      expect(out.isError, out.text).toBe(false);
+      const surface = out.data.surface as { cursor: number; items: { data: { key: string } }[] };
+      expect(surface.items.map((i) => i.data.key)).toEqual(["plan"]);
+      const [woke] = envelopes(out.data.events) as { data: { cursor: number } }[];
+      expect(out.data.surface_cursor).toBe(woke.data.cursor);
+      // The block's own cursor, not just the top-level one: the rows come from
+      // the store and are fresh whichever record is passed, so only this line
+      // notices a block read off the pre-wait record.
+      expect(surface.cursor).toBe(woke.data.cursor);
+    } finally {
+      await hh.close();
+    }
+  });
+
+  // Review Focus 5, second half, and spec D7: a removed member reads to its cut.
+  it("stops a removed member's read at its cut", async () => {
+    const p = await pairUp(h);
+    await write(p, plan());
+    await write(p, { key: "notes", kind: "text", body: "kept" });
+    const evicted = await p.creator.call("bellman_evict", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(evicted.isError, evicted.text).toBe(false);
+    const cut = (await h.store.eventsAfter(p.sessionId, 0)).find((e) => e.type === "member_evicted")!.cursor;
+
+    const rewritten = await write(p, plan({ body: "after the cut" }));
+    expect(rewritten.isError, rewritten.text).toBe(false);
+
+    const out = await poll(p, { surface: true });
+    expect(out.data.removed).toBe(true);
+    const surface = out.data.surface as { cursor: number; items: { data: { key: string } }[] };
+    expect(surface.items.map((i) => i.data.key)).toEqual(["notes"]);
+    expect(surface.cursor).toBeLessThanOrEqual(cut);
+    expect(out.data.surface_cursor).toBeLessThanOrEqual(cut);
+  });
+});

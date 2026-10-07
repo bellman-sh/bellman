@@ -151,3 +151,90 @@ describe("GET /rooms", () => {
     expect(res.headers.get("allow")).toBe("GET");
   });
 });
+
+describe("GET /rooms/:id", () => {
+  it("answers one 404 for a stranger and for an unknown room", async () => {
+    const stranger = (await call(DEV_KEY.outsider, `/rooms/${ROOM}`))!;
+    const unknown = (await call(DEV_KEY.jesse, "/rooms/qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+  });
+
+  it("returns the preview for my seat, the roster, the status, and my handles with their verbs", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`))!;
+    expect(res.status).toBe(200);
+    const body = await bodyOf(res) as {
+      id: string; session_status: string; expires_at: string;
+      preview: { your_role: string; your_verbs: string[]; text: { trust: string } };
+      members: { member_id: string; presence: string; active: boolean }[];
+      my_handles: { member_id: string; room_role: string; verbs: string[]; active: boolean; removed: boolean }[];
+    };
+    expect(body.id).toBe(ROOM);
+    expect(body.session_status).toBe("active");
+    expect(body.preview.your_role).toBe("peer_a");
+    expect(body.preview.your_verbs).toContain("write_surface");
+    expect(body.preview.text.trust).toBe("untrusted");
+    expect(body.members.map((m) => m.member_id).sort()).toEqual(["m_creator", "m_peer"]);
+    expect(body.members[0]).toHaveProperty("presence");
+    expect(body.my_handles).toEqual([
+      { member_id: "m_creator", room_role: "peer_a", verbs: expect.arrayContaining(["write_surface"]), active: true, removed: false },
+    ]);
+  });
+
+  it("gives a seat without the verb a preview that says so", async () => {
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`)) as { my_handles: { verbs: string[] }[] };
+    expect(body.my_handles[0].verbs).not.toContain("write_surface");
+  });
+
+  it("lists every handle I hold, and names the removed one", async () => {
+    // Joined twice: one handle removed by the creator, one still in.
+    await store.createSession(session({
+      id: "qs_two", createdBy: "u_peer",
+      members: [
+        peer(),
+        member({ memberId: "m_old", roomRole: "peer_b", leftAt: Date.now(), removedAtCursor: 3 }),
+        member({ memberId: "m_new", roomRole: "peer_b" }),
+      ],
+    }));
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_two")) as {
+      preview: { your_role: string }; my_handles: { member_id: string; active: boolean; removed: boolean }[];
+    };
+    expect(body.my_handles).toEqual([
+      { member_id: "m_old", room_role: "peer_b", verbs: expect.any(Array), active: false, removed: true },
+      { member_id: "m_new", room_role: "peer_b", verbs: expect.any(Array), active: true, removed: false },
+    ]);
+    expect(body.preview.your_role).toBe("peer_b");
+  });
+
+  // The test above gives both handles one role, so it cannot tell which handle the preview follows. Here the
+  // removed handle comes first and holds another seat: the preview is the seat still in the room.
+  it("previews the seat of the handle still in the room, not the first one held", async () => {
+    await store.createSession(session({
+      id: "qs_two_seats", createdBy: "u_peer",
+      members: [
+        peer(),
+        member({ memberId: "m_old", roomRole: "peer_a", leftAt: Date.now(), removedAtCursor: 3 }),
+        member({ memberId: "m_new", roomRole: "peer_b" }),
+      ],
+    }));
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_two_seats")) as { preview: { your_role: string } };
+    expect(body.preview.your_role).toBe("peer_b");
+  });
+
+  it("still answers a member who left, and a closed room", async () => {
+    await store.createSession(session({ id: "qs_gone", closed: true, members: [member({ leftAt: Date.now() })] }));
+    const res = (await call(DEV_KEY.jesse, "/rooms/qs_gone"))!;
+    expect(res.status).toBe(200);
+    expect(await bodyOf(res)).toMatchObject({ session_status: "closed", my_handles: [{ active: false, removed: false }] });
+  });
+
+  it("refuses without a credential, with CORS on the refusal, and answers 405 to a method it does not take", async () => {
+    const anonymous = (await call(null, `/rooms/${ROOM}`, { headers: { origin: PANEL } }))!;
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
+    const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`, { method: "POST", body: {} }))!;
+    expect(post.status).toBe(405);
+    expect(post.headers.get("allow")).toBe("GET");
+  });
+});

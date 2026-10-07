@@ -20,11 +20,12 @@ import {
   sanitizeName, storedType, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { roomSummary } from "../projections.js";
+import { publicMember, roomPreview, roomSummary } from "../projections.js";
+import { verbsOfRole } from "../roles.js";
 import { findMember, gateSeat, sessionStatus, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
-import type { Identity } from "../types.js";
+import type { Identity, Member } from "../types.js";
 
 /** Who is calling a room route, and how. `via` feeds the CSRF check and nothing else. */
 export interface RoomCaller {
@@ -46,6 +47,7 @@ export interface RoomRouteDeps {
 export const MAX_ROOMS_LISTED = 50;
 
 const LIST = /^\/rooms$/;
+const DETAIL = /^\/rooms\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 
@@ -109,6 +111,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (LIST.test(path)) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await listRooms(request, origin, deps);
+    }
+    const detail = DETAIL.exec(path);
+    if (detail) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await roomDetail(request, detail[1], origin, deps);
     }
     const upload = UPLOAD.exec(path);
     if (upload) {
@@ -294,4 +301,43 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
     .slice(0, MAX_ROOMS_LISTED)
     .map((s) => roomSummary(s, userId, sessionStatus(s)));
   return json(200, { rooms }, origin);
+}
+
+/** Every handle this person holds in the room, in roster order. Empty means a stranger. */
+const handlesOf = (session: StoredSession, identity: Identity): Member[] =>
+  session.members.filter((m) => m.userId === identity.userId);
+
+/**
+ * The room as my seat sees it (D1). The preview is `roomPreview` for the role
+ * of the handle still in the room — or, when none is, the first one held — so
+ * what the page shows is what a joiner was shown. `my_handles` is what the
+ * page needs to pick a seat for a write: the server refuses either way (D6).
+ * A member who left, a removed member and a closed room are all served: reads
+ * stay open, and what a removed member may READ is bounded at the surface
+ * route, where the cut applies.
+ */
+async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const session = await deps.store.getSession(sessionId);
+  const mine = session ? handlesOf(session, who.identity) : [];
+  if (!session || mine.length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const connected = await deps.store.connectedMembers(sessionId);
+  const viewer = mine.find((m) => m.leftAt === null) ?? mine[0];
+  return json(200, {
+    id: session.id,
+    session_status: sessionStatus(session),
+    expires_at: new Date(session.expiresAt).toISOString(),
+    preview: roomPreview(session, viewer.roomRole),
+    members: session.members.map((m) => publicMember(m, connected)),
+    my_handles: mine.map((m) => ({
+      member_id: m.memberId,
+      room_role: m.roomRole,
+      verbs: verbsOfRole(session.manifest, m.roomRole),
+      active: m.leftAt === null,
+      removed: isRemovedMember(m),
+    })),
+  }, origin);
 }

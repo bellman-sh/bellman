@@ -22,9 +22,10 @@ import {
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, roomPreview, roomSummary } from "../projections.js";
 import { verbsOfRole } from "../roles.js";
-import { findMember, gateSeat, sessionStatus, type RoomFailure } from "../rooms.js";
+import { findMember, gateSeat, readSurface, sessionStatus, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
+import { surfaceCursor } from "../surface.js";
 import type { Identity, Member } from "../types.js";
 
 /** Who is calling a room route, and how. `via` feeds the CSRF check and nothing else. */
@@ -48,6 +49,7 @@ export const MAX_ROOMS_LISTED = 50;
 
 const LIST = /^\/rooms$/;
 const DETAIL = /^\/rooms\/([^/]+)$/;
+const SURFACE = /^\/rooms\/([^/]+)\/surface$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 
@@ -116,6 +118,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (detail) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await roomDetail(request, detail[1], origin, deps);
+    }
+    const surface = SURFACE.exec(path);
+    if (surface) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await readSurfaceRoute(request, surface[1], origin, deps);
     }
     const upload = UPLOAD.exec(path);
     if (upload) {
@@ -340,4 +347,64 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       removed: isRemovedMember(m),
     })),
   }, origin);
+}
+
+/** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
+const surfaceTag = (cursor: number): string => `"${cursor}"`;
+
+/**
+ * Whether an If-None-Match header names `tag`. A list, a weak validator and `*`
+ * all count; anything else is a miss, so a garbled header costs a body and
+ * never a 500.
+ */
+const etagMatches = (header: string | null, tag: string): boolean =>
+  header !== null && header.split(",").some((v) => {
+    const t = v.trim().replace(/^W\//, "");
+    return t === "*" || t === tag;
+  });
+
+/**
+ * Where a person's reading stops (#113), if anywhere. Only when every handle
+ * they hold was removed: a handle still in the room, or one that left of its
+ * own accord, keeps the open feed, as it does on `bellman_sync`. With several
+ * removed handles, the latest cut: the most this person was ever shown.
+ */
+const cutFor = (handles: readonly Member[]): number | undefined =>
+  handles.every(isRemovedMember)
+    ? Math.max(...handles.map((m) => m.removedAtCursor ?? 0))
+    : undefined;
+
+/**
+ * The surface read (D2): the same envelopes `bellman_sync surface: true`
+ * returns, with the surface cursor as the ETag. A member still in the room is
+ * answered from the record alone on a match — no row read, which is what makes
+ * a four-second poll cheap. A removed member reads to its cut, and its cursor
+ * is derived from the rows it is shown, as the tool derives it: the record's
+ * number would claim a change the member never saw.
+ */
+async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const session = await deps.store.getSession(sessionId);
+  const mine = session ? handlesOf(session, who.identity) : [];
+  if (!session || mine.length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const ifNoneMatch = request.headers.get("if-none-match");
+  // The page reads the ETag off a cross-origin response, which CORS hides
+  // unless the header is exposed by name; on the 304 as on the 200.
+  const exposed = { ...corsHeaders(origin), "access-control-expose-headers": "etag" };
+  const notModified = (cursor: number) =>
+    new Response(null, { status: 304, headers: { ...exposed, "cache-control": "no-store", etag: surfaceTag(cursor) } });
+
+  const cut = cutFor(mine);
+  if (cut === undefined && etagMatches(ifNoneMatch, surfaceTag(surfaceCursor(session)))) {
+    return notModified(surfaceCursor(session));
+  }
+  const block = await readSurface(deps.store, session, cut);
+  if (cut !== undefined && etagMatches(ifNoneMatch, surfaceTag(block.cursor))) return notModified(block.cursor);
+  const res = json(200, { surface_cursor: block.cursor, items: block.items }, origin);
+  res.headers.set("etag", surfaceTag(block.cursor));
+  res.headers.set("access-control-expose-headers", "etag");
+  return res;
 }

@@ -11,7 +11,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/store.js";
 import { member, session } from "./helpers/fixtures.js";
-import { DEV_KEY } from "./helpers/harness.js";
+import { DEV_KEY, Harness } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";
@@ -234,6 +234,172 @@ describe("GET /rooms/:id", () => {
     expect(anonymous.headers.get("access-control-allow-origin")).toBe(PANEL);
     expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
     const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`, { method: "POST", body: {} }))!;
+    expect(post.status).toBe(405);
+    expect(post.headers.get("allow")).toBe("GET");
+  });
+});
+
+/** Write one item through the tool, so the route's read has something to show. */
+async function placeThroughTool(key: string, payload: Record<string, unknown>) {
+  const h = new Harness(store, blobs);
+  const jesse = await h.connect(DEV_KEY.jesse);
+  const out = await jesse.call("bellman_send", { session_id: ROOM, member_id: "m_creator", type: "surface", payload: { key, ...payload } });
+  await h.close();
+  expect(out.isError, out.text).toBe(false);
+  return out.data as { cursor: number };
+}
+
+/**
+ * Remove a member the way the creator does, through the tool, so the room records the cut itself: the
+ * `member_evicted` event's own cursor, written in the transaction that appends it. A removal cannot be
+ * patched onto a record (`MemberPatch` leaves `removedAtCursor` out), and a fixture that set it by hand
+ * would test the route against a cut no event carries.
+ */
+async function evictThroughTool(memberId: string) {
+  const h = new Harness(store, blobs);
+  const jesse = await h.connect(DEV_KEY.jesse);
+  const out = await jesse.call("bellman_evict", { session_id: ROOM, member_id: memberId });
+  await h.close();
+  expect(out.isError, out.text).toBe(false);
+}
+
+describe("GET /rooms/:id/surface", () => {
+  it("returns every item in an untrusted envelope, with the surface cursor as the ETag", async () => {
+    const { cursor } = await placeThroughTool("plan", { kind: "text", body: "# Plan\nship it" });
+    const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`, { headers: { origin: PANEL } }))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe(`"${cursor}"`);
+    // Exposed by name, or a cross-origin fetch in the panel cannot read it.
+    expect(res.headers.get("access-control-expose-headers")).toBe("etag");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = await bodyOf(res) as { surface_cursor: number; items: { trust: string; origin: { memberId: string }; data: { key: string; body: string } }[] };
+    expect(body.surface_cursor).toBe(cursor);
+    expect(body.items).toEqual([
+      { trust: "untrusted", origin: { memberId: "m_creator", label: "jesse@codenerd" }, data: expect.objectContaining({ key: "plan", kind: "text", body: "# Plan\nship it", cursor }) },
+    ]);
+    expect(Object.keys(body).sort()).toEqual(["items", "surface_cursor"]);
+  });
+
+  it("answers 304 from the record alone when If-None-Match names the cursor, and 200 once a write moves it", async () => {
+    const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
+    const reads = { n: 0 };
+    const original = store.surfaceOf.bind(store);
+    store.surfaceOf = async (id: string) => { reads.n++; return original(id); };
+    const same = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": `"${cursor}"` } }))!;
+    expect(same.status).toBe(304);
+    expect(same.headers.get("etag")).toBe(`"${cursor}"`);
+    expect(await same.text()).toBe("");
+    expect(reads.n).toBe(0);
+    const next = await placeThroughTool("plan", { kind: "text", body: "v2" });
+    const moved = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": `"${cursor}"` } }))!;
+    expect(moved.status).toBe(200);
+    expect(moved.headers.get("etag")).toBe(`"${next.cursor}"`);
+  });
+
+  it("matches a weak validator and a list, and treats garbage as a miss, never a throw", async () => {
+    const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
+    for (const header of [`W/"${cursor}"`, `"1", "${cursor}"`, "*"]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": header } }))!;
+      expect(res.status, header).toBe(304);
+    }
+    for (const header of ["garbage", `"${cursor + 1}"`, ""]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": header } }))!;
+      expect(res.status, header).toBe(200);
+    }
+  });
+
+  it("answers an empty surface with cursor 0 and an ETag of \"0\"", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe('"0"');
+    expect(await bodyOf(res)).toEqual({ surface_cursor: 0, items: [] });
+  });
+
+  it("stops a removed member at its cut, and derives the cursor from what it is shown", async () => {
+    const first = await placeThroughTool("a", { kind: "text", body: "before" });
+    await evictThroughTool("m_peer");
+    await placeThroughTool("b", { kind: "text", body: "after" });
+    const res = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`))!;
+    const body = await bodyOf(res) as { surface_cursor: number; items: { data: { key: string } }[] };
+    expect(body.items.map((i) => i.data.key)).toEqual(["a"]);
+    expect(body.surface_cursor).toBe(first.cursor);
+    expect(res.headers.get("etag")).toBe(`"${first.cursor}"`);
+  });
+
+  it("does not cut a person while one of their handles is still in the room", async () => {
+    await placeThroughTool("a", { kind: "text", body: "before" });
+    await evictThroughTool("m_peer");
+    await placeThroughTool("b", { kind: "text", body: "after" });
+    await store.addMember(ROOM, member({ memberId: "m_peer2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }));
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
+    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+  });
+
+  it("answers one 404 for a stranger and an unknown room", async () => {
+    expect((await call(DEV_KEY.outsider, `/rooms/${ROOM}/surface`))!.status).toBe(404);
+    expect((await call(DEV_KEY.jesse, "/rooms/qs_nope/surface"))!.status).toBe(404);
+  });
+
+  // The first write in a fresh room is cursor 1, which makes the list in the weak-validator test above one
+  // value twice: it passes if only the first validator is read. Here the match is never first.
+  it("finds the cursor anywhere in a list of validators", async () => {
+    const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
+    for (const header of [`"${cursor + 1}", "${cursor}"`, `"${cursor + 1}", W/"${cursor}", "${cursor + 2}"`]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": header } }))!;
+      expect(res.status, header).toBe(304);
+    }
+  });
+
+  it("carries the CORS headers and no-store on a 304, as on the 200", async () => {
+    const { cursor } = await placeThroughTool("plan", { kind: "text", body: "v1" });
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { headers: { origin: PANEL, "if-none-match": `"${cursor}"` } }))!;
+    expect(res.status).toBe(304);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(res.headers.get("access-control-expose-headers")).toBe("etag");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  // A 304 on the record's cursor would tell a removed member that the surface changed after it was out, which
+  // is the one thing its cursor is derived from the rows to avoid saying.
+  it("answers a removed member's conditional read from what it is shown, never from the record", async () => {
+    const first = await placeThroughTool("a", { kind: "text", body: "before" });
+    await evictThroughTool("m_peer");
+    const last = await placeThroughTool("b", { kind: "text", body: "after" });
+    const asked = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": `"${last.cursor}"` } }))!;
+    expect(asked.status).toBe(200);
+    expect(asked.headers.get("etag")).toBe(`"${first.cursor}"`);
+    const shown = (await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`, { headers: { "if-none-match": `"${first.cursor}"` } }))!;
+    expect(shown.status).toBe(304);
+    expect(shown.headers.get("etag")).toBe(`"${first.cursor}"`);
+  });
+
+  it("does not cut a member who left of its own accord", async () => {
+    await placeThroughTool("a", { kind: "text", body: "before" });
+    await store.updateMember(ROOM, "m_peer", { leftAt: Date.now() });
+    await placeThroughTool("b", { kind: "text", body: "after" });
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
+    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+  });
+
+  // Removed, back on a fresh handle, removed again: the person read the open feed in between, so the cut is the
+  // latest one. Taking the earliest would hide what the second handle was entitled to see.
+  it("cuts a person with every handle removed at the latest cut", async () => {
+    await placeThroughTool("a", { kind: "text", body: "first" });
+    await evictThroughTool("m_peer");
+    await store.addMember(ROOM, member({ memberId: "m_peer2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }));
+    await placeThroughTool("b", { kind: "text", body: "second" });
+    await evictThroughTool("m_peer2");
+    await placeThroughTool("c", { kind: "text", body: "third" });
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string } }[] };
+    expect(body.items.map((i) => i.data.key)).toEqual(["a", "b"]);
+  });
+
+  it("refuses without a credential, with CORS on the refusal, and answers 405 to a method it does not take", async () => {
+    const anonymous = (await call(null, `/rooms/${ROOM}/surface`, { headers: { origin: PANEL } }))!;
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
+    const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { method: "POST", body: {} }))!;
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET");
   });

@@ -74,9 +74,12 @@ know whether to show the write affordances at all.
 
 ### D2 — The surface read carries an ETag, so polling is cheap.
 
-`GET /rooms/:id/surface` answers `{ cursor, surface_cursor, items }` with the
-same projection `bellman_sync surface: true` returns — envelopes intact, the
-#49 rule that peer content stays framed. `ETag: "<surface_cursor>"`, and a
+`GET /rooms/:id/surface` answers `{ surface_cursor, items }` with the same
+projection `bellman_sync surface: true` returns — envelopes intact, the #49
+rule that peer content stays framed. The log's own `cursor` is not in it: the
+record carries the surface cursor and not the log's head, so it would cost the
+row read the ETag exists to avoid, and the page has no use for it until the
+timeline (#49). `ETag: "<surface_cursor>"`, and a
 request carrying `If-None-Match` that matches answers 304 from the session
 record alone, with no row read. The page polls every four seconds and most
 polls cost one record read. A removed member is served to its cut, as the tool

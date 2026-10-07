@@ -215,8 +215,9 @@ The read is bounded. `path` must resolve, links followed, under the upload
 root: the directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when
 that is set (`/` for any file; the Desktop bundle exposes it as the Upload
 folder setting). The working-directory default is refused when that directory
-is the filesystem root, so a bridge started there reads nothing until `/` is
-named on purpose. The agent driving the bridge may already read that
+is the filesystem root or the home directory, so a bridge started in either
+reads nothing until that directory is named on purpose. The agent driving the
+bridge may already read that
 filesystem, but a one-call send to every member of a room is new, and a room
 tool is the kind people allowlist; a line that arrives as peer content must
 not be able to ship a key file. The tool is `readOnlyHint: false`, so a host

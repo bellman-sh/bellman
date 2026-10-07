@@ -1,6 +1,7 @@
 import {
   closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, extname, join, parse, sep } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -341,11 +342,25 @@ export function readLocalFile(path: string, root: string): { bytes: Buffer<Array
 }
 
 /**
+ * Whether `dir` is the home directory, links followed. The native realpath, because the other keeps the case it was
+ * given and a home reached in another case on a case-insensitive disk would then slip past a guard that is meant to
+ * refuse. A path that cannot be resolved, or a home that cannot be named, is not it.
+ */
+function isHomeDirectory(dir: string): boolean {
+  try {
+    return realpathSync.native(dir) === realpathSync.native(homedir());
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The root bellman_upload reads under (D7): BELLMAN_UPLOAD_ROOT when that is set and not empty, else the directory
- * the bridge was started in. That default is never the filesystem root: a bridge started at `/` by whatever launched
- * it would make every file on the machine an upload candidate with nobody having said so, so it refuses instead,
- * before anything is read. Saying so is naming `/` in BELLMAN_UPLOAD_ROOT, which stays allowed. Read on each call,
- * so a change to either is honoured on the next upload.
+ * the bridge was started in. That default is never the filesystem root or the home directory: a bridge started at `/`
+ * or in `~` by whatever launched it would make every file on the machine, or every key a person owns, an upload
+ * candidate with nobody having said so, so it refuses instead, before anything is read. Saying so is naming that
+ * directory in BELLMAN_UPLOAD_ROOT, which stays allowed. Read on each call, so a change to either is honoured on the
+ * next upload.
  */
 function uploadRoot(): string {
   const named = process.env.BELLMAN_UPLOAD_ROOT;
@@ -354,6 +369,11 @@ function uploadRoot(): string {
   if (parse(cwd).root === cwd) {
     throw new Error(
       `the bridge was started at ${cwd}, the filesystem root, which would make every file an upload candidate: set BELLMAN_UPLOAD_ROOT to the directory to upload from (/ to allow any file on purpose).`,
+    );
+  }
+  if (isHomeDirectory(cwd)) {
+    throw new Error(
+      `the bridge was started in ${cwd}, your home directory, which would make every file under it an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${cwd} to allow your whole home directory on purpose).`,
     );
   }
   return cwd;
@@ -1162,11 +1182,11 @@ export function createBridge(opts: BridgeOptions) {
    * for a path outside the upload root, a link, a non-file or an oversized file
    * before anything leaves the machine. The root is BELLMAN_UPLOAD_ROOT when
    * that is set and not empty, else the directory the bridge was started in,
-   * unless that is the filesystem root, which is refused (see `uploadRoot`); it
-   * is read on each call. The post carries the bearer the bridge holds and sets
-   * Content-Length itself — the route requires it, a real fetch keeps a
-   * caller's value when it matches the body, and a fake server's Request
-   * computes none. A 401 is answered once, by asking the held connection to
+   * unless that is the filesystem root or the home directory, which are refused
+   * (see `uploadRoot`); it is read on each call. The post carries the bearer the
+   * bridge holds and sets Content-Length itself — the route requires it, a real
+   * fetch keeps a caller's value when it matches the body, and a fake server's
+   * Request computes none. A 401 is answered once, by asking the held connection to
    * refresh the sign-in and posting again if the bearer changed. The placement
    * is the upstream bellman_send, observed like any other so the membership it
    * reveals is watched. A placement the server refuses, for whatever reason, is

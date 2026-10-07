@@ -11,7 +11,7 @@
  * not cover.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -439,6 +439,60 @@ describe("bellman_upload's upload root", () => {
     setRoot("/");
     const named = await upload({ path, key: "k" });
     expect(named.isError, named.text).toBe(false);
+  });
+
+  // The home directory is the other place a default would cover too much: every key a person owns is under it.
+  // `os.homedir()` follows HOME, which is how this stands a home up in a temp directory instead of writing under
+  // the real one. It is a link to the working directory, so the two are the same directory by different paths and
+  // only a guard that resolves both sides refuses it. Naming the home directory is saying so on purpose.
+  it("refuses the working-directory default when it is the home directory, and takes the home directory when it is named", async () => {
+    const home = join(outside, "home");
+    symlinkSync(dir, home);
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      vi.spyOn(process, "cwd").mockReturnValue(dir);
+      const path = file("notes.md", "# notes\n");
+      for (const value of [undefined, ""]) {
+        setRoot(value);
+        const out = await upload({ path, key: "k" });
+        expect(out.isError, JSON.stringify(value)).toBe(true);
+        expect(out.text, JSON.stringify(value)).toBe(
+          `Error: the bridge was started in ${dir}, your home directory, which would make every file under it an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${dir} to allow your whole home directory on purpose).`,
+        );
+        await sentNothing();
+      }
+      setRoot(home);
+      const named = await upload({ path, key: "k" });
+      expect(named.isError, named.text).toBe(false);
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  // On a disk that ignores case, a home reached in another case is still the home directory. The plain realpath
+  // keeps the case it is given, so a guard built on it would let that through; the native one reports what the disk
+  // holds. A case-sensitive disk has no such path, and the test says so and stops.
+  it("refuses the home directory reached in another case, on a disk that ignores case", async (context) => {
+    const shouted = dir.toUpperCase();
+    context.skip(!existsSync(shouted), "this disk is case-sensitive");
+    const saved = process.env.HOME;
+    process.env.HOME = dir;
+    try {
+      vi.spyOn(process, "cwd").mockReturnValue(shouted);
+      setRoot(undefined);
+      const out = await upload({ path: file("notes.md", "# notes\n"), key: "k" });
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain(`the bridge was started in ${shouted}, your home directory`);
+      await sentNothing();
+    } finally {
+      if (saved === undefined) delete process.env.HOME;
+      else process.env.HOME = saved;
+    }
   });
 });
 

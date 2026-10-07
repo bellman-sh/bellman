@@ -29,3 +29,6 @@ worker-tests/node_modules
 # The .mcpb staging directory. extension/dist/ is already covered by `dist/`
 # above; this is the tree build.sh assembles before packing.
 extension/build/
+
+# The SDD executor's per-plan scratch (ledger, briefs). Never committed.
+.superpowers/

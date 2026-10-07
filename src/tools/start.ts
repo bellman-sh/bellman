@@ -6,7 +6,7 @@ import type { ToolResult } from "./kit.js";
 import { roomPreview } from "../projections.js";
 import type { Brief, Capability, Identity, Member, RoomManifest, Session } from "../types.js";
 import { entitlementsFor } from "../auth.js";
-import { generateSessionId, renderJoinCode } from "../codes.js";
+import { generateSessionId, joinUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, resolveManifest } from "../manifest.js";
 import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL } from "../store.js";
@@ -36,7 +36,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
@@ -117,6 +117,10 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         session_id: session.id,
         member_id: memberId,
         join_code: defaultCode.code,
+        // The same code, as a link: clickable in chat, and it tells the person
+        // who opens it what to say to their agent. The page is rendered from
+        // the URL alone, so sharing the link reveals nothing the code does not.
+        join_url: joinUrl(defaultCode.code),
         join_code_expires_at: new Date(defaultCode.expiresAt).toISOString(),
         session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,

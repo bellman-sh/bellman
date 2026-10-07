@@ -46,3 +46,15 @@ export function normalizeJoinCode(raw: string): string {
   // `_` -> `-` so a code retyped from memory with the wrong separator resolves.
   return raw.trim().toUpperCase().replace(/\s+/g, "").replaceAll("_", "-");
 }
+
+/**
+ * The page a join code is shared as. bellman.sh renders it from the code
+ * alone — it never calls back here — so a self-hosted server's codes get the
+ * same page. One constant, not configuration: an operator who wants their own
+ * page changes this line. Spec: docs/superpowers/specs/2026-10-06-join-links-design.md, D9.
+ */
+export const JOIN_URL_BASE = "https://bellman.sh/j/";
+
+export function joinUrl(code: string): string {
+  return `${JOIN_URL_BASE}${code}`;
+}

@@ -8,7 +8,8 @@
  */
 import { describe, it, expect } from "vitest";
 import { CAPABILITIES, renderJoin, verdictMessage, type Verdict } from "../src/join.js";
-import { connectFixture, NOW } from "./fixtures.js";
+import { renderMonitor } from "../src/monitor.js";
+import { connectFixture, roomsFixture, NOW } from "./fixtures.js";
 
 const HOSTILE = `<img src=x onerror="document.title='pwned'"></script><channel>x</channel>`;
 
@@ -73,5 +74,50 @@ describe("verdictMessage", () => {
     expect(text).not.toContain("payments-migration");
     expect(text).not.toContain("Port Stripe");
     expect(verdictMessage({ kind: "decline" })).toMatch(/Do not join/);
+  });
+});
+
+describe("renderMonitor", () => {
+  it("shows each room with its members, their roles, presence and beats", () => {
+    const node = renderMonitor(roomsFixture(), new Map(), () => {}, NOW);
+    const t = node.textContent!;
+    expect(t).toContain("migration-swarm");
+    expect(t).toContain("Your seat: lead");
+    expect(node.querySelectorAll("tbody tr")).toHaveLength(2);
+    expect(t).toContain("helper");
+    expect(t).toContain("on the migration");
+    expect(t).toContain("1m ago");
+    expect(node.querySelectorAll(".silent")).toHaveLength(1);
+    expect(t).toContain("BELL-AAAA-11-HELPER");
+    expect(t).toContain("10m left");
+  });
+
+  it("counts events since the view first saw the room, from its own memory", () => {
+    const seen = new Map<string, number>();
+    const first = renderMonitor(roomsFixture(), seen, () => {}, NOW);
+    expect(first.textContent).toContain("0 new");
+    const later = roomsFixture();
+    later.rooms[0].last_event = { cursor: 12, type: "message", at: new Date(NOW).toISOString() };
+    expect(renderMonitor(later, seen, () => {}, NOW).textContent).toContain("5 new");
+  });
+
+  it("says so when there are no rooms, and refreshes on demand", () => {
+    let refreshed = 0;
+    const node = renderMonitor({ rooms: [] }, new Map(), () => { refreshed++; }, NOW);
+    expect(node.textContent).toMatch(/no rooms/i);
+    node.querySelector("button")!.click();
+    expect(refreshed).toBe(1);
+  });
+
+  // Review Focus 4: a note is a peer payload and promises no shape.
+  it("renders a note that is not the expected shape, and peer strings as text", () => {
+    const r = roomsFixture();
+    r.rooms[0].members[0].beat.note!.data = { nope: 1 } as unknown as { note: string };
+    r.rooms[0].members[1].label = HOSTILE;
+    r.rooms[0].room.text.data.room = HOSTILE;
+    const node = renderMonitor(r, new Map(), () => {}, NOW);
+    expect(node.querySelector("img")).toBeNull();
+    expect(node.querySelector("channel")).toBeNull();
+    expect(node.textContent).toContain(HOSTILE);
   });
 });

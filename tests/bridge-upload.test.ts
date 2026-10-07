@@ -27,6 +27,7 @@ const jesse = resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!;
 let fake: FakeBellman;
 let dir: string;
 let fetches: number;
+let posted: string[];
 let sends: number;
 let bridge: ReturnType<typeof createBridge>;
 let client: Client;
@@ -47,11 +48,19 @@ async function remoteFor(): Promise<Remote> {
   };
 }
 
+/** The network the bridge posts through: the fake's own `fetch`, with what was asked of it written down. */
+const recording = ((input, init) => {
+  fetches++;
+  posted.push(String(input));
+  return fake.fetch(input, init);
+}) as typeof fetch;
+
 beforeEach(async () => {
   fake = fakeBellman({ keys: { [DEV_KEY.jesse]: jesse } });
   await fake.store.createSession(session({ id: ROOM, members: [member()] }));
   dir = mkdtempSync(join(tmpdir(), "bellman-upload-"));
   fetches = 0;
+  posted = [];
   sends = 0;
   bridge = createBridge({
     delivery: "channel",
@@ -59,10 +68,7 @@ beforeEach(async () => {
     upload: {
       serverUrl: `${ISSUER}/mcp`,
       bearer: () => DEV_KEY.jesse,
-      fetchImpl: ((input, init) => {
-        fetches++;
-        return fake.fetch(input, init);
-      }) as typeof fetch,
+      fetchImpl: recording,
     },
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -113,6 +119,41 @@ describe("bellman_upload", () => {
     expect(sends).toBe(1);
     // The membership the send revealed is watched, as any bellman_send's is.
     expect(bridge.watching().map((w) => w.member_id)).toEqual(["m_creator"]);
+  });
+
+  // The fake routes on the path alone, so every test above would pass if the post went to some other
+  // origin. This one reads where it went. A second bridge on an origin and port of its own is what tells
+  // "the origin it was configured with" from "the one the first bridge happens to use".
+  it("posts to the origin it was configured with, at the room's blob route and nowhere else", async () => {
+    const out = await upload({ path: file("notes.md", "# notes\n"), key: "notes" });
+    expect(out.isError, out.text).toBe(false);
+    expect(posted).toHaveLength(1);
+    const first = new URL(posted[0]);
+    expect(`${first.origin}${first.pathname}`).toBe(`${ISSUER}/rooms/${ROOM}/blobs`);
+    expect(Object.fromEntries(first.searchParams)).toEqual({ member_id: "m_creator", name: "notes.md" });
+
+    posted = [];
+    const elsewhere = createBridge({
+      delivery: "channel",
+      remote: remoteFor,
+      upload: { serverUrl: "https://bellman.example.invalid:8443/mcp", bearer: () => DEV_KEY.jesse, fetchImpl: recording },
+    });
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    const c = new Client({ name: "elsewhere", version: "0.0.1" });
+    await Promise.all([elsewhere.server.connect(serverSide), c.connect(clientSide)]);
+    try {
+      const res = (await c.callTool({
+        name: "bellman_upload",
+        arguments: { session_id: ROOM, member_id: "m_creator", path: file("again.md", "again"), key: "again" },
+      })) as CallToolResult;
+      expect(res.isError, JSON.stringify(res.content)).toBeFalsy();
+      expect(posted).toHaveLength(1);
+      const second = new URL(posted[0]);
+      expect(`${second.origin}${second.pathname}`).toBe(`https://bellman.example.invalid:8443/rooms/${ROOM}/blobs`);
+    } finally {
+      await elsewhere.close();
+      await c.close();
+    }
   });
 
   it("defaults the kind from the type: a PNG is an image, placed where asked", async () => {

@@ -25,14 +25,14 @@ interface Bellman {
   server: Server;
   url: string;
   /** The requests that actually arrived — the bridge talking to Bellman, observed. */
-  hits: { authorization: string | undefined }[];
+  hits: { authorization: string | undefined; method: string | undefined; url: string | undefined }[];
 }
 
 /** A Bellman that takes the request and answers however the test says, or never. */
 async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellman> {
   const hits: Bellman["hits"] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    hits.push({ authorization: req.headers.authorization });
+    hits.push({ authorization: req.headers.authorization, method: req.method, url: req.url });
     answer(res);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -44,6 +44,10 @@ async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellm
 const hangs = () => undefined;
 const refuses = (res: ServerResponse) => {
   res.writeHead(500, { "content-type": "text/plain" }).end("nope");
+};
+/** A room that will not take the upload: the answer the bridge reports, without needing a Bellman behind it. */
+const forbids = (res: ServerResponse) => {
+  res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: "forbidden" }));
 };
 
 interface Bridge {
@@ -289,4 +293,76 @@ describe("the bridge as a process", () => {
       log: [`ready: channel delivery via ${bellman.url} (BELLMAN_KEY)`],
     });
   });
+});
+
+/**
+ * What the process writes to stdout is the MCP transport: a JSON-RPC message a line, the tool results among them.
+ * Collected by id, so a test can wait for the answer to the call it made.
+ */
+interface Answer {
+  id?: unknown;
+  result?: { isError?: boolean; content?: { text?: string }[] };
+}
+
+function answers(bridge: Bridge): Map<number, Answer> {
+  const byId = new Map<number, Answer>();
+  let pending = "";
+  bridge.proc.stdout!.on("data", (chunk) => {
+    pending += String(chunk);
+    for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n")) {
+      const line = pending.slice(0, end);
+      pending = pending.slice(end + 1);
+      try {
+        const message = JSON.parse(line) as Answer;
+        if (typeof message.id === "number") byId.set(message.id, message);
+      } catch {
+        // Not a message: nothing else is meant to be on this stream.
+      }
+    }
+  });
+  return byId;
+}
+
+describe("bellman_upload through the process", () => {
+  /**
+   * src/channel.ts is the one place the bridge is told where to post and as whom (#183). Every other test builds a
+   * bridge of its own with an `upload` of its own, and the tool is listed whether or not it has a target, so a
+   * channel.ts that never passed one would ship with every test green and `bellman_upload` answering "no upload
+   * target". The room refuses (403) on purpose: the request is what is observed, and a refusal needs no Bellman
+   * behind it. The post comes before any connection to /mcp, so the one request that arrives is the upload.
+   */
+  const cases: [string, Options, string][] = [
+    ["a BELLMAN_KEY", { key: "qk_dev_jesse", cached: false }, "Bearer qk_dev_jesse"],
+    ["the cached sign-in's access token", {}, "Bearer not.a.jwt"],
+  ];
+  it.each(cases)(
+    "posts the file to the room's blob route on the server it was started against, with %s as the bearer",
+    async (_who, options, authorization) => {
+      const bellman = await fakeBellman(forbids);
+      const bridge = startBridge(bellman, options);
+      const answered = answers(bridge);
+      await until(() => bridge.log().length > 0);
+
+      const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
+      dirs.push(dir);
+      const path = join(dir, "notes.md");
+      writeFileSync(path, "# notes\n");
+
+      initialize(bridge);
+      bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      bridge.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "notes" } },
+      });
+      const replied = await until(() => answered.has(3));
+
+      expect({ replied, hits: bellman.hits, said: answered.get(3)?.result?.content?.[0]?.text }).toEqual({
+        replied: true,
+        hits: [{ method: "POST", url: "/rooms/qs_room/blobs?member_id=m_me&name=notes.md", authorization }],
+        said: expect.stringContaining("upload refused (403)"),
+      });
+    },
+  );
 });

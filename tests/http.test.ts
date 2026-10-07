@@ -234,4 +234,45 @@ describe("the room routes over the Node server (#183)", () => {
     expect((await fetch(`${base}/rooms/${sessionId}/blobs`, { method: "POST", headers: { authorization: "Bearer qk_dev_jesse" }, body: "x" })).status).toBe(400);
     await jesse.close();
   });
+
+  // The translation's other branch: an answer with no body (a 304 to a conditional GET, a preflight's
+  // 204) ends the response, where a stream is piped for every other. Without the branch the route's
+  // `null` body reaches Readable.fromWeb and the request answers 500.
+  it("answers a conditional GET 304 and a preflight 204 with their headers and no body", async () => {
+    const jesse = await mcpClient("qk_dev_jesse");
+    const started = await call(jesse, "bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const memberId = String(started.data.member_id);
+    const bearer = { authorization: "Bearer qk_dev_jesse" };
+
+    const uploaded = await fetch(`${base}/rooms/${sessionId}/blobs?member_id=${memberId}&name=notes.md`, {
+      method: "POST",
+      headers: { ...bearer, "content-type": "text/markdown" },
+      body: text("# notes\n"),
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id } = (await uploaded.json()) as { blob_id: string };
+    const blobUrl = `${base}/rooms/${sessionId}/blobs/${blob_id}`;
+
+    const served = await fetch(blobUrl, { headers: bearer });
+    expect(served.status).toBe(200);
+    const etag = served.headers.get("etag");
+    expect(etag).toBeTruthy();
+    await served.arrayBuffer();
+
+    const unchanged = await fetch(blobUrl, { headers: { ...bearer, "if-none-match": etag! } });
+    expect(unchanged.status).toBe(304);
+    expect(await unchanged.text()).toBe("");
+    expect(unchanged.headers.get("etag")).toBe(etag);
+    expect(unchanged.headers.get("cache-control")).toBe("private, max-age=300");
+    expect(unchanged.headers.get("content-security-policy")).toBe("sandbox");
+
+    // A stranger's preflight: 204 and no grant, because this server has no panel origins.
+    const preflight = await fetch(`${base}/rooms/${sessionId}/blobs`, { method: "OPTIONS" });
+    expect(preflight.status).toBe(204);
+    expect(await preflight.text()).toBe("");
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    await jesse.close();
+  });
 });

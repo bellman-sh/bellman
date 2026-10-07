@@ -8,7 +8,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { STALE_AFTER_MS } from "../src/presence.js";
 import { MemoryStore } from "../src/store.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
@@ -402,5 +403,204 @@ describe("GET /rooms/:id/surface", () => {
     const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`, { method: "POST", body: {} }))!;
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET");
+  });
+});
+
+const put = (key: string | null, itemKey: string, body: unknown, over: CallOptions & { member?: string | null; room?: string } = {}) => {
+  const q = over.member === null ? "" : `?member_id=${over.member ?? "m_creator"}`;
+  return call(key, `/rooms/${over.room ?? ROOM}/surface/${itemKey}${q}`, { method: "PUT", body, ...over });
+};
+const del = (key: string | null, itemKey: string, over: CallOptions & { member?: string | null } = {}) => {
+  const q = over.member === null ? "" : `?member_id=${over.member ?? "m_creator"}`;
+  return call(key, `/rooms/${ROOM}/surface/${itemKey}${q}`, { method: "DELETE", ...over });
+};
+
+/** The surface as the tool reads it, for the agreement tests. */
+async function surfaceThroughTool(key: string, memberId: string) {
+  const h = new Harness(store, blobs);
+  const p = await h.connect(key);
+  const out = await p.call("bellman_sync", { session_id: ROOM, member_id: memberId, since_cursor: 0, wait_seconds: 0, surface: true });
+  await h.close();
+  return out.data as { surface?: { cursor: number; items: unknown[] }; surface_cursor?: number };
+}
+
+describe("PUT and DELETE /rooms/:id/surface/:key", () => {
+  it("writes an item through the route, and the tool reads back exactly what the route reads", async () => {
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", title: "Plan", body: "ship it", placement: { x: 10, y: 20 } }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+    const out = await bodyOf(res) as { cursor: number; room_members: string[] };
+    expect(out.room_members).toEqual(["peer@codenerd"]);
+    const viaRoute = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { surface_cursor: number; items: unknown[] };
+    const viaTool = await surfaceThroughTool(DEV_KEY.peer, "m_peer");
+    expect(viaRoute.items).toEqual(viaTool.surface!.items);
+    expect(viaRoute.surface_cursor).toBe(viaTool.surface_cursor);
+    expect(viaRoute.surface_cursor).toBe(out.cursor);
+  });
+
+  it("reads back through the route what the tool wrote, and replaces by key", async () => {
+    await placeThroughTool("plan", { kind: "text", body: "v1" });
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "v2" }))!;
+    expect(res.status).toBe(200);
+    const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string; body: string } }[] };
+    expect(body.items.map((i) => [i.data.key, i.data.body])).toEqual([["plan", "v2"]]);
+  });
+
+  it("removes an item, and the tool no longer sees it", async () => {
+    await placeThroughTool("plan", { kind: "text", body: "v1" });
+    const res = (await del(DEV_KEY.jesse, "plan"))!;
+    expect(res.status).toBe(200);
+    expect((await surfaceThroughTool(DEV_KEY.jesse, "m_creator")).surface!.items).toEqual([]);
+  });
+
+  // The commit's claim is that the audit row cannot differ by transport; this is the row the tool test pins
+  // (tests/tools/working-surface.test.ts), read after the route wrote it.
+  it("leaves the audit row the tool leaves, for a write and for a removal", async () => {
+    expect((await put(DEV_KEY.jesse, "plan", { kind: "text", body: "ship it" }))!.status).toBe(200);
+    expect((await store.auditForOrg("org_codenerd", 50)).at(-1)).toMatchObject({
+      action: "sent_surface", actorUserId: "u_jesse", detail: { key: "plan", kind: "text", chars: 7 },
+    });
+    expect((await del(DEV_KEY.jesse, "plan"))!.status).toBe(200);
+    expect((await store.auditForOrg("org_codenerd", 50)).at(-1)).toMatchObject({
+      action: "sent_surface", detail: { key: "plan", removed: true },
+    });
+  });
+
+  it("refuses a seat without the verb, and the log is unchanged", async () => {
+    const before = (await store.eventsAfter(ROOM, 0)).length;
+    const res = (await put(DEV_KEY.peer, "plan", { kind: "text", body: "mine" }, { member: "m_peer" }))!;
+    expect(res.status).toBe(403);
+    expect(await bodyOf(res)).toMatchObject({ error: "forbidden" });
+    expect((await store.eventsAfter(ROOM, 0)).length).toBe(before);
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  it("answers 404 for a handle that is not the caller's, before any gate", async () => {
+    const res = (await put(DEV_KEY.peer, "plan", { kind: "text", body: "x" }, { member: "m_creator" }))!;
+    expect(res.status).toBe(404);
+  });
+
+  it("requires member_id", async () => {
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }, { member: null }))!;
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toMatchObject({ error_description: expect.stringContaining("member_id") });
+  });
+
+  it("maps the operation's refusals to statuses: invalid is 400, a frozen room is 409", async () => {
+    const invalid = (await put(DEV_KEY.jesse, "plan", { kind: "link", body: "not a url" }))!;
+    expect(invalid.status).toBe(400);
+    expect(await bodyOf(invalid)).toMatchObject({ error: "invalid", error_description: expect.stringContaining("http") });
+    await store.freezeSession(ROOM, Date.now());
+    const frozen = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }))!;
+    expect(frozen.status).toBe(409);
+    expect(await bodyOf(frozen)).toMatchObject({ error: "frozen" });
+  });
+
+  it("refuses a body that is not a JSON object with the route's own 400", async () => {
+    for (const rawBody of ["not json", "[1,2]", '"text"', ""]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method: "PUT", rawBody }))!;
+      expect(res.status, JSON.stringify(rawBody)).toBe(400);
+      expect(await bodyOf(res)).toMatchObject({ error: "invalid_request" });
+    }
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  it("refuses a body whose key disagrees with the path, and accepts one that agrees", async () => {
+    const clash = (await put(DEV_KEY.jesse, "plan", { key: "other", kind: "text", body: "x" }))!;
+    expect(clash.status).toBe(400);
+    const same = (await put(DEV_KEY.jesse, "plan", { key: "plan", kind: "text", body: "x" }))!;
+    expect(same.status).toBe(200);
+  });
+
+  it("refuses a key the grammar refuses with the operation's 400, a malformed escape with 400, and an unknown deeper path with 404", async () => {
+    const bad = (await put(DEV_KEY.jesse, "-bad", { kind: "text", body: "x" }))!;
+    expect(bad.status).toBe(400);
+    const slash = (await put(DEV_KEY.jesse, "a%2Fb", { kind: "text", body: "x" }))!;
+    expect(slash.status).toBe(400);
+    const escape = (await put(DEV_KEY.jesse, "%E0%A4%A", { kind: "text", body: "x" }))!;
+    expect(escape.status).toBe(400);
+    const deeper = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan/more?member_id=m_creator`, { method: "PUT", body: {} }))!;
+    expect(deeper.status).toBe(404);
+  });
+
+  // The malformed escape above is a 400 whether or not the path is decoded, since the raw form fails the grammar
+  // too; only a key that is valid once decoded can tell the two apart.
+  it("takes a percent-encoded key as the key it spells", async () => {
+    const res = (await put(DEV_KEY.jesse, "p%6Can", { kind: "text", body: "x" }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["plan"]);
+  });
+
+  it("refuses a body over MAX_SURFACE_WRITE_BYTES from its Content-Length, unparsed", async () => {
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }, { headers: { "content-length": String(64 * 1024 + 1) } }))!;
+    expect(res.status).toBe(413);
+  });
+
+  // The test above would pass if the body were parsed first and the size checked after: both orders answer 413
+  // for a valid body. A body that is not JSON tells them apart, since parsed first it is the body's 400.
+  it("decides the size from the header before the body is parsed, and takes a body exactly at the bound", async () => {
+    const over = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, {
+      method: "PUT", rawBody: "not json", headers: { "content-length": String(MAX_SURFACE_WRITE_BYTES + 1) },
+    }))!;
+    expect(over.status).toBe(413);
+    expect(await bodyOf(over)).toMatchObject({ error: "too_large" });
+    const at = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }, { headers: { "content-length": String(MAX_SURFACE_WRITE_BYTES) } }))!;
+    expect(at.status).toBe(200);
+  });
+
+  // The Origin check runs ahead of `writeSurface`, whose gate touches the caller's lastSeenAt: a forged request
+  // writes nothing at all, not even a liveness stamp. The seat starts stale because touchMember skips one seen
+  // within half the window, so a fresh fixture would read "unchanged" whatever the order of the two.
+  it("refuses a cookie write without the panel's Origin before touching the seat, and takes one with it", async () => {
+    const stale = Date.now() - 2 * STALE_AFTER_MS;
+    await store.updateMember(ROOM, "m_creator", { lastSeenAt: stale });
+    const lastSeen = async () =>
+      (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_creator")!.lastSeenAt;
+    expect(await lastSeen(), "the seat starts stale").toBe(stale);
+    const forged = (await put(null, "plan", { kind: "text", body: "x" }, { cookie: DEV_KEY.jesse }))!;
+    expect([forged.status, await lastSeen()], "no Origin: refused, and the seat as it was").toEqual([403, stale]);
+    const offList = (await put(null, "plan", { kind: "text", body: "x" }, { cookie: DEV_KEY.jesse, headers: { origin: "https://evil.example" } }))!;
+    expect([offList.status, await lastSeen()], "an off-list Origin: refused, and the seat as it was").toEqual([403, stale]);
+    const gone = (await del(null, "plan", { cookie: DEV_KEY.jesse }))!;
+    expect([gone.status, await lastSeen()], "a DELETE with no Origin: refused, and the seat as it was").toEqual([403, stale]);
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+    // The control: the same stale seat with the panel's Origin is served, and touched, so "unchanged" above means something.
+    const real = (await put(null, "plan", { kind: "text", body: "x" }, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect(real.status).toBe(200);
+    expect(await lastSeen()).toBeGreaterThan(stale);
+  });
+
+  it("answers the preflight for a PUT", async () => {
+    const pre = (await call(null, `/rooms/${ROOM}/surface/plan`, { method: "OPTIONS", headers: { origin: PANEL } }))!;
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get("access-control-allow-methods")).toContain("PUT");
+    expect(pre.headers.get("access-control-allow-headers")).toContain("if-none-match");
+  });
+
+  it("refuses without a credential, with CORS on the refusal, and answers 405 to the methods it does not take", async () => {
+    const anonymous = (await put(null, "plan", { kind: "text", body: "x" }, { headers: { origin: PANEL } }))!;
+    expect(anonymous.status).toBe(401);
+    expect(anonymous.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
+    for (const method of ["GET", "POST", "PATCH"]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method }))!;
+      expect(res.status, method).toBe(405);
+      expect(res.headers.get("allow"), method).toBe("PUT, DELETE");
+    }
+  });
+
+  // The blob route and this one meet here: nothing else threads the route's blob store into the operation, and
+  // an item that names a blob is the only write that reads it.
+  it("places a blob uploaded through the blob route, and the read carries the object's own metadata", async () => {
+    const uploaded = (await roomRoutes(new Request(`${ISSUER}/rooms/${ROOM}/blobs?member_id=m_creator&name=notes.txt`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${DEV_KEY.jesse}`, "content-type": "text/plain", "content-length": "5" },
+      body: "hello",
+    }), deps))!;
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id } = (await uploaded.json()) as { blob_id: string };
+    const placed = (await put(DEV_KEY.jesse, "notes", { kind: "file", blob: { id: blob_id } }))!;
+    expect(placed.status, await placed.clone().text()).toBe(200);
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { blob: unknown } }[] };
+    expect(body.items[0].data.blob).toEqual({ id: blob_id, bytes: 5, type: "text/plain", name: "notes.txt" });
   });
 });

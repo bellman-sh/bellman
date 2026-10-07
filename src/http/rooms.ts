@@ -22,7 +22,7 @@ import {
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, roomPreview, roomSummary } from "../projections.js";
 import { verbsOfRole } from "../roles.js";
-import { findMember, gateSeat, readSurface, sessionStatus, type RoomFailure } from "../rooms.js";
+import { findMember, gateSeat, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -47,9 +47,14 @@ export interface RoomRouteDeps {
 // summary index, not a bigger number.
 export const MAX_ROOMS_LISTED = 50;
 
+// ponytail: 64 KB, not tuned. An item's largest field is 8,000 characters;
+// this is the bound on the JSON around it, read off the header before parsing.
+export const MAX_SURFACE_WRITE_BYTES = 64 * 1024;
+
 const LIST = /^\/rooms$/;
 const DETAIL = /^\/rooms\/([^/]+)$/;
 const SURFACE = /^\/rooms\/([^/]+)\/surface$/;
+const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 
@@ -123,6 +128,17 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (surface) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await readSurfaceRoute(request, surface[1], origin, deps);
+    }
+    const item = SURFACE_ITEM.exec(path);
+    if (item) {
+      if (request.method !== "PUT" && request.method !== "DELETE") return methodNotAllowed("PUT, DELETE", origin);
+      let key: string;
+      try {
+        key = decodeURIComponent(item[2]);
+      } catch {
+        return problem(400, "invalid_request", "the key is not valid percent-encoding", origin);
+      }
+      return await writeSurfaceRoute(request, url, item[1], key, origin, deps);
     }
     const upload = UPLOAD.exec(path);
     if (upload) {
@@ -407,4 +423,63 @@ async function readSurfaceRoute(request: Request, sessionId: string, origin: str
   res.headers.set("etag", surfaceTag(block.cursor));
   res.headers.set("access-control-expose-headers", "etag");
   return res;
+}
+
+/**
+ * The writes (D1, D6): a PUT whose body is the item, a DELETE that removes the
+ * key. Both call `writeSurface`, the operation `bellman_send type: "surface"`
+ * calls, so the verb guard, the blob head, the connector check, the audit row
+ * and the event are one sequence for both transports; this maps the result to
+ * a status and nothing else. The key is the path's; a body that names another
+ * is refused rather than silently rekeyed.
+ */
+async function writeSurfaceRoute(
+  request: Request,
+  url: URL,
+  sessionId: string,
+  key: string,
+  origin: string | undefined,
+  deps: RoomRouteDeps,
+): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+
+  const memberId = url.searchParams.get("member_id") ?? "";
+  if (!memberId) return problem(400, "invalid_request", "member_id is required", origin);
+
+  let payload: unknown;
+  if (request.method === "DELETE") {
+    payload = { key, remove: true };
+  } else {
+    const declared = Number(request.headers.get("content-length") ?? "0");
+    if (declared > MAX_SURFACE_WRITE_BYTES) {
+      return problem(413, "too_large", `a surface write is at most ${MAX_SURFACE_WRITE_BYTES} bytes of JSON`, origin);
+    }
+    const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the item, without its key or with the path's", origin);
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return notObject();
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) return notObject();
+    const given = (body as { key?: unknown }).key;
+    if (given !== undefined && given !== key) {
+      return problem(400, "invalid_request", `the body names key ${JSON.stringify(given)} but the path names "${key}"`, origin);
+    }
+    payload = { ...(body as Record<string, unknown>), key };
+  }
+
+  // A stranger's answer is the unknown room's answer, before the gate, as on
+  // an upload: a handle that is not the caller's is 404, and the gate's
+  // `forbidden` then means the seat itself.
+  const found = await deps.store.getSession(sessionId);
+  if (!found || !findMember(found, memberId, who.identity)) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const out = await writeSurface(deps.store, deps.blobs, who.identity, sessionId, memberId, payload);
+  if (!out.ok) return problem(STATUS[out.code], out.code, out.reason, origin);
+  return json(200, { cursor: out.value.cursor, room_members: out.value.roomMembers }, origin);
 }

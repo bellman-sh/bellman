@@ -14,7 +14,14 @@
 const PREFLIGHT_MAX_AGE_SECONDS = 86_400;
 
 /** The methods the panel uses. Explicit rather than echoing the request. */
-const ALLOWED_METHODS = "GET, POST, DELETE, OPTIONS";
+const ALLOWED_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
+
+/**
+ * The request headers the panel sends that a browser does not send unasked. The
+ * page sends `If-None-Match` on its surface poll, which is not a CORS-safelisted
+ * request header, so the browser asks first and must be told yes.
+ */
+const ALLOWED_HEADERS = "content-type, if-none-match";
 
 /**
  * The request's Origin, if the allowlist admits it. Undefined otherwise, which
@@ -82,7 +89,7 @@ export function preflightResponse(origin: string | undefined): Response {
       ...(origin
         ? {
             "access-control-allow-methods": ALLOWED_METHODS,
-            "access-control-allow-headers": "content-type",
+            "access-control-allow-headers": ALLOWED_HEADERS,
             "access-control-max-age": String(PREFLIGHT_MAX_AGE_SECONDS),
           }
         : {}),

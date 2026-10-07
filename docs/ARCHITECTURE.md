@@ -1216,9 +1216,12 @@ treat these as plus or minus ten percent:
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 
 Tool definitions were re-measured on 2026-10-03, after #111, and again on
-2026-10-06, after #28 added `bellman_rooms` (255 tokens by the method below;
-the total was 4,962 before it). The three rows below the first are from the
-original measurement and have not been re-measured since.
+2026-10-06, after #28. On that commit the ten tools total 5,816: `bellman_rooms`
+is 255 of it and the `_meta.ui` on `bellman_connect` 16, so #28 added
+271; the same tree without them measures 5,545, and the growth from
+4,962 to that predates #28 (`join_url` in #180, among others). The three rows
+below the first are from the original measurement and have not been re-measured
+since.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as

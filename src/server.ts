@@ -7,6 +7,7 @@ import { registerConfirm } from "./tools/confirm.js";
 import { registerInvite } from "./tools/invite.js";
 import { registerSend } from "./tools/send.js";
 import { registerSync } from "./tools/sync.js";
+import { registerRooms } from "./tools/rooms.js";
 import { registerLeave } from "./tools/leave.js";
 import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
@@ -41,6 +42,7 @@ export function buildServer(identity: Identity, s: BellmanStore): McpServer {
   registerInvite(server, identity, s);
   registerSend(server, identity, s);
   registerSync(server, identity, s);
+  registerRooms(server, identity, s);
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);

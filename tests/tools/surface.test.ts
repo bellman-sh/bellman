@@ -1,5 +1,5 @@
 /**
- * INVARIANT 9: the tool surface stays at 9. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 10. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: tools first — every tool's text result stands alone; one UI
@@ -22,6 +22,7 @@ const EXPECTED_TOOLS = [
   "bellman_audit",
   "bellman_invite",
   "bellman_evict",
+  "bellman_rooms",
 ].sort();
 
 describe("tool surface", () => {
@@ -43,7 +44,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(9);
+    expect(EXPECTED_TOOLS).toHaveLength(10);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -191,14 +192,13 @@ describe("tool surface", () => {
 
   // The host renders a tool through the resource its _meta names. A tool that
   // named a resource this server does not serve would render nothing, so every
-  // ui meta present must point at the one resource. Task 5 adds bellman_rooms
-  // to the expected list.
-  it("attaches the app to bellman_connect and to no other tool", async () => {
+  // ui meta present must point at the one resource.
+  it("attaches the app to bellman_connect and bellman_rooms, and to no other tool", async () => {
     const { tools } = await jesse.listTools();
     const uiOf = (t: { _meta?: Record<string, unknown> }) =>
       (t._meta as { ui?: { resourceUri?: string } } | undefined)?.ui;
     const withApp = tools.filter((t) => uiOf(t)?.resourceUri === APP_RESOURCE_URI).map((t) => t.name).sort();
-    expect(withApp).toEqual(["bellman_connect"]);
+    expect(withApp).toEqual(["bellman_connect", "bellman_rooms"]);
     for (const t of tools) {
       const ui = uiOf(t);
       if (ui) expect(ui.resourceUri, t.name).toBe(APP_RESOURCE_URI);

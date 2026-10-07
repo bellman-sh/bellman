@@ -416,7 +416,8 @@ describe("bellman_upload through the process", () => {
   });
 
   // The same refusal from a real process whose working directory really is `/`, with no mock between this test and
-  // process.cwd(): the default root is never the filesystem root, so nothing is read and nothing is posted.
+  // process.cwd(): a default root that contains the home directory, as `/` does, is refused, so nothing is read and
+  // nothing is posted.
   it("refuses to take the filesystem root as its default upload root, and posts nothing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
     dirs.push(dir);
@@ -440,7 +441,7 @@ describe("bellman_upload through the process", () => {
     expect({ replied, hits: bellman.hits, said: answered.get(3)?.result?.content?.[0]?.text }).toEqual({
       replied: true,
       hits: [],
-      said: expect.stringContaining("the bridge was started at /, the filesystem root"),
+      said: expect.stringContaining("the bridge was started in /, which contains your home directory"),
     });
   });
 });

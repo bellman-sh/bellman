@@ -342,13 +342,24 @@ export function readLocalFile(path: string, root: string): { bytes: Buffer<Array
 }
 
 /**
- * Whether `dir` is the home directory, links followed. The native realpath, because the other keeps the case it was
- * given and a home reached in another case on a case-insensitive disk would then slip past a guard that is meant to
- * refuse. A path that cannot be resolved, or a home that cannot be named, is not it.
+ * Whether `dir` holds the home directory: it is the home directory, or it is above it, and the filesystem root is
+ * above everything. Both are resolved with the native realpath, links followed, because the plain one keeps the case
+ * it is given and a home reached in another case on a disk that ignores case would then slip past a guard that
+ * exists to refuse it. The root is named outright instead of being found by comparing with a home, so a machine
+ * that cannot name one (no HOME, no account entry, as a bare container may be) still refuses `/`. A `dir` that
+ * cannot be resolved holds nothing, and a home that cannot be resolved is held by nothing but the root.
  */
-function isHomeDirectory(dir: string): boolean {
+function containsHome(dir: string): boolean {
+  let here: string;
   try {
-    return realpathSync.native(dir) === realpathSync.native(homedir());
+    here = realpathSync.native(dir);
+  } catch {
+    return false;
+  }
+  if (parse(here).root === here) return true;
+  try {
+    const home = realpathSync.native(homedir());
+    return home === here || home.startsWith(here + sep);
   } catch {
     return false;
   }
@@ -356,24 +367,19 @@ function isHomeDirectory(dir: string): boolean {
 
 /**
  * The root bellman_upload reads under (D7): BELLMAN_UPLOAD_ROOT when that is set and not empty, else the directory
- * the bridge was started in. That default is never the filesystem root or the home directory: a bridge started at `/`
- * or in `~` by whatever launched it would make every file on the machine, or every key a person owns, an upload
- * candidate with nobody having said so, so it refuses instead, before anything is read. Saying so is naming that
- * directory in BELLMAN_UPLOAD_ROOT, which stays allowed. Read on each call, so a change to either is honoured on the
- * next upload.
+ * the bridge was started in. That default is refused when the directory contains the home directory (is it, or is
+ * above it, the filesystem root included): a bridge started there by whatever launched it would make every file
+ * under it, every key a person owns among them, an upload candidate with nobody having said so, so it refuses
+ * instead, before anything is read. A root that is named is never held to this: naming it is saying so. Read on
+ * each call, so a change to either is honoured on the next upload.
  */
 function uploadRoot(): string {
   const named = process.env.BELLMAN_UPLOAD_ROOT;
   if (named) return named;
   const cwd = process.cwd();
-  if (parse(cwd).root === cwd) {
+  if (containsHome(cwd)) {
     throw new Error(
-      `the bridge was started at ${cwd}, the filesystem root, which would make every file an upload candidate: set BELLMAN_UPLOAD_ROOT to the directory to upload from (/ to allow any file on purpose).`,
-    );
-  }
-  if (isHomeDirectory(cwd)) {
-    throw new Error(
-      `the bridge was started in ${cwd}, your home directory, which would make every file under it an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${cwd} to allow your whole home directory on purpose).`,
+      `the bridge was started in ${cwd}, which contains your home directory, so every file under it would be an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${cwd} to allow that much on purpose).`,
     );
   }
   return cwd;
@@ -1182,17 +1188,17 @@ export function createBridge(opts: BridgeOptions) {
    * for a path outside the upload root, a link, a non-file or an oversized file
    * before anything leaves the machine. The root is BELLMAN_UPLOAD_ROOT when
    * that is set and not empty, else the directory the bridge was started in,
-   * unless that is the filesystem root or the home directory, which are refused
-   * (see `uploadRoot`); it is read on each call. The post carries the bearer the
-   * bridge holds and sets Content-Length itself — the route requires it, a real
-   * fetch keeps a caller's value when it matches the body, and a fake server's
-   * Request computes none. A 401 is answered once, by asking the held connection to
-   * refresh the sign-in and posting again if the bearer changed. The placement
-   * is the upstream bellman_send, observed like any other so the membership it
-   * reveals is watched. A placement the server refuses, for whatever reason, is
-   * reported with the blob's id, bytes and type: the bytes are stored and
-   * charged, and the caller places them again (as a file, if an image was the
-   * trouble) rather than uploading twice.
+   * unless that directory contains the home directory, the filesystem root
+   * included, which is refused (see `uploadRoot`); it is read on each call. The
+   * post carries the bearer the bridge holds and sets Content-Length itself —
+   * the route requires it, a real fetch keeps a caller's value when it matches
+   * the body, and a fake server's Request computes none. A 401 is answered once,
+   * by asking the held connection to refresh the sign-in and posting again if
+   * the bearer changed. The placement is the upstream bellman_send, observed
+   * like any other so the membership it reveals is watched. A placement the
+   * server refuses, for whatever reason, is reported with the blob's id, bytes
+   * and type: the bytes are stored and charged, and the caller places them again
+   * (as a file, if an image was the trouble) rather than uploading twice.
    */
   async function uploadAndPlace(args: Record<string, unknown>): Promise<CallToolResult> {
     const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });

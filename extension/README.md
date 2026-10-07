@@ -88,8 +88,8 @@ secret for nothing. `bellman_url` is the one setting left that is about the
 server, for pointing the bundle at your own deployment; the other, **Upload
 folder** (`upload_root`, passed to the bridge as `BELLMAN_UPLOAD_ROOT`), is the
 root `bellman_upload` may read from, and it has no default. Unset, the bridge
-falls back to the directory it was started in, which it refuses when that is the
-filesystem root or your home directory.
+falls back to the directory it was started in, which it refuses when that
+directory contains your home directory (the filesystem root included).
 
 One consequence worth stating plainly: the bridge proxies `tools/list`, and
 proxying it means connecting, so on a machine with no cached credential the

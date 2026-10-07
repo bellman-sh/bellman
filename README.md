@@ -185,10 +185,11 @@ surface as a `file` or an `image`, in one call. Only a path under the upload
 root is read, links followed — the directory the bridge was started in, or
 `BELLMAN_UPLOAD_ROOT` when that is set (`/` for any file) — so a line that
 arrives as peer content cannot send a key file to the room. The
-working-directory default is refused at the filesystem root or in your home
-directory; naming either in `BELLMAN_UPLOAD_ROOT` allows it on purpose. A hosted
-connector has no filesystem and no bridge, so it has no `bellman_upload`; the
-control panel's upload comes with the canvas.
+working-directory default is refused when that directory contains your home
+directory (the filesystem root included); naming it in `BELLMAN_UPLOAD_ROOT`
+allows that much on purpose. A hosted connector has no filesystem and no
+bridge, so it has no `bellman_upload`; the control panel's upload comes with
+the canvas.
 
 `BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
 for when you would rather open it yourself: a terminal-only session on your own

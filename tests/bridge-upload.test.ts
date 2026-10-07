@@ -420,9 +420,28 @@ describe("bellman_upload's upload root", () => {
     expect(await rowKeys()).toEqual(["inside"]);
   });
 
-  // A bridge started at the filesystem root would make every file on the machine an upload candidate with nobody
-  // having said so, so the working-directory default is refused there, before anything is read. Naming / is
-  // saying so on purpose, and stays allowed.
+  // A bridge started where the home directory is, or anywhere above it, would make every file under it an upload
+  // candidate, every key a person owns among them, with nobody having said so. So the working-directory default is
+  // refused there, before anything is read: one predicate, whether the directory is `/`, the home directory or
+  // something between, and so one message. Naming the directory is saying so on purpose, and stays allowed.
+  const containsHomeMessage = (cwd: string) =>
+    `the bridge was started in ${cwd}, which contains your home directory, so every file under it would be an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${cwd} to allow that much on purpose).`;
+
+  /** Runs `body` with `os.homedir()` answering `home`. It follows HOME (USERPROFILE on Windows), so no real home is touched. */
+  const withHome = async (home: string, body: () => Promise<void>) => {
+    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      await body();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  };
+
   it("refuses the working-directory default when it is the filesystem root, and takes / when it is named", async () => {
     vi.spyOn(process, "cwd").mockReturnValue("/");
     const path = join(outside, "notes.md");
@@ -431,9 +450,7 @@ describe("bellman_upload's upload root", () => {
       setRoot(value);
       const out = await upload({ path, key: "k" });
       expect(out.isError, JSON.stringify(value)).toBe(true);
-      expect(out.text, JSON.stringify(value)).toBe(
-        "Error: the bridge was started at /, the filesystem root, which would make every file an upload candidate: set BELLMAN_UPLOAD_ROOT to the directory to upload from (/ to allow any file on purpose).",
-      );
+      expect(out.text, JSON.stringify(value)).toBe(`Error: ${containsHomeMessage("/")}`);
       await sentNothing();
     }
     setRoot("/");
@@ -441,37 +458,66 @@ describe("bellman_upload's upload root", () => {
     expect(named.isError, named.text).toBe(false);
   });
 
-  // The home directory is the other place a default would cover too much: every key a person owns is under it.
-  // `os.homedir()` follows HOME, which is how this stands a home up in a temp directory instead of writing under
-  // the real one. It is a link to the working directory, so the two are the same directory by different paths and
-  // only a guard that resolves both sides refuses it. Naming the home directory is saying so on purpose.
+  // The filesystem root holds everything, so it is refused whether or not a home can be found to compare it with:
+  // a bare container with no HOME and no account entry must not read `/` as fine for want of a home.
+  it("refuses the filesystem root as the default even when no home directory can be found", async () => {
+    await withHome(join(dir, "no-such-home"), async () => {
+      vi.spyOn(process, "cwd").mockReturnValue("/");
+      setRoot(undefined);
+      const out = await upload({ path: file("n.md", "x"), key: "k" });
+      expect(out.isError).toBe(true);
+      expect(out.text).toBe(`Error: ${containsHomeMessage("/")}`);
+      await sentNothing();
+    });
+  });
+
+  // `os.homedir()` follows HOME, which is how this stands a home up in a temp directory instead of touching the real
+  // one. It is a link to the working directory, so the two are the same directory by different paths and only a
+  // check that resolves both sides sees it. Naming the home directory is saying so on purpose.
   it("refuses the working-directory default when it is the home directory, and takes the home directory when it is named", async () => {
     const home = join(outside, "home");
     symlinkSync(dir, home);
-    const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
-    process.env.HOME = home;
-    process.env.USERPROFILE = home;
-    try {
+    await withHome(home, async () => {
       vi.spyOn(process, "cwd").mockReturnValue(dir);
       const path = file("notes.md", "# notes\n");
       for (const value of [undefined, ""]) {
         setRoot(value);
         const out = await upload({ path, key: "k" });
         expect(out.isError, JSON.stringify(value)).toBe(true);
-        expect(out.text, JSON.stringify(value)).toBe(
-          `Error: the bridge was started in ${dir}, your home directory, which would make every file under it an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${dir} to allow your whole home directory on purpose).`,
-        );
+        expect(out.text, JSON.stringify(value)).toBe(`Error: ${containsHomeMessage(dir)}`);
         await sentNothing();
       }
       setRoot(home);
       const named = await upload({ path, key: "k" });
       expect(named.isError, named.text).toBe(false);
-    } finally {
-      for (const [name, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[name];
-        else process.env[name] = value;
+    });
+  });
+
+  // Above the home directory is as much a place to refuse as the home directory is: `/Users` holds every account's
+  // home. The prefix has to end at a separator, or a directory whose name only begins like the home's would be
+  // refused with it, and the one beside the home here, `m` next to `me`, is there for that.
+  it("refuses the working-directory default when it is above the home directory, however far, and not one that only looks like it", async () => {
+    const top = join(outside, "top");
+    const home = join(top, "people", "me");
+    const lookalike = join(top, "people", "m");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(lookalike);
+    writeFileSync(join(lookalike, "n.md"), "# notes\n");
+    await withHome(home, async () => {
+      const cwd = vi.spyOn(process, "cwd");
+      setRoot(undefined);
+      for (const above of [join(top, "people"), top]) {
+        cwd.mockReturnValue(above);
+        const out = await upload({ path: join(lookalike, "n.md"), key: "k" });
+        expect(out.isError, above).toBe(true);
+        expect(out.text, above).toBe(`Error: ${containsHomeMessage(above)}`);
+        await sentNothing();
       }
-    }
+      // The control: a directory that is not above the home, though its name is the start of the home's, is a root.
+      cwd.mockReturnValue(lookalike);
+      const beside = await upload({ path: join(lookalike, "n.md"), key: "k" });
+      expect(beside.isError, beside.text).toBe(false);
+    });
   });
 
   // On a disk that ignores case, a home reached in another case is still the home directory. The plain realpath
@@ -480,19 +526,14 @@ describe("bellman_upload's upload root", () => {
   it("refuses the home directory reached in another case, on a disk that ignores case", async (context) => {
     const shouted = dir.toUpperCase();
     context.skip(!existsSync(shouted), "this disk is case-sensitive");
-    const saved = process.env.HOME;
-    process.env.HOME = dir;
-    try {
+    await withHome(dir, async () => {
       vi.spyOn(process, "cwd").mockReturnValue(shouted);
       setRoot(undefined);
       const out = await upload({ path: file("notes.md", "# notes\n"), key: "k" });
       expect(out.isError).toBe(true);
-      expect(out.text).toContain(`the bridge was started in ${shouted}, your home directory`);
+      expect(out.text).toBe(`Error: ${containsHomeMessage(shouted)}`);
       await sentNothing();
-    } finally {
-      if (saved === undefined) delete process.env.HOME;
-      else process.env.HOME = saved;
-    }
+    });
   });
 });
 

@@ -104,6 +104,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         joinCodes: { [manifest.defaultRole]: defaultCode },
         expiresAt: now + ent.sessionTtlMs,
         maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
+        // The room's own byte ceiling (#183), from the plan creating it, as the
+        // seat count and the TTL are. Nothing downstream asks a plan again.
+        blobBytesCeiling: ent.blobBytesPerRoom,
         members: [creator],
         events: [],
         closed: false,

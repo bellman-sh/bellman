@@ -123,6 +123,14 @@ export interface Session {
   joinCodes: Record<string, JoinCodeRecord>;
   expiresAt: number;            // whole-session TTL
   maxMembers: number;
+  /**
+   * The bytes this room's blob store may hold (#183, D3), stamped at creation
+   * from the creator's plan as `maxMembers` is, and never consulted against a
+   * plan again: a free member in a team room shares the team room's ceiling,
+   * which is what "a room is what a plan rations" means. Rows written before
+   * the field read the free plan's ceiling through `hydrateStoredSession`.
+   */
+  blobBytesCeiling: number;
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
@@ -187,6 +195,12 @@ export interface Entitlements {
   monthlyCreates: number;
   orgScoping: boolean;
   audit: boolean;
+  /**
+   * The bytes a room may hold in its blob store (#183, spec D3), charged per
+   * room on `chargeBlobBytes` and never against a monthly figure: a room is what
+   * a plan already rations.
+   */
+  blobBytesPerRoom: number;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
@@ -234,9 +248,10 @@ export interface RoomManifest {
 /**
  * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
  * client is shown maps to a shape the server validates, and a kind lands with
- * its validator. `file`, `image` and `html` arrive with pieces 2 and 4.
+ * its validator. `file` and `image` (#183) reference a blob; `html` arrives
+ * with piece 4.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image";
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -247,10 +262,23 @@ export interface Placement {
 }
 
 /**
+ * A blob an item references (#183, D5): the object's metadata as the server
+ * stored it, never the writer's claim. The writer names only the id; the
+ * server reads the rest off the object when the item is placed.
+ */
+export interface BlobRef {
+  id: string;        // [a-f0-9]{32}
+  bytes: number;
+  type: string;      // as stored, after D6
+  name: string;      // as stored, after D6
+}
+
+/**
  * An item as written, normalised: every optional field present as null, so a
  * reader never tells "absent" from "null". `ends` is a connector's two keys;
  * every other kind has none. `body` is markdown for `text`, a URL for `link`,
- * mermaid source for `diagram`, a label for `connector`.
+ * mermaid source for `diagram`, a label for `connector`, and absent for `file`
+ * and `image`, whose bytes are the blob's.
  */
 export interface SurfaceItem {
   key: string;
@@ -259,6 +287,8 @@ export interface SurfaceItem {
   body: string | null;
   ends: { from: string; to: string } | null;
   placement: Placement | null;
+  /** The blob a `file` or `image` names; null for every other kind. */
+  blob: BlobRef | null;
 }
 
 /** An item as stored: the item plus the write that put it there. */

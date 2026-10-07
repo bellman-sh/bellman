@@ -46,7 +46,7 @@ describe("writing an item", () => {
     expect(out.data.room_members).toEqual([p.joiner.identity.label]);
 
     expect(await rows(p)).toEqual([{
-      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null,
+      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null,
       cursor: last.cursor, at: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
     }]);
   });
@@ -122,7 +122,7 @@ describe("writing an item", () => {
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
     // pass just as well for a read that had dropped them.
-    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, cursor: expect.any(Number) });
+    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, blob: null, cursor: expect.any(Number) });
     expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
 
     const asWritten = (data: Record<string, unknown>) =>
@@ -276,6 +276,17 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     // it: null is absence, so each is refused for the rule and not for its type.
     await refused(p, { key: "t", kind: "text", body: null }, "needs a body");
     await refused(p, { key: "c", kind: "connector", ends: null }, "needs ends");
+    // A file or an image names a blob (#183) and carries no body; nothing else names one.
+    const id = "ab".repeat(16);
+    await refused(p, { key: "t3", kind: "text", body: "x", blob: { id } }, "names a blob");
+    await refused(p, { key: "c3", kind: "connector", ends: { from: "plan", to: "arch" }, blob: { id } }, "names a blob");
+    await refused(p, { key: "f", kind: "file" }, "needs blob");
+    await refused(p, { key: "f", kind: "file", blob: null }, "needs blob");
+    await refused(p, { key: "f", kind: "file", blob: { id }, body: "and a body" }, "no body");
+    await refused(p, { key: "f", kind: "image", blob: { id }, ends: { from: "plan", to: "arch" } }, "only a connector has ends");
+    await refused(p, { key: "f", kind: "file", blob: { id: "nope" } }, "blob.id: ");
+    await refused(p, { key: "f", kind: "file", blob: { id, bytes: 5 } }, "blob: ");
+    await refused(p, { key: "f", kind: "file", blob: { id, type: "image/png", name: "x" } }, '"type"');
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "plan" } }, "must differ");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "arch" }, placement: { x: 0, y: 0 } }, "no placement");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "ghost" } }, "not on the surface");

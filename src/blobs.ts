@@ -119,8 +119,7 @@ export const blobKey = (sessionId: string, id: string): string => `rooms/${sessi
  * in-memory store does not hydrate, so this reads through `?? 0` as
  * `surfaceCursor` does.
  */
-export const blobBytesUsed = (s: StoredSession): number =>
-  (s as { blobBytes?: number }).blobBytes ?? 0;
+export const blobBytesUsed = (s: StoredSession): number => s.blobBytes ?? 0;
 
 /** The object's metadata, as the store reports it. `etag` is the store's own. */
 export interface BlobMeta {

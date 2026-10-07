@@ -13,8 +13,9 @@ import { z } from "zod";
 import type { SessionEvent, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
+import { BLOB_ID } from "./blobs.js";
 
-export const SURFACE_KINDS = ["text", "link", "diagram", "connector"] as const satisfies readonly SurfaceKind[];
+export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image"] as const satisfies readonly SurfaceKind[];
 
 // ponytail: ceilings, not tuned. 64 keeps a full read inside one tool response;
 // the first room past it wants pagination, not a bigger number. 8,000 is the
@@ -75,6 +76,16 @@ const PlacementShape = z.strictObject({
 const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape });
 
 /**
+ * The blob a `file` or `image` names (#183, D5): the id and nothing else.
+ * `bytes`, `type` and `name` are the server's to set from the object, so an item
+ * sent back as it was read is refused for them until the sender takes them off,
+ * as it is for `cursor` and `at`.
+ */
+const BlobShape = z.strictObject({
+  id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
+});
+
+/**
  * Non-empty text of at most `max` UTF-16 code units: `.length`, which is what
  * the index reports as `chars`, so the bound and the number read against it
  * are one count. Not zod's `.max()`, which measures a string in code points
@@ -101,6 +112,7 @@ export const SurfaceItemShape = z.strictObject({
   body: boundedText(MAX_SURFACE_BODY_CHARS).nullish(),
   ends: EndsShape.nullish(),
   placement: PlacementShape.nullish(),
+  blob: BlobShape.nullish(),
 });
 
 /** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */
@@ -121,39 +133,48 @@ const describeIssue = (i: { path: PropertyKey[]; message: string }): string => {
  * presence of `remove`, as the manifest resolver chooses by `preset`, so the
  * error names the field rather than reporting an opaque union failure.
  *
- * What is NOT checked here: that a connector's ends exist. That needs the
- * rows, and it is `writeSurface`'s read.
+ * What is NOT checked here: that a connector's ends exist, and that a blob
+ * exists and is what its kind needs — both are `writeSurface`'s reads.
  */
 export function normalizeSurfaceWrite(
   payload: unknown,
-): { ok: true; write: SurfaceWrite } | { ok: false; reason: string } {
+): { ok: true; write: SurfaceWrite; blobId: string | null } | { ok: false; reason: string } {
   const removing = typeof payload === "object" && payload !== null && "remove" in payload;
   if (removing) {
     const parsed = SurfaceRemoveShape.safeParse(payload);
     if (!parsed.success) {
       return { ok: false, reason: `surface removal must be { key, remove: true }: ${describeIssue(parsed.error.issues[0])}` };
     }
-    return { ok: true, write: { key: parsed.data.key, item: null } };
+    return { ok: true, write: { key: parsed.data.key, item: null }, blobId: null };
   }
 
   const parsed = SurfaceItemShape.safeParse(payload);
   if (!parsed.success) {
     return {
       ok: false,
-      reason: `surface payload must be { key, kind, title?, body?, ends?, placement? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
+      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, blob? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
     };
   }
   const v = parsed.data;
   const refuse = (reason: string) => ({ ok: false as const, reason: `surface ${v.kind} "${v.key}": ${reason}` });
 
+  // A file or an image is blob-backed (#183): its bytes are the object's, so it
+  // names a blob and carries no body. Nothing else may name one.
+  const blobBacked = v.kind === "file" || v.kind === "image";
   if (v.kind === "connector") {
     if (!v.ends) return refuse("a connector needs ends { from, to } naming two items");
     if (v.ends.from === v.ends.to) return refuse("a connector's ends must differ");
     if (v.placement) return refuse("a connector has no placement; it is drawn between its ends");
   } else {
     if (v.ends) return refuse("only a connector has ends");
-    if (!v.body) return refuse("needs a body");
+    if (blobBacked) {
+      if (!v.blob) return refuse("a file or an image needs blob { id } naming a blob uploaded to this room");
+      if (v.body) return refuse("a file or an image has no body; its bytes are the blob's");
+    } else if (!v.body) {
+      return refuse("needs a body");
+    }
   }
+  if (v.blob && !blobBacked) return refuse("only a file or an image names a blob");
 
   if (v.kind === "link") {
     if (v.body!.length > MAX_SURFACE_LINK_CHARS) {
@@ -182,7 +203,10 @@ export function normalizeSurfaceWrite(
         body: v.body ?? null,
         ends: v.ends ?? null,
         placement: v.placement ?? null,
+        // Filled from the object by writeSurface (D5): the writer's word is the id alone.
+        blob: null,
       },
     },
+    blobId: v.blob?.id ?? null,
   };
 }

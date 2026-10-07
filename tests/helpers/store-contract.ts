@@ -1822,7 +1822,7 @@ export function describeStoreContract(
      */
     describe("the surface rows", () => {
       const plan = (body = "1. read\n2. write"): SurfaceItem => ({
-        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null,
+        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null, blob: null,
       });
       const wrote = (item: SurfaceItem | null = plan()): EventBody => ({
         type: "surface",

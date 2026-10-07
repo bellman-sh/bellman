@@ -2,8 +2,9 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
-import { UNTRUSTED_PREAMBLE, roomPreview, untrusted } from "../projections.js";
+import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../projections.js";
 import type { Identity } from "../types.js";
+import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
 import { activeMembers, audit, seatedMembers } from "../rooms.js";
 import { CONNECT_TOKEN_TTL } from "../store.js";
@@ -22,7 +23,8 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope) }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
+surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
 Errors: "join code not found or expired" — codes are single-use and expire 15 minutes after creation if unused. "session is org-restricted" — creator limited joining to their org.`,
@@ -87,6 +89,11 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       });
       await audit(s, session, identity, "connect_previewed", {});
 
+      // The index, not the items (#129, D7/D9): a code holder who never joins
+      // is shown that the room keeps a plan and a diagram, not their contents —
+      // the line that keeps joiners' briefs out of this preview.
+      const index = surfaceIndex(await s.surfaceOf(session.id));
+
       return ok(
         {
           connect_token: token,
@@ -102,6 +109,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
             { memberId: creator.memberId, label: creator.label },
             creator.brief
           ),
+          surface: { cursor: surfaceCursor(session), items: index },
         },
         UNTRUSTED_PREAMBLE +
           "\n\nShow this preview to your human before calling bellman_confirm — confirming ships YOUR brief to the peer."

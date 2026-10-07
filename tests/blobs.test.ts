@@ -100,6 +100,20 @@ describe("sanitizeName (D6)", () => {
     expect(sanitizeName("line\nbreak.txt")).toBe("linebreak.txt");
   });
 
+  // The whole-branch review's fourth finding: C0 and DEL were stripped and C1 and the format characters were not.
+  // The right-to-left override is the one that matters: it makes a save dialog draw this name as `reportexe.pdf`.
+  it("strips C1 controls and format characters, the bidirectional overrides among them", () => {
+    expect(sanitizeName("report‮fdp.exe")).toBe("reportfdp.exe");
+    expect(sanitizeName("a\u0085b\u009Fc.txt")).toBe("abc.txt");
+    expect(sanitizeName("⁦isolated⁩.txt")).toBe("isolated.txt");
+  });
+
+  // Named so it is a decision and not a surprise: a joiner is a format character too, so a ZWJ emoji sequence
+  // comes back as the emoji that made it up, side by side.
+  it("loses the joiners of a ZWJ emoji sequence, the accepted cost of stripping format characters", () => {
+    expect(sanitizeName("👨‍👩‍👧.png")).toBe("👨👩👧.png");
+  });
+
   it("refuses an absent, empty or over-long name rather than inventing or truncating one", () => {
     expect(sanitizeName(null)).toBeNull();
     expect(sanitizeName("")).toBeNull();

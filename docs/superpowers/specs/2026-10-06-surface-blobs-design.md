@@ -190,9 +190,10 @@ signatures. A mismatch stores `application/octet-stream`, not the claim: a body
 that is not a PNG is not served as one, whatever its header said. Ten lines,
 and the difference between an allowlist and a suggestion.
 
-`name` is bounded at 200 characters, stripped of path separators and control
-characters, and what comes back in `Content-Disposition` is that, encoded. It
-is the client's word and is treated as a label, never as a path.
+`name` is bounded at 200 characters, stripped of path separators, control
+characters and format characters, and what comes back in `Content-Disposition`
+is that, encoded. It is the client's word and is treated as a label, never as a
+path.
 
 ### D7 — The bridge uploads and places in one call.
 

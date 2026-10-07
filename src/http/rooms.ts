@@ -143,7 +143,7 @@ async function uploadBlob(
   if (name === null) {
     return problem(
       400, "invalid_request",
-      `name is required: 1 to ${MAX_BLOB_NAME_CHARS} characters once path separators and control characters are stripped`,
+      `name is required: 1 to ${MAX_BLOB_NAME_CHARS} characters once path separators, control characters and format characters are stripped`,
       origin,
     );
   }

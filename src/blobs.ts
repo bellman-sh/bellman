@@ -76,15 +76,18 @@ export function storedType(claimed: string | null, head: Uint8Array): string {
 
 /**
  * A name as it is stored and later sent back in Content-Disposition (D6): a
- * label, never a path. Path separators and control characters are stripped and
- * the rest trimmed; what is left must be 1 to 200 code units (`.length`, the
- * unit every surface bound uses), or the name is refused — null, for the route
- * to answer 400, rather than truncated or invented.
+ * label, never a path. Path separators, control characters (C0, DEL and C1) and
+ * format characters are stripped and the rest trimmed. The format characters
+ * include the bidirectional overrides, which make a save dialog draw
+ * `report<RLO>fdp.exe` as `reportexe.pdf`; they also include the joiners that hold
+ * an emoji sequence together, which is the accepted cost: a family emoji comes
+ * back as its members side by side. What is left must be 1 to 200 code units
+ * (`.length`, the unit every surface bound uses), or the name is refused — null,
+ * for the route to answer 400, rather than truncated or invented.
  */
 export function sanitizeName(raw: string | null): string | null {
   if (raw === null) return null;
-  // eslint-disable-next-line no-control-regex
-  const name = raw.replace(/[\\/\u0000-\u001f\u007f]/g, "").trim();
+  const name = raw.replace(/[\\/\p{Cc}\p{Cf}]/gu, "").trim();
   return name.length >= 1 && name.length <= MAX_BLOB_NAME_CHARS ? name : null;
 }
 

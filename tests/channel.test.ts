@@ -414,4 +414,33 @@ describe("bellman_upload through the process", () => {
       said: expect.stringContaining("upload refused (403)"),
     });
   });
+
+  // The same refusal from a real process whose working directory really is `/`, with no mock between this test and
+  // process.cwd(): the default root is never the filesystem root, so nothing is read and nothing is posted.
+  it("refuses to take the filesystem root as its default upload root, and posts nothing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
+    dirs.push(dir);
+    const path = join(dir, "notes.md");
+    writeFileSync(path, "# notes\n");
+
+    const bellman = await fakeBellman(forbids);
+    const bridge = startBridge(bellman, { key: "qk_dev_jesse", cached: false, cwd: "/" });
+    const answered = answers(bridge);
+    await until(() => bridge.log().length > 0);
+    initialize(bridge);
+    bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    bridge.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "notes" } },
+    });
+    const replied = await until(() => answered.has(3));
+
+    expect({ replied, hits: bellman.hits, said: answered.get(3)?.result?.content?.[0]?.text }).toEqual({
+      replied: true,
+      hits: [],
+      said: expect.stringContaining("the bridge was started at /, the filesystem root"),
+    });
+  });
 });

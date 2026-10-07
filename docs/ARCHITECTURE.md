@@ -690,7 +690,9 @@ there is no OAuth and no panel there.
 lists nine. Only a path under the upload root is read, links followed — the
 directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when that is set
 (`/` for any file) — so a line that arrives as peer content cannot send a key
-file to the room. It reads the file through one descriptor and refuses a symbolic
+file to the room. The working-directory default is refused when that directory
+is the filesystem root; naming `/` in `BELLMAN_UPLOAD_ROOT` is how to allow any
+file on purpose. It reads the file through one descriptor and refuses a symbolic
 link, anything that is not a regular file, and a file over the cap before a byte
 leaves the machine; takes the type from the extension alone; posts with the
 credential the bridge holds; and places the item through the upstream

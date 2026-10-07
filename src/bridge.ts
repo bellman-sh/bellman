@@ -1,7 +1,7 @@
 import {
   closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync,
 } from "node:fs";
-import { basename, extname, join, sep } from "node:path";
+import { basename, extname, join, parse, sep } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -338,6 +338,25 @@ export function readLocalFile(path: string, root: string): { bytes: Buffer<Array
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The root bellman_upload reads under (D7): BELLMAN_UPLOAD_ROOT when that is set and not empty, else the directory
+ * the bridge was started in. That default is never the filesystem root: a bridge started at `/` by whatever launched
+ * it would make every file on the machine an upload candidate with nobody having said so, so it refuses instead,
+ * before anything is read. Saying so is naming `/` in BELLMAN_UPLOAD_ROOT, which stays allowed. Read on each call,
+ * so a change to either is honoured on the next upload.
+ */
+function uploadRoot(): string {
+  const named = process.env.BELLMAN_UPLOAD_ROOT;
+  if (named) return named;
+  const cwd = process.cwd();
+  if (parse(cwd).root === cwd) {
+    throw new Error(
+      `the bridge was started at ${cwd}, the filesystem root, which would make every file an upload candidate: set BELLMAN_UPLOAD_ROOT to the directory to upload from (/ to allow any file on purpose).`,
+    );
+  }
+  return cwd;
 }
 
 interface Watch {
@@ -1142,7 +1161,8 @@ export function createBridge(opts: BridgeOptions) {
    * bellman_upload (#183, D7): read, post, place. The upload is refused locally
    * for a path outside the upload root, a link, a non-file or an oversized file
    * before anything leaves the machine. The root is BELLMAN_UPLOAD_ROOT when
-   * that is set and not empty, else the directory the bridge was started in; it
+   * that is set and not empty, else the directory the bridge was started in,
+   * unless that is the filesystem root, which is refused (see `uploadRoot`); it
    * is read on each call. The post carries the bearer the bridge holds and sets
    * Content-Length itself — the route requires it, a real fetch keeps a
    * caller's value when it matches the body, and a fake server's Request
@@ -1166,7 +1186,7 @@ export function createBridge(opts: BridgeOptions) {
 
     let file: { bytes: Buffer<ArrayBuffer> };
     try {
-      file = readLocalFile(path, process.env.BELLMAN_UPLOAD_ROOT || process.cwd());
+      file = readLocalFile(path, uploadRoot());
     } catch (e) {
       return fail((e as Error).message);
     }

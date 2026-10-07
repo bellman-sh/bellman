@@ -30,8 +30,9 @@
  *                     others sharing a bus among themselves.
  *   BELLMAN_UPLOAD_ROOT  optional. Where bellman_upload may read from: a path outside this
  *                     directory, links followed, is refused. Unset or empty, it is the
- *                     directory the bridge was started in. "/" is any file. Read on each
- *                     upload.
+ *                     directory the bridge was started in, unless that is the filesystem
+ *                     root, which is refused. "/" is any file, and has to be named. Read
+ *                     on each upload.
  *
  * The sign-in is NOT lazy, and it is worth being plain about it. Claude Code
  * lists a server's tools as soon as it connects, the bridge proxies tools/list

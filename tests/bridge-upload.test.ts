@@ -419,6 +419,27 @@ describe("bellman_upload's upload root", () => {
     }
     expect(await rowKeys()).toEqual(["inside"]);
   });
+
+  // A bridge started at the filesystem root would make every file on the machine an upload candidate with nobody
+  // having said so, so the working-directory default is refused there, before anything is read. Naming / is
+  // saying so on purpose, and stays allowed.
+  it("refuses the working-directory default when it is the filesystem root, and takes / when it is named", async () => {
+    vi.spyOn(process, "cwd").mockReturnValue("/");
+    const path = join(outside, "notes.md");
+    writeFileSync(path, "# notes\n");
+    for (const value of [undefined, ""]) {
+      setRoot(value);
+      const out = await upload({ path, key: "k" });
+      expect(out.isError, JSON.stringify(value)).toBe(true);
+      expect(out.text, JSON.stringify(value)).toBe(
+        "Error: the bridge was started at /, the filesystem root, which would make every file an upload candidate: set BELLMAN_UPLOAD_ROOT to the directory to upload from (/ to allow any file on purpose).",
+      );
+      await sentNothing();
+    }
+    setRoot("/");
+    const named = await upload({ path, key: "k" });
+    expect(named.isError, named.text).toBe(false);
+  });
 });
 
 describe("the local half", () => {

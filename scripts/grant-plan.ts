@@ -27,6 +27,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFile
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ENTITLEMENTS } from "../src/auth.js";
 import type { Identity, Plan, Role } from "../src/types.js";
 import { isStableIdentityKey } from "../src/oauth/providers.js";
 
@@ -36,7 +37,7 @@ const USERS_FILE = join(CONFIG_DIR, "users.json");
 const BACKUP_FILE = `${USERS_FILE}.bak`;
 const DEFAULT_URL = "https://mcp.bellman.sh/mcp";
 
-const PLANS: Plan[] = ["free", "pro", "team"];
+const PLANS = Object.keys(ENTITLEMENTS) as Plan[];
 const ROLES: Role[] = ["member", "admin"];
 
 /**

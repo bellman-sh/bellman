@@ -3,6 +3,9 @@ import type { Entitlements, Identity, Plan } from "./types.js";
 /**
  * Plan entitlements. These gate session CREATION only — joining is free on
  * every plan, so being invited into a room never depends on what you pay.
+ *
+ * Declared cheapest first: billing ranks plans by this order, and a user
+ * paying for two gets the higher one (src/billing/ledger.ts).
  */
 export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   free: {
@@ -18,6 +21,16 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     maxMembers: 8,
     sessionTtlMs: 72 * 60 * 60 * 1000,
     monthlyCreates: 500,
+    orgScoping: false,
+    audit: false,
+  },
+  // Team-sized rooms for one person, without an org. Org scoping, the audit
+  // log and 30-day rooms stay team-only: that is why a company still buys team.
+  max: {
+    modes: ["pair", "swarm"],
+    maxMembers: 25,
+    sessionTtlMs: 14 * 24 * 60 * 60 * 1000,
+    monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
   },

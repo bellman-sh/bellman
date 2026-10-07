@@ -1,4 +1,4 @@
-export type Plan = "free" | "pro" | "team";
+export type Plan = "free" | "pro" | "max" | "team";
 export type Role = "member" | "admin";
 export type SessionMode = "pair" | "swarm";
 export type Capability = "read_context" | "receive_messages" | "request_actions";

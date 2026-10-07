@@ -192,9 +192,9 @@ and the difference between an allowlist and a suggestion.
 
 `name` is bounded at 200 characters, stripped of path separators, control
 characters and format characters (all but the two zero-width joiners and the
-soft hyphen, which names are spelled with), and what comes back in
-`Content-Disposition` is that, encoded. It is the client's word and is treated
-as a label, never as a path.
+soft hyphen, which names are spelled with; a name left with nothing else is
+refused as a blank), and what comes back in `Content-Disposition` is that,
+encoded. It is the client's word and is treated as a label, never as a path.
 
 ### D7 — The bridge uploads and places in one call.
 

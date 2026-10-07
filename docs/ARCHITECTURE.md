@@ -854,7 +854,8 @@ loud:
   store an artifact as a blob without the route becoming an XSS vector on
   `mcp.bellman.sh`. A blob's name is a label, stripped of path separators,
   control characters and format characters (all but the two zero-width joiners
-  and the soft hyphen, which names are spelled with), and never derives a key.
+  and the soft hyphen, which names are spelled with, and a name left with
+  nothing else is refused as a blank), and never derives a key.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and

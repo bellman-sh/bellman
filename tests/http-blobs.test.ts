@@ -298,7 +298,7 @@ describe("POST /rooms/:id/blobs", () => {
     expect((await stored("x", { name: "../../etc/passwd" })).name).toBe("....etcpasswd");
     expect((await stored("x", { name: " résumé (1).pdf " })).name).toBe("résumé (1).pdf");
     expect((await stored("x", { name: "a\u0000b\nc.txt" })).name).toBe("abc.txt");
-    for (const name of [null, "", "///", "n".repeat(MAX_BLOB_NAME_CHARS + 1)]) {
+    for (const name of [null, "", "///", "\u{200D}", "n".repeat(MAX_BLOB_NAME_CHARS + 1)]) {
       expect((await upload(DEV_KEY.jesse, "x", { name }))!.status, JSON.stringify(name)).toBe(400);
     }
     expect((await upload(DEV_KEY.jesse, "x", { member: null }))!.status).toBe(400);

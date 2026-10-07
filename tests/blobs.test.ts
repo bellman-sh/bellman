@@ -117,6 +117,15 @@ describe("sanitizeName (D6)", () => {
     expect(sanitizeName("co\u{AD}operate.txt")).toBe("co\u{AD}operate.txt");
   });
 
+  // The three that stay are invisible, so a name made of nothing else shows as a blank: refused, as an empty name
+  // is. Beside anything visible they are part of a name, and a sequence of emoji held by joiners is still a name.
+  it("refuses a name that would show blank, and still takes one with anything visible beside a joiner", () => {
+    expect(sanitizeName("\u{200D}")).toBeNull();
+    expect(sanitizeName("\u{200C}\u{AD} \u{200D}")).toBeNull();
+    expect(sanitizeName("a\u{200D}")).toBe("a\u{200D}");
+    expect(sanitizeName("👨\u{200D}👩\u{200D}👧")).toBe("👨\u{200D}👩\u{200D}👧");
+  });
+
   // Every other format character goes. The tag characters (the U+E0000 block) spell out a string a human reader
   // cannot see and a program can; the zero-width space and the byte-order mark are invisible and mean nothing in
   // a name. Placed inside the name, because trim() takes a leading U+FEFF off whatever the class does.

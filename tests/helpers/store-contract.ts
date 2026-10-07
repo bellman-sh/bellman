@@ -2043,10 +2043,24 @@ export function describeStoreContract(
         expect(await used(s.id)).toBe(5);
       });
 
+      // Closed wins over frozen, as in closeIfEmpty (src/rooms.ts): "frozen" tells the caller to restore the plan, which cannot reopen a room that is over.
+      it("reads a room that is both frozen and closed as closed", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 5);
+        await store.freezeSession(s.id, Date.now());
+        await store.closeSession(s.id);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "closed", used: 5 });
+      });
+
       it("answers not_found for a room that does not exist", async () => {
         expect(await store.chargeBlobBytes("qs_nobody", 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
       });
 
+      // Against MemoryStore this reaches `expireIfDue`. Against the Durable Object it reaches
+      // `s.closed` and not the TTL read: the alarm has closed a room created already past its
+      // TTL before the charge arrives. The room past its TTL with the alarm still to come, which
+      // is what `readsClosed` answers for, is pinned in worker-tests/blob-charge.test.ts.
       it("reads a room past its TTL as closed", async () => {
         const s = session({ expiresAt: Date.now() - 1 });
         await store.createSession(s);

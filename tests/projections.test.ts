@@ -19,6 +19,10 @@
  * the tool handlers import, with `blobs-r2.ts` the Workers half it must never
  * reach.
  *
+ * `src/http/rooms.ts` is the fifth (#183): the routes the Worker dispatches to
+ * and the root program drives directly, which only holds while they import no
+ * runtime.
+ *
  * The property is transitive. A clean module that imports a clean module that
  * imports the SDK is not clean, so the walk follows local edges rather than
  * reading one file's import list.
@@ -99,6 +103,7 @@ describe("the projection layer stays importable from both transports", () => {
     ["public-event.ts", resolve(SRC, "public-event.ts")],
     ["rooms.ts", resolve(SRC, "rooms.ts")],
     ["blobs.ts", resolve(SRC, "blobs.ts")],
+    ["http/rooms.ts", resolve(SRC, "http/rooms.ts")],
   ])("%s pulls in no runtime, transitively", (_name, entry) => {
     expect(offenders(entry)).toEqual([]);
   });
@@ -129,6 +134,7 @@ describe("the projection layer stays importable from both transports", () => {
     reachable(resolve(SRC, "public-event.ts"));
     reachable(resolve(SRC, "rooms.ts"));
     reachable(resolve(SRC, "blobs.ts"));
+    reachable(resolve(SRC, "http/rooms.ts"));
     expect(unresolved).toEqual([]);
   });
 

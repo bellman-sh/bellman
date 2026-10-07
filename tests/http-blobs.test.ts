@@ -9,9 +9,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import {
-  MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, MemoryBlobStore, blobBytesUsed, newBlobId, type BlobPut,
+  MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, MemoryBlobStore, blobBytesUsed, newBlobId, type BlobPut, type BlobRead,
 } from "../src/blobs.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { STALE_AFTER_MS } from "../src/presence.js";
 import { MemoryStore, type BlobCharge } from "../src/store.js";
 import { PNG, text } from "./helpers/blob-bytes.js";
 import { member, session } from "./helpers/fixtures.js";
@@ -21,12 +22,20 @@ const ISSUER = "https://mcp.example.test";
 const PANEL = "https://dash.example.test";
 const ROOM = "qs_blobs";
 
-/** A blob store that remembers every put, so a test can show nothing was stored, or that a refusal cleaned up. */
+/**
+ * A blob store that remembers every put, so a test can show nothing was stored or that a refusal
+ * cleaned up, and counts every get, so a test can show a download never asked it.
+ */
 class RecordingBlobStore extends MemoryBlobStore {
   puts: { sessionId: string; id: string }[] = [];
+  gets = 0;
   override async put(sessionId: string, id: string, body: ReadableStream<Uint8Array> | ArrayBuffer, meta: BlobPut): Promise<void> {
     this.puts.push({ sessionId, id });
     return super.put(sessionId, id, body, meta);
+  }
+  override async get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobRead> {
+    this.gets++;
+    return super.get(sessionId, id, ifNoneMatch);
   }
 }
 
@@ -188,6 +197,26 @@ describe("POST /rooms/:id/blobs", () => {
     expect((await upload(DEV_KEY.jesse, "x"))!.status).toBe(201);
   });
 
+  // The Origin check runs ahead of the seat gate, and the gate touches the caller's lastSeenAt: a
+  // forged request writes nothing at all, not even a liveness stamp.
+  it("refuses a forged cookie upload before the seat gate, so the member's lastSeenAt is unchanged", async () => {
+    // Stale enough that the gate's touch would write: touchMember skips a seat seen within half the window.
+    const stale = Date.now() - 2 * STALE_AFTER_MS;
+    await store.updateMember(ROOM, "m_creator", { lastSeenAt: stale });
+    const lastSeen = async () =>
+      (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_creator")!.lastSeenAt;
+    const before = await lastSeen();
+    expect(before, "the seat starts stale").toBe(stale);
+    const noOrigin = (await upload(null, "x", { cookie: DEV_KEY.jesse }))!;
+    expect([noOrigin.status, await lastSeen()], "no Origin: refused, and the seat as it was").toEqual([403, before]);
+    const offList = (await upload(null, "x", { cookie: DEV_KEY.jesse, headers: { origin: "https://evil.example" } }))!;
+    expect([offList.status, await lastSeen()], "an off-list Origin: refused, and the seat as it was").toEqual([403, before]);
+    expect(blobs.puts).toEqual([]);
+    // The control: the same stale seat through a bearer is touched, so "unchanged" above means something.
+    expect((await upload(DEV_KEY.jesse, "x"))!.status).toBe(201);
+    expect(await lastSeen()).toBeGreaterThan(stale);
+  });
+
   it("refuses an over-quota upload before the bytes move, against the room's own ceiling", async () => {
     await store.createSession(session({ id: "qs_small", blobBytesCeiling: 10, members: [member()] }));
     const small = { room: "qs_small" };
@@ -310,13 +339,15 @@ describe("GET /rooms/:id/blobs/:blobId", () => {
       .toBe("attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20%281%29.md");
   });
 
-  it("answers 304 to a matching If-None-Match, with the ETag, CORS and no body", async () => {
+  it("answers 304 to a matching If-None-Match, with the ETag, the download headers, CORS and no body", async () => {
     const { blob_id } = await stored("cached", { name: "c.txt" });
     const etag = (await download(DEV_KEY.jesse, blob_id))!.headers.get("etag")!;
     const again = (await download(DEV_KEY.jesse, blob_id, { "if-none-match": etag, origin: PANEL }))!;
     expect(again.status).toBe(304);
     expect(again.headers.get("etag")).toBe(etag);
     expect(again.headers.get("cache-control")).toBe("private, max-age=300");
+    expect(again.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(again.headers.get("content-security-policy")).toBe("sandbox");
     expect(again.headers.get("access-control-allow-origin")).toBe(PANEL);
     expect(await again.text()).toBe("");
     expect((await download(DEV_KEY.jesse, blob_id, { "if-none-match": '"something-else"' }))!.status).toBe(200);
@@ -334,6 +365,28 @@ describe("GET /rooms/:id/blobs/:blobId", () => {
     const posted = (await roomRoutes(new Request(`${ISSUER}/rooms/${ROOM}/blobs/${blob_id}`, { method: "POST", headers: { authorization: `Bearer ${DEV_KEY.jesse}` } }), deps))!;
     expect(posted.status).toBe(405);
     expect(posted.headers.get("allow")).toBe("GET");
+  });
+
+  // The id check is the route's own rule. Over MemoryBlobStore an unknown id answers null, so a
+  // status alone cannot tell the guard from the store: count the questions the store was asked.
+  it("answers 404 to a malformed id without asking the blob store", async () => {
+    await stored("x");
+    const malformed = [
+      // `../x` as a client has to send it: a literal `../x` is resolved away by the URL parser and
+      // never reaches a route.
+      "..%2Fx",
+      "ABCDEF01".repeat(4), // 32 characters, but uppercase hex
+      "a".repeat(31), // one character short
+    ];
+    const statuses: number[] = [];
+    const asked: number[] = [];
+    for (const id of malformed) {
+      statuses.push((await download(DEV_KEY.jesse, id))!.status);
+      asked.push(blobs.gets);
+    }
+    expect([statuses, asked]).toEqual([[404, 404, 404], [0, 0, 0]]);
+    // The control: a well-formed id nobody stored is asked of the store, and is a 404 too.
+    expect([(await download(DEV_KEY.jesse, newBlobId()))!.status, blobs.gets]).toEqual([404, 1]);
   });
 
   it("serves a member whatever its verbs, one who left or timed out, a closed room and a frozen one", async () => {

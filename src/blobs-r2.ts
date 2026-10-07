@@ -35,16 +35,34 @@ export class R2BlobStore implements BlobStore {
     // stream must have a known length" otherwise. A request body qualifies; the
     // stream the route rebuilt after reading its first bytes (readHead) does
     // not, so the body goes through a FixedLengthStream, which gives R2 its
-    // length. The length RULE is not the FixedLengthStream's: it errors with its
-    // own TypeError, which cannot be told from any other failure of the put.
-    // `exactLength` runs ahead of it and errors with BlobLengthError first, and
-    // the two halves are settled together so that error is the one thrown — the
-    // class the route maps to 400 — and neither rejection is left unhandled.
+    // length.
+    //
+    // The length RULE is neither the FixedLengthStream's nor R2's: a body of the
+    // wrong length makes the put fail with a plain Error, the message without the
+    // class, which cannot be told from any other failure of the put. So the class
+    // comes from the pipe. `exactLength` runs ahead of the FixedLengthStream and
+    // errors with BlobLengthError first; the put and the pipe are settled together,
+    // so neither rejection is left unhandled; and the pipe's own BlobLengthError is
+    // rethrown ahead of R2's rejection. That is the class the route maps to 400, so
+    // its `instanceof` holds over R2 as it does over memory, and the route counts
+    // nothing itself.
+    //
+    // A refused body stores nothing. R2 commits a put the moment it holds the
+    // length it was told and reports the stream's failure only after, so a body that
+    // delivers exactly `meta.bytes` and then runs on is stored while its put still
+    // rejects. Whenever the pipe objected, then, the key is deleted before the error
+    // is thrown, whatever the put said. (An id is fresh for every upload, so there
+    // is no earlier object under it to lose.)
     const fixed = new FixedLengthStream(meta.bytes);
     const [stored, piped] = await Promise.allSettled([
       this.bucket.put(key, fixed.readable, options),
       exactLength(body, meta.bytes).pipeTo(fixed.writable),
     ]);
+    if (piped.status === "rejected") {
+      await this.bucket.delete(key).catch((err: unknown) => {
+        console.error(`orphaned blob ${key} after a refused body:`, err);
+      });
+    }
     if (piped.status === "rejected" && piped.reason instanceof BlobLengthError) throw piped.reason;
     if (stored.status === "rejected") throw stored.reason;
     if (piped.status === "rejected") throw piped.reason;

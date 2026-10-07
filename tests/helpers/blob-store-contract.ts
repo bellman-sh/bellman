@@ -95,6 +95,9 @@ export function describeBlobStoreContract(name: string, makeStore: () => BlobSto
       await refusal("11".repeat(16), stream(text("short")), 10);
       await refusal("22".repeat(16), stream(text("too long")), 3);
       await refusal("33".repeat(16), text("buf").buffer as ArrayBuffer, 4);
+      // Delivers exactly the declared length in its first chunks and then runs on: a store that was
+      // told the length has been given everything it expected by the time the overrun shows.
+      await refusal("55".repeat(16), stream(text("toolong"), 3), 3);
     });
 
     it("replaces an object put again under the same id", async () => {

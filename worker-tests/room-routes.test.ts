@@ -21,6 +21,6 @@ describe("GET /rooms through the Worker", () => {
   it("reaches the room routes module with no trailing slash", async () => {
     const res = await call("/rooms", { headers: { authorization: `Bearer ${KEY}` } });
     expect(res.status, await res.clone().text()).toBe(200);
-    expect(await res.json()).toEqual({ rooms: [] });
+    expect(await res.json()).toEqual({ rooms: [], truncated: false });
   });
 });

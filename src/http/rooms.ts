@@ -305,10 +305,19 @@ async function downloadBlob(
  * The list (D1): every room this person created or holds a handle in, from the
  * two registry listings, each resolved with one `getSession`. Membership is
  * checked on the record, not trusted from the index: a listing row names a room,
- * and only the roster says whether this person is in it. Newest first, by the
- * creator's seat, since a room has no creation stamp of its own. A room this
- * person was removed from (#113) is listed with its member count as of the
- * removal (`roomSummary`), the number its detail would give.
+ * and only the roster says whether this person is in it.
+ *
+ * Newest first, by the creator's seat (a room has no creation stamp of its own),
+ * among the rooms the indexes returned. Each listing is asked for
+ * `MAX_ROOMS_LISTED` ids and neither orders by recency — the dev store walks
+ * oldest first, the registry by session id — so for a person with more rooms
+ * than that the page is shown a window the indexes chose, not their newest.
+ * `truncated` says when that could be so: a listing came back full, which may
+ * have been exactly full, or the rooms found exceeded the bound before the cut.
+ * The newest 50 of a larger set is #49's summary index.
+ *
+ * A room this person was removed from (#113) is listed with its member count as
+ * of the removal (`roomSummary`), the number its detail would give.
  */
 async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -320,12 +329,14 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
   ]);
   const ids = [...new Set([...created, ...joined])];
   const found = await Promise.all(ids.map((id) => deps.store.getSession(id)));
-  const rooms = found
+  const mine = found
     .filter((s): s is StoredSession => s !== undefined && s.members.some((m) => m.userId === userId))
-    .sort((a, b) => b.members[0].joinedAt - a.members[0].joinedAt)
+    .sort((a, b) => b.members[0].joinedAt - a.members[0].joinedAt);
+  const truncated = created.length >= MAX_ROOMS_LISTED || joined.length >= MAX_ROOMS_LISTED || mine.length > MAX_ROOMS_LISTED;
+  const rooms = mine
     .slice(0, MAX_ROOMS_LISTED)
     .map((s) => roomSummary(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
-  return json(200, { rooms }, origin);
+  return json(200, { rooms, truncated }, origin);
 }
 
 /** Every handle this person holds in the room, in roster order. Empty means a stranger. */

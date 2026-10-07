@@ -163,6 +163,57 @@ describe("GET /rooms", () => {
     expect(await count(DEV_KEY.peer)).toBe(1);
     expect(await count(DEV_KEY.jesse)).toBe(2);
   });
+
+  // The list is newest first among the rooms the two indexes returned, and each index is asked for MAX_ROOMS_LISTED ids
+  // and does not order by recency, so past the bound the page is shown a window the indexes chose. `truncated` says so.
+  // One case per way the rule can be true, since each has its own clause.
+  describe("truncated", () => {
+    const listed = async () => (await bodyOf(await call(DEV_KEY.jesse, "/rooms"))) as { rooms: { id: string }[]; truncated: boolean };
+
+    it("is true when the created listing came back full", async () => {
+      for (let i = 0; i < 60; i++) await store.createSession(session({ id: `qs_made_${i}`, members: [member()] }));
+      const { rooms, truncated } = await listed();
+      expect([rooms.length, truncated]).toEqual([MAX_ROOMS_LISTED, true]);
+    });
+
+    it("is true when the joined listing came back full", async () => {
+      for (let i = 0; i < 60; i++) {
+        await store.createSession(session({
+          id: `qs_joined_${i}`, createdBy: "u_peer",
+          members: [peer(), member({ memberId: `m_jesse_${i}`, roomRole: "peer_b" })],
+        }));
+      }
+      const { rooms, truncated } = await listed();
+      expect([rooms.length, truncated]).toEqual([MAX_ROOMS_LISTED, true]);
+    });
+
+    it("is true when the created listing came back full, though none of its other rooms survive the roster check", async () => {
+      // Created by jesse on the record, with no handle of jesse's: named by the index, dropped by the roster.
+      for (let i = 0; i < MAX_ROOMS_LISTED; i++) await store.createSession(session({ id: `qs_theirs_${i}`, members: [peer()] }));
+      const { rooms, truncated } = await listed();
+      expect([rooms.map((r) => r.id), truncated]).toEqual([[ROOM], true]);
+    });
+
+    it("is true when the rooms found exceed the bound though neither listing came back full", async () => {
+      // The registry's two indexes can disagree about a room, so the union can be larger than either listing.
+      const ids = Array.from({ length: 60 }, (_, i) => `qs_either_${i}`);
+      for (const id of ids) await store.createSession(session({ id, members: [member()] }));
+      store.sessionsCreatedBy = async () => ids.slice(0, 30);
+      store.sessionsJoinedBy = async () => ids.slice(30);
+      const { rooms, truncated } = await listed();
+      expect([rooms.length, truncated]).toEqual([MAX_ROOMS_LISTED, true]);
+    });
+
+    it("is false while the listings come back short, and true at the first full one", async () => {
+      expect((await listed()).truncated).toBe(false);
+      for (let i = 0; i < MAX_ROOMS_LISTED - 2; i++) await store.createSession(session({ id: `qs_more_${i}`, members: [member()] }));
+      // The fixture room and 48 more: 49 rooms, one short of the bound.
+      expect(await listed()).toMatchObject({ truncated: false });
+      await store.createSession(session({ id: "qs_fiftieth", members: [member()] }));
+      // A listing of exactly the bound may have held more, so it counts as bounded.
+      expect(await listed()).toMatchObject({ truncated: true });
+    });
+  });
 });
 
 describe("GET /rooms/:id", () => {

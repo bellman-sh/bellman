@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md]
-last-verified-against-source: cf2bf36
+last-verified-against-source: afefeb3
 last-updated: 2026-10-07
 ---
 
@@ -23,7 +23,8 @@ A room holds as many members as the creator's plan allows. Two is the smallest
 useful number and not the shape of the thing: a `swarm` room fills to the plan's
 member limit, join codes can be reissued to add people later, and a long-lived
 hub room ([#18](../../../issues/18)) is meant to accumulate members over weeks.
-Where this document says *peer* it means any other member, not a counterpart.
+Where this document says *peer* it means any other member of the room, however
+many there are.
 
 That is the whole product. The exclusions need stating precisely, because
 they are the design:
@@ -194,6 +195,20 @@ Two consequences:
   events. [#43](../../../issues/43) shares one upstream connection per room
   between them, over a local socket — no new daemon, and every bridge polls as
   before where that cannot be had ([the local bus](#the-local-bus)).
+
+**The control panel** (`dash.bellman.sh`, #49) reaches a room over HTTP rather
+than MCP: `GET /rooms` for the rooms a person created or holds a handle in,
+`GET /rooms/:id` for a room as their seat sees it, `GET /rooms/:id/surface` for
+the working surface with the surface cursor as its `ETag`, and `PUT`/`DELETE
+/rooms/:id/surface/:key` to write or remove an item (#184), beside the blob
+routes (#183). The routes authenticate through the same composed caller the blob
+routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
+project through `src/projections.ts` so the panel and the tools shape a room
+identically, and write through `writeSurface`, the operation `bellman_send type:
+"surface"` calls. Membership is the tenant boundary: a stranger and an unknown
+room are one 404. A poll that finds nothing new costs one record read, because
+the ETag is the record's surface cursor. The `/ws` socket does not admit the
+panel yet; polling with an ETag came first.
 
 ### Two delivery paths
 
@@ -678,13 +693,13 @@ existed reads the free plan's until it expires. The route puts the object and
 then charges — section 9 says why that order — and deletes the object when the
 charge refuses.
 
-Both servers serve the routes. The Worker dispatches `/rooms/` ahead of the
-OAuth routes, under the same fail-closed guard `/ws` has, so a deploy with
-neither a key map nor OAuth serves no room. The Node server mounts them over
-`MemoryBlobStore` ahead of `express.json()`, so an upload's body reaches the
-route as the stream it was sent as, translating Express's req/res to the
-Request/Response the module speaks; its only caller is the static key map, as
-there is no OAuth and no panel there.
+Both servers serve the routes. The Worker dispatches `/rooms` and `/rooms/`
+ahead of the OAuth routes, under the same fail-closed guard `/ws` has, so a
+deploy with neither a key map nor OAuth serves no room. The Node server mounts
+them over `MemoryBlobStore` ahead of `express.json()`, so an upload's body
+reaches the route as the stream it was sent as, translating Express's req/res
+to the Request/Response the module speaks; its only caller is the static key
+map, as there is no OAuth and no panel there.
 
 `bellman_upload` is the bridge's own tool, not the server's: the server still
 lists nine. Only a path under the upload root is read, links followed — the
@@ -912,7 +927,10 @@ flowchart TB
 
 The working surface (#129) landed first in this track and reframed the two below
 it: the record exists while the room is alive, and the scribe's job is to keep
-it current.
+it current. Piece 3 of the working surface (#129) is split: the room routes are
+here (#184); the canvas page is in `bellman-sh/dash` (#13), the first screen
+that renders peer content and the one that brings the panel its content
+security policy.
 
 The ordering that mattered: **[#2](../../../issues/2) gated a lot**, and it has
 shipped. Permission verbs are declared in a manifest and enforced by the server,

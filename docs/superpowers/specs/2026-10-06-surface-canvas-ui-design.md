@@ -106,7 +106,7 @@ solved. It is MIT, maintained, and this is exactly its shape.
 Items map to nodes: `id` is the key, `type` is the kind, `position` is the
 placement, `data` is the envelope. Connectors map to edges by their `ends`; an
 edge whose end names no item is dropped from the render, which is piece 1's D2
-read from the other side. An item with no placement gets a slot in a grid by
+seen from the reader's end. An item with no placement gets a slot in a grid by
 key order, computed on the client and **not written back** — every viewer
 derives the same grid, and a write would make every viewer a writer. The first
 drag writes it.

@@ -1,7 +1,7 @@
 /**
- * The HTTP room routes (#183; #49 is where the rest go): the two doors a
- * room's bytes pass through — `POST /rooms/:id/blobs` and
- * `GET /rooms/:id/blobs/:blobId` — and where piece 3's room routes go next.
+ * The HTTP room routes (#183, #184; #49 is where the rest go): the list, the
+ * detail, the surface read and its writes, and the two doors a room's bytes
+ * pass through. What the control panel calls, and what any bearer caller may.
  *
  * Runtime-free, like rooms.ts: a web Request in, a Response out, so the Worker
  * dispatches here and the root test program drives the same code over

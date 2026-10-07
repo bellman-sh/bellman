@@ -11,6 +11,7 @@ import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { MemoryStore } from "../../src/store.js";
+import { ENTITLEMENTS } from "../../src/auth.js";
 import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS,
 } from "../../src/surface.js";
@@ -549,5 +550,24 @@ describe("joining a room with a surface", () => {
       connect_token: String(preview.data.connect_token), brief: brief(),
     });
     expect(confirmed.data.surface).toEqual({ cursor: 0, items: [] });
+  });
+});
+
+// A room's byte ceiling is stamped when the room is made (#183, D3), from the plan of the
+// member who makes it, as the seat count and the TTL are: a free member's room holds the free
+// ceiling and a team member's the team's, and nothing after creation asks a plan again. So the
+// stamp is the one place the plan enters, and these two rooms read it back off the stored record.
+describe("a room's byte ceiling", () => {
+  it.each([
+    ["team", DEV_KEY.jesse],
+    ["free", DEV_KEY.peer],
+  ] as const)("stamps a room started on the %s plan with that plan's ceiling", async (plan, key) => {
+    const creator = await h.connect(key);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    // The key is on the plan this case names, so the two cases cannot stamp one plan twice.
+    expect(started.data.plan).toBe(plan);
+    const room = (await h.store.getSession(String(started.data.session_id)))!;
+    expect(room.blobBytesCeiling).toBe(ENTITLEMENTS[plan].blobBytesPerRoom);
   });
 });

@@ -100,7 +100,7 @@ const boundedText = (max: number) =>
  * than dropped: `cursor` and `at` are the server's to set, and an item sent back
  * as it was read is refused for them until the sender takes them off.
  *
- * `null` is absence, for the four fields a read spells that way: an item as a
+ * `null` is absence, for the five fields a read spells that way: an item as a
  * member reads it carries `null` for each it left out, and read, edit, send back
  * is the natural replace. `normalizeSurfaceWrite` reads null as absent in every
  * rule below and stores absence as null either way.

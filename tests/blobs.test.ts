@@ -124,8 +124,7 @@ describe("attachmentDisposition", () => {
 describe("blobBytesUsed", () => {
   it("reads 0 off a record that was never charged, and the number off one that was", () => {
     const record = { blobBytes: undefined } as unknown as Parameters<typeof blobBytesUsed>[0];
-    // `blobBytes` is not on `StoredSession` until Task 2, so the charged record is asserted into shape.
-    const charged = { ...record, blobBytes: 1234 } as typeof record;
+    const charged = { ...record, blobBytes: 1234 };
     expect(blobBytesUsed(record)).toBe(0);
     expect(blobBytesUsed(charged)).toBe(1234);
   });
@@ -181,5 +180,28 @@ describe("exactLength", () => {
   it("takes an empty body for zero bytes and refuses it for any more", async () => {
     expect(await drain(exactLength(stream(text("")), 0))).toEqual(text(""));
     await expect(drain(exactLength(stream(text("")), 1))).rejects.toBeInstanceOf(BlobLengthError);
+  });
+
+  // The refusal comes at the chunk that overshoots, not when the body ends. The source has six
+  // chunks to give, so a refusal that waited for the end would have asked for all of them.
+  // `highWaterMark: 0` makes `pull` run only when the pipe asks for a chunk: a default source
+  // reads one ahead, so even with the guard in place its count at this refusal is 4, not 3.
+  it("refuses at the chunk that overshoots, and asks the source for nothing after it", async () => {
+    let pulled = 0;
+    const source = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulled += 1;
+          if (pulled > 6) controller.close();
+          else controller.enqueue(text("abcd"));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    // Ten bytes declared, four to a chunk: the third chunk takes it to twelve.
+    const error = await drain(exactLength(source, 10)).then(() => null, (e: unknown) => e);
+    await new Promise((resolve) => setTimeout(resolve, 0)); // a pull that came late would still count
+    expect(error).toBeInstanceOf(BlobLengthError);
+    expect(pulled).toBe(3);
   });
 });

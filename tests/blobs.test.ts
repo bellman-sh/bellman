@@ -103,15 +103,27 @@ describe("sanitizeName (D6)", () => {
   // The whole-branch review's fourth finding: C0 and DEL were stripped and C1 and the format characters were not.
   // The right-to-left override is the one that matters: it makes a save dialog draw this name as `reportexe.pdf`.
   it("strips C1 controls and format characters, the bidirectional overrides among them", () => {
-    expect(sanitizeName("report‮fdp.exe")).toBe("reportfdp.exe");
+    expect(sanitizeName("report\u{202E}fdp.exe")).toBe("reportfdp.exe");
     expect(sanitizeName("a\u0085b\u009Fc.txt")).toBe("abc.txt");
-    expect(sanitizeName("⁦isolated⁩.txt")).toBe("isolated.txt");
+    expect(sanitizeName("\u{2066}isolated\u{2069}.txt")).toBe("isolated.txt");
   });
 
-  // Named so it is a decision and not a surprise: a joiner is a format character too, so a ZWJ emoji sequence
-  // comes back as the emoji that made it up, side by side.
-  it("loses the joiners of a ZWJ emoji sequence, the accepted cost of stripping format characters", () => {
-    expect(sanitizeName("👨‍👩‍👧.png")).toBe("👨👩👧.png");
+  // Three format characters are how names are spelled, so they stay: the zero-width non-joiner sits inside Persian
+  // and Indic words, the joiner holds an emoji sequence together, and a soft hyphen is a hyphenation hint in text
+  // pasted from a typeset page. Stripping them would misspell the name rather than make it safer.
+  it("keeps the zero-width non-joiner, the zero-width joiner and the soft hyphen, which spell names", () => {
+    expect(sanitizeName("می\u{200C}خواهم.txt")).toBe("می\u{200C}خواهم.txt");
+    expect(sanitizeName("👨\u{200D}👩\u{200D}👧.png")).toBe("👨\u{200D}👩\u{200D}👧.png");
+    expect(sanitizeName("co\u{AD}operate.txt")).toBe("co\u{AD}operate.txt");
+  });
+
+  // Every other format character goes. The tag characters (the U+E0000 block) spell out a string a human reader
+  // cannot see and a program can; the zero-width space and the byte-order mark are invisible and mean nothing in
+  // a name. Placed inside the name, because trim() takes a leading U+FEFF off whatever the class does.
+  it("strips the other format characters: the tag characters, the zero-width space, the byte-order mark", () => {
+    expect(sanitizeName("a\u{E0041}b.txt")).toBe("ab.txt");
+    expect(sanitizeName("a\u{200B}b.txt")).toBe("ab.txt");
+    expect(sanitizeName("not\u{FEFF}es.txt")).toBe("notes.txt");
   });
 
   it("refuses an absent, empty or over-long name rather than inventing or truncating one", () => {

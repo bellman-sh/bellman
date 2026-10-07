@@ -77,17 +77,20 @@ export function storedType(claimed: string | null, head: Uint8Array): string {
 /**
  * A name as it is stored and later sent back in Content-Disposition (D6): a
  * label, never a path. Path separators, control characters (C0, DEL and C1) and
- * format characters are stripped and the rest trimmed. The format characters
- * include the bidirectional overrides, which make a save dialog draw
- * `report<RLO>fdp.exe` as `reportexe.pdf`; they also include the joiners that hold
- * an emoji sequence together, which is the accepted cost: a family emoji comes
- * back as its members side by side. What is left must be 1 to 200 code units
- * (`.length`, the unit every surface bound uses), or the name is refused — null,
- * for the route to answer 400, rather than truncated or invented.
+ * format characters are stripped and the rest trimmed, bar three format
+ * characters that spell names: the zero-width non-joiner and joiner, which words
+ * in Persian and several Indic scripts are written with (the joiner also holds an
+ * emoji sequence together), and the soft hyphen, a hyphenation hint in text
+ * pasted from a typeset page. The rest go. The bidirectional controls rewrite
+ * what a save dialog shows: `report<RLO>fdp.exe` is drawn `reportexe.pdf`. The tag
+ * characters hide a string from a human reader that a program can still read.
+ * What is left must be 1 to 200 code units (`.length`, the unit every surface
+ * bound uses), or the name is refused — null, for the route to answer 400,
+ * rather than truncated or invented.
  */
 export function sanitizeName(raw: string | null): string | null {
   if (raw === null) return null;
-  const name = raw.replace(/[\\/\p{Cc}\p{Cf}]/gu, "").trim();
+  const name = raw.replace(/[\\/]|(?![\u{AD}\u{200C}\u{200D}])[\p{Cc}\p{Cf}]/gu, "").trim();
   return name.length >= 1 && name.length <= MAX_BLOB_NAME_CHARS ? name : null;
 }
 

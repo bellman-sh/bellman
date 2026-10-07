@@ -6,8 +6,8 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md]
-last-verified-against-source: afefeb3
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
+last-verified-against-source: 1addfcc
 last-updated: 2026-10-07
 ---
 
@@ -206,9 +206,14 @@ routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
 "surface"` calls. Membership is the tenant boundary: a stranger and an unknown
-room are one 404. A poll that finds nothing new costs one record read, because
-the ETag is the record's surface cursor. The `/ws` socket does not admit the
-panel yet; polling with an ETag came first.
+room are one 404. A member a creator removed (#113) is served the room as it
+stood at its removal and nothing after: the surface to the rows it was shown,
+and the roster and the member count as of the removal, with no `presence`. The
+list is bounded at 50 rooms and says when it was (`truncated`), because neither
+registry index orders by recency; the newest 50 of a larger set is #49's summary
+index. A poll that finds nothing new costs one record read, because the ETag is
+the record's surface cursor. The `/ws` socket does not admit the panel yet;
+polling with an ETag came first.
 
 ### Two delivery paths
 
@@ -898,7 +903,7 @@ flowchart TB
         B3["#66 the scribe as actor"]
     end
     subgraph C["Surfaces beyond /mcp"]
-        C1["#49 HTTP API"]
+        C1["#49 HTTP API — room routes<br/>(#184) shipped, the rest pending"]
         C2["#48 browser session"]
         C3["#28 MCP Apps UI"]
         C4["#43 one poll per member"]

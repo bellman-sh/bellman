@@ -27,6 +27,7 @@ Args:
 
 Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, surface_cursor?, surface?, removed?, outstanding? }
 surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for all of them.
+A member a creator removed sees only items changed at or before its cut, and surface_cursor is the last of those.
 outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
 removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.
@@ -157,17 +158,6 @@ If a room's creator has removed you, you still get the history up to and includi
       // asked from past its cut gets its own cursor back, so round-tripping it
       // stays put instead of re-requesting the same empty range forever.
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
-
-      // The surface's cursor off the record the poll ANSWERS with, for the
-      // reason `status` is read off it: never older than the events beside it.
-      // Capped at a removed member's cut as `cursor` is, so the one number a
-      // removed member learns is not a count of changes made after it was out.
-      const cutAt = cut ?? removal?.cursor;
-      const sfCursor = cutAt === undefined
-        ? surfaceCursor(answering)
-        : Math.min(surfaceCursor(answering), cutAt);
-      const surfaceBlock = surface ? await readSurface(s, answering, cutAt) : undefined;
-
       const foreign = all.filter((e) => e.fromMemberId !== member_id);
 
       // Every event, not the slice. A request made before `since_cursor` is
@@ -244,6 +234,23 @@ If a room's creator has removed you, you still get the history up to and includi
       // do — the eviction cut above already bounds how much.
       const outstanding = outstandingFor(visible, member_id, Date.now())
         .filter((o) => o.mine || isActiveMember(me));
+
+      // The surface's cursor, and the surface when it was asked for, capped by
+      // `stopAt` above: a removed member reads its history and nothing after it.
+      //
+      // A member still in the room gets the record's number, off the record the
+      // poll ANSWERS with for the reason `status` is read off it: never older
+      // than the events beside it.
+      //
+      // A removed member gets one derived from what it is shown, never the
+      // record's. The record's number, capped at the cut, claims a change AT the
+      // cut when nothing had changed by then, and tells a member removed from a
+      // still-empty room that the surface changed after it was out. Derived
+      // means `readSurface`'s, so a poll that asked for no surface has none to
+      // send: it reads no rows, and that member has been told `removed: true`
+      // and its feed has ended.
+      const surfaceBlock = surface ? await readSurface(s, answering, stopAt) : undefined;
+      const sfCursor = stopAt === undefined ? surfaceCursor(answering) : (surfaceBlock?.cursor ?? 0);
 
       return ok(
         {

@@ -350,12 +350,15 @@ describe("bellman_sync and the surface", () => {
   it("stops a removed member's read at its cut", async () => {
     const p = await pairUp(h);
     await write(p, plan());
-    await write(p, { key: "notes", kind: "text", body: "kept" });
+    const notes = await write(p, { key: "notes", kind: "text", body: "kept" });
     const evicted = await p.creator.call("bellman_evict", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
     });
     expect(evicted.isError, evicted.text).toBe(false);
     const cut = (await h.store.eventsAfter(p.sessionId, 0)).find((e) => e.type === "member_evicted")!.cursor;
+    // The gap between the last change the member was shown and the cut is what
+    // lets the exact values below tell a derived cursor from a capped one.
+    expect(notes.data.cursor).toBeLessThan(cut);
 
     const rewritten = await write(p, plan({ body: "after the cut" }));
     expect(rewritten.isError, rewritten.text).toBe(false);
@@ -364,8 +367,50 @@ describe("bellman_sync and the surface", () => {
     expect(out.data.removed).toBe(true);
     const surface = out.data.surface as { cursor: number; items: { data: { key: string } }[] };
     expect(surface.items.map((i) => i.data.key)).toEqual(["notes"]);
-    expect(surface.cursor).toBeLessThanOrEqual(cut);
-    expect(out.data.surface_cursor).toBeLessThanOrEqual(cut);
+    // Exact, not "at most the cut": the cursor is the last change the member was
+    // shown, which is `notes`. The record capped at the cut would say `cut`,
+    // which is the eviction and not a change to the surface.
+    expect(surface.cursor).toBe(notes.data.cursor);
+    expect(out.data.surface_cursor).toBe(notes.data.cursor);
+
+    // The same member asking for no surface: no rows are read, so there is no
+    // number to derive and none is sent. It has been told `removed: true`, and
+    // its feed has ended.
+    const bare = await poll(p);
+    expect(bare.data.removed).toBe(true);
+    expect(bare.data.surface_cursor, "surface_cursor, no surface asked for").toBeUndefined();
+    expect(bare.data).not.toHaveProperty("surface");
+  });
+
+  // The probe behind the derived cursor: removed while the surface was still
+  // empty, and the surface first written after the cut. The record's cursor
+  // would say the surface changed AT the cut, which it did not, and would tell
+  // the member that something changed after it was out.
+  it("tells a removed member of no surface change when the surface first changed after its cut", async () => {
+    const p = await pairUp(h);
+    const evicted = await p.creator.call("bellman_evict", {
+      session_id: p.sessionId, member_id: p.joinerMemberId,
+    });
+    expect(evicted.isError, evicted.text).toBe(false);
+    const wrote = await write(p, plan());
+    expect(wrote.isError, wrote.text).toBe(false);
+
+    // The positive control: the surface did change, and a member still in the
+    // room is told so. Without it the absences below would pass just as well
+    // for a server that never sends the field.
+    const inside = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0,
+    });
+    expect(inside.data.surface_cursor).toBe(wrote.data.cursor);
+
+    const bare = await poll(p);
+    expect(bare.data.removed).toBe(true);
+    expect(bare.data.surface_cursor, "surface_cursor, no surface asked for").toBeUndefined();
+
+    const asked = await poll(p, { surface: true });
+    expect(asked.data.removed).toBe(true);
+    expect(asked.data.surface).toEqual({ cursor: 0, items: [] });
+    expect(asked.data.surface_cursor, "surface_cursor, surface asked for").toBeUndefined();
   });
 });
 

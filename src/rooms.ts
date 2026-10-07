@@ -238,13 +238,23 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
 
 /**
  * The surface as a member reads it (#129, D7): every row in an envelope, and
- * the record's cursor of the last change.
+ * the cursor of the last change.
  *
  * `cut` is a removed member's cursor (#113): such a member reads its history
  * up to the `member_evicted` event that removed it and nothing after, so rows
- * changed past the cut are left out and the cursor is capped there. An item
- * rewritten after the cut is omitted outright; its earlier version is still
- * in that member's event history.
+ * changed past the cut are left out. An item rewritten after the cut is
+ * omitted outright; its earlier version is still in that member's event
+ * history.
+ *
+ * Under a cut the cursor is derived from the rows the member is shown (the
+ * largest of their cursors, 0 for none) and never from the record. The
+ * record's cursor, capped at the cut, claims a change AT the cut when nothing
+ * had changed by then, and a member removed from a still-empty room would
+ * learn from a nonzero number that the surface changed after it was out. What
+ * it is told is what it can see. The cost is that a removal before the cut
+ * leaves no row, so the number can sit below the last change the member was
+ * entitled to; it only ever understates, and a removed member's feed has
+ * ended, so it compares the number with nothing.
  */
 export async function readSurface(
   store: BellmanStore,
@@ -253,7 +263,9 @@ export async function readSurface(
 ) {
   const rows = await store.surfaceOf(session.id);
   const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
-  const cursor = cut === undefined ? surfaceCursor(session) : Math.min(surfaceCursor(session), cut);
+  const cursor = cut === undefined
+    ? surfaceCursor(session)
+    : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
   return { cursor, items: visible.map(surfaceItem) };
 }
 

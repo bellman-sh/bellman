@@ -240,9 +240,11 @@ export interface BlobRef {
 export interface BlobMeta { bytes: number; type: string; name: string; by: string; at: number; etag: string }
 export interface BlobObject extends BlobMeta { body: ReadableStream }
 export interface BlobStore {
-  put(sessionId: string, id: string, body: ReadableStream | ArrayBuffer, meta: BlobMeta): Promise<void>;
+  // The etag is the store's to mint, so a put takes the metadata without it;
+  // a 304 must carry the etag, so an unchanged answer names it.
+  put(sessionId: string, id: string, body: ReadableStream | ArrayBuffer, meta: Omit<BlobMeta, "etag">): Promise<void>;
   head(sessionId: string, id: string): Promise<BlobMeta | null>;
-  get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobObject | "unchanged" | null>;
+  get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobObject | { unchanged: true; etag: string } | null>;
   delete(sessionId: string, id: string): Promise<void>;
 }
 ```

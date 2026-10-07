@@ -772,6 +772,18 @@ export interface BellmanStore {
    * this way; reading the whole history to find one event is what #25 was.
    */
   eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined>;
+  /**
+   * The last `limit` events, in cursor order. A bounded read for callers that
+   * want the end of the log and nothing else: the monitor's poll (#28) reads it
+   * for each member's latest `progress` note and the room's last event, every
+   * 15 seconds, for every room a user is in. `eventsAfter(id, 0)` would read
+   * the whole log each time, and nothing guards that read the way
+   * `lastActionRequestAt` guards `bellman_sync`'s.
+   *
+   * `[]` for an unknown room, and for a limit of zero or less: `slice(-0)` is
+   * the whole array, so the memory store has to say so itself.
+   */
+  recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
@@ -1323,6 +1335,12 @@ export class MemoryStore implements BellmanStore {
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
     const e = this.sessions.get(sessionId)?.events.find((ev) => ev.cursor === cursor);
     return e ? detach(e) : undefined;
+  }
+
+  async recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]> {
+    const s = this.sessions.get(sessionId);
+    if (!s || limit <= 0) return [];
+    return detach(s.events.slice(-limit));
   }
 
   /**

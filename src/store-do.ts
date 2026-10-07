@@ -1426,6 +1426,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * The tail of the log. Events are keyed `e:<padded cursor>` (`eventKey`), so
+   * the newest `limit` are one reverse list; reversed back so the caller reads
+   * them in cursor order like `eventsAfter`. Public on purpose: a read, like
+   * `eventsAfter`, and the facade calls it over RPC.
+   */
+  async recentEvents(limit: number): Promise<SessionEvent[]> {
+    if (limit <= 0) return [];
+    const map = await this.ctx.storage.list<SessionEvent>({ prefix: "e:", reverse: true, limit });
+    return [...map.values()].reverse();
+  }
+
+  /**
    * The read and the registration must not be split by an await, or an event
    * appended in the gap wakes an empty waiter list and this poll hangs to its
    * own timeout. Storage is async here, so the read is awaited FIRST and the
@@ -2668,6 +2680,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
     return this.session(sessionId).eventAt(cursor);
+  }
+
+  async recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]> {
+    return this.session(sessionId).recentEvents(limit);
   }
 
   async waitForEvents(

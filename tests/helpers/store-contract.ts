@@ -313,6 +313,23 @@ export function describeStoreContract(
     });
 
     // --------------------------------------------------------------- members
+    it("recentEvents returns the tail in cursor order, shorter when the log is, and nothing for a bad limit", async () => {
+      const s = session();
+      await store.createSession(s);
+      for (const n of [1, 2, 3]) {
+        await store.appendEvent(s.id, {
+          type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+          fromLabel: "jesse", payload: { n }, refId: null,
+        });
+      }
+      expect((await store.recentEvents(s.id, 2)).map((e) => e.cursor)).toEqual([2, 3]);
+      expect((await store.recentEvents(s.id, 10)).map((e) => e.cursor)).toEqual([1, 2, 3]);
+      // Review Focus 3: slice(-0) is the whole array; the contract says nothing.
+      expect(await store.recentEvents(s.id, 0)).toEqual([]);
+      expect(await store.recentEvents(s.id, -1)).toEqual([]);
+      expect(await store.recentEvents("qs_missing", 5)).toEqual([]);
+    });
+
     it("addMember appends a member", async () => {
       const s = session();
       (await store.createSession(s));

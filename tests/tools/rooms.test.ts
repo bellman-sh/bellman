@@ -11,6 +11,8 @@ import { pairUp } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
+import { ROOMS_LIMIT } from "../../src/tools/rooms.js";
+import { session } from "../helpers/fixtures.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -152,6 +154,23 @@ describe("bellman_rooms", () => {
     expect(rooms).toHaveLength(1);
     expect(rooms[0].your_member_id).toBe("m_second");
     expect(rooms[0].room.your_role).toBe("helper");
+  });
+
+  // The joined index lists every room a person ever held a handle in, closed
+  // ones included, in no promised order, and is never pruned
+  // (BellmanStore.sessionsJoinedBy). A window the size of the answer, taken
+  // before the closed filter, cut a live room for anyone past it, for good.
+  it("still lists a live room for a member whose joined history is longer than the answer", async () => {
+    for (let i = 0; i < ROOMS_LIMIT; i++) {
+      const id = `qs_dead_${i}`;
+      await h.store.createSession(session({
+        id, joinCodes: {},
+        members: [member(), member({ memberId: `m_dead_${i}`, userId: "u_peer", label: "peer@codenerd" })],
+      }));
+      await h.store.closeSession(id);
+    }
+    const p = await pairUp(h, { creatorKey: DEV_KEY.jesse, joinerKey: DEV_KEY.peer });
+    expect((await roomsOf(p.joiner)).map((r) => r.session_id)).toEqual([p.sessionId]);
   });
 
   it("opens with the untrusted preamble when a room is listed, and not when none is", async () => {

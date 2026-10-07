@@ -8,11 +8,25 @@ import type { Identity } from "../types.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 /**
- * How many rooms each index is asked for. Past this a hub user needs the
+ * How many rooms the listing returns at most. Past this a hub user needs the
  * paginated listing #49 builds; the monitor is for the rooms you are working in
  * now.
  */
 export const ROOMS_LIMIT = 50;
+
+/**
+ * How many ids the joined index is read for, per call. That index lists every
+ * room a person ever held a handle in, closed ones included, in no promised
+ * order, and is never pruned (`BellmanStore.sessionsJoinedBy`), so a window the
+ * size of the answer, taken before the closed filter, cut live rooms for anyone
+ * past 50 memberships, and the cut was permanent. The created index needs no
+ * such room: `sessionsCreatedBy` drops closed rows as it meets them.
+ *
+ * Each dead id costs one `getSession`, so this is also the bound on that spend.
+ * ponytail: a person whose live rooms sit past 500 dead memberships loses them
+ * from this listing; the upgrade is a status-aware or pruned joined index (#49).
+ */
+export const JOINED_SCAN = 500;
 
 export function registerRooms(server: McpServer, identity: Identity, s: BellmanStore): void {
   // --------------------------------------------------------------- bellman_rooms
@@ -34,13 +48,19 @@ Closed rooms, and rooms you left or were removed from, are not listed. Peer-writ
       _meta: APP_UI_META,
     },
     async (): Promise<ToolResult> => {
+      // Created rooms first: that index is already live-only. Then the joined
+      // history, scanned wide and filtered here, until the answer is full.
       const ids = new Set([
         ...(await s.sessionsCreatedBy(identity.userId, ROOMS_LIMIT)),
-        ...(await s.sessionsJoinedBy(identity.userId, ROOMS_LIMIT)),
+        ...(await s.sessionsJoinedBy(identity.userId, JOINED_SCAN)),
       ]);
       const now = Date.now();
       const rooms: ReturnType<typeof roomSummary>[] = [];
+      // ponytail: three object calls per live room, sequentially, on every poll
+      // (15 s from the monitor). Fine over tens of rooms; a registry-side summary
+      // is the upgrade if the panel (#49) polls the same way.
       for (const id of ids) {
+        if (rooms.length >= ROOMS_LIMIT) break;
         const session = await s.getSession(id);
         if (!session || session.closed) continue;
         // The newest live seat this identity holds here. A person on two

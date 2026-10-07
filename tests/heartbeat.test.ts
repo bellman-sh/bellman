@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { clearSilence, lastReport, nextTickAt, dueMembers, snapshotOf } from "../src/heartbeat.js";
+import { clearSilence, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf } from "../src/heartbeat.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { StoredSession } from "../src/stored-session.js";
 
@@ -326,6 +326,15 @@ describe("dueMembers", () => {
 });
 
 describe("snapshotOf", () => {
+  it("reportRow never says silent without a cadence, and snapshotOf is built from it", () => {
+    const m = lead({ lastReportAt: T0 });
+    expect(reportRow(m, T0 + 100 * FIVE_MIN, null)).toMatchObject({
+      member_id: "m_lead", silent_for_seconds: 100 * 300, silent: false,
+    });
+    const s = stored({ members: [m] });
+    expect(snapshotOf(s, T0 + 2 * FIVE_MIN).members[0]).toEqual(reportRow(m, T0 + 2 * FIVE_MIN, FIVE_MIN));
+  });
+
   it("marks silent only at two cadences, so a member is asked before peers are alarmed", () => {
     const s = stored({ members: [lead({ lastReportAt: T0 })] });
     expect(snapshotOf(s, T0 + FIVE_MIN).members[0].silent).toBe(false);

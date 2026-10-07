@@ -10,7 +10,10 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
+import { PNG, text } from "../helpers/blob-bytes.js";
 import { MemoryStore } from "../../src/store.js";
+import { ENTITLEMENTS } from "../../src/auth.js";
+import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
 import {
   MAX_SURFACE_BODY_CHARS, MAX_SURFACE_ITEMS, MAX_SURFACE_LINK_CHARS, MAX_SURFACE_TITLE_CHARS,
 } from "../../src/surface.js";
@@ -46,7 +49,7 @@ describe("writing an item", () => {
     expect(out.data.room_members).toEqual([p.joiner.identity.label]);
 
     expect(await rows(p)).toEqual([{
-      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null,
+      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null,
       cursor: last.cursor, at: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
     }]);
   });
@@ -122,7 +125,7 @@ describe("writing an item", () => {
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
     // pass just as well for a read that had dropped them.
-    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, cursor: expect.any(Number) });
+    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, blob: null, cursor: expect.any(Number) });
     expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
 
     const asWritten = (data: Record<string, unknown>) =>
@@ -276,6 +279,17 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     // it: null is absence, so each is refused for the rule and not for its type.
     await refused(p, { key: "t", kind: "text", body: null }, "needs a body");
     await refused(p, { key: "c", kind: "connector", ends: null }, "needs ends");
+    // A file or an image names a blob (#183) and carries no body; nothing else names one.
+    const id = "ab".repeat(16);
+    await refused(p, { key: "t3", kind: "text", body: "x", blob: { id } }, "names a blob");
+    await refused(p, { key: "c3", kind: "connector", ends: { from: "plan", to: "arch" }, blob: { id } }, "names a blob");
+    await refused(p, { key: "f", kind: "file" }, "needs blob");
+    await refused(p, { key: "f", kind: "file", blob: null }, "needs blob");
+    await refused(p, { key: "f", kind: "file", blob: { id }, body: "and a body" }, "no body");
+    await refused(p, { key: "f", kind: "image", blob: { id }, ends: { from: "plan", to: "arch" } }, "only a connector has ends");
+    await refused(p, { key: "f", kind: "file", blob: { id: "nope" } }, "blob.id: ");
+    await refused(p, { key: "f", kind: "file", blob: { id, bytes: 5 } }, "blob: ");
+    await refused(p, { key: "f", kind: "file", blob: { id, type: "image/png", name: "x" } }, '"type"');
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "plan" } }, "must differ");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "arch" }, placement: { x: 0, y: 0 } }, "no placement");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "ghost" } }, "not on the surface");
@@ -538,5 +552,146 @@ describe("joining a room with a surface", () => {
       connect_token: String(preview.data.connect_token), brief: brief(),
     });
     expect(confirmed.data.surface).toEqual({ cursor: 0, items: [] });
+  });
+});
+
+// A room's byte ceiling is stamped when the room is made (#183, D3), from the plan of the
+// member who makes it, as the seat count and the TTL are: a free member's room holds the free
+// ceiling and a team member's the team's, and nothing after creation asks a plan again. So the
+// stamp is the one place the plan enters, and these two rooms read it back off the stored record.
+describe("a room's byte ceiling", () => {
+  it.each([
+    ["team", DEV_KEY.jesse],
+    ["free", DEV_KEY.peer],
+  ] as const)("stamps a room started on the %s plan with that plan's ceiling", async (plan, key) => {
+    const creator = await h.connect(key);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    // The key is on the plan this case names, so the two cases cannot stamp one plan twice.
+    expect(started.data.plan).toBe(plan);
+    const room = (await h.store.getSession(String(started.data.session_id)))!;
+    expect(room.blobBytesCeiling).toBe(ENTITLEMENTS[plan].blobBytesPerRoom);
+  });
+});
+
+describe("file and image items (#183)", () => {
+  const MD = text("# notes\n");
+
+  /** A blob in the harness's store, as the upload route would have left it. */
+  const stored = async (p: PairedSession, type: string, bytes: Uint8Array, name = "notes.md", room = p.sessionId) => {
+    const id = newBlobId();
+    await h.blobs.put(room, id, bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer, {
+      bytes: bytes.byteLength, type, name, by: p.creatorMemberId, at: 1_700_000_000_000,
+    });
+    return id;
+  };
+
+  const refusedWith = async (p: PairedSession, payload: Record<string, unknown>, words: string) => {
+    const before = await eventCount(p);
+    const out = await write(p, payload);
+    expect(out.isError, JSON.stringify(payload).slice(0, 80)).toBe(true);
+    expect(out.text, JSON.stringify(payload).slice(0, 80)).toContain(words);
+    expect(await eventCount(p)).toBe(before);
+  };
+
+  it("places a file carrying the object's metadata, which the payload never named", async () => {
+    const p = await pairUp(h);
+    const id = await stored(p, "text/markdown", MD);
+    const out = await write(p, { key: "notes", kind: "file", blob: { id }, title: "Notes" });
+    expect(out.isError, out.text).toBe(false);
+
+    const [row] = await rows(p);
+    expect(row).toMatchObject({
+      key: "notes", kind: "file", title: "Notes", body: null, ends: null, placement: null,
+      blob: { id, bytes: MD.byteLength, type: "text/markdown", name: "notes.md" },
+    });
+    const last = (await h.store.eventsAfter(p.sessionId, 0)).at(-1)!;
+    expect(last.payload).toMatchObject({ key: "notes", kind: "file", blob: { id, bytes: MD.byteLength, name: "notes.md" } });
+    const audit = (await h.store.auditForOrg(p.creator.identity.orgId!, 50)).at(-1)!;
+    expect(audit.detail).toEqual({ key: "notes", kind: "file", chars: 0, bytes: MD.byteLength });
+  });
+
+  it("places an image over an allowlisted blob, and refuses one over anything else", async () => {
+    const p = await pairUp(h);
+    const png = await stored(p, "image/png", PNG, "shot.png");
+    const ok = await write(p, { key: "shot", kind: "image", blob: { id: png }, placement: { x: 10, y: 20, w: 320, h: 240 } });
+    expect(ok.isError, ok.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({ kind: "image", blob: { id: png, type: "image/png" }, placement: { x: 10, y: 20, w: 320, h: 240 } });
+
+    const md = await stored(p, "text/markdown", MD);
+    await refusedWith(p, { key: "not_an_image", kind: "image", blob: { id: md } }, "not an image");
+    // What an upload claiming a PNG that was not one is stored as (D6).
+    const bytes = await stored(p, "application/octet-stream", MD, "fake.png");
+    await refusedWith(p, { key: "fake", kind: "image", blob: { id: bytes } }, "not an image");
+    // The same blob places as a file: the refusal is about the kind, not the blob.
+    const asFile = await write(p, { key: "fake", kind: "file", blob: { id: bytes } });
+    expect(asFile.isError, asFile.text).toBe(false);
+    const refusal = (await write(p, { key: "fake2", kind: "image", blob: { id: bytes } })).text;
+    for (const type of IMAGE_TYPES) {
+      expect(refusal, "the refusal names every type that would have been accepted").toContain(type);
+    }
+  });
+
+  it("refuses a blob that was never uploaded, and one uploaded to another room", async () => {
+    const p = await pairUp(h);
+    await refusedWith(p, { key: "ghost", kind: "file", blob: { id: newBlobId() } }, "no blob");
+    const elsewhere = await stored(p, "text/markdown", MD, "notes.md", "qs_another_room");
+    await refusedWith(p, { key: "theirs", kind: "file", blob: { id: elsewhere } }, "no blob");
+    expect(await rows(p)).toEqual([]);
+  });
+
+  // Review Focus 3: read, edit, send back works for a blob-backed item too, once the server's
+  // fields come off — the three inside `blob` as well as the two on top. zod reports the nested
+  // issue before the top-level one and the refusal names only the first, so each step asserts
+  // its first issue by its path (`blob: `; the refusal's own prefix says `blob? }`, never
+  // `blob: `) and by the key it names, and says which issue is not the first.
+  it("reads a file item back with its blob, and accepts it back once the server's fields are stripped", async () => {
+    const p = await pairUp(h);
+    const id = await stored(p, "text/markdown", MD);
+    await write(p, { key: "notes", kind: "file", blob: { id }, title: "Notes" });
+    const read = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, surface: true,
+    });
+    const [item] = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items.map((i) => i.data);
+    expect(item.blob).toEqual({ id, bytes: MD.byteLength, type: "text/markdown", name: "notes.md" });
+
+    // As read: the blob's three server fields are the first issue; cursor and at are the second.
+    const asRead = await write(p, { ...item, title: "Renamed" });
+    expect(asRead.isError).toBe(true);
+    expect(asRead.text).toContain("blob: ");
+    expect(asRead.text).toContain('"bytes"');
+    expect(asRead.text).not.toContain('"cursor"');
+
+    // The blob reduced to its id: the top-level pair is the first issue now, and the blob is not named.
+    const blobFixed = await write(p, { ...item, blob: { id }, title: "Renamed" });
+    expect(blobFixed.isError).toBe(true);
+    expect(blobFixed.text).toContain('"cursor"');
+    expect(blobFixed.text).not.toContain("blob: ");
+
+    // cursor and at off, the blob left as read: the blob again, by name.
+    const { cursor: _c, at: _a, ...rest } = item;
+    const stripped = await write(p, { ...rest, title: "Renamed" });
+    expect(stripped.isError).toBe(true);
+    expect(stripped.text).toContain("blob: ");
+    expect(stripped.text).toContain('"bytes"');
+
+    // All of it off: accepted, and the row keeps the object's own metadata.
+    const edited = await write(p, { ...rest, blob: { id }, title: "Renamed" });
+    expect(edited.isError, edited.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({
+      title: "Renamed", blob: { id, bytes: MD.byteLength, type: "text/markdown", name: "notes.md" },
+    });
+  });
+
+  it("leaves the blob where it is when the item is replaced or removed", async () => {
+    const p = await pairUp(h);
+    const id = await stored(p, "text/markdown", MD);
+    const before = await h.blobs.head(p.sessionId, id);
+    expect(before, "the blob is there to begin with").toMatchObject({ bytes: MD.byteLength, name: "notes.md" });
+    await write(p, { key: "notes", kind: "file", blob: { id } });
+    await write(p, { key: "notes", kind: "text", body: "replaced by prose" });
+    expect(await h.blobs.head(p.sessionId, id)).toEqual(before);
+    await write(p, { key: "notes", remove: true });
+    expect(await h.blobs.head(p.sessionId, id)).toEqual(before);
   });
 });

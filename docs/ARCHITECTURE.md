@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md]
-last-verified-against-source: c9789ae
-last-updated: 2026-10-06
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md]
+last-verified-against-source: cf2bf36
+last-updated: 2026-10-07
 ---
 
 # Bellman Architecture
@@ -402,6 +402,12 @@ flowchart LR
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
     end
+
+    BLOB["BlobStore<br/>src/blobs.ts"]
+    R2["R2 — bellman-blobs<br/>rooms/&lt;sessionId&gt;/&lt;blobId&gt;<br/>the object's metadata is the metadata"]
+    MEMB["MemoryBlobStore<br/>tests, npm start"] -.implements.-> BLOB
+    R2S["R2BlobStore<br/>src/blobs-r2.ts"] -.implements.-> BLOB
+    R2S --> R2
 ```
 
 Why the split is shaped that way:
@@ -578,10 +584,11 @@ need the upgrade stamp as well and is not done.
 ### The working surface
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally
-placed items — `text`, `link`, `diagram`, `connector` — that members read and a
-seat holding `write_surface` keeps current. The log is how the surface got
-that way; the surface is where things stand. Pieces 2 to 4 add blobs, a
-canvas and sandboxed HTML artifacts on top of it.
+placed items — `text`, `link`, `diagram`, `connector`, and the blob-backed
+`file` and `image` — that members read and a seat holding `write_surface` keeps
+current. The log is how the surface got that way; the surface is where things
+stand. Blobs, piece 2, are the next subsection; pieces 3 and 4 add a canvas and
+sandboxed HTML artifacts on top of it.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -607,6 +614,94 @@ Nothing deletes a closed room's storage, and reads stay open to a closed
 room, so a surface written here outlives the session's active life already.
 What #65 still has to settle is who may read it who was never a member, and
 for how long it is kept.
+
+### Blobs
+
+A `file` or an `image` item (#183) names bytes that live in R2, under
+`rooms/<sessionId>/<blobId>`, behind the second seam storage has:
+`BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore` for tests
+and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only) for
+production, held to one contract by `tests/helpers/blob-store-contract.ts` the
+way the two session stores are. No row in the room object describes a blob:
+the object's own metadata — the type as decided at upload, the name, the
+uploading member, the time — is the metadata, because a row and an object are
+two systems with no transaction between them, and the one holding the bytes
+is the one that cannot lie about them. The prefix is the ownership; a foreign
+room's id resolves nowhere.
+
+The bytes go up through `POST /rooms/:id/blobs` and come down through
+`GET /rooms/:id/blobs/:blobId` (`src/http/rooms.ts`, the module #49's routes
+join). The upload is gated as the tool is — the same `gateSeat` and
+`write_surface` verb — and who is calling is composed, not simplified: the
+Worker's `roomCaller` takes the bearer paths `/mcp` takes, an OAuth access token
+and then the `BELLMAN_KEYS` map (`resolveCaller`), and only then the
+authorization server's own `caller`, which is where the panel's cookie is read.
+A key-map bearer is no token `caller` can verify, so `caller` alone would lock
+out every bridge started with a `BELLMAN_KEY`; and a bearer that is present and
+bad is refused by `caller` and never falls through to a cookie, so neither half
+can be dropped.
+
+The download is membership: a member a creator removed is refused, as `/ws`
+refuses it, while one who left or timed out is served, and so is a closed or a
+frozen room. An unknown room, a room the caller is no member of, and an unknown
+or malformed blob id are one 404, so a stranger learns nothing. The type is the
+server's word: an image claim is read against the four signatures and a
+mismatch is stored as `application/octet-stream`; the download serves an image
+on the allowlist inline and everything else as an octet-stream attachment, with
+`nosniff` and `Content-Security-Policy: sandbox` on every download, a 304
+included, so nothing from this origin is ever rendered as HTML. SVG is not on
+the allowlist: it is scriptable, and a type on the list is served inline. When
+the item is placed, `writeSurface` `head`s the object and copies its metadata
+onto the item: what readers see is the bucket's record, never the writer's
+claim. Removing or replacing the item leaves the blob where it is; the event
+that placed it still names it, and deletion is #65's.
+
+A body that is not its declared length is refused by the store itself, with
+`BlobLengthError`, and nothing stays behind. `exactLength` (`src/blobs.ts`) is
+the one place the rule lives: `MemoryBlobStore` reads through it, and
+`R2BlobStore` pipes through it into R2's `FixedLengthStream`, because R2's own
+failure for a wrong length is a plain `Error` that cannot be told from any other
+failed put. R2 also commits a put as soon as it holds the length it was told
+and reports the stream's failure afterwards, so whenever the pipe objected the
+store deletes the key, whatever the put said. The route maps that one class to
+400 and charges nothing, and the contract that proves it runs against both
+stores, over R2 in workerd.
+
+The quota is two numbers on the session record: `blobBytesCeiling`, stamped
+at creation from the creator's plan (`blobBytesPerRoom`: 50 MB on free, 500 MB on pro, 5 GB on max and team)
+as `maxMembers` is, so a room never consults a plan again and every member
+shares the room's ceiling; and `blobBytes`, the sum charged so far, raised in
+one `SessionDO` transaction by `chargeBlobBytes`. That call takes no ceiling:
+the object reads its own record's, and both stores decide with one function,
+`decideBlobCharge`, so they cannot drift. A room written before the ceiling
+existed reads the free plan's until it expires. The route puts the object and
+then charges — section 9 says why that order — and deletes the object when the
+charge refuses.
+
+Both servers serve the routes. The Worker dispatches `/rooms/` ahead of the
+OAuth routes, under the same fail-closed guard `/ws` has, so a deploy with
+neither a key map nor OAuth serves no room. The Node server mounts them over
+`MemoryBlobStore` ahead of `express.json()`, so an upload's body reaches the
+route as the stream it was sent as, translating Express's req/res to the
+Request/Response the module speaks; its only caller is the static key map, as
+there is no OAuth and no panel there.
+
+`bellman_upload` is the bridge's own tool, not the server's: the server still
+lists nine. Only a path under the upload root is read, links followed — the
+directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when that is set
+(`/` for any file) — so a line that arrives as peer content cannot send a key
+file to the room. The working-directory default is refused when that directory
+contains the home directory (the filesystem root included); naming it in
+`BELLMAN_UPLOAD_ROOT` is how to allow that much on purpose. It reads the file
+through one descriptor and refuses a symbolic link, anything that is not a
+regular file, and a file over the cap before a byte leaves the machine; takes
+the type from the extension alone; posts with the credential the bridge holds;
+and places the item through the upstream `bellman_send`, so the verb gate, the
+metadata copy and the audit row are the ones every surface write gets. `kind` defaults from the extension's type —
+`image` for the four, `file` for the rest — and the server may still refuse an
+image whose stored type is not one of them, which is why a refused placement
+reports the blob's id, bytes and type: the bytes are stored and charged, and the
+caller places them as a `file` instead of uploading twice.
 
 ## 6. Identity, plans and entitlements
 
@@ -750,6 +845,17 @@ loud:
   brought it, and it does not become trusted by passing through a local process.
 - **`<` is escaped to `<`** so a payload cannot close the `<channel>` tag
   and impersonate the harness.
+- **A blob is served under membership, typed by the server, and never as
+  HTML.** The bucket has no public URL and no presigned one; every byte leaves
+  through the download route. An image claim is checked against the bytes, and
+  the route serves only an allowlisted image inline — a PDF, an SVG or an HTML
+  artifact is an octet-stream download under `nosniff` and
+  `Content-Security-Policy: sandbox`. Together those are what let piece 4
+  store an artifact as a blob without the route becoming an XSS vector on
+  `mcp.bellman.sh`. A blob's name is a label, stripped of path separators,
+  control characters and format characters (all but the two zero-width joiners
+  and the soft hyphen, which names are spelled with, and a name left with
+  nothing else is refused as a blank), and never derives a key.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and
@@ -899,6 +1005,18 @@ Its audit rows ride the outbox as a third kind in `SessionDO`'s queue, `audit`,
 delivered `SessionDO → AuditDO` and deduped on the intent id like the
 registry's. That is what closes the half of #117 an idempotency key could not:
 `appendEventOnce` would have deduped the event and left the audit row doubled.
+
+A blob upload (#183) is the newest window, and it spans a Durable Object and
+R2, where no outbox reaches. The route puts the object, then charges the
+room's `blobBytes` inside `SessionDO` in one transaction, and deletes the
+object if the charge refuses. A charge that throws deletes nothing: the room
+object may have committed it before the call failed, so the object is kept and
+logged by key. The other order was rejected on purpose: a
+charge reserved before an upload that never completes — the client dies
+mid-body — is a phantom that locks quota with nothing anywhere to list, while
+an object nobody charged for costs storage only and `list({ prefix })` finds
+it. Both are this section's window; put-then-charge is the side on which the
+loss is findable, and retention (#65) is what sweeps it.
 
 **A lost write: durable delivery.** `src/outbox.ts`:
 
@@ -1249,12 +1367,12 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~6,000** | every request, whether or not you are in a room |
+| Tool definitions | **~6,100** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-Tool definitions were re-measured on 2026-10-06, after #129. The three rows
+Tool definitions were re-measured on 2026-10-07, after #183. The three rows
 below that one are from the original measurement and have not been re-measured
 since. The joining row predates the surface: `bellman_connect` now carries its
 index and `bellman_confirm` its items, so a joiner pays for the room's surface
@@ -1266,8 +1384,8 @@ List the real server's tools through an in-memory MCP client, as
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
 leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
-`77396879` it gives 4,962, the figure recorded after #111. So the measurements
-are comparable.
+`77396879` it gives 4,962, the figure recorded after #111, and on `c9789ae`
+6,008, the figure recorded after #129. So the measurements are comparable.
 
 #111 added `heartbeat_on` and `reports` to the manifest schema inside
 `bellman_start`, and `progress` to `bellman_send`. It added nothing to
@@ -1297,7 +1415,23 @@ for the flag and the two fields it returns, `bellman_connect` +53 and
 `bellman_confirm` +46 for the `surface` block their `Returns:` lines now name,
 and +6 on `bellman_start` for the verb.
 
-`bellman_start` alone is 1,504 tokens, 25% of the tool budget, paid even by
+#183 added the `file` and `image` kinds to `bellman_send`: the `blob` field in
+its surface payload, and one sentence on the two kinds that names the upload
+route and the bridge's `bellman_upload`. It added no tool. The two routes are
+not MCP tools, and `bellman_upload` is the bridge's own, listed only to a client
+that connects through the bridge, so it is not in these figures, as
+`bellman_whoami` and `bellman_wait` are not.
+
+Counted this way the total is 6,101, which is 93 more than the 6,008 recorded.
+9 of those predate #183: `bellman_invite` +6 and `bellman_start` +3 for the
+`join_url` they now return, which landed after that figure was recorded. The
+other 84 are #183's, all of them `bellman_send`, which went from 1,008 to 1,092;
+no other tool moved. Per tool, now: `bellman_start` 1,507, `bellman_send` 1,092,
+`bellman_confirm` 760, `bellman_sync` 716, `bellman_invite` 704,
+`bellman_connect` 500, `bellman_evict` 489, `bellman_audit` 178 and
+`bellman_leave` 155.
+
+`bellman_start` alone is 1,507 tokens, 25% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

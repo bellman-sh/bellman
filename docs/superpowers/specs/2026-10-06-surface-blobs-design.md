@@ -44,7 +44,9 @@ The key prefix is the ownership. A download route for room A can only `get`
 under `rooms/A/`, so a blob id from another room does not resolve, and nothing
 has to check a table to know whose bytes these are. The object's own metadata
 is the metadata: `httpMetadata.contentType` as validated at upload, and
-`customMetadata` carrying `name`, `by` (the uploading member) and `at`. No row
+`customMetadata` carrying `name` (percent-encoded, since custom metadata travels
+as header values and the stored alphabet is ASCII), `by` (the uploading member)
+and `at`. No row
 in the room object describes a blob, because a row and an object are two
 systems with no transaction between them, and the one that holds the bytes is
 the one that cannot lie about them.
@@ -70,8 +72,10 @@ browser (a `File`) send one that way. `Content-Length` is required (411 without
 it) because the cap is enforced from the header before a byte is read (413
 over it), and because R2 needs the length to stream a body in.
 
-Authenticated through the same `caller` seam as `/account` — bearer or cookie
-— so what counts as a caller cannot differ between a tool and a route. The
+Authenticated as `/mcp` and `/account` are, composed: `resolveCaller` for an
+OAuth access token or a static `BELLMAN_KEY` bearer, then the OAuth `caller`
+for the panel cookie — so what counts as a caller cannot differ between a tool
+and a route, and the bridge's key reaches the route as it reaches the tools. The
 handle must be the caller's (`findMember`), in the room, and its seat must hold
 `write_surface`: uploading is the storing half of placing a file, and a seat
 that cannot place one should not fill the bucket. A cookie caller passes the
@@ -85,12 +89,17 @@ for it.
 
 ### D3 — Put, then charge. The quota is a record on the room.
 
-Entitlements gain `blobBytesPerRoom`, and the session record gains
-`blobBytes`, the sum charged so far. One new store method decides the charge
-inside the room object:
+Entitlements gain `blobBytesPerRoom`, and the session gains two numbers:
+`blobBytesCeiling`, stamped at creation from the creator's plan the way
+`maxMembers` and `expiresAt` are, and `blobBytes`, the sum charged so far. The
+ceiling is the room's, not the uploader's: a free member in a team room shares
+the team room's allowance, because a room is what a plan rations. A room
+written before the field existed reads the free ceiling until it expires. One
+new store method decides the charge inside the room object, reading the
+room's own ceiling:
 
 ```ts
-chargeBlobBytes(sessionId, bytes, ceiling): Promise<
+chargeBlobBytes(sessionId, bytes): Promise<
   | { ok: true; used: number }
   | { ok: false; reason: "over_quota" | "frozen" | "closed" | "not_found"; used: number }
 >
@@ -100,7 +109,9 @@ The route pre-checks the ceiling against the record it already read (a
 courtesy, so a hopeless upload is refused before the bytes move), puts the
 object, then charges. A refused charge — over quota, or a room that froze or
 closed while the bytes were in flight — deletes the object and answers 413 or
-409. A delete that fails leaves an orphan.
+409. A delete that fails leaves an orphan. A charge that throws is ambiguous,
+since the room object may have committed it before the call failed, so it
+deletes nothing: the object stays, logged by key, on the findable side.
 
 Put-then-charge rather than charge-then-put, deliberately. A charge reserved
 before an upload that never completes — the client dies mid-body — is a phantom
@@ -179,9 +190,11 @@ signatures. A mismatch stores `application/octet-stream`, not the claim: a body
 that is not a PNG is not served as one, whatever its header said. Ten lines,
 and the difference between an allowlist and a suggestion.
 
-`name` is bounded at 200 characters, stripped of path separators and control
-characters, and what comes back in `Content-Disposition` is that, encoded. It
-is the client's word and is treated as a label, never as a path.
+`name` is bounded at 200 characters, stripped of path separators, control
+characters and format characters (all but the two zero-width joiners and the
+soft hyphen, which names are spelled with; a name left with nothing else is
+refused as a blank), and what comes back in `Content-Disposition` is that,
+encoded. It is the client's word and is treated as a label, never as a path.
 
 ### D7 — The bridge uploads and places in one call.
 
@@ -198,9 +211,16 @@ holds (`BELLMAN_KEY`, or the cached sign-in's access token), then calls the
 upstream `bellman_send` with the `surface` item. `kind` defaults from the type:
 an allowlisted image is `image`, anything else `file`.
 
-Reading a path on the user's machine is not a new capability: the agent
-driving the bridge already has that filesystem. The tool is `readOnlyHint:
-false`, so a host that asks before writes asks here too.
+The read is bounded. `path` must resolve, links followed, under the upload
+root: the directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when
+that is set (`/` for any file; the Desktop bundle exposes it as the Upload
+folder setting). The working-directory default is refused when that directory
+contains the home directory (the filesystem root included), so a bridge started
+there reads nothing until that directory is named on purpose. The agent driving
+the bridge may already read that filesystem, but a one-call send to every
+member of a room is new, and a room tool is the kind people allowlist; a line
+that arrives as peer content must not be able to ship a key file. The tool is
+`readOnlyHint: false`, so a host that asks before writes asks here too.
 
 `extension/manifest.json` gains the tool; `tests/extension.test.ts` fails until
 it does. A hosted connector with no bridge uploads through the panel (piece 3),
@@ -224,16 +244,20 @@ export interface BlobRef {
   name: string;      // as stored, after D6
 }
 // SurfaceItem gains `blob: BlobRef | null`; SurfaceKind gains "file" | "image"
-// StoredSession gains `blobBytes?: number`, lifted to 0 by hydrateStoredSession
+// Session gains `blobBytesCeiling: number`, stamped by bellman_start from the
+// creator's entitlements; StoredSession gains `blobBytes?: number`, lifted to 0
+// by hydrateStoredSession, which lifts a missing ceiling to the free plan's
 // Entitlements gains `blobBytesPerRoom: number`
 
 // src/blobs.ts — runtime-free
 export interface BlobMeta { bytes: number; type: string; name: string; by: string; at: number; etag: string }
 export interface BlobObject extends BlobMeta { body: ReadableStream }
 export interface BlobStore {
-  put(sessionId: string, id: string, body: ReadableStream | ArrayBuffer, meta: BlobMeta): Promise<void>;
+  // The etag is the store's to mint, so a put takes the metadata without it;
+  // a 304 must carry the etag, so an unchanged answer names it.
+  put(sessionId: string, id: string, body: ReadableStream | ArrayBuffer, meta: Omit<BlobMeta, "etag">): Promise<void>;
   head(sessionId: string, id: string): Promise<BlobMeta | null>;
-  get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobObject | "unchanged" | null>;
+  get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobObject | { unchanged: true; etag: string } | null>;
   delete(sessionId: string, id: string): Promise<void>;
 }
 ```

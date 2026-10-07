@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -11,7 +11,8 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  connectedAmong, creditReport, isActiveMember, isRemovedMember, markRemoved, seatVictims,
+  connectedAmong, creditReport, decideBlobCharge, isActiveMember, isRemovedMember, markRemoved,
+  seatVictims,
 } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
@@ -1477,6 +1478,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * The quota's bound (#183, D3), decided in this object in one transaction
+   * against the ceiling stamped on its own record: the read of the total and
+   * the write that raises it are one unit, so two uploads cannot both fit the
+   * last megabyte. A room past its TTL reads as closed through `readsClosed`,
+   * the rule every reader of "closed" shares; the rest of the decision is
+   * `decideBlobCharge`'s, the same call `MemoryStore` makes. Nothing is written
+   * for a refusal. `blobBytes` is the sum charged so far; nothing here credits it.
+   */
+  async chargeBlobBytes(bytes: number): Promise<BlobCharge> {
+    return this.ctx.storage.transaction<BlobCharge>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found", used: 0 };
+      const charge = decideBlobCharge(s, readsClosed(s, Date.now()), bytes);
+      if (charge.ok) await txn.put("session", { ...s, blobBytes: charge.used });
+      return charge;
+    });
+  }
+
+  /**
    * The read and the registration must not be split by an await, or an event
    * appended in the gap wakes an empty waiter list and this poll hangs to its
    * own timeout. Storage is async here, so the read is awaited FIRST and the
@@ -2723,6 +2743,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
     return this.session(sessionId).surfaceOf();
+  }
+
+  async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
+    return this.session(sessionId).chargeBlobBytes(bytes);
   }
 
   async waitForEvents(

@@ -15,6 +15,9 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 20,
     orgScoping: false,
     audit: false,
+    // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
+    // A room is what a plan already rations, so nothing here is monthly.
+    blobBytesPerRoom: 50 * 1024 * 1024,
   },
   pro: {
     modes: ["pair", "swarm"],
@@ -23,6 +26,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 500,
     orgScoping: false,
     audit: false,
+    blobBytesPerRoom: 500 * 1024 * 1024,
   },
   // Team-sized rooms for one person, without an org. Org scoping, the audit
   // log and 30-day rooms stay team-only: that is why a company still buys team.
@@ -33,6 +37,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
+    blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
   },
   team: {
     modes: ["pair", "swarm"],
@@ -41,6 +46,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 5000,
     orgScoping: true,
     audit: true,
+    blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
   },
 };
 

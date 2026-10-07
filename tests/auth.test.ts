@@ -102,6 +102,10 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
     expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
     expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
+    expect(ENTITLEMENTS.free.blobBytesPerRoom).toBe(50 * 1024 * 1024);
+    expect(ENTITLEMENTS.pro.blobBytesPerRoom).toBe(500 * 1024 * 1024);
+    expect(ENTITLEMENTS.max.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
+    expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
   it("gives max the team-sized room: 25 members for 14 days, 2,000 a month (#45)", () => {
@@ -131,11 +135,12 @@ describe("plan entitlements", () => {
   /**
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
-   * on what you pay — this test is the tripwire.
+   * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
+   * bounds what a room stores, not who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit",
+      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
     ].sort();
 
     for (const plan of plans) {

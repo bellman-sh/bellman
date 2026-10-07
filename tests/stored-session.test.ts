@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { hydrateStoredSession } from "../src/stored-session.js";
+import { ENTITLEMENTS } from "../src/auth.js";
 import { mustReport } from "../src/roles.js";
 import { roomManifest, session } from "./helpers/fixtures.js";
 
@@ -135,5 +136,32 @@ describe("hydrateStoredSession — a record stored before the surface", () => {
   it("leaves a surfaceCursor the room has already moved alone", () => {
     const { events: _events, ...raw } = session();
     expect(hydrateStoredSession({ ...raw, surfaceCursor: 12 })!.surfaceCursor).toBe(12);
+  });
+});
+
+/**
+ * A record written before blobs (#183): it has no `blobBytes`. The key is
+ * ABSENT, not undefined, which is what Durable Object storage hands back.
+ */
+describe("hydrateStoredSession — a record stored before blobs", () => {
+  /** Nothing was ever charged there, which is what 0 says; a quota check cannot add to undefined. */
+  it("reads a missing blobBytes as 0", () => {
+    const { events: _events, ...raw } = session();
+    expect("blobBytes" in raw).toBe(false);
+    expect(hydrateStoredSession(raw)!.blobBytes).toBe(0);
+  });
+
+  /** A default that clobbered would hand every room its whole quota back on each read. */
+  it("leaves a blobBytes the room has already charged alone", () => {
+    const { events: _events, ...raw } = session();
+    expect(hydrateStoredSession({ ...raw, blobBytes: 4096 })!.blobBytes).toBe(4096);
+  });
+
+  /** A room written before the ceiling existed reads the free plan's: conservative, and it expires with the room. */
+  it("reads a missing blobBytesCeiling as the free ceiling, and leaves a stamped one alone", () => {
+    const { events: _events, blobBytesCeiling: _ceiling, ...raw } = session();
+    expect("blobBytesCeiling" in raw).toBe(false);
+    expect(hydrateStoredSession(raw)!.blobBytesCeiling).toBe(ENTITLEMENTS.free.blobBytesPerRoom);
+    expect(hydrateStoredSession({ ...raw, blobBytesCeiling: 7 })!.blobBytesCeiling).toBe(7);
   });
 });

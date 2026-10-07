@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Identity } from "./types.js";
 import type { BellmanStore } from "./store.js";
+import type { BlobStore } from "./blobs.js";
 import { registerStart } from "./tools/start.js";
 import { registerConnect } from "./tools/connect.js";
 import { registerConfirm } from "./tools/confirm.js";
@@ -29,15 +30,19 @@ const SERVER_VERSION = "0.1.0";
  * order they were registered in before the split. `extension/manifest.json`
  * declares the same list by hand for the Claude Desktop bundle, and
  * `tests/extension.test.ts` asserts the two against each other.
+ *
+ * `blobs` is the blob seam (#183), handed only to `bellman_send`, whose `file`
+ * and `image` items read it; it has no default, so a deploy that forgets the
+ * binding does not compile rather than serving a store that forgets.
  */
-export function buildServer(identity: Identity, s: BellmanStore): McpServer {
+export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   registerStart(server, identity, s);
   registerConnect(server, identity, s);
   registerConfirm(server, identity, s);
   registerInvite(server, identity, s);
-  registerSend(server, identity, s);
+  registerSend(server, identity, s, blobs);
   registerSync(server, identity, s);
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);

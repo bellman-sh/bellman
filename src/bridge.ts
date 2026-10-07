@@ -1,5 +1,8 @@
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, extname, join, parse, sep } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -13,6 +16,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
+import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
@@ -139,6 +143,8 @@ export interface BridgeOptions {
    * one: the bus is an optimisation, and nothing here depends on it.
    */
   bus?: BridgeBus;
+  /** The upload target for bellman_upload. Absent, the tool is listed and refuses with a message. */
+  upload?: UploadOptions;
   log?: (message: string) => void;
 }
 
@@ -152,6 +158,18 @@ export type BridgeBus = Pick<
   "url" | "identity" | "bearer" | "root" | "platform" | "ackTimeoutMs" | "window" | "roomSocket"
   | "cooldownMs" | "maxLosses" | "lossWindowMs"
 >;
+
+/**
+ * Where bellman_upload posts, and as whom (#183, D7). The server URL is the one
+ * the bridge has (.../mcp); the blob routes live on its origin. `bearer` is read
+ * on every upload, because an access token lasts ten minutes. `fetchImpl` is for
+ * tests, which hand in a fake server's.
+ */
+export interface UploadOptions {
+  serverUrl: string;
+  bearer: () => string | Promise<string>;
+  fetchImpl?: typeof fetch;
+}
 
 const CHANNEL_INSTRUCTIONS =
   "Bellman peer events are pushed into this session as <channel> events from this server, " +
@@ -213,6 +231,159 @@ Returns: { source, label, plan, role, org_id } when source is "oauth" — this b
     readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
   },
 };
+
+const UPLOAD_TOOL: Tool = {
+  name: "bellman_upload",
+  title: "Upload a file and place it on the room's surface",
+  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file or image item, in one call. Local to this bridge: the server has no binary channel, and a hosted connector has no bellman_upload; the control panel's upload comes with the canvas.
+
+Args:
+  - session_id, member_id: your handles from start/confirm; the seat must hold write_surface
+  - path: a regular file under the upload root (the directory the bridge was started in, or BELLMAN_UPLOAD_ROOT; / for any file), not a symbolic link, at most ${MAX_BLOB_BYTES} bytes
+  - key: the surface key to place it under; an item already there is replaced
+  - kind: "file" | "image". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file
+  - title?, placement? ({ x, y, w?, h? }): as on bellman_send type "surface"
+The type is taken from the file's extension. The server checks an image's bytes against that claim and stores a mismatch as application/octet-stream. A placement the server refuses — an image over a mismatched type, a key it does not accept, a surface that is full — is reported with the blob's id, bytes and stored type, so you can place it again with bellman_send, without uploading again.
+
+Returns: { blob_id, bytes, type, cursor, room_members } — type is what the server stored, cursor is the surface event's, room_members is bellman_send's (not a read receipt).`,
+  // The bounds on key, title and placement are the server's, held in one place
+  // (`SurfaceKeyShape`, `boundedText` in surface.ts); this schema names the
+  // fields and carries no number it could drift from.
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_id: { type: "string" },
+      member_id: { type: "string" },
+      path: { type: "string" },
+      key: { type: "string" },
+      kind: { type: "string", enum: ["file", "image"] },
+      title: { type: "string" },
+      placement: {
+        type: "object",
+        properties: { x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } },
+        required: ["x", "y"],
+      },
+    },
+    required: ["session_id", "member_id", "path", "key"],
+  },
+  annotations: {
+    readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+  },
+};
+
+// ponytail: a short table, not a MIME database. Unknown is an octet-stream, and
+// the server decides what an image really is either way (D6).
+const TYPES: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  svg: "image/svg+xml", md: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json",
+  yaml: "application/yaml", yml: "application/yaml", html: "text/html", htm: "text/html", pdf: "application/pdf",
+};
+
+/** The type a file is claimed as, from its extension alone. */
+export function typeFromExtension(path: string): string {
+  return TYPES[extname(path).slice(1).toLowerCase()] ?? OCTET_STREAM;
+}
+
+/**
+ * A regular file's bytes, read through one descriptor so nothing can change
+ * between the check and the read. A symbolic link is refused, as room.yaml's is
+ * and for the same reason — the bridge sends what it reads to a server, and a
+ * link would send whatever it points at; so is anything that is not a regular
+ * file, and so is a file over the cap, before a byte of it is read. O_NOFOLLOW
+ * refuses a link in the open itself where the platform has it, and the lstat
+ * is what refuses one where it does not (Windows).
+ *
+ * So is anything outside `root` (#183, D7). The leaf is not the only place a link
+ * can be: a directory inside the root may point out of it, and the file under it is
+ * a regular file by every check above. So both are resolved, links followed, and
+ * the path must be the root or under it. That comparison comes before the open,
+ * so a file the root does not cover is not so much as opened; and a root that
+ * cannot be resolved covers nothing, and says so.
+ */
+export function readLocalFile(path: string, root: string): { bytes: Buffer<ArrayBuffer> } {
+  const link = () =>
+    new Error(`${path} is a symbolic link, and the bridge will not follow one: whatever it points at would be read and sent to the server. Pass the file itself.`);
+  if (isSymlink(path)) throw link();
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch (e) {
+    throw new Error(`the upload root ${root} does not exist or cannot be read (${(e as Error).message}): set BELLMAN_UPLOAD_ROOT to a directory that does, or start the bridge in the directory to upload from.`);
+  }
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch (e) {
+    throw new Error(`${path} could not be read: ${(e as Error).message}`);
+  }
+  // The root itself, or a path under it: the prefix ends at a separator, so /up does not cover /up-evil.
+  // A root that is already one (/, or a drive's) is its own prefix.
+  const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+  if (real !== realRoot && !real.startsWith(prefix)) {
+    throw new Error(`${path} is outside the upload root ${root}: the bridge uploads only from the directory it was started in, or from BELLMAN_UPLOAD_ROOT when that is set (/ for any file).`);
+  }
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (e) {
+    if ((e as { code?: string }).code === "ELOOP") throw link();
+    throw new Error(`${path} could not be read: ${(e as Error).message}`);
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new Error(`${path} is not a regular file`);
+    if (info.size > MAX_BLOB_BYTES) {
+      throw new Error(`${path} is ${info.size} bytes, and a blob is at most ${MAX_BLOB_BYTES}`);
+    }
+    return { bytes: readFileSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Whether `dir` holds the home directory: it is the home directory, or it is above it, and the filesystem root is
+ * above everything. Both are resolved with the native realpath, links followed, because the plain one keeps the case
+ * it is given and a home reached in another case on a disk that ignores case would then slip past a guard that
+ * exists to refuse it. The root is named outright instead of being found by comparing with a home, so a machine
+ * that cannot name one (no HOME, no account entry, as a bare container may be) still refuses `/`. A `dir` that
+ * cannot be resolved holds nothing, and a home that cannot be resolved is held by nothing but the root.
+ */
+function containsHome(dir: string): boolean {
+  let here: string;
+  try {
+    here = realpathSync.native(dir);
+  } catch {
+    return false;
+  }
+  if (parse(here).root === here) return true;
+  try {
+    const home = realpathSync.native(homedir());
+    return home === here || home.startsWith(here + sep);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The root bellman_upload reads under (D7): BELLMAN_UPLOAD_ROOT when that is set and not empty, else the directory
+ * the bridge was started in. That default is refused when the directory contains the home directory (is it, or is
+ * above it, the filesystem root included): a bridge started there by whatever launched it would make every file
+ * under it, every key a person owns among them, an upload candidate with nobody having said so, so it refuses
+ * instead, before anything is read. A root that is named is never held to this: naming it is saying so. Read on
+ * each call, so a change to either is honoured on the next upload.
+ */
+function uploadRoot(): string {
+  const named = process.env.BELLMAN_UPLOAD_ROOT;
+  if (named) return named;
+  const cwd = process.cwd();
+  if (containsHome(cwd)) {
+    throw new Error(
+      `the bridge was started in ${cwd}, which contains your home directory, so every file under it would be an upload candidate (your keys included): set BELLMAN_UPLOAD_ROOT to the directory to upload from (${cwd} to allow that much on purpose).`,
+    );
+  }
+  return cwd;
+}
 
 interface Watch {
   sessionId: string;
@@ -532,7 +703,7 @@ export function createBridge(opts: BridgeOptions) {
     const { tools } = await (await remote()).listTools();
     // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
     const listed = tools.map(advertised);
-    const local = delivery === "hook" ? [WAIT_TOOL, WHOAMI_TOOL] : [WHOAMI_TOOL];
+    const local = delivery === "hook" ? [WAIT_TOOL, WHOAMI_TOOL, UPLOAD_TOOL] : [WHOAMI_TOOL, UPLOAD_TOOL];
     return { tools: [...listed, ...local] };
   });
 
@@ -542,6 +713,7 @@ export function createBridge(opts: BridgeOptions) {
     let args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (name === WHOAMI_TOOL.name) return describeSelf();
     if (name === WAIT_TOOL.name && delivery === "hook") return waitForQueued(args);
+    if (name === UPLOAD_TOOL.name) return uploadAndPlace(args);
 
     // The one place the bridge transforms a call instead of relaying it.
     if (name === START_TOOL && args.manifest === undefined) {
@@ -1009,6 +1181,100 @@ export function createBridge(opts: BridgeOptions) {
         events: events.map((e) => ({ trust: "untrusted", ...e })),
       },
     };
+  }
+
+  /**
+   * bellman_upload (#183, D7): read, post, place. The upload is refused locally
+   * for a path outside the upload root, a link, a non-file or an oversized file
+   * before anything leaves the machine. The root is BELLMAN_UPLOAD_ROOT when
+   * that is set and not empty, else the directory the bridge was started in,
+   * unless that directory contains the home directory, the filesystem root
+   * included, which is refused (see `uploadRoot`); it is read on each call. The
+   * post carries the bearer the bridge holds and sets Content-Length itself —
+   * the route requires it, a real fetch keeps a caller's value when it matches
+   * the body, and a fake server's Request computes none. A 401 is answered once,
+   * by asking the held connection to refresh the sign-in and posting again if
+   * the bearer changed. The placement is the upstream bellman_send, observed
+   * like any other so the membership it reveals is watched. A placement the
+   * server refuses, for whatever reason, is reported with the blob's id, bytes
+   * and type: the bytes are stored and charged, and the caller places them again
+   * (as a file, if an image was the trouble) rather than uploading twice.
+   */
+  async function uploadAndPlace(args: Record<string, unknown>): Promise<CallToolResult> {
+    const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
+    const upload = opts.upload;
+    if (!upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
+    const sessionId = String(args.session_id ?? "");
+    const memberId = String(args.member_id ?? "");
+    const path = String(args.path ?? "");
+    const key = String(args.key ?? "");
+    if (!sessionId || !memberId || !path || !key) return fail("session_id, member_id, path and key are required");
+
+    let file: { bytes: Buffer<ArrayBuffer> };
+    try {
+      file = readLocalFile(path, uploadRoot());
+    } catch (e) {
+      return fail((e as Error).message);
+    }
+    const claimed = typeFromExtension(path);
+    const kind = args.kind === "file" || args.kind === "image" ? args.kind : isImageType(claimed) ? "image" : "file";
+
+    const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/blobs`, upload.serverUrl);
+    target.searchParams.set("member_id", memberId);
+    target.searchParams.set("name", basename(path));
+    const post = (bearer: string): Promise<Response> =>
+      (upload.fetchImpl ?? fetch)(target, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${bearer}`,
+          "content-type": claimed,
+          "content-length": String(file.bytes.byteLength),
+        },
+        body: file.bytes,
+      });
+    let response: Response;
+    try {
+      const bearer = await upload.bearer();
+      response = await post(bearer);
+      if (response.status === 401) {
+        // The bearer is read from the credential file, and a signed-in access token lasts ten minutes, with nothing
+        // refreshing it between calls. The MCP transport does, on a 401 of its own, and writes the new token to
+        // that file (src/signin.ts). So it is given one: a tools/list through the connection the bridge holds,
+        // whose failure, or the sign-in it could not complete, changes nothing here. The post is repeated once,
+        // and only if the bearer read now is not the one just refused: a BELLMAN_KEY cannot be refreshed, and a
+        // second post of up to 25 MB that must fail the same way is not a retry. A 401 that stays is reported as it
+        // was.
+        await remote().then((connection) => connection.listTools()).catch(() => undefined);
+        const fresh = await upload.bearer();
+        if (fresh !== bearer) {
+          await response.body?.cancel().catch(() => undefined);
+          response = await post(fresh);
+        }
+      }
+    } catch (e) {
+      return fail(`upload failed: ${(e as Error).message}`);
+    }
+    if (response.status !== 201) {
+      const detail = await response.text().catch(() => "");
+      return fail(`upload refused (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    const uploaded = (await response.json()) as { blob_id: string; bytes: number; type: string; name: string };
+
+    const payload: Record<string, unknown> = { key, kind, blob: { id: uploaded.blob_id } };
+    if (args.title !== undefined) payload.title = args.title;
+    if (args.placement !== undefined) payload.placement = args.placement;
+    const sendArgs = { session_id: sessionId, member_id: memberId, type: "surface", payload };
+    const placed = await (await remote()).callTool({ name: "bellman_send", arguments: sendArgs });
+    observe("bellman_send", sendArgs, placed);
+    if (placed.isError) {
+      return fail(
+        `uploaded blob ${uploaded.blob_id} (${uploaded.bytes} bytes, stored as ${uploaded.type}) but could not place it as ${kind} "${key}": ` +
+          `${textOf(placed).replace(/^Error: /, "")} Place it with bellman_send type "surface", payload { key, kind: "file", blob: { id: "${uploaded.blob_id}" } }, rather than uploading again.`,
+      );
+    }
+    const out = (placed.structuredContent ?? {}) as Record<string, unknown>;
+    const result = { blob_id: uploaded.blob_id, bytes: uploaded.bytes, type: uploaded.type, cursor: out.cursor, room_members: out.room_members };
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }
 
   async function close(): Promise<void> {

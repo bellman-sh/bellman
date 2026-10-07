@@ -182,6 +182,9 @@ export function surfaceItem(r: SurfaceRow) {
       body: r.body,
       ends: r.ends,
       placement: r.placement,
+      // `?? null` for rows written before blobs (#183): a reader never tells
+      // "absent" from "null", and a legacy row has no key at all.
+      blob: r.blob ?? null,
       cursor: r.cursor,
       at: new Date(r.at).toISOString(),
     },

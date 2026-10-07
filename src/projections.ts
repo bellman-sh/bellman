@@ -147,6 +147,25 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
 }
 
 /**
+ * A room on a person's list (#184, D1): identifiers, the server's numbers,
+ * and the room's name. `room` is creator prose; the panel renders it as text
+ * and never as markup, which is what makes it safe to carry unwrapped here
+ * where `roomPreview` wraps it for a joiner's MODEL. `status` is handed in
+ * because `sessionStatus` lives in rooms.ts, which imports this module.
+ */
+export function roomSummary(s: StoredSession, viewerUserId: string, status: string) {
+  return {
+    id: s.id,
+    room: s.manifest.room,
+    mode: s.manifest.mode,
+    status,
+    members: s.members.filter((m) => m.leftAt === null).length,
+    mine: s.createdBy === viewerUserId,
+    expires_at: new Date(s.expiresAt).toISOString(),
+  };
+}
+
+/**
  * The surface as a joiner's preview shows it (#129, D9): identifiers and the
  * server's numbers, and no prose. `key` is regex-bounded, `kind` is an enum
  * value, `chars`, `cursor` and `at` are the server's, and `by` is the label

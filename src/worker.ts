@@ -209,10 +209,11 @@ export default {
       });
     }
 
-    // The room routes (#183), ahead of the OAuth routes: /rooms/ is that
-    // module's prefix. An upload is a write, so the fail-closed guard /ws has
-    // covers it too — a deploy with neither a key map nor OAuth serves no room.
-    if (url.pathname.startsWith("/rooms/")) {
+    // The room routes (#183, #184), ahead of the OAuth routes: /rooms/ is that
+    // module's prefix, and /rooms with no slash is the list. The fail-closed
+    // guard /ws has covers them all — a deploy with neither a key map nor OAuth
+    // serves no room.
+    if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await roomRoutes(request, {

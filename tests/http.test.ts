@@ -276,6 +276,16 @@ describe("the room routes over the Node server (#183)", () => {
     await jesse.close();
   });
 
+  // The list path, with no trailing slash, reaches the module. The key is outsider's: the store is shared
+  // across this file and the tests above leave rooms behind them for jesse, so only a person who made none
+  // answers the empty list this asserts.
+  it("serves GET /rooms, with no trailing slash, from the room routes module", async () => {
+    const res = await fetch(`${base}/rooms`, { headers: { authorization: "Bearer qk_dev_outsider" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ rooms: [] });
+  });
+
   // A handler that throws is answered by the route module, in JSON. Left to Express, a rejected async handler
   // is answered with its own HTML error page, which a bridge or the panel cannot read as the error it is.
   it("answers a route whose store throws with the module's JSON, not Express's HTML page", async () => {

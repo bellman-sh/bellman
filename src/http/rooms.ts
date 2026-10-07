@@ -20,8 +20,10 @@ import {
   sanitizeName, storedType, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { findMember, gateSeat, type RoomFailure } from "../rooms.js";
+import { roomSummary } from "../projections.js";
+import { findMember, gateSeat, sessionStatus, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
+import type { StoredSession } from "../stored-session.js";
 import type { Identity } from "../types.js";
 
 /** Who is calling a room route, and how. `via` feeds the CSRF check and nothing else. */
@@ -39,6 +41,11 @@ export interface RoomRouteDeps {
   panelOrigins: readonly string[];
 }
 
+// ponytail: fifty rooms, not paged. The first account past it wants #49's
+// summary index, not a bigger number.
+export const MAX_ROOMS_LISTED = 50;
+
+const LIST = /^\/rooms$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 
@@ -79,14 +86,15 @@ const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
 
 /**
- * The room routes. `undefined` for a path outside `/rooms/`, so the Worker
- * carries on to the next module; everything under the prefix is answered here,
- * a path this module does not know and a handler that throws included.
+ * The room routes. `undefined` for a path that is neither `/rooms` (the list)
+ * nor under `/rooms/`, so the Worker carries on to the next module; everything
+ * under the prefix is answered here, a path this module does not know and a
+ * handler that throws included.
  */
 export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise<Response | undefined> {
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "");
-  if (!path.startsWith("/rooms/")) return undefined;
+  if (path !== "/rooms" && !path.startsWith("/rooms/")) return undefined;
   const origin = allowedOrigin(request, deps.panelOrigins);
   // The panel's upload sets a Content-Type that is not a simple one, so the
   // browser asks first. 204 either way: a stranger's preflight carries no grant.
@@ -98,6 +106,10 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
   // handlers are awaited inside the try, or their rejections would pass it. A
   // body of the wrong length is not one of these: `uploadBlob` answers it 400.
   try {
+    if (LIST.test(path)) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await listRooms(request, origin, deps);
+    }
     const upload = UPLOAD.exec(path);
     if (upload) {
       if (request.method !== "POST") return methodNotAllowed("POST", origin);
@@ -257,4 +269,29 @@ async function downloadBlob(
   headers["content-length"] = String(read.bytes);
   if (!image) headers["content-disposition"] = attachmentDisposition(read.name);
   return new Response(read.body, { status: 200, headers });
+}
+
+/**
+ * The list (D1): every room this person created or holds a handle in, from the
+ * two registry listings, each resolved with one `getSession`. Membership is
+ * checked on the record, not trusted from the index: a listing row names a room,
+ * and only the roster says whether this person is in it. Newest first, by the
+ * creator's seat, since a room has no creation stamp of its own.
+ */
+async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const userId = who.identity.userId;
+  const [created, joined] = await Promise.all([
+    deps.store.sessionsCreatedBy(userId, MAX_ROOMS_LISTED),
+    deps.store.sessionsJoinedBy(userId, MAX_ROOMS_LISTED),
+  ]);
+  const ids = [...new Set([...created, ...joined])];
+  const found = await Promise.all(ids.map((id) => deps.store.getSession(id)));
+  const rooms = found
+    .filter((s): s is StoredSession => s !== undefined && s.members.some((m) => m.userId === userId))
+    .sort((a, b) => b.members[0].joinedAt - a.members[0].joinedAt)
+    .slice(0, MAX_ROOMS_LISTED)
+    .map((s) => roomSummary(s, userId, sessionStatus(s)));
+  return json(200, { rooms }, origin);
 }

@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md]
-last-verified-against-source: 77396879
+last-verified-against-source: c9789ae
 last-updated: 2026-10-06
 ---
 
@@ -1239,12 +1239,12 @@ names; a `surface` block to what `bellman_connect` and `bellman_confirm` return;
 and `write_surface` to the verbs the manifest schema inside `bellman_start`
 lists.
 
-Counted this way the total is 5,998, which is 1,036 more than the 4,962
+Counted this way the total is 6,008, which is 1,046 more than the 4,962
 recorded. 574 of those predate #129, so the recorded figure was already out of
 date on main: `bellman_send` +226 (`room_members` #82, the request states #81, the
 depth bound #136), `bellman_sync` +225 (`outstanding` #81, the removed member's
 cut #113), `bellman_invite` +79 (#90) and `bellman_evict` +44 (#113). The other
-462 are #129's: `bellman_send` +200 for the seventh kind, `bellman_sync` +157
+472 are #129's: `bellman_send` +210 for the seventh kind, `bellman_sync` +157
 for the flag and the two fields it returns, `bellman_connect` +53 and
 `bellman_confirm` +46 for the `surface` block their `Returns:` lines now name,
 and +6 on `bellman_start` for the verb.

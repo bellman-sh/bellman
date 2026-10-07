@@ -76,7 +76,9 @@ that way; the surface is where things stand.
 - A joiner's preview lists what the surface holds — keys, kinds and sizes — and
   `bellman_confirm` hands over the items. Every poll carries `surface_cursor`
   once the surface has changed, each change arrives as a `surface` event, and
-  `bellman_sync` with `surface: true` returns everything.
+  `bellman_sync` with `surface: true` returns everything. A member a creator
+  removed is the exception: it sees only the items changed at or before its
+  cut, and gets `surface_cursor` only when it asks for the surface.
 - Every item arrives in an untrusted envelope with its writer as origin. The
   preview carries no prose at all.
 

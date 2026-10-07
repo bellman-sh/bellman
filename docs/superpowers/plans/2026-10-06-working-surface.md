@@ -31,7 +31,7 @@ Five inputs the spec implies and no test in the spec's own list exercises. Each 
 2. **A body of astral characters.** `.max()` counts UTF-16 code units, so 4,000 emoji is 8,000 units and accepted, 4,001 is refused. The same unit `MAX_PAYLOAD_CHARS` uses. Task 6.
 3. **A key that differs by case or carries whitespace** (`Plan`, `plan `). The regex refuses both; a writer must not be able to shadow `plan` with `Plan`. Task 1.
 4. **A link whose scheme is upper-case or whose body is not a URL.** `HTTPS://EXAMPLE.COM` parses and is accepted; `javascript:alert(1)`, `data:text/html,...`, `//host/path` and `not a url` are refused. Task 6.
-5. **A poll that waited, and a removed member's poll.** `surface: true` on a poll parked when the write landed returns the item that woke it, read after the wait; a removed member's `surface_cursor` is capped at its cut like `cursor` is. Task 7.
+5. **A poll that waited, and a removed member's poll.** `surface: true` on a poll parked when the write landed returns the item that woke it, read after the wait; a removed member's `surface_cursor` is derived from the items it is shown, and present only when it asks for the surface. Task 7.
 
 ---
 

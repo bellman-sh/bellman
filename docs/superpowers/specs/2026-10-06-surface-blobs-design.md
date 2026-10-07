@@ -70,8 +70,10 @@ browser (a `File`) send one that way. `Content-Length` is required (411 without
 it) because the cap is enforced from the header before a byte is read (413
 over it), and because R2 needs the length to stream a body in.
 
-Authenticated through the same `caller` seam as `/account` — bearer or cookie
-— so what counts as a caller cannot differ between a tool and a route. The
+Authenticated as `/mcp` and `/account` are, composed: `resolveCaller` for an
+OAuth access token or a static `BELLMAN_KEY` bearer, then the OAuth `caller`
+for the panel cookie — so what counts as a caller cannot differ between a tool
+and a route, and the bridge's key reaches the route as it reaches the tools. The
 handle must be the caller's (`findMember`), in the room, and its seat must hold
 `write_surface`: uploading is the storing half of placing a file, and a seat
 that cannot place one should not fill the bucket. A cookie caller passes the
@@ -85,12 +87,17 @@ for it.
 
 ### D3 — Put, then charge. The quota is a record on the room.
 
-Entitlements gain `blobBytesPerRoom`, and the session record gains
-`blobBytes`, the sum charged so far. One new store method decides the charge
-inside the room object:
+Entitlements gain `blobBytesPerRoom`, and the session gains two numbers:
+`blobBytesCeiling`, stamped at creation from the creator's plan the way
+`maxMembers` and `expiresAt` are, and `blobBytes`, the sum charged so far. The
+ceiling is the room's, not the uploader's: a free member in a team room shares
+the team room's allowance, because a room is what a plan rations. A room
+written before the field existed reads the free ceiling until it expires. One
+new store method decides the charge inside the room object, reading the
+room's own ceiling:
 
 ```ts
-chargeBlobBytes(sessionId, bytes, ceiling): Promise<
+chargeBlobBytes(sessionId, bytes): Promise<
   | { ok: true; used: number }
   | { ok: false; reason: "over_quota" | "frozen" | "closed" | "not_found"; used: number }
 >
@@ -224,7 +231,9 @@ export interface BlobRef {
   name: string;      // as stored, after D6
 }
 // SurfaceItem gains `blob: BlobRef | null`; SurfaceKind gains "file" | "image"
-// StoredSession gains `blobBytes?: number`, lifted to 0 by hydrateStoredSession
+// Session gains `blobBytesCeiling: number`, stamped by bellman_start from the
+// creator's entitlements; StoredSession gains `blobBytes?: number`, lifted to 0
+// by hydrateStoredSession, which lifts a missing ceiling to the free plan's
 // Entitlements gains `blobBytesPerRoom: number`
 
 // src/blobs.ts — runtime-free

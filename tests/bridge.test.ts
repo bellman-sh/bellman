@@ -233,7 +233,7 @@ describe("channel delivery", () => {
     expect(names).toEqual([
       "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
       "bellman_invite", "bellman_leave", "bellman_send", "bellman_start",
-      "bellman_sync", "bellman_whoami",
+      "bellman_sync", "bellman_upload", "bellman_whoami",
     ]);
   });
 
@@ -798,7 +798,7 @@ describe("bellman_whoami", () => {
     const names = (await a.client.listTools()).tools.map((t) => t.name).sort();
 
     expect({ names, who: await asked(a) }).toEqual({
-      names: [...remoteToolNames, "bellman_wait", "bellman_whoami"],
+      names: [...remoteToolNames, "bellman_upload", "bellman_wait", "bellman_whoami"],
       who: { isError: false, data: { source: "env", label: null }, text: ENV_TEXT },
     });
   });
@@ -1033,7 +1033,7 @@ describe("a connection Bellman stops accepting", () => {
       logs,
     }).toEqual({
       first: "rejected",
-      second: ["bellman_whoami"],
+      second: ["bellman_whoami", "bellman_upload"],
       conns: [{ closed: true, calls: ["listTools"] }, { closed: false, calls: ["listTools"] }],
       logs: [RETIRED],
     });
@@ -1548,9 +1548,9 @@ describe("the tools the bridge lists", () => {
       expect(startOf(listed).description).toContain(".bellman/room.yaml");
 
       // No REMOTE tool is edited, added or dropped. The bridge's own local tools are excluded, because
-      // they were never in the server's list to compare against: bellman_wait (hook delivery only) and
-      // bellman_whoami. That they ARE listed is asserted where each is tested.
-      const local = new Set(["bellman_start", "bellman_wait", "bellman_whoami"]);
+      // they were never in the server's list to compare against: bellman_wait (hook delivery only),
+      // bellman_whoami and bellman_upload. That they ARE listed is asserted where each is tested.
+      const local = new Set(["bellman_start", "bellman_wait", "bellman_whoami", "bellman_upload"]);
       const others = (tools: Tool[]) => tools.filter((t) => !local.has(t.name));
       expect(others(listed)).toEqual(others(served));
     },

@@ -1,5 +1,5 @@
 import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, extname, join } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -13,6 +13,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { parse as parseYaml } from "yaml";
+import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
@@ -139,6 +140,8 @@ export interface BridgeOptions {
    * one: the bus is an optimisation, and nothing here depends on it.
    */
   bus?: BridgeBus;
+  /** The upload target for bellman_upload. Absent, the tool is listed and refuses with a message. */
+  upload?: UploadOptions;
   log?: (message: string) => void;
 }
 
@@ -152,6 +155,18 @@ export type BridgeBus = Pick<
   "url" | "identity" | "bearer" | "root" | "platform" | "ackTimeoutMs" | "window" | "roomSocket"
   | "cooldownMs" | "maxLosses" | "lossWindowMs"
 >;
+
+/**
+ * Where bellman_upload posts, and as whom (#183, D7). The server URL is the one
+ * the bridge has (.../mcp); the blob routes live on its origin. `bearer` is read
+ * on every upload, because an access token lasts ten minutes. `fetchImpl` is for
+ * tests, which hand in a fake server's.
+ */
+export interface UploadOptions {
+  serverUrl: string;
+  bearer: () => string | Promise<string>;
+  fetchImpl?: typeof fetch;
+}
 
 const CHANNEL_INSTRUCTIONS =
   "Bellman peer events are pushed into this session as <channel> events from this server, " +
@@ -213,6 +228,90 @@ Returns: { source, label, plan, role, org_id } when source is "oauth" — this b
     readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
   },
 };
+
+const UPLOAD_TOOL: Tool = {
+  name: "bellman_upload",
+  title: "Upload a file and place it on the room's surface",
+  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file or image item, in one call. Local to this bridge: the server has no binary channel, so a hosted connector uploads through the control panel instead.
+
+Args:
+  - session_id, member_id: your handles from start/confirm; the seat must hold write_surface
+  - path: a regular file on this machine (not a symbolic link), at most ${MAX_BLOB_BYTES} bytes
+  - key: the surface key to place it under; an item already there is replaced
+  - kind: "file" | "image". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file
+  - title?, placement? ({ x, y, w?, h? }): as on bellman_send type "surface"
+The type is taken from the file's extension. The server checks an image's bytes against that claim and stores a mismatch as application/octet-stream. A placement the server refuses — an image over a mismatched type, a key it does not accept, a surface that is full — is reported with the blob's id, bytes and stored type, so you can place it again with bellman_send, without uploading again.
+
+Returns: { blob_id, bytes, type, cursor, room_members } — type is what the server stored, cursor is the surface event's, room_members is bellman_send's (not a read receipt).`,
+  // The bounds on key, title and placement are the server's, held in one place
+  // (`SurfaceKeyShape`, `boundedText` in surface.ts); this schema names the
+  // fields and carries no number it could drift from.
+  inputSchema: {
+    type: "object",
+    properties: {
+      session_id: { type: "string" },
+      member_id: { type: "string" },
+      path: { type: "string" },
+      key: { type: "string" },
+      kind: { type: "string", enum: ["file", "image"] },
+      title: { type: "string" },
+      placement: {
+        type: "object",
+        properties: { x: { type: "number" }, y: { type: "number" }, w: { type: "number" }, h: { type: "number" } },
+        required: ["x", "y"],
+      },
+    },
+    required: ["session_id", "member_id", "path", "key"],
+  },
+  annotations: {
+    readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
+  },
+};
+
+// ponytail: a short table, not a MIME database. Unknown is an octet-stream, and
+// the server decides what an image really is either way (D6).
+const TYPES: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  svg: "image/svg+xml", md: "text/markdown", txt: "text/plain", csv: "text/csv", json: "application/json",
+  yaml: "application/yaml", yml: "application/yaml", html: "text/html", htm: "text/html", pdf: "application/pdf",
+};
+
+/** The type a file is claimed as, from its extension alone. */
+export function typeFromExtension(path: string): string {
+  return TYPES[extname(path).slice(1).toLowerCase()] ?? OCTET_STREAM;
+}
+
+/**
+ * A regular file's bytes, read through one descriptor so nothing can change
+ * between the check and the read. A symbolic link is refused, as room.yaml's is
+ * and for the same reason — the bridge sends what it reads to a server, and a
+ * link would send whatever it points at; so is anything that is not a regular
+ * file, and so is a file over the cap, before a byte of it is read. O_NOFOLLOW
+ * refuses a link in the open itself where the platform has it, and the lstat
+ * is what refuses one where it does not (Windows).
+ */
+export function readLocalFile(path: string): { bytes: Buffer<ArrayBuffer> } {
+  const link = () =>
+    new Error(`${path} is a symbolic link, and the bridge will not follow one: whatever it points at would be read and sent to the server. Pass the file itself.`);
+  if (isSymlink(path)) throw link();
+  let fd: number;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+  } catch (e) {
+    if ((e as { code?: string }).code === "ELOOP") throw link();
+    throw new Error(`${path} could not be read: ${(e as Error).message}`);
+  }
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new Error(`${path} is not a regular file`);
+    if (info.size > MAX_BLOB_BYTES) {
+      throw new Error(`${path} is ${info.size} bytes, and a blob is at most ${MAX_BLOB_BYTES}`);
+    }
+    return { bytes: readFileSync(fd) };
+  } finally {
+    closeSync(fd);
+  }
+}
 
 interface Watch {
   sessionId: string;
@@ -532,7 +631,7 @@ export function createBridge(opts: BridgeOptions) {
     const { tools } = await (await remote()).listTools();
     // advertised() re-describes one of the REMOTE tools; the local ones are ours already.
     const listed = tools.map(advertised);
-    const local = delivery === "hook" ? [WAIT_TOOL, WHOAMI_TOOL] : [WHOAMI_TOOL];
+    const local = delivery === "hook" ? [WAIT_TOOL, WHOAMI_TOOL, UPLOAD_TOOL] : [WHOAMI_TOOL, UPLOAD_TOOL];
     return { tools: [...listed, ...local] };
   });
 
@@ -542,6 +641,7 @@ export function createBridge(opts: BridgeOptions) {
     let args = (request.params.arguments ?? {}) as Record<string, unknown>;
     if (name === WHOAMI_TOOL.name) return describeSelf();
     if (name === WAIT_TOOL.name && delivery === "hook") return waitForQueued(args);
+    if (name === UPLOAD_TOOL.name) return uploadAndPlace(args);
 
     // The one place the bridge transforms a call instead of relaying it.
     if (name === START_TOOL && args.manifest === undefined) {
@@ -1009,6 +1109,76 @@ export function createBridge(opts: BridgeOptions) {
         events: events.map((e) => ({ trust: "untrusted", ...e })),
       },
     };
+  }
+
+  /**
+   * bellman_upload (#183, D7): read, post, place. The upload is refused locally
+   * for a link, a non-file or an oversized file before anything leaves the
+   * machine. The post carries the bearer the bridge holds and sets
+   * Content-Length itself — the route requires it, a real fetch keeps a
+   * caller's value when it matches the body, and a fake server's Request
+   * computes none. The placement is the upstream bellman_send, observed like
+   * any other so the membership it reveals is watched. A placement the server
+   * refuses, for whatever reason, is reported with the blob's id, bytes and
+   * type: the bytes are stored and charged, and the caller places them again
+   * (as a file, if an image was the trouble) rather than uploading twice.
+   */
+  async function uploadAndPlace(args: Record<string, unknown>): Promise<CallToolResult> {
+    const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
+    if (!opts.upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
+    const sessionId = String(args.session_id ?? "");
+    const memberId = String(args.member_id ?? "");
+    const path = String(args.path ?? "");
+    const key = String(args.key ?? "");
+    if (!sessionId || !memberId || !path || !key) return fail("session_id, member_id, path and key are required");
+
+    let file: { bytes: Buffer<ArrayBuffer> };
+    try {
+      file = readLocalFile(path);
+    } catch (e) {
+      return fail((e as Error).message);
+    }
+    const claimed = typeFromExtension(path);
+    const kind = args.kind === "file" || args.kind === "image" ? args.kind : isImageType(claimed) ? "image" : "file";
+
+    const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/blobs`, opts.upload.serverUrl);
+    target.searchParams.set("member_id", memberId);
+    target.searchParams.set("name", basename(path));
+    let response: Response;
+    try {
+      response = await (opts.upload.fetchImpl ?? fetch)(target, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await opts.upload.bearer()}`,
+          "content-type": claimed,
+          "content-length": String(file.bytes.byteLength),
+        },
+        body: file.bytes,
+      });
+    } catch (e) {
+      return fail(`upload failed: ${(e as Error).message}`);
+    }
+    if (response.status !== 201) {
+      const detail = await response.text().catch(() => "");
+      return fail(`upload refused (${response.status}): ${detail.slice(0, 300)}`);
+    }
+    const uploaded = (await response.json()) as { blob_id: string; bytes: number; type: string; name: string };
+
+    const payload: Record<string, unknown> = { key, kind, blob: { id: uploaded.blob_id } };
+    if (args.title !== undefined) payload.title = args.title;
+    if (args.placement !== undefined) payload.placement = args.placement;
+    const sendArgs = { session_id: sessionId, member_id: memberId, type: "surface", payload };
+    const placed = await (await remote()).callTool({ name: "bellman_send", arguments: sendArgs });
+    observe("bellman_send", sendArgs, placed);
+    if (placed.isError) {
+      return fail(
+        `uploaded blob ${uploaded.blob_id} (${uploaded.bytes} bytes, stored as ${uploaded.type}) but could not place it as ${kind} "${key}": ` +
+          `${textOf(placed).replace(/^Error: /, "")} Place it with bellman_send type "surface", payload { key, kind: "file", blob: { id: "${uploaded.blob_id}" } }, rather than uploading again.`,
+      );
+    }
+    const out = (placed.structuredContent ?? {}) as Record<string, unknown>;
+    const result = { blob_id: uploaded.blob_id, bytes: uploaded.bytes, type: uploaded.type, cursor: out.cursor, room_members: out.room_members };
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }
 
   async function close(): Promise<void> {

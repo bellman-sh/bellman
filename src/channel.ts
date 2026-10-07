@@ -124,6 +124,12 @@ const bridge = createBridge({
   remote: connect,
   whoami,
   /**
+   * Where bellman_upload posts (#183): the blob routes on this server's origin,
+   * as whoever the bridge is — the BELLMAN_KEY, or the cached sign-in's access
+   * token, read on every upload because it rotates every ten minutes.
+   */
+  upload: { serverUrl: url, bearer: busCredentials(url, key).bearer },
+  /**
    * One upstream connection per room, shared by every bridge on this machine (#43, #99). It is asked for when the
    * first membership is armed and not before, so nothing is read and no socket made at launch: a signed-in bridge
    * has no identity to name a bus after until it has signed in. A BELLMAN_KEY names the bus and signs a room's

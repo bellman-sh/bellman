@@ -77,6 +77,10 @@
       "description": "Check which identity peers see. Answered locally, no round trip."
     },
     {
+      "name": "bellman_upload",
+      "description": "Upload a file from this machine and place it on the room's surface, in one call."
+    },
+    {
       "name": "bellman_invite",
       "description": "Issue a fresh join code, or revoke the current one."
     },

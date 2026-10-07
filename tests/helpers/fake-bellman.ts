@@ -2,13 +2,16 @@ import http from "node:http";
 import type { Duplex } from "node:stream";
 import { ignoreResets } from "./upgrade-socket.js";
 import { resolveIdentity } from "../../src/auth.js";
+import { MemoryBlobStore } from "../../src/blobs.js";
+import { roomRoutes } from "../../src/http/rooms.js";
 import {
-  handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig,
+  caller, handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig,
 } from "../../src/oauth/routes.js";
 import { MemoryAuthStore } from "../../src/oauth/storage.js";
 import { signJwt } from "../../src/oauth/tokens.js";
 import { PING, PONG } from "../../src/keepalive.js";
 import { publicEvent } from "../../src/public-event.js";
+import { MemoryStore } from "../../src/store.js";
 import type { Identity, SessionEvent } from "../../src/types.js";
 import { ClientFrames, OPCODE, binaryFrame, closeCodeOf, closeFrame, handshake, textFrame } from "./ws-wire.js";
 
@@ -51,6 +54,9 @@ export interface FakeBellman {
   config: OAuthConfig;
   /** Every /register body the client sent — length is the registration count. */
   registrations: unknown[];
+  /** The room routes' store and blob store, so a test can seed a room and read what an upload left. */
+  store: MemoryStore;
+  blobs: MemoryBlobStore;
   /** Drives the browser half: authorize page -> provider -> loopback. */
   browser(authorizeUrl: URL): Promise<void>;
   /**
@@ -71,6 +77,8 @@ export interface FakeBellman {
 
 export interface FakeBellmanOptions {
   overrides?: Record<string, Identity>;
+  /** Static bearer keys the room routes accept, as the Worker's BELLMAN_KEYS map. */
+  keys?: Record<string, Identity>;
   /**
    * The server's own origin. A second fake needs a DIFFERENT one rather than a
    * URL rewrite: tokens carry an RFC 8707 resource indicator derived from the
@@ -80,7 +88,7 @@ export interface FakeBellmanOptions {
   origin?: string;
 }
 
-export function fakeBellman({ overrides = {}, origin = ISSUER }: FakeBellmanOptions = {}): FakeBellman {
+export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: FakeBellmanOptions = {}): FakeBellman {
   const config: OAuthConfig = {
     issuer: origin,
     resource: `${origin}/mcp`,
@@ -91,6 +99,8 @@ export function fakeBellman({ overrides = {}, origin = ISSUER }: FakeBellmanOpti
     fetchImpl: upstream,
   };
   const registrations: unknown[] = [];
+  const store = new MemoryStore();
+  const blobs = new MemoryBlobStore();
 
   const serve: typeof fetch = async (input, init) => {
     const request = new Request(input as RequestInfo, init);
@@ -98,6 +108,24 @@ export function fakeBellman({ overrides = {}, origin = ISSUER }: FakeBellmanOpti
 
     if (url.pathname === "/register" && request.method === "POST") {
       registrations.push(await request.clone().json());
+    }
+
+    // The room routes (#183), composed as the Worker composes them: the
+    // authorization server's caller (an access token, then a cookie), and the
+    // static key map a bridge with BELLMAN_KEY presents.
+    if (url.pathname.startsWith("/rooms/")) {
+      const handled = await roomRoutes(request, {
+        store,
+        blobs,
+        caller: async (req) => {
+          const who = await caller(req, config);
+          if (who) return { identity: who.identity, via: who.via };
+          const identity = resolveIdentity(req.headers.get("authorization") ?? undefined, JSON.stringify(keys));
+          return identity ? { identity, via: "bearer" } : null;
+        },
+        panelOrigins: config.panelOrigins ?? [],
+      });
+      return handled ?? new Response("not found", { status: 404 });
     }
 
     if (url.pathname !== "/mcp") {
@@ -140,6 +168,8 @@ export function fakeBellman({ overrides = {}, origin = ISSUER }: FakeBellmanOpti
     fetch: serve,
     config,
     registrations,
+    store,
+    blobs,
     /**
      * What a human's browser does: load /authorize, pick GitHub, let the
      * provider come back, and follow the final redirect to the loopback — that

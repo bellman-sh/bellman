@@ -81,7 +81,7 @@ const methodNotAllowed = (allow: string, origin: string | undefined) =>
 /**
  * The room routes. `undefined` for a path outside `/rooms/`, so the Worker
  * carries on to the next module; everything under the prefix is answered here,
- * a path this module does not know included.
+ * a path this module does not know and a handler that throws included.
  */
 export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise<Response | undefined> {
   const url = new URL(request.url);
@@ -92,17 +92,27 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
   // browser asks first. 204 either way: a stranger's preflight carries no grant.
   if (request.method === "OPTIONS") return preflightResponse(origin);
 
-  const upload = UPLOAD.exec(path);
-  if (upload) {
-    if (request.method !== "POST") return methodNotAllowed("POST", origin);
-    return uploadBlob(request, url, upload[1], origin, deps);
+  // What a client sees of an unexpected throw — a store, a bucket or the caller
+  // lookup failing — is decided here, once, for both servers: this route's own
+  // JSON, where the Worker would answer a 1101 page and Express its HTML one. The
+  // handlers are awaited inside the try, or their rejections would pass it. A
+  // body of the wrong length is not one of these: `uploadBlob` answers it 400.
+  try {
+    const upload = UPLOAD.exec(path);
+    if (upload) {
+      if (request.method !== "POST") return methodNotAllowed("POST", origin);
+      return await uploadBlob(request, url, upload[1], origin, deps);
+    }
+    const download = DOWNLOAD.exec(path);
+    if (download) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await downloadBlob(request, download[1], download[2], origin, deps);
+    }
+    return problem(404, "not_found", "no such route", origin);
+  } catch (err) {
+    console.error(`${request.method} ${path} failed:`, err);
+    return problem(500, "internal", "the request failed on the server; nothing was placed", origin);
   }
-  const download = DOWNLOAD.exec(path);
-  if (download) {
-    if (request.method !== "GET") return methodNotAllowed("GET", origin);
-    return downloadBlob(request, download[1], download[2], origin, deps);
-  }
-  return problem(404, "not_found", "no such route", origin);
 }
 
 /**
@@ -185,7 +195,16 @@ async function uploadBlob(
   // fails leaves an orphan the prefix finds (#65). The other order was rejected
   // in the spec: a charge reserved for a body that never completes is a phantom
   // nothing can list, where an orphan costs storage and is findable.
-  const charge = await deps.store.chargeBlobBytes(sessionId, bytes);
+  //
+  // A charge that THROWS is not a refusal, and deletes nothing. It is ambiguous:
+  // the room object may have committed the charge before the call failed, and
+  // deleting the object then would leave a phantom charge nothing can list.
+  // Keeping it leaves an orphan the prefix finds and #65 credits, and D3 puts an
+  // ambiguous loss on the findable side. The log names the key for that sweep.
+  const charge = await deps.store.chargeBlobBytes(sessionId, bytes).catch((err: unknown) => {
+    console.error(`blob ${blobKey(sessionId, id)} kept after its charge threw:`, err);
+    throw err;
+  });
   if (!charge.ok) {
     await deps.blobs.delete(sessionId, id).catch((err: unknown) => {
       console.error(`orphaned blob ${blobKey(sessionId, id)} after a refused charge:`, err);

@@ -6,7 +6,7 @@
  * INVARIANT 5: transports are stateless — state survives across independent
  *              HTTP requests only because it lives in the store.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Server } from "node:http";
 import { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -274,5 +274,23 @@ describe("the room routes over the Node server (#183)", () => {
     expect(await preflight.text()).toBe("");
     expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
     await jesse.close();
+  });
+
+  // A handler that throws is answered by the route module, in JSON. Left to Express, a rejected async handler
+  // is answered with its own HTML error page, which a bridge or the panel cannot read as the error it is.
+  it("answers a route whose store throws with the module's JSON, not Express's HTML page", async () => {
+    const throwing = vi.spyOn(store, "getSession").mockRejectedValueOnce(new Error("the store is unreachable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${base}/rooms/qs_nowhere/blobs/${"a".repeat(32)}`, {
+        headers: { authorization: "Bearer qk_dev_jesse" },
+      });
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({ error: "internal" });
+    } finally {
+      throwing.mockRestore();
+      log.mockRestore();
+    }
   });
 });

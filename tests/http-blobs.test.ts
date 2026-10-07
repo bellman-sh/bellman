@@ -6,10 +6,10 @@
  * runtime-free. Who is calling is a stub over the dev keys: the seam under
  * test is the route, and the cookie session store has tests/panel-session.test.ts.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import {
-  MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, MemoryBlobStore, blobBytesUsed, newBlobId, type BlobPut, type BlobRead,
+  MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, MemoryBlobStore, blobBytesUsed, blobKey, newBlobId, type BlobPut, type BlobRead,
 } from "../src/blobs.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
@@ -249,6 +249,29 @@ describe("POST /rooms/:id/blobs", () => {
     }
   });
 
+  // A charge that throws is not a refusal. The room object may have committed it before the call failed, so
+  // deleting the object could leave a charge nothing can list; it is kept, and the log names its key for the
+  // sweep that will find it (D3, #65). The client gets this route's JSON, not a thrown error.
+  it("answers a charge that throws with a JSON 500, keeps the object it put, and logs its key", async () => {
+    vi.spyOn(store, "chargeBlobBytes").mockRejectedValueOnce(new Error("the room object is unreachable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = (await upload(DEV_KEY.jesse, "bytes in flight"))!;
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toBe("application/json");
+      expect(await res.json()).toEqual({
+        error: "internal",
+        error_description: "the request failed on the server; nothing was placed",
+      });
+      expect(blobs.puts).toHaveLength(1);
+      const { id } = blobs.puts[0];
+      expect(await blobs.head(ROOM, id), "the object is kept: the charge may have landed").not.toBeNull();
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(blobKey(ROOM, id)), expect.any(Error));
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   // Review Focus 1. The route maps one class, and both stores throw it (Tasks 1 and 5), so this
   // answer is the same over R2.
   it("stores and charges nothing for a body that ends short of its Content-Length", async () => {
@@ -401,6 +424,24 @@ describe("GET /rooms/:id/blobs/:blobId", () => {
     await store.closeSession(ROOM);
     expect((await download(DEV_KEY.peer, blob_id))!.status).toBe(200);
     expect((await download(DEV_KEY.jesse, blob_id))!.status).toBe(200);
+  });
+
+  // The same outer catch, from the read side: a store that rejects answers JSON, and what it threw stays in the log.
+  it("answers a download whose store throws with a JSON 500 that does not repeat what was thrown", async () => {
+    const { blob_id } = await stored("x");
+    vi.spyOn(store, "getSession").mockRejectedValueOnce(new Error("the room object is unreachable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = (await download(DEV_KEY.jesse, blob_id))!;
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toBe("application/json");
+      const body = await res.text();
+      expect(JSON.parse(body)).toMatchObject({ error: "internal" });
+      expect(body).not.toContain("unreachable");
+      expect(log).toHaveBeenCalledWith(expect.stringContaining(`GET /rooms/${ROOM}/blobs/${blob_id}`), expect.any(Error));
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("refuses a member a creator removed, as /ws does", async () => {

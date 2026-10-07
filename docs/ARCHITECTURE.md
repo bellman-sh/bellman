@@ -1005,7 +1005,9 @@ registry's. That is what closes the half of #117 an idempotency key could not:
 A blob upload (#183) is the newest window, and it spans a Durable Object and
 R2, where no outbox reaches. The route puts the object, then charges the
 room's `blobBytes` inside `SessionDO` in one transaction, and deletes the
-object if the charge refuses. The other order was rejected on purpose: a
+object if the charge refuses. A charge that throws deletes nothing: the room
+object may have committed it before the call failed, so the object is kept and
+logged by key. The other order was rejected on purpose: a
 charge reserved before an upload that never completes — the client dies
 mid-body — is a phantom that locks quota with nothing anywhere to list, while
 an object nobody charged for costs storage only and `list({ prefix })` finds

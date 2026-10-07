@@ -107,7 +107,9 @@ The route pre-checks the ceiling against the record it already read (a
 courtesy, so a hopeless upload is refused before the bytes move), puts the
 object, then charges. A refused charge — over quota, or a room that froze or
 closed while the bytes were in flight — deletes the object and answers 413 or
-409. A delete that fails leaves an orphan.
+409. A delete that fails leaves an orphan. A charge that throws is ambiguous,
+since the room object may have committed it before the call failed, so it
+deletes nothing: the object stays, logged by key, on the findable side.
 
 Put-then-charge rather than charge-then-put, deliberately. A charge reserved
 before an upload that never completes — the client dies mid-body — is a phantom

@@ -14,6 +14,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { text } from "./helpers/blob-bytes.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 
 let http: Server;
@@ -194,5 +195,43 @@ describe("cross-provider pairing over the wire", () => {
     expect(JSON.stringify(sync.data.events)).toContain("unblocked");
 
     await Promise.all([jesse.close(), peer.close()]);
+  });
+});
+
+describe("the room routes over the Node server (#183)", () => {
+  it("uploads and downloads a blob through the app, and the tool heads what the route stored", async () => {
+    const jesse = await mcpClient("qk_dev_jesse");
+    const started = await call(jesse, "bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const memberId = String(started.data.member_id);
+
+    const body = text("# notes\n");
+    const uploaded = await fetch(`${base}/rooms/${sessionId}/blobs?member_id=${memberId}&name=notes.md`, {
+      method: "POST",
+      headers: { authorization: "Bearer qk_dev_jesse", "content-type": "text/markdown" },
+      body,
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id, bytes } = (await uploaded.json()) as { blob_id: string; bytes: number };
+    expect(bytes).toBe(body.byteLength);
+
+    // The same MemoryBlobStore behind the tool: the placement heads the object the route stored.
+    const placed = await call(jesse, "bellman_send", {
+      session_id: sessionId, member_id: memberId, type: "surface",
+      payload: { key: "notes", kind: "file", blob: { id: blob_id } },
+    });
+    expect(placed.isError, placed.text).toBe(false);
+
+    const served = await fetch(`${base}/rooms/${sessionId}/blobs/${blob_id}`, { headers: { authorization: "Bearer qk_dev_jesse" } });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toBe("application/octet-stream");
+    expect(served.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''notes.md");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox");
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(body);
+
+    expect((await fetch(`${base}/rooms/${sessionId}/blobs/${blob_id}`)).status).toBe(401);
+    expect((await fetch(`${base}/rooms/${sessionId}/blobs`, { method: "POST", headers: { authorization: "Bearer qk_dev_jesse" }, body: "x" })).status).toBe(400);
+    await jesse.close();
   });
 });

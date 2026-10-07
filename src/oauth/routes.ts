@@ -1279,8 +1279,11 @@ export async function handleOAuth(
  * learns beyond the identity, and only the CSRF check and /admin read it —
  * everything else sees an Identity and cannot tell the two apart, which is what
  * keeps the authorization rules in one place.
+ *
+ * Exported for the room routes (#183), which the Worker composes it into so a
+ * route and a tool cannot disagree about who someone is.
  */
-async function caller(
+export async function caller(
   request: Request,
   config: OAuthConfig
 ): Promise<{ identity: Identity; planSource: string; via: "bearer" | "cookie" } | null> {

@@ -14,14 +14,14 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, Verb } from "./types.js";
+import type { AuditEntry, Identity, Member, SessionEvent, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
-import { JOIN_CODE_TTL, isActiveMember, type BellmanStore, type EventBody } from "./store.js";
+import { JOIN_CODE_TTL, isActiveMember, type AppendExtras, type BellmanStore, type EventBody } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
-import { surfaceCursor } from "./surface.js";
+import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -623,6 +623,115 @@ export async function revokeInvite(
   }
 
   return succeed({ roles: retired });
+}
+
+/**
+ * A seat writes one item on the room's working surface, or removes one (#129).
+ *
+ * One operation for both transports — `bellman_send type: "surface"` now, and
+ * piece 3's `PUT /rooms/:id/surface/:key` next — for the reason this module
+ * exists: a second transport re-typing the sequence is a second chance to skip
+ * the verb guard or the audit row. The order is the write path the spec gives:
+ * the seat's guards (`gateSeat`, which also touches the caller), the payload's
+ * shape and each kind's rule, the rows for the cap and a connector's ends,
+ * the append with the row riding it, the audit row.
+ *
+ * The rows are read once and then the append happens, which is a
+ * read-then-write with the window open: two writers can both add a 64th item,
+ * and a connector can name a key removed a millisecond earlier. Both are
+ * courtesy bounds — a 65th row costs nothing and a dangling connector is a
+ * state the spec declares a reader handles — so neither moves into the store.
+ * The verb guard, the frozen guard and the row's write are not courtesies, and
+ * each is where it has to be.
+ */
+export async function writeSurface(
+  store: BellmanStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  payload: unknown,
+  idempotencyKey?: string,
+): Promise<RoomResult<{ cursor: number; replayed: boolean; key: string; removed: boolean; roomMembers: string[] }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
+  if (!gate.ok) return gate;
+  const session = gate.value;
+
+  const normalized = normalizeSurfaceWrite(payload);
+  if (!normalized.ok) return refuse("invalid", normalized.reason);
+  const { write } = normalized;
+
+  const rows = await store.surfaceOf(sessionId);
+  const byKey = new Map(rows.map((r) => [r.key, r] as const));
+  if (write.item !== null) {
+    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
+      return refuse(
+        "conflict",
+        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
+      );
+    }
+    if (write.item.kind === "connector" && write.item.ends !== null) {
+      for (const end of [write.item.ends.from, write.item.ends.to]) {
+        const target = byKey.get(end);
+        if (!target) {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
+        }
+        if (target.kind === "connector") {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
+        }
+      }
+    }
+  }
+
+  const draft: EventBody = {
+    type: "surface",
+    fromMemberId: memberId,
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    // The normalised item, so the event reads as the row does: every optional
+    // field present as null. A removal's payload is the tombstone itself.
+    payload: write.item ?? { key: write.key, remove: true },
+    refId: null,
+  };
+  const extras: AppendExtras = { surface: write };
+
+  let event: SessionEvent;
+  let replayed = false;
+  if (idempotencyKey) {
+    const w = await store.appendEventOnce(sessionId, draft, idempotencyKey, extras);
+    if (w.outcome === "conflict") {
+      return refuse(
+        "conflict",
+        `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
+      );
+    }
+    if (w.outcome === "frozen") return refuse("frozen", FROZEN);
+    event = w.event;
+    replayed = w.outcome === "replayed";
+  } else {
+    const appended = await store.appendEvent(sessionId, draft, extras);
+    if (!appended) return refuse("frozen", FROZEN);
+    event = appended;
+  }
+
+  // Nothing below happens twice: a replay's original call did it.
+  if (!replayed) {
+    await audit(
+      store, session, actor, "sent_surface",
+      write.item !== null
+        ? { key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0 }
+        : { key: write.key, removed: true },
+    );
+  }
+
+  return succeed({
+    cursor: event.cursor,
+    replayed,
+    key: write.key,
+    removed: write.item === null,
+    // Who else was active when the gate read the room — `bellman_send`'s
+    // `room_members`, with the same caveat: not a read receipt.
+    roomMembers: activeMembers(session).filter((m) => m.memberId !== memberId).map((m) => m.label),
+  });
 }
 
 /**

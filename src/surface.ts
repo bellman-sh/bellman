@@ -1,13 +1,15 @@
 /**
  * The working surface's pure rules (#129): the key grammar, the bounds, the
- * monotonic write rule both stores apply, and the accessor over the record's
- * cursor. Runtime-free — no MCP SDK, no `cloudflare:workers` — because both
+ * monotonic write rule both stores apply, the accessor over the record's
+ * cursor, and the payload a write arrives in with the rules that normalise it.
+ * Runtime-free — no MCP SDK, no `cloudflare:workers` — because both
  * stores, both test programs and the projection layer import it.
  *
  * It imports manifest.ts for the slug grammar and nothing that imports store.ts,
  * so store.ts can import it without the cycle that keeps `asked` and
  * `clearSilence` in store.ts rather than heartbeat.ts.
  */
+import { z } from "zod";
 import type { SessionEvent, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
@@ -60,5 +62,118 @@ export function applySurfaceWrite(
     at: event.at,
     byMemberId: event.fromMemberId,
     byLabel: event.fromLabel,
+  };
+}
+
+const PlacementShape = z.strictObject({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  w: z.number().finite().positive().optional(),
+  h: z.number().finite().positive().optional(),
+});
+
+const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape });
+
+/**
+ * Non-empty text of at most `max` UTF-16 code units: `.length`, which is what
+ * the index reports as `chars`, so the bound and the number read against it
+ * are one count. Not zod's `.max()`, which measures a string in code points
+ * once it is past the bound: an astral body would pass at twice the ceiling,
+ * 8,000 astral characters being 16,000 units.
+ */
+const boundedText = (max: number) =>
+  z.string().min(1).refine((s) => s.length <= max, `must be at most ${max} characters`);
+
+/** An item as the wire carries it. Strict, so an unknown field is refused rather than dropped. */
+export const SurfaceItemShape = z.strictObject({
+  key: SurfaceKeyShape,
+  kind: z.enum(SURFACE_KINDS),
+  title: boundedText(MAX_SURFACE_TITLE_CHARS).optional(),
+  body: boundedText(MAX_SURFACE_BODY_CHARS).optional(),
+  ends: EndsShape.optional(),
+  placement: PlacementShape.optional(),
+});
+
+/** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */
+export const SurfaceRemoveShape = z.strictObject({
+  key: SurfaceKeyShape,
+  remove: z.literal(true),
+});
+
+/** One issue as "path: message", the manifest resolver's wording. */
+const describeIssue = (i: { path: PropertyKey[]; message: string }): string => {
+  const path = i.path.map(String).join(".");
+  return path ? `${path}: ${i.message}` : i.message;
+};
+
+/**
+ * Validate a `surface` payload and normalise it to a write (spec D2, D3):
+ * the shape, then each kind's cross-field rule. The arm is chosen by the
+ * presence of `remove`, as the manifest resolver chooses by `preset`, so the
+ * error names the field rather than reporting an opaque union failure.
+ *
+ * What is NOT checked here: that a connector's ends exist. That needs the
+ * rows, and it is `writeSurface`'s read.
+ */
+export function normalizeSurfaceWrite(
+  payload: unknown,
+): { ok: true; write: SurfaceWrite } | { ok: false; reason: string } {
+  const removing = typeof payload === "object" && payload !== null && "remove" in payload;
+  if (removing) {
+    const parsed = SurfaceRemoveShape.safeParse(payload);
+    if (!parsed.success) {
+      return { ok: false, reason: `surface removal must be { key, remove: true }: ${describeIssue(parsed.error.issues[0])}` };
+    }
+    return { ok: true, write: { key: parsed.data.key, item: null } };
+  }
+
+  const parsed = SurfaceItemShape.safeParse(payload);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      reason: `surface payload must be { key, kind, title?, body?, ends?, placement? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
+    };
+  }
+  const v = parsed.data;
+  const refuse = (reason: string) => ({ ok: false as const, reason: `surface ${v.kind} "${v.key}": ${reason}` });
+
+  if (v.kind === "connector") {
+    if (!v.ends) return refuse("a connector needs ends { from, to } naming two items");
+    if (v.ends.from === v.ends.to) return refuse("a connector's ends must differ");
+    if (v.placement) return refuse("a connector has no placement; it is drawn between its ends");
+  } else {
+    if (v.ends) return refuse("only a connector has ends");
+    if (!v.body) return refuse("needs a body");
+  }
+
+  if (v.kind === "link") {
+    if (v.body!.length > MAX_SURFACE_LINK_CHARS) {
+      // "2,048", written out: the test pins the wording and a locale must not move it.
+      return refuse("a link's body is at most 2,048 characters");
+    }
+    let url: URL;
+    try {
+      url = new URL(v.body!);
+    } catch {
+      return refuse("body must be an absolute http or https URL");
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return refuse("body must be an http or https URL");
+    }
+  }
+
+  return {
+    ok: true,
+    write: {
+      key: v.key,
+      item: {
+        key: v.key,
+        kind: v.kind,
+        title: v.title ?? null,
+        body: v.body ?? null,
+        ends: v.ends ?? null,
+        placement: v.placement ?? null,
+      },
+    },
   };
 }

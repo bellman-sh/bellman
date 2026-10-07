@@ -16,7 +16,7 @@ export function registerSend(server: McpServer, identity: Identity, s: BellmanSt
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, brief update, or progress report to the room.
+      description: `Send a message, artifact, action request, action response, brief update, progress report, or a surface item to the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm

@@ -117,18 +117,26 @@ describe("writing an item", () => {
 
   it("replays an idempotency key, and refuses the key for different content", async () => {
     const p = await pairUp(h);
+    const org = p.creator.identity.orgId!;
+    const auditRows = async () => (await h.store.auditForOrg(org, 50)).length;
     const before = await eventCount(p);
+    const auditBefore = await auditRows();
     const first = await write(p, plan(), { idempotency_key: "sf-retry-01" });
+    const auditAfterFirst = await auditRows();
+    expect(auditAfterFirst, "the first write audits once").toBe(auditBefore + 1);
+
     const retry = await write(p, plan(), { idempotency_key: "sf-retry-01" });
     expect(retry.isError, retry.text).toBe(false);
     expect(retry.data.replayed).toBe(true);
     expect(retry.data.cursor).toBe(first.data.cursor);
     expect(await eventCount(p), "one surface event after a replay").toBe(before + 1);
     expect(await rows(p)).toHaveLength(1);
+    expect(await auditRows(), "a replay writes no second audit row").toBe(auditAfterFirst);
 
     const conflict = await write(p, plan({ body: "other" }), { idempotency_key: "sf-retry-01" });
     expect(conflict.isError).toBe(true);
     expect(conflict.text).toContain("already used for a different message");
+    expect(await auditRows(), "a refused key writes none either").toBe(auditAfterFirst);
   });
 });
 
@@ -153,17 +161,39 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     expect(await rows(p)).toEqual([]);
   });
 
+  // D8: a seat that may not write hears about its seat, not about its payload.
+  // The payload is malformed on purpose, so the order of the two checks is the
+  // only thing that decides which sentence comes back; with a valid payload the
+  // case above passes whichever check runs first.
+  it("tells a seat without write_surface about its verb before it reads a malformed payload", async () => {
+    const p = await pairUp(h);
+    const before = await eventCount(p);
+    const out = await p.joiner.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.joinerMemberId, type: "surface", payload: plan({ key: "Plan" }),
+    });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('does not hold the verb "write_surface"');
+    expect(out.text).not.toContain("surface keys");
+    expect(await eventCount(p)).toBe(before);
+    expect(await rows(p)).toEqual([]);
+  });
+
   it("refuses a malformed payload by naming the field", async () => {
     const p = await pairUp(h);
-    await refused(p, { kind: "text", body: "x" }, "key");
+    // A field is asserted as the "path: " describeIssue puts before the message,
+    // because the bare word is in the reason's own prefix ("{ key, kind, title?,
+    // body?, … } or { key, remove: true }") and would match with the path gone.
+    // "remove: " is in that prefix too, so the removal anchors on the "}: " that
+    // closes it. "surface keys" and "colour" come only from the issue itself.
+    await refused(p, { kind: "text", body: "x" }, "key: ");
     await refused(p, plan({ key: "Plan" }), "surface keys");
     await refused(p, plan({ key: "__proto__" }), "surface keys");
-    await refused(p, plan({ kind: "sticky" }), "kind");
+    await refused(p, plan({ kind: "sticky" }), "kind: ");
     await refused(p, plan({ colour: "red" }), "colour");
-    await refused(p, plan({ title: "" }), "title");
-    await refused(p, plan({ title: "t".repeat(MAX_SURFACE_TITLE_CHARS + 1) }), "title");
-    await refused(p, plan({ body: "b".repeat(MAX_SURFACE_BODY_CHARS + 1) }), "body");
-    await refused(p, { key: "plan", remove: false }, "remove");
+    await refused(p, plan({ title: "" }), "title: ");
+    await refused(p, plan({ title: "t".repeat(MAX_SURFACE_TITLE_CHARS + 1) }), "title: ");
+    await refused(p, plan({ body: "b".repeat(MAX_SURFACE_BODY_CHARS + 1) }), "body: ");
+    await refused(p, { key: "plan", remove: false }, "}: remove: ");
   });
 
   it("accepts the bounds at their edge", async () => {
@@ -178,7 +208,7 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
       const out = await write(p, payload);
       expect(out.isError, out.text).toBe(false);
     }
-    await refused(p, plan({ body: "𝄞".repeat(MAX_SURFACE_BODY_CHARS / 2 + 1) }), "body");
+    await refused(p, plan({ body: "𝄞".repeat(MAX_SURFACE_BODY_CHARS / 2 + 1) }), "body: ");
   });
 
   it("holds each kind to its rule", async () => {

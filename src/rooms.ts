@@ -651,7 +651,7 @@ export async function writeSurface(
   memberId: string,
   payload: unknown,
   idempotencyKey?: string,
-): Promise<RoomResult<{ cursor: number; replayed: boolean; key: string; removed: boolean; roomMembers: string[] }>> {
+): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
   if (!gate.ok) return gate;
   const session = gate.value;
@@ -726,8 +726,6 @@ export async function writeSurface(
   return succeed({
     cursor: event.cursor,
     replayed,
-    key: write.key,
-    removed: write.item === null,
     // Who else was active when the gate read the room — `bellman_send`'s
     // `room_members`, with the same caveat: not a read receipt.
     roomMembers: activeMembers(session).filter((m) => m.memberId !== memberId).map((m) => m.label),

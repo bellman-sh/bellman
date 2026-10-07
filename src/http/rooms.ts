@@ -132,13 +132,7 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     const item = SURFACE_ITEM.exec(path);
     if (item) {
       if (request.method !== "PUT" && request.method !== "DELETE") return methodNotAllowed("PUT, DELETE", origin);
-      let key: string;
-      try {
-        key = decodeURIComponent(item[2]);
-      } catch {
-        return problem(400, "invalid_request", "the key is not valid percent-encoding", origin);
-      }
-      return await writeSurfaceRoute(request, url, item[1], key, origin, deps);
+      return await writeSurfaceRoute(request, url, item[1], item[2], origin, deps);
     }
     const upload = UPLOAD.exec(path);
     if (upload) {
@@ -470,13 +464,14 @@ async function readSurfaceRoute(request: Request, sessionId: string, origin: str
  * calls, so the verb guard, the blob head, the connector check, the audit row
  * and the event are one sequence for both transports; this maps the result to
  * a status and nothing else. The key is the path's; a body that names another
- * is refused rather than silently rekeyed.
+ * is refused rather than silently rekeyed, and a PUT body is the item, so one
+ * that carries the removal marker is refused too: removing is the DELETE.
  */
 async function writeSurfaceRoute(
   request: Request,
   url: URL,
   sessionId: string,
-  key: string,
+  rawKey: string,
   origin: string | undefined,
   deps: RoomRouteDeps,
 ): Promise<Response> {
@@ -485,6 +480,16 @@ async function writeSurfaceRoute(
   const refusal = csrfRefusal(request, who.via, origin);
   if (refusal) return refusal;
 
+  // Decoded here and not where the path is matched, so a malformed escape is a
+  // 400 to a caller who has signed in and the 401 every route gives to one who
+  // has not.
+  let key: string;
+  try {
+    key = decodeURIComponent(rawKey);
+  } catch {
+    return problem(400, "invalid_request", "the key is not valid percent-encoding", origin);
+  }
+
   const memberId = url.searchParams.get("member_id") ?? "";
   if (!memberId) return problem(400, "invalid_request", "member_id is required", origin);
 
@@ -492,8 +497,15 @@ async function writeSurfaceRoute(
   if (request.method === "DELETE") {
     payload = { key, remove: true };
   } else {
-    const declared = Number(request.headers.get("content-length") ?? "0");
-    if (declared > MAX_SURFACE_WRITE_BYTES) {
+    // A length that is present must be a digit string: `Number` would read
+    // "garbage" as NaN and "1e3" as 1000 and pass both under the bound. An
+    // absent one is a chunked body, which is allowed; the bound on those is a
+    // follow-up, not this check.
+    const length = request.headers.get("content-length");
+    if (length !== null && !/^\d+$/.test(length)) {
+      return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
+    }
+    if (Number(length ?? "0") > MAX_SURFACE_WRITE_BYTES) {
       return problem(413, "too_large", `a surface write is at most ${MAX_SURFACE_WRITE_BYTES} bytes of JSON`, origin);
     }
     const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the item, without its key or with the path's", origin);
@@ -504,6 +516,9 @@ async function writeSurfaceRoute(
       return notObject();
     }
     if (typeof body !== "object" || body === null || Array.isArray(body)) return notObject();
+    if ("remove" in body) {
+      return problem(400, "invalid_request", "a PUT body is the item; to remove an item, DELETE it", origin);
+    }
     const given = (body as { key?: unknown }).key;
     if (given !== undefined && given !== key) {
       return problem(400, "invalid_request", `the body names key ${JSON.stringify(given)} but the path names "${key}"`, origin);

@@ -624,6 +624,23 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(await bodyOf(frozen)).toMatchObject({ error: "frozen" });
   });
 
+  // A member who has left is the seat's 403 through the gate, not the 404 a handle that is not the caller's gets.
+  it("refuses a write from a member who has left with the gate's 403", async () => {
+    await store.updateMember(ROOM, "m_creator", { leftAt: Date.now() });
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }))!;
+    expect(res.status).toBe(403);
+    expect(await bodyOf(res)).toMatchObject({ error: "forbidden" });
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  it("refuses a write to a closed room with 409 closed", async () => {
+    await store.closeSession(ROOM);
+    const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }))!;
+    expect(res.status).toBe(409);
+    expect(await bodyOf(res)).toMatchObject({ error: "closed" });
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
   it("refuses a body that is not a JSON object with the route's own 400", async () => {
     for (const rawBody of ["not json", "[1,2]", '"text"', ""]) {
       const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/surface/plan?member_id=m_creator`, { method: "PUT", rawBody }))!;
@@ -631,6 +648,18 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
       expect(await bodyOf(res)).toMatchObject({ error: "invalid_request" });
     }
     expect(await store.surfaceOf(ROOM)).toEqual([]);
+  });
+
+  // `normalizeSurfaceWrite` takes the removal arm on the key's presence, so without this a PUT would delete, and a mixed
+  // body would get the removal arm's strict-object error instead of an answer that says what is wrong.
+  it("refuses a PUT body that carries the removal marker, alone or beside an item, and removes nothing", async () => {
+    await placeThroughTool("plan", { kind: "text", body: "v1" });
+    for (const body of [{ remove: true }, { kind: "text", body: "v2", remove: true }]) {
+      const res = (await put(DEV_KEY.jesse, "plan", body))!;
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(await bodyOf(res)).toMatchObject({ error: "invalid_request", error_description: expect.stringContaining("DELETE") });
+    }
+    expect((await store.surfaceOf(ROOM)).map((r) => r.body)).toEqual(["v1"]);
   });
 
   it("refuses a body whose key disagrees with the path, and accepts one that agrees", async () => {
@@ -659,9 +688,30 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect((await store.surfaceOf(ROOM)).map((r) => r.key)).toEqual(["plan"]);
   });
 
+  // The malformed escape is decided from the path alone and leaks nothing, but it is still a branch an unauthenticated
+  // caller should not reach: the answer to a stranger is the 401 every other route gives.
+  it("answers a malformed escape with 401 to a caller who has not signed in, and 400 to one who has", async () => {
+    const anonymous = (await put(null, "%E0%A4%A", { kind: "text", body: "x" }))!;
+    expect(anonymous.status).toBe(401);
+    const signedIn = (await put(DEV_KEY.jesse, "%E0%A4%A", { kind: "text", body: "x" }))!;
+    expect(signedIn.status).toBe(400);
+    expect(await bodyOf(signedIn)).toMatchObject({ error: "invalid_request", error_description: expect.stringContaining("percent-encoding") });
+  });
+
   it("refuses a body over MAX_SURFACE_WRITE_BYTES from its Content-Length, unparsed", async () => {
     const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }, { headers: { "content-length": String(64 * 1024 + 1) } }))!;
     expect(res.status).toBe(413);
+  });
+
+  // A length that is present and is not a digit string is the client's mistake. `Number` would read each of these as NaN,
+  // -5 or 1000 and pass them under the bound, so the body would be parsed and written; none of them is a length.
+  it("refuses a Content-Length that is not a non-negative integer, before the body is read", async () => {
+    for (const length of ["garbage", "-5", "1e3"]) {
+      const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "x" }, { headers: { "content-length": length } }))!;
+      expect(res.status, length).toBe(400);
+      expect(await bodyOf(res), length).toMatchObject({ error: "invalid_request", error_description: "Content-Length must be a non-negative integer" });
+    }
+    expect(await store.surfaceOf(ROOM)).toEqual([]);
   });
 
   // The test above would pass if the body were parsed first and the size checked after: both orders answer 413

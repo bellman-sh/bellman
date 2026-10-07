@@ -26,7 +26,7 @@ Args:
   - manifest: the room's declaration. Either cite a preset —
     { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
-    Verbs: send, invite, revoke, request_actions, respond_actions.
+    Verbs: send, invite, revoke, request_actions, respond_actions, write_surface.
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
     invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. revoke is likewise not self-scoped: a seat holding it may retire any role's code, not only its own. Give invite only to a seat you would trust with every seat's authority.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
@@ -64,7 +64,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
 
       const ent = entitlementsFor(identity);
       if (!ent.modes.includes(manifest.mode)) {
-        return fail(`swarm mode requires the pro or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
+        return fail(`swarm mode requires the pro, max or team plan (you are on "${identity.plan}"). Start a pair session instead, or upgrade.`);
       }
       if (org_only && !ent.orgScoping) {
         return fail(`org_only sessions require the team plan (you are on "${identity.plan}").`);
@@ -104,6 +104,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         joinCodes: { [manifest.defaultRole]: defaultCode },
         expiresAt: now + ent.sessionTtlMs,
         maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
+        // The room's own byte ceiling (#183), from the plan creating it, as the
+        // seat count and the TTL are. Nothing downstream asks a plan again.
+        blobBytesCeiling: ent.blobBytesPerRoom,
         members: [creator],
         events: [],
         closed: false,

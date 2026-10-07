@@ -19,6 +19,9 @@ import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
+import { surfaceCursor } from "../../src/surface.js";
+import { blobBytesUsed } from "../../src/blobs.js";
+import type { SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session } from "./fixtures.js";
 
 /**
@@ -1827,6 +1830,258 @@ export function describeStoreContract(
         (await store.appendEventOnce(s.id, reported(), "p-0001", { creditReport: true }));
 
         expect(await stampOf(s.id)).toBe(later);
+      });
+    });
+
+    /**
+     * The working surface's rows (#129). The store writes the row it is handed
+     * in the event's own transaction, under the monotonic rule in surface.ts,
+     * and never asks what a `surface` event means.
+     */
+    describe("the surface rows", () => {
+      const plan = (body = "1. read\n2. write"): SurfaceItem => ({
+        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null, blob: null,
+      });
+      const wrote = (item: SurfaceItem | null = plan()): EventBody => ({
+        type: "surface",
+        fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+        payload: item ?? { key: "plan", remove: true }, refId: null,
+      });
+      const cursorOf = async (id: string) => surfaceCursor((await store.getSession(id))!);
+
+      it("answers nothing for a room with no surface, and for no room at all", async () => {
+        const s = session({});
+        await store.createSession(s);
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await store.surfaceOf("qs_nobody")).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
+      });
+
+      it("writes the row with the event's cursor and moves surfaceCursor, in one append", async () => {
+        const s = session({});
+        await store.createSession(s);
+
+        const event = (await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } }))!;
+
+        expect(await store.surfaceOf(s.id)).toEqual([
+          { ...plan(), cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+        ]);
+        expect(await cursorOf(s.id)).toBe(event.cursor);
+      });
+
+      /** Type-agnostic: a `surface` event with no extra writes no row. */
+      it("writes no row when the append does not ask for one", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote());
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
+      });
+
+      it("replaces the row on a later write to the same key", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const second = (await store.appendEvent(
+          s.id, wrote(plan("revised")), { surface: { key: "plan", item: plan("revised") } },
+        ))!;
+
+        const rows = await store.surfaceOf(s.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ body: "revised", cursor: second.cursor });
+        expect(await cursorOf(s.id)).toBe(second.cursor);
+      });
+
+      it("sorts rows by key", async () => {
+        const s = session({});
+        await store.createSession(s);
+        for (const key of ["zeta", "alpha", "mid"]) {
+          const item = { ...plan(), key };
+          await store.appendEvent(s.id, wrote(item), { surface: { key, item } });
+        }
+        expect((await store.surfaceOf(s.id)).map((r) => r.key)).toEqual(["alpha", "mid", "zeta"]);
+      });
+
+      it("removes the row and moves the cursor; removing nothing moves neither", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const gone = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(gone.cursor);
+
+        const again = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(again.cursor).toBeGreaterThan(gone.cursor);
+        expect(await cursorOf(s.id), "a removal of nothing is not a change").toBe(gone.cursor);
+      });
+
+      /**
+       * A replay applies no surface write (the row went in with the event), so it
+       * neither duplicates the event nor moves the row: one event per key, and the
+       * newest write stands.
+       */
+      it("replays through appendEventOnce without duplicating or regressing", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        if (first.outcome !== "appended") throw new Error(`first write said ${first.outcome}`);
+
+        const newer = (await store.appendEvent(
+          s.id, wrote(plan("newer")), { surface: { key: "plan", item: plan("newer") } },
+        ))!;
+
+        const retry = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        expect(retry.outcome).toBe("replayed");
+
+        const rows = await store.surfaceOf(s.id);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ body: "newer", cursor: newer.cursor });
+        expect(await cursorOf(s.id)).toBe(newer.cursor);
+        expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
+      });
+
+      /**
+       * A removal leaves no tombstone, so a replay that applied the original write
+       * would see no row, accept the older cursor, and put back what was removed.
+       * The row went in with the event, so a replay has nothing to repair and
+       * applies no surface write at all.
+       */
+      it("a replay after a removal does not resurrect the row", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const first = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+        if (first.outcome !== "appended") throw new Error(`first write said ${first.outcome}`);
+
+        const gone = (await store.appendEvent(s.id, wrote(null), { surface: { key: "plan", item: null } }))!;
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+
+        const retry = await store.appendEventOnce(
+          s.id, wrote(), "sf-0001", { surface: { key: "plan", item: plan() } },
+        );
+
+        expect(retry.outcome).toBe("replayed");
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id), "the replay moved nothing").toBe(gone.cursor);
+        expect(await store.eventsAfter(s.id, 0)).toHaveLength(2);
+      });
+
+      it("hands back detached rows", async () => {
+        const s = session({});
+        await store.createSession(s);
+        await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } });
+
+        const [row] = await store.surfaceOf(s.id);
+        row.body = "scribbled on";
+
+        expect((await store.surfaceOf(s.id))[0].body).toBe("1. read\n2. write");
+      });
+
+      /**
+       * The write side of "hands back detached rows". The item an append is given
+       * holds objects of its own (`placement`, `ends`), and a caller that keeps a
+       * reference to them must not be able to reach into the stored row. The
+       * Durable Object store gets that from the RPC boundary; MemoryStore has to
+       * copy on the way in, as it does for the event.
+       */
+      it("stores a copy of what it is handed, not the caller's own objects", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const placement = { x: 1, y: 2, w: 3, h: 4 };
+        const ends = { from: "plan", to: "risks" };
+        const item: SurfaceItem = { ...plan(), key: "edge", kind: "connector", ends, placement };
+        await store.appendEvent(s.id, wrote(item), { surface: { key: "edge", item } });
+
+        placement.x = 999;
+        ends.to = "scribbled on";
+
+        const [row] = await store.surfaceOf(s.id);
+        expect(row.placement).toEqual({ x: 1, y: 2, w: 3, h: 4 });
+        expect(row.ends).toEqual({ from: "plan", to: "risks" });
+      });
+
+      it("writes neither event nor row into a frozen room", async () => {
+        const s = session({ frozenAt: 1 });
+        await store.createSession(s);
+        expect(await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } })).toBeNull();
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await cursorOf(s.id)).toBe(0);
+      });
+    });
+
+    /**
+     * The quota's bound (#183, D3). The read of the total and the write that
+     * raises it are one operation, decided in the room object; the route's
+     * pre-check is a courtesy. The store charges bytes it is handed and never
+     * asks what they are for.
+     */
+    describe("charging a room for its blobs", () => {
+      const used = async (id: string) => blobBytesUsed((await store.getSession(id))!);
+
+      it("reads 0 off a room never charged, and charges to the room's own ceiling", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        expect(await used(s.id)).toBe(0);
+        expect(await store.chargeBlobBytes(s.id, 60)).toEqual({ ok: true, used: 60 });
+        expect(await store.chargeBlobBytes(s.id, 40)).toEqual({ ok: true, used: 100 });
+        expect(await used(s.id)).toBe(100);
+      });
+
+      it("refuses past the ceiling, reports the total, and charges nothing for a refusal", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 90);
+        expect(await store.chargeBlobBytes(s.id, 11)).toEqual({ ok: false, reason: "over_quota", used: 90 });
+        expect(await used(s.id)).toBe(90);
+        // The controls: the ten that fit exactly land, and the ceiling is this
+        // room's own — a roomier record takes what this one refused.
+        expect(await store.chargeBlobBytes(s.id, 10)).toEqual({ ok: true, used: 100 });
+        const roomy = session({ id: "qs_roomy", blobBytesCeiling: 1_000 });
+        await store.createSession(roomy);
+        expect(await store.chargeBlobBytes(roomy.id, 101)).toEqual({ ok: true, used: 101 });
+      });
+
+      it("refuses a frozen room and a closed one, with the total", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 5);
+        await store.freezeSession(s.id, Date.now());
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "frozen", used: 5 });
+        await store.freezeSession(s.id, null);
+        await store.closeSession(s.id);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "closed", used: 5 });
+        expect(await used(s.id)).toBe(5);
+      });
+
+      // Closed wins over frozen, as in closeIfEmpty (src/rooms.ts): "frozen" tells the caller to restore the plan, which cannot reopen a room that is over.
+      it("reads a room that is both frozen and closed as closed", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 5);
+        await store.freezeSession(s.id, Date.now());
+        await store.closeSession(s.id);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "closed", used: 5 });
+      });
+
+      it("answers not_found for a room that does not exist", async () => {
+        expect(await store.chargeBlobBytes("qs_nobody", 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
+      });
+
+      // Against MemoryStore this reaches `expireIfDue`. Against the Durable Object it reaches
+      // `s.closed` and not the TTL read: the alarm has closed a room created already past its
+      // TTL before the charge arrives. The room past its TTL with the alarm still to come, which
+      // is what `readsClosed` answers for, is pinned in worker-tests/blob-charge.test.ts.
+      it("reads a room past its TTL as closed", async () => {
+        const s = session({ expiresAt: Date.now() - 1 });
+        await store.createSession(s);
+        expect(await store.chargeBlobBytes(s.id, 1)).toMatchObject({ ok: false, reason: "closed" });
       });
     });
 

@@ -20,7 +20,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_start` | Create a room from a manifest; get the join code, your `member_id` and the room as recorded. Entitlement-gated. |
 | `bellman_connect` | Phase 1: preview the creator's brief and the room's roles (the verbs each lists and the one you would get; verbs are enforced by the server). **Nothing of yours ships yet.** |
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
-| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` |
+| `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_rooms` | The rooms you hold a seat in: members with their roles, presence and last beat, live codes, expiry. Backs the in-chat monitor. |
 | `bellman_leave` | Depart with a broadcast event. |
@@ -60,6 +60,44 @@ What it does not say is whether anyone is there. `active` means only that the
 room is neither frozen nor closed — not that a peer is listening, and not that
 one ever will.
 
+## The working surface
+
+A room carries a surface as well as a log: a set of named items — a plan, a
+decision list, a link, a diagram, and the connectors between them — that
+members read and one seat keeps current. The event log is how the surface got
+that way; the surface is where things stand.
+
+- Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
+  body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
+  `text`, `link`, `diagram`, `connector`, `file`, `image`. Items replace by key;
+  every version stays in the log at its cursor.
+- A `file` or an `image` names a blob. Upload the bytes first — `POST
+  /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
+  25 MB per file, a bearer token or the panel's cookie, the seat holding
+  `write_surface` — then place `{ key, kind: "file", blob: { id } }`. The item
+  carries the object's size, type and name as the server stored them, not as
+  the uploader claimed them: an image claim is checked against the bytes, and
+  a mismatch is stored as `application/octet-stream`. `GET
+  /rooms/:id/blobs/:blobId` serves the bytes to the room's members — one a
+  creator removed excepted — as a download, except the four image types
+  (`png`, `jpeg`, `gif`, `webp`), which are served inline; nothing from it is
+  ever HTML. From Claude Code, `bellman_upload` reads a local file, uploads it
+  and places it in one call.
+- The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
+  to the creator's seat alone; a manifest may give it to any seat. Reading is
+  never gated.
+- A joiner's preview lists what the surface holds — keys, kinds and sizes — and
+  `bellman_confirm` hands over the items. Every poll carries `surface_cursor`
+  once the surface has changed, each change arrives as a `surface` event, and
+  `bellman_sync` with `surface: true` returns everything. A member a creator
+  removed is the exception: it sees only the items changed at or before its
+  cut, and gets `surface_cursor` only when it asks for the surface.
+- Every item arrives in an untrusted envelope with its writer as origin. The
+  preview carries no prose at all.
+
+A canvas to see it on and sandboxed HTML artifacts are the next two pieces; the
+designs are in `docs/superpowers/specs/`.
+
 ## Trust model
 
 - **Two-phase connect**: joiners see the creator's brief and the room's roles (the verbs each lists and the one they would get; verbs are enforced by the server) before their own context crosses. Codes are single-use and expire in 15 minutes unused.
@@ -71,13 +109,16 @@ one ever will.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | members | lifetime | rooms / month | |
-| --- | --- | --- | --- | --- | --- |
-| `free` | pair | 2 | 4 hours | 20 | |
-| `pro` | pair, swarm | 8 | 72 hours | 500 | |
-| `team` | pair, swarm | 25 | 30 days | 5,000 | `org_only` scoping, audit trail |
+| | modes | members | lifetime | rooms / month | blobs / room | |
+| --- | --- | --- | --- | --- | --- | --- |
+| `free` | pair | 2 | 4 hours | 20 | 50 MB | |
+| `pro` | pair, swarm | 8 | 72 hours | 500 | 500 MB | |
+| `max` | pair, swarm | 25 | 14 days | 2,000 | 5 GB | team-sized rooms for one person, no org |
+| `team` | pair, swarm | 25 | 30 days | 5,000 | 5 GB | `org_only` scoping, audit trail |
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
+
+A room's blob ceiling is stamped on the room when it is created, from the plan that creates it — as its seat count and lifetime are — so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
 
 ## Run it
 
@@ -137,6 +178,19 @@ call to Bellman. So expect one tab, once, while Claude Code is starting — and
 expect it again anywhere the cache is not, which makes a fresh CI container or
 devcontainer a first launch every single time. Ask the agent for
 `bellman_whoami` to see which account a room will show peers.
+
+The bridge adds one more tool of its own: `bellman_upload` reads a file on
+this machine — a regular file, not a symbolic link, at most 25 MB — uploads it
+to the room with the credential the bridge holds, and places it on the working
+surface as a `file` or an `image`, in one call. Only a path under the upload
+root is read, links followed — the directory the bridge was started in, or
+`BELLMAN_UPLOAD_ROOT` when that is set (`/` for any file) — so a line that
+arrives as peer content cannot send a key file to the room. The
+working-directory default is refused when that directory contains your home
+directory (the filesystem root included); naming it in `BELLMAN_UPLOAD_ROOT`
+allows that much on purpose. A hosted connector has no filesystem and no
+bridge, so it has no `bellman_upload`; the control panel's upload comes with
+the canvas.
 
 `BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
 for when you would rather open it yourself: a terminal-only session on your own
@@ -219,7 +273,7 @@ Subscribe `/stripe/webhook` to `checkout.session.completed` and `customer.subscr
 
 **Plans are mutually exclusive, and a subscription sells exactly one.** Build the catalogue so no subscription can carry prices for two; one that does grants nothing at all and logs which plans it named, rather than picking a winner by Stripe's item order. Several items of the *same* plan are fine — that is quantity, not conflict.
 
-**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
+**A purchase is a grant.** The webhook does not add a second place a plan can come from — it writes the same stored grant an admin would, with `source: "purchase"`, so a paid plan gets the ownership checks and the `/admin/grants` listing like any other. Team purchases and cancellations are written to the org audit log as `plan_granted` and `plan_revoked` with `stripe` as the actor; a pro or max purchase has no org, so there is no org stream to record it in. Buying `team` makes the buyer admin of an org named for their user id (`org_<userId>`); adding other people to that org isn't built yet. A **purchased** admin can read `/admin/grants` but not write to it — otherwise one month of team would buy permanent team, since an admin could write themselves a grant that billing has no business removing when the subscription lapses. Writing grants stays with admins named in `BELLMAN_USERS`.
 
 Billing only ever touches grants it wrote. An operator override in `BELLMAN_USERS` beats a purchase outright — `/upgrade` stops before Stripe rather than take money that would change nothing — and a grant an admin wrote by hand is left alone, with the clash logged for a human. A checkout carrying someone else's user id can only add a plan to them, never remove one they already pay for.
 
@@ -250,8 +304,8 @@ default_role: helper
 creator_role: lead
 ```
 
-Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`.
-Every member can always sync and leave.
+Verbs: `send`, `invite`, `revoke`, `request_actions`, `respond_actions`, `write_surface`.
+Every member can always sync and leave, and read the working surface.
 
 Verbs are enforced by the server. A call a seat's role does not permit is
 refused with an error naming the verb it lacks, and nothing is delivered or

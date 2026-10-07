@@ -14,12 +14,15 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, Verb } from "./types.js";
+import type { AuditEntry, Identity, Member, SessionEvent, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
-import { JOIN_CODE_TTL, isActiveMember, type BellmanStore, type EventBody } from "./store.js";
+import { JOIN_CODE_TTL, isActiveMember, type AppendExtras, type BellmanStore, type EventBody } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
+import { surfaceItem } from "./projections.js";
+import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
+import { IMAGE_TYPES, isImageType, type BlobStore } from "./blobs.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -235,6 +238,39 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
 /**
+ * The surface as a member reads it (#129, D7): every row in an envelope, and
+ * the cursor of the last change.
+ *
+ * `cut` is a removed member's cursor (#113): such a member reads its history
+ * up to the `member_evicted` event that removed it and nothing after, so rows
+ * changed past the cut are left out. An item rewritten after the cut is
+ * omitted outright; its earlier version is still in that member's event
+ * history.
+ *
+ * Under a cut the cursor is derived from the rows the member is shown (the
+ * largest of their cursors, 0 for none) and never from the record. The
+ * record's cursor, capped at the cut, claims a change AT the cut when nothing
+ * had changed by then, and a member removed from a still-empty room would
+ * learn from a nonzero number that the surface changed after it was out. What
+ * it is told is what it can see. The cost is that a removal before the cut
+ * leaves no row, so the number can sit below the last change the member was
+ * entitled to; it only ever understates, and a removed member's feed has
+ * ended, so it compares the number with nothing.
+ */
+export async function readSurface(
+  store: BellmanStore,
+  session: StoredSession,
+  cut?: number,
+) {
+  const rows = await store.surfaceOf(session.id);
+  const visible = cut === undefined ? rows : rows.filter((r) => r.cursor <= cut);
+  const cursor = cut === undefined
+    ? surfaceCursor(session)
+    : visible.reduce((last, r) => Math.max(last, r.cursor), 0);
+  return { cursor, items: visible.map(surfaceItem) };
+}
+
+/**
  * Which orgs get a row for this action, and what it says. One rule, in one
  * place, for the callers that write it themselves and the ones that hand it to
  * a store operation to commit with the mutation it records.
@@ -398,8 +434,11 @@ export async function leaveRoom(
  * it too: its authority is creator-only, which no verb expresses, and it must
  * work for a creator who has already left the room, whom a gate that requires
  * the caller's handle to still be in it would refuse.
+ *
+ * Exported for the upload route (#183), which runs it as the tool does and maps
+ * its codes to statuses.
  */
-async function gateSeat(
+export async function gateSeat(
   store: BellmanStore,
   actor: Identity,
   sessionId: string,
@@ -600,6 +639,139 @@ export async function revokeInvite(
   }
 
   return succeed({ roles: retired });
+}
+
+/**
+ * A seat writes one item on the room's working surface, or removes one (#129).
+ *
+ * One operation for both transports — `bellman_send type: "surface"` now, and
+ * piece 3's `PUT /rooms/:id/surface/:key` next — for the reason this module
+ * exists: a second transport re-typing the sequence is a second chance to skip
+ * the verb guard or the audit row. The order is the write path the spec gives:
+ * the seat's guards (`gateSeat`, which also touches the caller), the payload's
+ * shape and each kind's rule, the blob a file or image names, the rows for the
+ * cap and a connector's ends, the append with the row riding it, the audit row.
+ *
+ * The rows are read once and then the append happens, which is a
+ * read-then-write with the window open: two writers can both add a 64th item,
+ * and a connector can name a key removed a millisecond earlier. Both are
+ * courtesy bounds — a 65th row costs nothing and a dangling connector is a
+ * state the spec declares a reader handles — so neither moves into the store.
+ * The verb guard, the frozen guard and the row's write are not courtesies, and
+ * each is where it has to be.
+ */
+export async function writeSurface(
+  store: BellmanStore,
+  blobs: BlobStore,
+  actor: Identity,
+  sessionId: string,
+  memberId: string,
+  payload: unknown,
+  idempotencyKey?: string,
+): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
+  const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
+  if (!gate.ok) return gate;
+  const session = gate.value;
+
+  const normalized = normalizeSurfaceWrite(payload);
+  if (!normalized.ok) return refuse("invalid", normalized.reason);
+  let { write } = normalized;
+
+  // A blob-backed item carries the object's metadata, not the writer's (#183,
+  // D5): the writer named an id, and what readers get is what the bucket holds
+  // under this room's prefix. `head` resolves nothing from another room (D1),
+  // so a foreign id is "no blob" here too. The image check is on the STORED
+  // type, which D6 already decided at upload.
+  if (normalized.blobId !== null && write.item !== null) {
+    const meta = await blobs.head(sessionId, normalized.blobId);
+    if (!meta) {
+      return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${normalized.blobId} has been uploaded to this room.`);
+    }
+    if (write.item.kind === "image" && !isImageType(meta.type)) {
+      return refuse(
+        "invalid",
+        `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
+      );
+    }
+    write = {
+      key: write.key,
+      item: { ...write.item, blob: { id: normalized.blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
+    };
+  }
+
+  const rows = await store.surfaceOf(sessionId);
+  const byKey = new Map(rows.map((r) => [r.key, r] as const));
+  if (write.item !== null) {
+    if (!byKey.has(write.key) && rows.length >= MAX_SURFACE_ITEMS) {
+      return refuse(
+        "conflict",
+        `this room's surface already holds ${MAX_SURFACE_ITEMS} items; remove one with { key, remove: true } before adding "${write.key}".`,
+      );
+    }
+    if (write.item.kind === "connector" && write.item.ends !== null) {
+      for (const end of [write.item.ends.from, write.item.ends.to]) {
+        const target = byKey.get(end);
+        if (!target) {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is not on the surface.`);
+        }
+        if (target.kind === "connector") {
+          return refuse("invalid", `connector "${write.key}" names "${end}", which is a connector; connectors join items, not each other.`);
+        }
+      }
+    }
+  }
+
+  const draft: EventBody = {
+    type: "surface",
+    fromMemberId: memberId,
+    fromUserId: actor.userId,
+    fromLabel: actor.label,
+    // The normalised item, so the event reads as the row does: every optional
+    // field present as null. A removal's payload is the tombstone itself.
+    payload: write.item ?? { key: write.key, remove: true },
+    refId: null,
+  };
+  const extras: AppendExtras = { surface: write };
+
+  let event: SessionEvent;
+  let replayed = false;
+  if (idempotencyKey) {
+    const w = await store.appendEventOnce(sessionId, draft, idempotencyKey, extras);
+    if (w.outcome === "conflict") {
+      return refuse(
+        "conflict",
+        `idempotency_key "${idempotencyKey}" was already used for a different message. Reuse a key only to retry the same send; pick a new one for new content.`,
+      );
+    }
+    if (w.outcome === "frozen") return refuse("frozen", FROZEN);
+    event = w.event;
+    replayed = w.outcome === "replayed";
+  } else {
+    const appended = await store.appendEvent(sessionId, draft, extras);
+    if (!appended) return refuse("frozen", FROZEN);
+    event = appended;
+  }
+
+  // Nothing below happens twice: a replay's original call did it.
+  if (!replayed) {
+    await audit(
+      store, session, actor, "sent_surface",
+      write.item !== null
+        ? {
+            key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
+            ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
+          }
+        : { key: write.key, removed: true },
+    );
+  }
+
+  return succeed({
+    cursor: event.cursor,
+    replayed,
+    // Who else was active when the gate read the room — `bellman_send`'s
+    // `room_members`, with the same caveat: not a read receipt.
+    roomMembers: activeMembers(session).filter((m) => m.memberId !== memberId).map((m) => m.label),
+  });
 }
 
 /**

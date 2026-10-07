@@ -17,10 +17,12 @@ describe("attention", () => {
     expect(attentionOf(type)).toBe("interrupt");
   });
 
-  it("makes a reply ambient and the tick an interrupt", () => {
+  it("makes a reply and a surface write ambient, and the tick an interrupt", () => {
     expect(attentionOf("progress")).toBe("ambient");
+    expect(attentionOf("surface")).toBe("ambient");
     expect(attentionOf("heartbeat")).toBe("interrupt");
     expect(isAmbient("progress")).toBe(true);
+    expect(isAmbient("surface")).toBe(true);
     expect(isAmbient("heartbeat")).toBe(false);
   });
 
@@ -32,6 +34,6 @@ describe("attention", () => {
    */
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))
-      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress"]));
+      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface"]));
   });
 });

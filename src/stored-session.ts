@@ -1,4 +1,5 @@
 import type { RoomManifest, Session } from "./types.js";
+import { ENTITLEMENTS } from "./auth.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
 // exists only inside workerd, so a test can load it only by stubbing that module, and
@@ -50,12 +51,31 @@ export interface StoredSession extends Omit<Session, "events"> {
    * briefly short beats a migration over rooms that expire anyway.
    */
   lastActionRequestAt?: number;
+  /**
+   * The cursor of the last `surface` event that changed a row (#129): a write
+   * that replaced or added one, or a removal that deleted one. A removal of a
+   * key that held nothing does not move it. Moves in the same put as the row,
+   * monotonically, so a poll can report "the surface moved" off the record it
+   * already read, with no row read. Absent on rows written before this landed;
+   * `hydrateStoredSession` lifts it to 0 and `surfaceCursor` in surface.ts
+   * reads it through `?? 0` for the in-memory store, which does not hydrate.
+   */
+  surfaceCursor?: number;
+  /**
+   * The bytes charged to this room's blob store so far (#183): the sum every
+   * successful `chargeBlobBytes` added, and nothing credits it — a deletion is a
+   * retention decision (#65) and lands with its own credit. Absent on rows
+   * written before this landed; `hydrateStoredSession` lifts it to 0 and
+   * `blobBytesUsed` in blobs.ts reads it through `?? 0` for the in-memory
+   * store, which does not hydrate.
+   */
+  blobBytes?: number;
 }
 
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Four changes to the stored shape landed after the sessions now in production
+ * Seven changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -80,8 +100,16 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   invents nothing. Left alone, both read as `undefined`, which is neither: a
  *   guard written `=== null` misses the cadence and goes on to do arithmetic with
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
+ * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
+ *   existed has never had a row change, which is what 0 says.
+ * - **blobBytes** (#183) defaults to `0`: a room written before blobs existed
+ *   has been charged nothing, which is what 0 says.
+ * - **blobBytesCeiling** (#183) defaults to the free plan's ceiling. A room
+ *   written before the field was stamped from no plan, so the conservative
+ *   number is the honest one, and it expires with the room rather than being
+ *   migrated.
  *
- * All four live here, in one gate, rather than in separate functions that could drift.
+ * All seven live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -98,6 +126,11 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     ...row,
     manifest: withHeartbeatDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
+    surfaceCursor: row.surfaceCursor ?? 0,
+    blobBytes: row.blobBytes ?? 0,
+    // Required on the type, absent on a row written before #183: the cast says
+    // so where `??` alone would read as redundant.
+    blobBytesCeiling: (row as { blobBytesCeiling?: number }).blobBytesCeiling ?? ENTITLEMENTS.free.blobBytesPerRoom,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

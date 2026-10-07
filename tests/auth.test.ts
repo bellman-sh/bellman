@@ -79,41 +79,68 @@ describe("resolveIdentity", () => {
 });
 
 describe("plan entitlements", () => {
-  const plans: Plan[] = ["free", "pro", "team"];
+  const plans: Plan[] = ["free", "pro", "max", "team"];
 
-  it("gates swarm mode to pro and team", () => {
+  it("gates swarm mode to the paid plans", () => {
     expect(ENTITLEMENTS.free.modes).toEqual(["pair"]);
     expect(ENTITLEMENTS.pro.modes).toContain("swarm");
+    expect(ENTITLEMENTS.max.modes).toContain("swarm");
     expect(ENTITLEMENTS.team.modes).toContain("swarm");
   });
 
+  /**
+   * max buys team's room size for one person, so members may tie at the top;
+   * lifetime and quota still step up to team.
+   */
   it("raises member ceilings, TTLs and quotas monotonically by plan", () => {
     expect(ENTITLEMENTS.free.maxMembers).toBeLessThan(ENTITLEMENTS.pro.maxMembers);
-    expect(ENTITLEMENTS.pro.maxMembers).toBeLessThan(ENTITLEMENTS.team.maxMembers);
+    expect(ENTITLEMENTS.pro.maxMembers).toBeLessThan(ENTITLEMENTS.max.maxMembers);
+    expect(ENTITLEMENTS.max.maxMembers).toBeLessThanOrEqual(ENTITLEMENTS.team.maxMembers);
     expect(ENTITLEMENTS.free.sessionTtlMs).toBeLessThan(ENTITLEMENTS.pro.sessionTtlMs);
-    expect(ENTITLEMENTS.pro.sessionTtlMs).toBeLessThan(ENTITLEMENTS.team.sessionTtlMs);
+    expect(ENTITLEMENTS.pro.sessionTtlMs).toBeLessThan(ENTITLEMENTS.max.sessionTtlMs);
+    expect(ENTITLEMENTS.max.sessionTtlMs).toBeLessThan(ENTITLEMENTS.team.sessionTtlMs);
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
-    expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
+    expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
+    expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
+    expect(ENTITLEMENTS.free.blobBytesPerRoom).toBe(50 * 1024 * 1024);
+    expect(ENTITLEMENTS.pro.blobBytesPerRoom).toBe(500 * 1024 * 1024);
+    expect(ENTITLEMENTS.max.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
+    expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
+  it("gives max the team-sized room: 25 members for 14 days, 2,000 a month (#45)", () => {
+    expect(ENTITLEMENTS.max.maxMembers).toBe(25);
+    expect(ENTITLEMENTS.max.sessionTtlMs).toBe(14 * 24 * 60 * 60 * 1000);
+    expect(ENTITLEMENTS.max.monthlyCreates).toBe(2000);
+  });
+
+  /** The reason a company with several people creating rooms still buys team. */
   it("reserves org scoping and audit for the team plan", () => {
     expect(ENTITLEMENTS.free.orgScoping).toBe(false);
     expect(ENTITLEMENTS.pro.orgScoping).toBe(false);
+    expect(ENTITLEMENTS.max.orgScoping).toBe(false);
     expect(ENTITLEMENTS.team.orgScoping).toBe(true);
 
     expect(ENTITLEMENTS.free.audit).toBe(false);
     expect(ENTITLEMENTS.pro.audit).toBe(false);
+    expect(ENTITLEMENTS.max.audit).toBe(false);
     expect(ENTITLEMENTS.team.audit).toBe(true);
+  });
+
+  /** Billing ranks plans in this order (src/billing/ledger.ts), so the order is part of the contract. */
+  it("declares plans cheapest first", () => {
+    expect(Object.keys(ENTITLEMENTS)).toEqual(["free", "pro", "max", "team"]);
   });
 
   /**
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
-   * on what you pay — this test is the tripwire.
+   * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
+   * bounds what a room stores, not who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit",
+      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
     ].sort();
 
     for (const plan of plans) {

@@ -16,6 +16,7 @@ import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/bridge.js";
 import { buildServer } from "../src/server.js";
 import { MemoryStore } from "../src/store.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { member, session } from "./helpers/fixtures.js";
@@ -30,7 +31,7 @@ afterEach(async () => {
 /** A real Bellman behind a real MCP client, as connectRemote builds one. */
 async function remoteFor(store: MemoryStore): Promise<Remote> {
   const identity = resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!;
-  const server = buildServer(identity, store);
+  const server = buildServer(identity, store, new MemoryBlobStore());
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "bridge-remote", version: "0.0.1" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);

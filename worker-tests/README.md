@@ -1,8 +1,10 @@
 # worker-tests
 
-The second test program. It exists to run one thing: the `BellmanStore` contract
-suite (`../tests/helpers/store-contract.ts`) against `DurableObjectStore`, in
-real workerd, with real Durable Objects — issue #12.
+The second test program. It exists to run two things: the `BellmanStore` contract
+suite (`../tests/helpers/store-contract.ts`) against `DurableObjectStore`, and the
+`BlobStore` contract suite (`../tests/helpers/blob-store-contract.ts`) against
+`R2BlobStore`, in real workerd, with real Durable Objects and a real R2 binding —
+issues #12 and #183.
 
 ```bash
 npm run test:worker      # from the repo root
@@ -70,7 +72,8 @@ which `store-contract.test.ts` calls explicitly.
 
 ## What `wrangler.toml` here is for
 
-The pool reads Durable Object bindings and migrations from a wrangler config.
-This one mirrors the real `../wrangler.toml`'s DO topology and compatibility
-settings and nothing else — no routes, no custom domain, no observability. When
-the DO topology changes in the real file, change it here too.
+The pool reads Durable Object and R2 bindings and migrations from a wrangler
+config. This one mirrors the real `../wrangler.toml`'s DO topology, its `BLOBS`
+bucket and its compatibility settings and nothing else — no routes, no custom
+domain, no observability. When the DO topology or the bindings change in the
+real file, change them here too.

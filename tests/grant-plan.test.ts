@@ -50,6 +50,13 @@ describe("argument parsing", () => {
 
     expect(() => parseGrant(orphan)).toThrow(/needs an orgId/);
   });
+
+  /** max is not an org plan: team-sized rooms for one person (#45). */
+  it("accepts a max grant with no org", () => {
+    const solo = ["--github", "x", "--plan", "max", "--role", "member", "--org", "none"];
+
+    expect(parseGrant(solo)).toMatchObject({ plan: "max", orgId: null });
+  });
 });
 
 describe("key resolution", () => {
@@ -165,6 +172,8 @@ describe("the users map", () => {
     expect(() => parseUsers(JSON.stringify({ "github:1": { plan: "team" } }))).toThrow(/userId/);
     expect(() => parseUsers(JSON.stringify({ "slack:1": granted }))).toThrow(/slack:1/);
     expect(parseUsers(JSON.stringify(existing))).toEqual(existing);
+    const solo = { "github:7": { ...granted, plan: "max", role: "member", orgId: null } };
+    expect(parseUsers(JSON.stringify(solo))).toEqual(solo);
     expect(parseUsers(undefined)).toEqual({});
   });
 });

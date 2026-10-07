@@ -1,4 +1,4 @@
-import type { Member, SessionEvent, Verb } from "./types.js";
+import type { Member, SessionEvent, SurfaceRow, Verb } from "./types.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
@@ -222,4 +222,49 @@ export function roomSummary(
       })),
     last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,
   };
+}
+
+/**
+ * The surface as a joiner's preview shows it (#129, D9): identifiers and the
+ * server's numbers, and no prose. `key` is regex-bounded, `kind` is an enum
+ * value, `chars`, `cursor` and `at` are the server's, and `by` is the label
+ * every roster already ships unwrapped. A title is author prose and is
+ * deliberately absent — a code holder who never joins reads that the room
+ * keeps a plan, not what the plan says. tests/working-surface.test.ts puts a
+ * title here and expects red.
+ */
+export function surfaceIndex(rows: readonly SurfaceRow[]) {
+  return rows.map((r) => ({
+    key: r.key,
+    kind: r.kind,
+    chars: r.body?.length ?? 0,
+    cursor: r.cursor,
+    at: new Date(r.at).toISOString(),
+    by: { member_id: r.byMemberId, label: r.byLabel },
+  }));
+}
+
+/**
+ * An item as a member reads it: the whole item inside the writer's envelope,
+ * placement included, because one shape is easier to hold than two. The
+ * writer is the origin, so a reader sees whose words these are before it
+ * sees the words.
+ */
+export function surfaceItem(r: SurfaceRow) {
+  return untrusted(
+    { memberId: r.byMemberId, label: r.byLabel },
+    {
+      key: r.key,
+      kind: r.kind,
+      title: r.title,
+      body: r.body,
+      ends: r.ends,
+      placement: r.placement,
+      // `?? null` for rows written before blobs (#183): a reader never tells
+      // "absent" from "null", and a legacy row has no key at all.
+      blob: r.blob ?? null,
+      cursor: r.cursor,
+      at: new Date(r.at).toISOString(),
+    },
+  );
 }

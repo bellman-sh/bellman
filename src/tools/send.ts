@@ -6,17 +6,18 @@ import {
 import type { ToolResult } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
-import { FROZEN, activeMembers, audit, findMember, touchMember } from "../rooms.js";
+import { FROZEN, activeMembers, audit, findMember, touchMember, writeSurface } from "../rooms.js";
 import type { AppendExtras, BellmanStore, EventWrite } from "../store.js";
+import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 
-export function registerSend(server: McpServer, identity: Identity, s: BellmanStore): void {
+export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
   // --------------------------------------------------------------- bellman_send
   server.registerTool(
     "bellman_send",
     {
       title: "Send to Bellman session members",
-      description: `Send a message, artifact, action request, action response, brief update, or progress report to the room.
+      description: `Send a message, artifact, action request, action response, brief update, progress report, or a surface item to the room.
 
 Args:
   - session_id, member_id: your handles from start/confirm
@@ -28,6 +29,9 @@ Args:
       "action_response"— answer an action_request; set ref_id to the request's cursor id and include { approved: boolean, result?: string }
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
+      "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, blob? } or { key, remove: true }.
+                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
+                         Needs the write_surface verb. Items replace by key; at most 64 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Both bounds matter: a deeply nested payload can be small and still be undeliverable, so flatten rather than nest.
   - ref_id: required for action_response
   - idempotency_key: optional. Names this send. Retrying with the SAME key returns the original result instead of delivering a second copy — use it when a call timed out or the connection dropped and you cannot tell whether it landed. Use a fresh key for a new message; reusing one for different content is an error.
@@ -35,7 +39,7 @@ Args:
 Returns: { room_members, cursor, replayed? }
   - room_members: the OTHER active members this call saw just before appending — your own seat is not in it, and on a replayed send it is who was there at the retry rather than at the original append. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
   - replayed: true means this key had already been used and nothing new was sent.
-Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant.`,
+Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke.`,
       inputSchema: {
         session_id: z.string().min(4),
         member_id: z.string().min(4),
@@ -49,6 +53,19 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       },
     },
     async ({ session_id, member_id, type, payload, ref_id, idempotency_key }): Promise<ToolResult> => {
+      // The whole sequence — guards, shape, rows, append, audit — is one
+      // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
+      // Handled before the common guards below, which writeSurface runs itself.
+      if (type === "surface") {
+        const out = await writeSurface(s, blobs, identity, session_id, member_id, payload, idempotency_key);
+        if (!out.ok) return fail(out.reason);
+        return ok({
+          room_members: out.value.roomMembers,
+          cursor: out.value.cursor,
+          ...(out.value.replayed ? { replayed: true } : {}),
+        });
+      }
+
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);

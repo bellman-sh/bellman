@@ -108,16 +108,16 @@ describe("presets", () => {
   // leaves or joins a role should show up as an edit to this table, not only to the catalog.
   const catalog: Record<PresetName, Record<string, string[]>> = {
     pair: {
-      peer_a: ["send", "request_actions", "respond_actions", "invite", "revoke"],
+      peer_a: ["send", "request_actions", "respond_actions", "invite", "revoke", "write_surface"],
       peer_b: ["send", "request_actions", "respond_actions"],
     },
     swarm: {
-      lead: ["send", "invite", "revoke", "request_actions", "respond_actions"],
+      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
       helper: ["send", "request_actions", "respond_actions"],
       observer: [],
     },
     review: {
-      author: ["send", "invite", "revoke", "request_actions", "respond_actions"],
+      author: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
       reviewer: ["send", "respond_actions"],
     },
   };
@@ -140,8 +140,10 @@ describe("the verb enum", () => {
   // gate it, and no tool closes a room on a member's say-so (a room ends when its last member
   // leaves). Each verb returns in the PR that adds its operation, and this list changes in that
   // PR, not before.
-  it("holds exactly the five verbs whose operations exist room-scoped", () => {
-    expect([...VERBS]).toEqual(["send", "invite", "revoke", "request_actions", "respond_actions"]);
+  it("holds exactly the six verbs whose operations exist room-scoped", () => {
+    expect([...VERBS]).toEqual([
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
+    ]);
   });
 
   it.each(["audit", "close_room"])("rejects %s from a role, and from the tool's own schema", (verb) => {

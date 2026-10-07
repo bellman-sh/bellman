@@ -209,6 +209,21 @@ describe("subscriptions to plans", () => {
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
   });
 
+  it("sells max, ranked above pro and below team whichever order they arrive in", async () => {
+    await checkout("cus_A", "u_github_1");
+    await subscription("created", { id: "sub_1", lookup: "max_monthly" });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("max");
+
+    await subscription("created", { id: "sub_2", lookup: "pro_monthly" });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("max");
+
+    await subscription("created", { id: "sub_3", lookup: "team_seat_annual" });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
+
+    await subscription("created", { id: "sub_4", lookup: "max_annual" });
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("team");
+  });
+
   it("links a user id an operator grant named, not only the ones sign-in mints", async () => {
     await checkout("cus_A", "u_jesse");
     await subscription("created");
@@ -419,6 +434,7 @@ describe("prices", () => {
   it("reads the plan from metadata first, then the lookup key prefix", () => {
     expect(planForPrice({ lookup_key: "pro_monthly", metadata: { plan: "team" } })).toBe("team");
     expect(planForPrice({ lookup_key: "team_seat_annual" })).toBe("team");
+    expect(planForPrice({ lookup_key: "max_monthly" })).toBe("max");
   });
 
   it("never sells free, and ignores what it does not know", () => {

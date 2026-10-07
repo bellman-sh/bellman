@@ -25,6 +25,11 @@ describe("key generation", () => {
 });
 
 describe("identity validation", () => {
+  /** max is not an org plan, so it needs no orgId the way team and admin do (#45). */
+  it("accepts a max identity with no org", () => {
+    expect(() => parseIdentities([{ ...peer, plan: "max", orgId: null }])).not.toThrow();
+  });
+
   it("rejects a file that would upload a broken key map", () => {
     expect(() => parseIdentities([])).toThrow(/non-empty/);
     expect(() => parseIdentities([{ ...jesse, userId: "" }])).toThrow(/userId/);

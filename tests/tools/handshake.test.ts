@@ -37,7 +37,7 @@ describe("INVARIANT 1 — entitlements gate creation, never joining", () => {
     const peer = await h.connect(DEV_KEY.peer);
     const res = await peer.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
     expect(res.isError).toBe(true);
-    expect(res.text).toContain("pro or team");
+    expect(res.text).toContain("pro, max or team");
   });
 
   it("lets a free plan create a pair session", async () => {
@@ -614,7 +614,7 @@ describe("INVARIANT 10 — every room is declared", () => {
       manifest: { room: "too-big", preset: "swarm" },
     });
     expect(res.isError).toBe(true);
-    expect(res.text).toContain("pro or team");
+    expect(res.text).toContain("pro, max or team");
     expect(await h.store.countCreatesThisMonth("u_peer")).toBe(before);
   });
 

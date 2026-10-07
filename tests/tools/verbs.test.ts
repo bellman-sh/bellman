@@ -1,14 +1,14 @@
 /**
  * The verb guards. #1 declared a room's verbs and enforced none of them; this is
  * the file that turns bellman_connect's preview from stated intent into a fact —
- * for all five verbs: send, request_actions and respond_actions in bellman_send,
- * invite and revoke in bellman_invite.
+ * for all six verbs: send, request_actions, respond_actions and write_surface in
+ * bellman_send, invite and revoke in bellman_invite.
  *
  * Every KIND of send is denied with the missing verb named, and the room does not
- * move: one row per kind in "a seat that lacks the verb", against the single
- * guard site in bellman_send. An error that still appended an event would be
- * worse than no guard at all. The other tests here pin what the caller hears;
- * they do not each re-assert that the room stood still.
+ * move: one row per kind in "a seat that lacks the verb", against bellman_send's
+ * guard — and, for a surface write, writeSurface's own. An error that still
+ * appended an event would be worse than no guard at all. The other tests here
+ * pin what the caller hears; they do not each re-assert that the room stood still.
  *
  * Seats are authored rather than taken from a preset because a joiner always gets
  * `default_role` until #3, so a verbless or oddly-shaped joiner seat has to be
@@ -24,7 +24,7 @@ let h: Harness;
 beforeEach(() => { h = new Harness(); });
 afterEach(async () => { await h.close(); });
 
-const ALL_VERBS = ["send", "invite", "revoke", "request_actions", "respond_actions"];
+const ALL_VERBS = ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"];
 
 /**
  * A manifest whose joiner seat holds exactly `can`. A pair unless `mode` says
@@ -51,6 +51,7 @@ describe("bellman_send — a seat that holds the verb", () => {
     ["message", "send", { text: "hello" }],
     ["artifact", "send", { name: "patch.diff", content: "--- a\n+++ b\n" }],
     ["action_request", "request_actions", { action: "run the test suite" }],
+    ["surface", "write_surface", { key: "plan", kind: "text", body: "the plan" }],
   ] as const)("allows %s to a seat holding %s", async (type, verb, payload) => {
     const p = await pairUp(h, { manifest: seat([verb]) });
     const res = await p.joiner.call("bellman_send", {
@@ -99,6 +100,7 @@ describe("bellman_send — a seat that lacks the verb", () => {
     ["action_request", "request_actions", { action: "do a thing" }],
     ["action_response", "respond_actions", { approved: true }],
     ["progress", "send", { note: "ran migration 0042" }],
+    ["surface", "write_surface", { key: "plan", kind: "text", body: "the plan" }],
   ] as const)("refuses %s, naming the missing verb %s, and appends nothing", async (type, verb, payload) => {
     // The seat holds every verb EXCEPT the one under test, so nothing else can
     // be doing the refusing.
@@ -136,7 +138,7 @@ describe("bellman_send — a seat that lacks the verb", () => {
   it("refuses every kind to a wholly verbless seat", async () => {
     const p = await pairUp(h, { manifest: seat([]) });
     const before = await eventCount(p.sessionId);
-    for (const type of ["message", "artifact", "action_request", "action_response", "brief_update", "progress"]) {
+    for (const type of ["message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface"]) {
       const res = await p.joiner.call("bellman_send", {
         session_id: p.sessionId, member_id: p.joinerMemberId,
         type, payload: { text: "x" }, ref_id: "1",
@@ -601,7 +603,9 @@ describe("platform role and room role are different things", () => {
 
   // Every KIND of send, not just `message`. The scan below cannot see every way to
   // write an exemption, and these behavioural tests are what backs it: an exemption
-  // for one kind ("admins may approve") would otherwise slip past four of the five.
+  // for one kind ("admins may approve") would otherwise slip past all the others.
+  // The scan reads src/server.ts and src/tools/, and a surface write's guard lives
+  // in src/rooms.ts, so for that kind this row is the only thing that backs it.
   it.each([
     ["message", "send", { text: "I administer this org" }],
     ["artifact", "send", { name: "admin.diff", content: "x" }],
@@ -609,6 +613,7 @@ describe("platform role and room role are different things", () => {
     ["action_request", "request_actions", { action: "rerun CI as the org admin" }],
     ["action_response", "respond_actions", { approved: true }],
     ["progress", "send", { note: "ran migration 0042 as the org admin" }],
+    ["surface", "write_surface", { key: "plan", kind: "text", body: "the plan, as the org admin" }],
   ] as const)("refuses an org admin's %s in a seat holding nothing", async (type, verb, payload) => {
     const p = await adminJoins(seat([], "admin-holds-nothing"));
     // Each row is built so that a bypassed guard would genuinely SUCCEED and flip

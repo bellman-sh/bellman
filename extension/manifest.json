@@ -62,7 +62,7 @@
     },
     {
       "name": "bellman_send",
-      "description": "Send a message, artifact, action request, or brief update."
+      "description": "Send a message, artifact, action request, action response, brief update, progress report, or surface item."
     },
     {
       "name": "bellman_sync",

@@ -12,7 +12,7 @@ export const MAX_WAIT_SECONDS = 25; // stay under the strictest client tool-call
 
 /** The kinds bellman_send accepts. The tool's `type` enum is built from this list. */
 export const SEND_KINDS = [
-  "message", "artifact", "action_request", "action_response", "brief_update", "progress",
+  "message", "artifact", "action_request", "action_response", "brief_update", "progress", "surface",
 ] as const;
 export type SendKind = (typeof SEND_KINDS)[number];
 
@@ -39,6 +39,11 @@ export const SEND_VERB = {
    * `RoleDef.reports` already answers who is asked.
    */
   progress: "send",
+  /**
+   * A write to the room's working surface (#129). Its own verb, because the
+   * surface is state every member reads and the presets give it to one seat.
+   */
+  surface: "write_surface",
   action_request: "request_actions",
   action_response: "respond_actions",
 } as const satisfies Record<SendKind, Verb>;

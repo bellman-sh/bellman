@@ -221,13 +221,13 @@ describe("tool surface", () => {
    * is the list a client is handed, so it closes the gap at the surface the claim
    * is about, and it needs no export from server.ts to do it.
    */
-  it("offers exactly the six send kinds, and no way to forge a heartbeat", async () => {
+  it("offers exactly the seven send kinds, and no way to forge a heartbeat", async () => {
     const { tools } = await jesse.listTools();
     const send = tools.find((t) => t.name === "bellman_send")!;
     const kinds = (send.inputSchema.properties as Record<string, { enum?: string[] }>).type.enum;
 
     expect([...kinds!].sort()).toEqual([
-      "action_request", "action_response", "artifact", "brief_update", "message", "progress",
+      "action_request", "action_response", "artifact", "brief_update", "message", "progress", "surface",
     ]);
     // Said separately, because that is the claim: the tick is the server's to
     // write, and a member has no name for it to pass here.

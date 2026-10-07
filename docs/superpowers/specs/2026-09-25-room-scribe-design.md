@@ -1,6 +1,6 @@
 # Room Scribe — Design
 
-Status: approved design, pending implementation plan
+Status: superseded by [the working surface](2026-10-06-working-surface-design.md) — the summary is a `text` item there, and D4 and D7 here were reversed by its D3
 Depends on: #1 (room manifests) — the manifest must exist to declare a scribe
 Generalised by: #2 (permission verbs) — see D5
 Spawns: two follow-up issues, see **Out of scope**

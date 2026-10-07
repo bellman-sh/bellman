@@ -116,3 +116,24 @@ describe("hydrateStoredSession — a manifest stored before the heartbeat", () =
     }
   });
 });
+
+/**
+ * A record written before the working surface (#129): it has no `surfaceCursor`.
+ * The key is ABSENT, not undefined, which is what Durable Object storage hands
+ * back for a row that never had it.
+ */
+describe("hydrateStoredSession — a record stored before the surface", () => {
+  /** No row ever changed there, which is what 0 says; `undefined` is not a cursor anything can compare. */
+  it("reads a missing surfaceCursor as 0", () => {
+    const { events: _events, ...raw } = session();
+    // Without this, a fixture that grew a cursor would pass for the wrong reason.
+    expect("surfaceCursor" in raw).toBe(false);
+    expect(hydrateStoredSession(raw)!.surfaceCursor).toBe(0);
+  });
+
+  /** A default that clobbered would report every room that has written to its surface as never having moved. */
+  it("leaves a surfaceCursor the room has already moved alone", () => {
+    const { events: _events, ...raw } = session();
+    expect(hydrateStoredSession({ ...raw, surfaceCursor: 12 })!.surfaceCursor).toBe(12);
+  });
+});

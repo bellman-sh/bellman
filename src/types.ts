@@ -83,7 +83,9 @@ export type EventType =
   /** The server's tick, on the room's cadence. Never sent by a member (#111). */
   | "heartbeat"
   /** A member's answer to a tick. */
-  | "progress";
+  | "progress"
+  /** A write to the room's working surface: an item, or its removal (#129). */
+  | "surface";
 
 export interface SessionEvent {
   cursor: number;
@@ -193,7 +195,8 @@ export type Verb =
   | "invite"
   | "revoke"
   | "request_actions"
-  | "respond_actions";
+  | "respond_actions"
+  | "write_surface";
 
 export type PresetName = "pair" | "swarm" | "review";
 
@@ -226,4 +229,42 @@ export interface RoomManifest {
    * reading silence reads it against the same number every member was given.
    */
   heartbeatOnMs: number | null;
+}
+
+/**
+ * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
+ * client is shown maps to a shape the server validates, and a kind lands with
+ * its validator. `file`, `image` and `html` arrive with pieces 2 and 4.
+ */
+export type SurfaceKind = "text" | "link" | "diagram" | "connector";
+
+/** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
+export interface Placement {
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+}
+
+/**
+ * An item as written, normalised: every optional field present as null, so a
+ * reader never tells "absent" from "null". `ends` is a connector's two keys;
+ * every other kind has none. `body` is markdown for `text`, a URL for `link`,
+ * mermaid source for `diagram`, a label for `connector`.
+ */
+export interface SurfaceItem {
+  key: string;
+  kind: SurfaceKind;
+  title: string | null;
+  body: string | null;
+  ends: { from: string; to: string } | null;
+  placement: Placement | null;
+}
+
+/** An item as stored: the item plus the write that put it there. */
+export interface SurfaceRow extends SurfaceItem {
+  cursor: number;
+  at: number;
+  byMemberId: string;
+  byLabel: string;
 }

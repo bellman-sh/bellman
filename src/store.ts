@@ -1,10 +1,11 @@
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType,
+  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType, SurfaceRow,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
+import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -438,6 +439,21 @@ export interface AppendExtras {
    * retrying cannot know whether the first attempt landed it.
    */
   stampActionRequest?: boolean;
+  /**
+   * Write or remove one surface row in the event's own transaction (#129),
+   * under the rule in `applySurfaceWrite`: a newer cursor replaces, an older
+   * or equal one is a no-op, `item: null` removes. The row and `surfaceCursor`
+   * on the record commit with the event or not at all — a poll reads the
+   * cursor off the record and a reader reads the row, and the two must not be
+   * allowed to disagree.
+   *
+   * NOT applied on an idempotent replay, unlike the extras above. The row went
+   * in with the event in one transaction, so a replay has nothing to repair, and
+   * whatever has happened to the key since carries a higher cursor. A removal
+   * leaves no tombstone, so re-applying the original write would find no row to
+   * compare against and could only put back what was removed.
+   */
+  surface?: SurfaceWrite;
 }
 
 export interface BellmanStore {
@@ -773,6 +789,13 @@ export interface BellmanStore {
    */
   eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
+  /**
+   * Every surface row of this room, sorted by key, as detached copies. An
+   * unknown session answers none. One hop: the Durable Objects store reads the
+   * rows inside the object and returns them together, which is why this is a
+   * method and not N `eventAt` reads from a handler.
+   */
+  surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -857,6 +880,12 @@ export class MemoryStore implements BellmanStore {
    * Same lifetime either way — a session is never deleted from this store.
    */
   private keys = new Map<string, Map<string, IdempotencyRecord>>();
+  /**
+   * Surface rows, by session then by key. Beside `keys` for the same reason it
+   * is: the Session record is what SessionDO persists, and the rows live under
+   * their own storage keys there too.
+   */
+  private surfaces = new Map<string, Map<string, SurfaceRow>>();
 
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
@@ -1225,13 +1254,16 @@ export class MemoryStore implements BellmanStore {
   }
 
   /**
-   * Apply an append's `extras`, if it asked for any. Both rules live in this
-   * module and are shared with `SessionDO`, so the two stores cannot disagree
-   * about when a member write rides an append.
+   * Apply an append's `extras`, if it asked for any. The roster rules,
+   * `creditReport` and `markRemoved`, live in this module and the surface rule,
+   * `applySurfaceWrite`, in surface.ts; `SessionDO`'s `extraRows` applies the
+   * same functions, so the two stores cannot disagree about when an extra rides
+   * an append. The action-request stamp is the one extra with no function to
+   * share: it is a line in each store.
    *
-   * One method rather than two, because both rules rewrite the same member
-   * array: applied separately, the second would read `s.members` from before
-   * the first and discard it.
+   * One method rather than one per extra, because the two roster rules rewrite
+   * the same member array: applied separately, the second would read `s.members`
+   * from before the first and discard it.
    *
    * No awaits, for appendEvent's reason above.
    */
@@ -1249,6 +1281,23 @@ export class MemoryStore implements BellmanStore {
     if (extras.stampActionRequest) {
       const stored = s as { lastActionRequestAt?: number };
       stored.lastActionRequestAt = Math.max(stored.lastActionRequestAt ?? 0, event.at);
+    }
+    if (extras.surface !== undefined) {
+      const rows = this.surfaces.get(s.id) ?? new Map<string, SurfaceRow>();
+      const verdict = applySurfaceWrite(rows.get(extras.surface.key), event, extras.surface);
+      if (verdict !== null) {
+        // Copied in, as the event is in `appendNow`: the item holds objects of its
+        // own (`placement`, `ends`), and storing the caller's would let a caller
+        // that kept them rewrite the row. The Durable Object store gets the copy
+        // from the RPC boundary.
+        if (verdict === "remove") rows.delete(extras.surface.key);
+        else rows.set(extras.surface.key, detach(verdict));
+        this.surfaces.set(s.id, rows);
+        // Monotonic, as the action-request stamp is: a change moves it forward
+        // and nothing moves it back.
+        const stored = s as { surfaceCursor?: number };
+        stored.surfaceCursor = Math.max(stored.surfaceCursor ?? 0, event.cursor);
+      }
     }
   }
 
@@ -1280,13 +1329,22 @@ export class MemoryStore implements BellmanStore {
           `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
         );
       }
-      // The replay applies its extras too. A retry cannot know whether the first
-      // attempt landed the stamp, and `creditReport` is monotonic, so re-asserting
-      // it is either a repair or a no-op and never a regression. `original` and
-      // not `e`, so `markRemoved` sees the cursor the key names: a replay
-      // re-asserts the same cut, and `markRemoved` answers `null` once it is
-      // recorded.
-      this.applyExtras(s, original, extras);
+      // The replay re-asserts the member extras (`creditReport`, `markRemoved`
+      // and `stampActionRequest`) and applies no surface write.
+      //
+      // A retry cannot know whether the first attempt landed a member write, and
+      // each of the three is monotonic or answers `null` once it is recorded, so
+      // re-asserting one is either a repair or a no-op and never a regression.
+      // `original` and not `e`, so `markRemoved` sees the cursor the key names: a
+      // replay re-asserts the same cut.
+      //
+      // The surface write is the exception, so it is taken out of the extras. The
+      // row went in with the event in one transaction, so there is nothing to
+      // repair, and whatever has happened to the key since carries a higher
+      // cursor. A removal leaves no tombstone, so re-applying the original write
+      // would find no row to compare against and could only put back what was
+      // removed.
+      this.applyExtras(s, original, { ...extras, surface: undefined });
       return { outcome: "replayed", event: detach(original) };
     }
 
@@ -1323,6 +1381,13 @@ export class MemoryStore implements BellmanStore {
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
     const e = this.sessions.get(sessionId)?.events.find((ev) => ev.cursor === cursor);
     return e ? detach(e) : undefined;
+  }
+
+  async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
+    const rows = this.surfaces.get(sessionId);
+    if (!rows) return [];
+    const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return detach(sorted);
   }
 
   /**

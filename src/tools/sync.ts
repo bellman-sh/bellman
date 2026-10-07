@@ -4,7 +4,8 @@ import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
 import type { Identity } from "../types.js";
-import { findMember, sessionStatus, touchMember } from "../rooms.js";
+import { findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
+import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
@@ -22,8 +23,11 @@ Args:
   - session_id, member_id: your handles
   - since_cursor: last cursor you processed (0 on first call after start; the cursor from bellman_confirm after joining)
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
+  - surface (boolean, default false): also return the room's working surface in full — every item in an untrusted envelope. Use it after a restart, or when you want the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor, removed?, outstanding? }
+Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, surface_cursor?, surface?, removed?, outstanding? }
+surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for all of them.
+A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
 outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
 removed: true means a creator removed you from this room. Your history stays readable, nothing after it will arrive, and there is no point polling again — stop watching this room.
 Always pass the returned cursor next time — even an empty events list can advance it.
@@ -33,6 +37,7 @@ If a room's creator has removed you, you still get the history up to and includi
         member_id: z.string().min(4),
         since_cursor: z.number().int().min(0).default(0),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).default(0),
+        surface: z.boolean().default(false),
       },
       annotations: {
         // `readOnlyHint` stays true although this now writes `lastSeenAt`, and
@@ -47,7 +52,7 @@ If a room's creator has removed you, you still get the history up to and includi
         readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, since_cursor, wait_seconds }): Promise<ToolResult> => {
+    async ({ session_id, member_id, since_cursor, wait_seconds, surface }): Promise<ToolResult> => {
       const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);
@@ -230,6 +235,23 @@ If a room's creator has removed you, you still get the history up to and includi
       const outstanding = outstandingFor(visible, member_id, Date.now())
         .filter((o) => o.mine || isActiveMember(me));
 
+      // The surface's cursor, and the surface when it was asked for, capped by
+      // `stopAt` above: a removed member reads its history and nothing after it.
+      //
+      // A member still in the room gets the record's number, off the record the
+      // poll ANSWERS with for the reason `status` is read off it: never older
+      // than the events beside it.
+      //
+      // A removed member gets one derived from what it is shown, never the
+      // record's. The record's number, capped at the cut, claims a change AT the
+      // cut when nothing had changed by then, and tells a member removed from a
+      // still-empty room that the surface changed after it was out. Derived
+      // means `readSurface`'s, so a poll that asked for no surface has none to
+      // send: it reads no rows, and that member has been told `removed: true`
+      // and its feed has ended.
+      const surfaceBlock = surface ? await readSurface(s, answering, stopAt) : undefined;
+      const sfCursor = stopAt === undefined ? surfaceCursor(answering) : (surfaceBlock?.cursor ?? 0);
+
       return ok(
         {
           events: foreign.map((e) =>
@@ -280,6 +302,16 @@ If a room's creator has removed you, you still get the history up to and includi
           // wait: this poll is still capped by the event, and the next poll
           // reads the committed cursor and sets the flag.
           ...(cut !== undefined ? { removed: true as const } : {}),
+          // Last, after the fields that say whether the feed has ended: `removed` is
+          // the one field a client must never miss, and `surface` is the one block
+          // that can be large (64 items of up to 8,000 characters), so a read that
+          // is cut short loses the block and not the flag.
+          //
+          // Only when nonzero, as `outstanding` and `removed` are: a room with
+          // no surface does not grow a field, and a client that has never
+          // heard of it keeps working.
+          ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
+          ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },
         foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
       );

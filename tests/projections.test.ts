@@ -7,9 +7,13 @@
  *
  * `src/public-event.ts` has carried the same property since it was split out,
  * stated in its docblock and asserted nowhere. A comment does not survive
- * someone adding an import, so this walks the graph instead. Both modules are
+ * someone adding an import, so this walks the graph instead. Each root is
  * checked, because the rule is about the projection layer and not about the
  * file that happened to need it first.
+ *
+ * `src/rooms.ts` is the third root. It holds the operations both transports
+ * call, so its docblock makes the same promise, and neither of the other two
+ * roots reaches it: a clean walk from them said nothing about it.
  *
  * The property is transitive. A clean module that imports a clean module that
  * imports the SDK is not clean, so the walk follows local edges rather than
@@ -89,6 +93,7 @@ describe("the projection layer stays importable from both transports", () => {
   it.each([
     ["projections.ts", resolve(SRC, "projections.ts")],
     ["public-event.ts", resolve(SRC, "public-event.ts")],
+    ["rooms.ts", resolve(SRC, "rooms.ts")],
   ])("%s pulls in no runtime, transitively", (_name, entry) => {
     expect(offenders(entry)).toEqual([]);
   });
@@ -117,6 +122,7 @@ describe("the projection layer stays importable from both transports", () => {
     // proving nothing.
     reachable(resolve(SRC, "projections.ts"));
     reachable(resolve(SRC, "public-event.ts"));
+    reachable(resolve(SRC, "rooms.ts"));
     expect(unresolved).toEqual([]);
   });
 

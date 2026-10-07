@@ -13,7 +13,7 @@ const swarm = resolveManifest({ room: "r", preset: "swarm" });
 describe("verbsOfRole", () => {
   it("returns the verbs a defined role holds", () => {
     expect(verbsOfRole(swarm, "lead")).toEqual([
-      "send", "invite", "revoke", "request_actions", "respond_actions",
+      "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
     ]);
   });
 
@@ -104,7 +104,7 @@ describe("denyVerb", () => {
 
   it("refuses every verb to a seat whose role the manifest does not define", () => {
     const ghost = member({ roomRole: "ghost" });
-    for (const verb of ["send", "invite", "revoke", "request_actions", "respond_actions"] as const) {
+    for (const verb of ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"] as const) {
       expect(denyVerb(swarmSession, ghost, verb), verb).toBe(
         `your role "ghost" does not hold the verb "${verb}" (it holds: none).`,
       );

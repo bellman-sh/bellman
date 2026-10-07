@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md]
-last-verified-against-source: 77396879
-last-updated: 2026-10-03
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md]
+last-verified-against-source: c9789ae
+last-updated: 2026-10-06
 ---
 
 # Bellman Architecture
@@ -397,7 +397,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>TTL alarm, freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, TTL alarm,<br/>freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -575,6 +575,39 @@ passed; presence stays derived, and only a listed socket says it is there now.
 What remains uncovered is a socket the runtime never reports at all, which would
 need the upgrade stamp as well and is not done.
 
+### The working surface
+
+A room carries a surface as well as a log (#129): keyed, typed, optionally
+placed items — `text`, `link`, `diagram`, `connector` — that members read and a
+seat holding `write_surface` keeps current. The log is how the surface got
+that way; the surface is where things stand. Pieces 2 to 4 add blobs, a
+canvas and sandboxed HTML artifacts on top of it.
+
+Each item is a row, `sf:<key>`, beside the event rows and not in the session
+record, so a poll that does not ask for the surface never reads one. The row
+is written by `#writeEvent` in the transaction that stores the `surface`
+event, through `AppendExtras.surface`, the `creditReport` pattern: the caller
+says what to index and the store writes the event and the row together. Last
+write wins per key, monotonic by cursor (`applySurfaceWrite`, `src/surface.ts`,
+one rule for both stores). An idempotent replay applies no surface write: the
+row went in with the event in one transaction, so there is nothing to repair,
+and a removal leaves no tombstone, so re-applying could only put back what was
+removed. The record gains one number, `surfaceCursor`, moved in the same put,
+so `bellman_sync` reports "the surface moved" off the record it already read.
+A member a creator removed (#113) is told a number derived from the items it is
+shown instead, because the record's could claim a change it never saw.
+
+`writeSurface` in `src/rooms.ts` is the one write path — guards, shape, the
+rows for the cap and a connector's ends, the append, the audit row — and
+`bellman_send` calls it as the HTTP route will. The reads are projections: the
+join preview gets an index with no prose, and everything else gets the whole
+item inside an untrusted envelope with its writer as origin (invariant 3).
+
+Nothing deletes a closed room's storage, and reads stay open to a closed
+room, so a surface written here outlives the session's active life already.
+What #65 still has to settle is who may read it who was never a member, and
+for how long it is kept.
+
 ## 6. Identity, plans and entitlements
 
 A human signs in with GitHub or Google. Bellman is its own authorization server:
@@ -738,8 +771,9 @@ flowchart TB
         A4["#20 sensitive values<br/>scoped to a room"]
     end
     subgraph B["Durability"]
+        B0["#129 the working surface — shipped"]
         B1["#18 long-lived rooms"]
-        B2["#65 a room record that<br/>outlives the session"]
+        B2["#65 a record that<br/>outlives the session — now:<br/>a read for non-members, and retention"]
         B3["#66 the scribe as actor"]
     end
     subgraph C["Surfaces beyond /mcp"]
@@ -762,11 +796,17 @@ flowchart TB
     A2 --> A4
     A2 --> B3
     B2 --> B3
+    B0 --> B2
+    B0 --> B3
     C1 --> C2
     C1 --> C3
     D1 --> D2
     D1 --> D3
 ```
+
+The working surface (#129) landed first in this track and reframed the two below
+it: the record exists while the room is alive, and the scribe's job is to keep
+it current.
 
 The ordering that mattered: **[#2](../../../issues/2) gated a lot**, and it has
 shipped. Permission verbs are declared in a manifest and enforced by the server,
@@ -1209,36 +1249,55 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~4,960** | every request, whether or not you are in a room |
+| Tool definitions | **~6,000** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 
-Tool definitions were re-measured on 2026-10-03, after #111. The three rows
+Tool definitions were re-measured on 2026-10-06, after #129. The three rows
 below that one are from the original measurement and have not been re-measured
-since.
+since. The joining row predates the surface: `bellman_connect` now carries its
+index and `bellman_confirm` its items, so a joiner pays for the room's surface
+too, up to 64 items.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as
 `tests/helpers/harness.ts` does; then for each entry count
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
 leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
-where the previous figure was recorded, it gives 4,820, and 1,462 for
-`bellman_start`, so the two measurements are comparable.
+where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
+`77396879` it gives 4,962, the figure recorded after #111. So the measurements
+are comparable.
 
 #111 added `heartbeat_on` and `reports` to the manifest schema inside
 `bellman_start`, and `progress` to `bellman_send`. It added nothing to
 `bellman_sync`: the ask travels in the tick's payload, paid by rooms that use the
 feature, rather than in a tool description paid by every request.
 
-Counted this way the total is 4,962, which is 142 more than the 4,820 recorded.
+Counted this way the total was 4,962, which was 142 more than the 4,820 recorded.
 52 of those predate #111 (`bellman_evict` +43 and `bellman_invite` +9 since the
 last measurement). The other 90 are #111's: `bellman_send` +47 for `progress`,
 `bellman_start` +29 for the two manifest keys, and +7 each on `bellman_start` and
 `bellman_connect` for the two preview keys their `Returns:` lines now name.
-`bellman_sync` is 334, as before.
+`bellman_sync` was 334, as before.
 
-`bellman_start` alone is 1,498 tokens, 30% of the tool budget, paid even by
+#129 added the `surface` kind to `bellman_send`; the `surface` flag to
+`bellman_sync`, with the `surface_cursor` and `surface` its `Returns:` line now
+names; a `surface` block to what `bellman_connect` and `bellman_confirm` return;
+and `write_surface` to the verbs the manifest schema inside `bellman_start`
+lists.
+
+Counted this way the total is 6,008, which is 1,046 more than the 4,962
+recorded. 574 of those predate #129, so the recorded figure was already out of
+date on main: `bellman_send` +226 (`room_members` #82, the request states #81, the
+depth bound #136), `bellman_sync` +225 (`outstanding` #81, the removed member's
+cut #113), `bellman_invite` +79 (#90) and `bellman_evict` +44 (#113). The other
+472 are #129's: `bellman_send` +210 for the seventh kind, `bellman_sync` +157
+for the flag and the two fields it returns, `bellman_connect` +53 and
+`bellman_confirm` +46 for the `surface` block their `Returns:` lines now name,
+and +6 on `bellman_start` for the verb.
+
+`bellman_start` alone is 1,504 tokens, 25% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

@@ -5,7 +5,7 @@ import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.j
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import type { Brief, Capability, Identity, Member } from "../types.js";
-import { FROZEN, announceReclaimed, audit } from "../rooms.js";
+import { FROZEN, announceReclaimed, audit, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
 import type { BellmanStore } from "../store.js";
 
@@ -24,7 +24,8 @@ Args:
 
 You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), cursor }
+Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), surface: { cursor, items (untrusted envelopes) }, cursor }
+surface is the room's working surface in full; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
 Errors: "connect token invalid or expired" — re-run bellman_connect.`,
@@ -137,6 +138,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           briefs: joined.members
             .filter((m) => m.memberId !== memberId)
             .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),
+          // Every item, in the writer's envelope (#129): the joiner is a member
+          // now, as `briefs` already treats them.
+          surface: await readSurface(s, joined),
         },
         UNTRUSTED_PREAMBLE
       );

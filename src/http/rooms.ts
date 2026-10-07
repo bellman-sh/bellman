@@ -20,7 +20,7 @@ import {
   sanitizeName, storedType, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { publicMember, roomPreview, roomSummary } from "../projections.js";
+import { publicMember, roomPreview, roomSummary, rosterAsOf } from "../projections.js";
 import { verbsOfRole } from "../roles.js";
 import { findMember, gateSeat, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
@@ -306,7 +306,9 @@ async function downloadBlob(
  * two registry listings, each resolved with one `getSession`. Membership is
  * checked on the record, not trusted from the index: a listing row names a room,
  * and only the roster says whether this person is in it. Newest first, by the
- * creator's seat, since a room has no creation stamp of its own.
+ * creator's seat, since a room has no creation stamp of its own. A room this
+ * person was removed from (#113) is listed with its member count as of the
+ * removal (`roomSummary`), the number its detail would give.
  */
 async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -322,7 +324,7 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
     .filter((s): s is StoredSession => s !== undefined && s.members.some((m) => m.userId === userId))
     .sort((a, b) => b.members[0].joinedAt - a.members[0].joinedAt)
     .slice(0, MAX_ROOMS_LISTED)
-    .map((s) => roomSummary(s, userId, sessionStatus(s)));
+    .map((s) => roomSummary(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
   return json(200, { rooms }, origin);
 }
 
@@ -330,14 +332,25 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
 const handlesOf = (session: StoredSession, identity: Identity): Member[] =>
   session.members.filter((m) => m.userId === identity.userId);
 
+/** The roster now: every member, with `presence` read off the clock and the sockets. */
+const liveRoster = async (store: BellmanStore, session: StoredSession) => {
+  const connected = await store.connectedMembers(session.id);
+  return session.members.map((m) => publicMember(m, connected));
+};
+
 /**
  * The room as my seat sees it (D1). The preview is `roomPreview` for the role
  * of the handle still in the room — or, when none is, the first one held — so
  * what the page shows is what a joiner was shown. `my_handles` is what the
  * page needs to pick a seat for a write: the server refuses either way (D6).
- * A member who left, a removed member and a closed room are all served: reads
- * stay open, and what a removed member may READ is bounded at the surface
- * route, where the cut applies.
+ * A member who left and a closed room are served as any read is.
+ *
+ * A person every one of whose handles a creator removed (#113) is served too,
+ * so the page can say so (`my_handles.removed`), but only the room as it stood
+ * at the removal, as the surface route stops at the same cut: the roster is
+ * `rosterAsOf` the latest of their removals, with no `presence`, and nothing
+ * live is read for it. One handle still in the room, or one that left of its own
+ * accord, keeps the live roster, as `bellman_sync` keeps the open feed.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -347,14 +360,17 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
   if (!session || mine.length === 0) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
-  const connected = await deps.store.connectedMembers(sessionId);
+  const cutAt = cutAtFor(mine);
+  const members = cutAt === undefined
+    ? await liveRoster(deps.store, session)
+    : rosterAsOf(session.members, cutAt);
   const viewer = mine.find((m) => m.leftAt === null) ?? mine[0];
   return json(200, {
     id: session.id,
     session_status: sessionStatus(session),
     expires_at: new Date(session.expiresAt).toISOString(),
     preview: roomPreview(session, viewer.roomRole),
-    members: session.members.map((m) => publicMember(m, connected)),
+    members,
     my_handles: mine.map((m) => ({
       member_id: m.memberId,
       room_role: m.roomRole,
@@ -391,12 +407,24 @@ const cutFor = (handles: readonly Member[]): number | undefined =>
     : undefined;
 
 /**
+ * The same cut as a moment, for what a cursor cannot bound: the roster and the
+ * member count carry times and no cursors. `markRemoved` sets `leftAt` in the
+ * write that sets the cut, so the latest removal's `leftAt` is when this person's
+ * reading stopped. Undefined exactly when `cutFor` is, since it asks `cutFor`.
+ */
+const cutAtFor = (handles: readonly Member[]): number | undefined =>
+  cutFor(handles) === undefined ? undefined : Math.max(...handles.map((m) => m.leftAt ?? 0));
+
+/**
  * The surface read (D2): the same envelopes `bellman_sync surface: true`
  * returns, with the surface cursor as the ETag. A member still in the room is
  * answered from the record alone on a match — no row read, which is what makes
  * a four-second poll cheap. A removed member reads to its cut, and its cursor
  * is derived from the rows it is shown, as the tool derives it: the record's
- * number would claim a change the member never saw.
+ * number would claim a change the member never saw. The record and the rows are
+ * two reads, so an eviction that commits between them leaves this one poll
+ * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
+ * gap from the `member_evicted` event in its slice, and this route reads no events.
  */
 async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);

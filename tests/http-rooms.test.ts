@@ -151,6 +151,18 @@ describe("GET /rooms", () => {
     expect(res.status).toBe(405);
     expect(res.headers.get("allow")).toBe("GET");
   });
+
+  // #113 on the list: a person every one of whose handles was removed is told the member count as it stood at the
+  // removal, not how many are in now. The creator, still in, is the control: it sees the late joiner.
+  it("counts a removed member's room as it stood at the removal", async () => {
+    await evictThroughTool("m_peer");
+    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
+    const count = async (key: string) =>
+      ((await bodyOf(await call(key, "/rooms"))) as { rooms: { id: string; members: number }[] }).rooms.find((r) => r.id === ROOM)!.members;
+    expect(await count(DEV_KEY.peer)).toBe(1);
+    expect(await count(DEV_KEY.jesse)).toBe(2);
+  });
 });
 
 describe("GET /rooms/:id", () => {
@@ -237,6 +249,72 @@ describe("GET /rooms/:id", () => {
     const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`, { method: "POST", body: {} }))!;
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET");
+  });
+
+  // #113 on this route: a person every one of whose handles was removed reads the room as it stood at the removal and
+  // nothing after it, as on the surface, `bellman_sync` and `/ws`. The creator, still in, is the control: it sees the late
+  // joiner and the presence the removed member must not.
+  it("serves a removed member the roster as of its removal, with no presence", async () => {
+    await evictThroughTool("m_peer");
+    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
+    type Roster = { members: Record<string, unknown>[]; my_handles: { removed: boolean }[] };
+    const asPeer = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`)) as Roster;
+    expect(asPeer.members.map((m) => m.member_id).sort()).toEqual(["m_creator", "m_peer"]);
+    expect(asPeer.members.some((m) => "presence" in m)).toBe(false);
+    // The page can still say "you were removed".
+    expect(asPeer.my_handles).toMatchObject([{ removed: true }]);
+    const asCreator = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`)) as Roster;
+    expect(asCreator.members.map((m) => m.member_id).sort()).toEqual(["m_creator", "m_late", "m_peer"]);
+    expect(asCreator.members.every((m) => "presence" in m)).toBe(true);
+  });
+
+  // The cut is for a person with nothing left in the room. One handle still in it, or one that left of its own accord,
+  // keeps the live roster: the same predicate the surface route cuts on, so the two cannot disagree.
+  it("keeps the live roster, presence included, for a person with a handle still in the room or one that left", async () => {
+    await store.createSession(session({
+      id: "qs_one_in", createdBy: "u_peer",
+      members: [peer(), member({ memberId: "m_old", roomRole: "peer_b", leftAt: Date.now(), removedAtCursor: 3 }), member({ memberId: "m_new", roomRole: "peer_b" })],
+    }));
+    await store.createSession(session({
+      id: "qs_left", createdBy: "u_peer",
+      members: [peer(), member({ memberId: "m_left", roomRole: "peer_b", leftAt: Date.now() })],
+    }));
+    for (const id of ["qs_one_in", "qs_left"]) {
+      const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${id}`)) as { members: object[] };
+      expect(body.members.length, id).toBeGreaterThan(1);
+      expect(body.members.every((m) => "presence" in m), id).toBe(true);
+    }
+  });
+
+  it("shows each member as in or out as they were at the removal, not as they are", async () => {
+    const joined = (memberId: string) => member({ memberId, userId: `u_${memberId}`, label: `${memberId}@codenerd`, roomRole: "peer_b" });
+    await store.addMember(ROOM, joined("m_before"));
+    await store.addMember(ROOM, joined("m_after"));
+    await store.updateMember(ROOM, "m_before", { leftAt: Date.now() });
+    await evictThroughTool("m_peer");
+    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    // Leaves after the removal: still in, as far as the removed member may know.
+    await store.updateMember(ROOM, "m_after", { leftAt: cutAt + 1_000 });
+    const active = async (key: string) =>
+      Object.fromEntries(((await bodyOf(await call(key, `/rooms/${ROOM}`))) as { members: { member_id: string; active: boolean }[] }).members.map((m) => [m.member_id, m.active]));
+    expect(await active(DEV_KEY.peer)).toEqual({ m_creator: true, m_peer: false, m_before: false, m_after: true });
+    expect(await active(DEV_KEY.jesse)).toEqual({ m_creator: true, m_peer: false, m_before: false, m_after: false });
+  });
+
+  // Removed, back on a fresh handle, removed again: the roster is as of the later removal, since the person read the
+  // open room in between. The pauses keep the moments in distinct milliseconds, which is the unit the comparison is made in.
+  it("serves a person with every handle removed the roster as of the latest removal", async () => {
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 10));
+    await evictThroughTool("m_peer");
+    await pause();
+    await store.addMember(ROOM, member({ memberId: "m_peer2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }));
+    await pause();
+    await evictThroughTool("m_peer2");
+    await pause();
+    await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b" }));
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`)) as { members: { member_id: string }[] };
+    expect(body.members.map((m) => m.member_id).sort()).toEqual(["m_creator", "m_peer", "m_peer2"]);
   });
 });
 

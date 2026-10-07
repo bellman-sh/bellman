@@ -1254,13 +1254,16 @@ export class MemoryStore implements BellmanStore {
   }
 
   /**
-   * Apply an append's `extras`, if it asked for any. Both rules live in this
-   * module and are shared with `SessionDO`, so the two stores cannot disagree
-   * about when a member write rides an append.
+   * Apply an append's `extras`, if it asked for any. The roster rules,
+   * `creditReport` and `markRemoved`, live in this module and the surface rule,
+   * `applySurfaceWrite`, in surface.ts; `SessionDO`'s `extraRows` applies the
+   * same functions, so the two stores cannot disagree about when an extra rides
+   * an append. The action-request stamp is the one extra with no function to
+   * share: it is a line in each store.
    *
-   * One method rather than two, because both rules rewrite the same member
-   * array: applied separately, the second would read `s.members` from before
-   * the first and discard it.
+   * One method rather than one per extra, because the two roster rules rewrite
+   * the same member array: applied separately, the second would read `s.members`
+   * from before the first and discard it.
    *
    * No awaits, for appendEvent's reason above.
    */
@@ -1326,18 +1329,21 @@ export class MemoryStore implements BellmanStore {
           `Idempotency record for ${sessionId} names missing cursor ${record.cursor}`
         );
       }
-      // The replay applies its extras too. A retry cannot know whether the first
-      // attempt landed the stamp, and `creditReport` is monotonic, so re-asserting
-      // it is either a repair or a no-op and never a regression. `original` and
-      // not `e`, so `markRemoved` sees the cursor the key names: a replay
-      // re-asserts the same cut, and `markRemoved` answers `null` once it is
-      // recorded.
+      // The replay re-asserts the member extras (`creditReport`, `markRemoved`
+      // and `stampActionRequest`) and applies no surface write.
       //
-      // All but the surface write. The row went in with the event in one
-      // transaction, so there is nothing to repair, and whatever has happened to
-      // the key since carries a higher cursor. A removal leaves no tombstone, so
-      // re-applying the original write would find no row to compare against and
-      // could only put back what was removed.
+      // A retry cannot know whether the first attempt landed a member write, and
+      // each of the three is monotonic or answers `null` once it is recorded, so
+      // re-asserting one is either a repair or a no-op and never a regression.
+      // `original` and not `e`, so `markRemoved` sees the cursor the key names: a
+      // replay re-asserts the same cut.
+      //
+      // The surface write is the exception, so it is taken out of the extras. The
+      // row went in with the event in one transaction, so there is nothing to
+      // repair, and whatever has happened to the key since carries a higher
+      // cursor. A removal leaves no tombstone, so re-applying the original write
+      // would find no row to compare against and could only put back what was
+      // removed.
       this.applyExtras(s, original, { ...extras, surface: undefined });
       return { outcome: "replayed", event: detach(original) };
     }

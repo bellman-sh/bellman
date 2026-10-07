@@ -95,6 +95,59 @@ describe("writing an item", () => {
     expect(stored.find((r) => r.key === "c1")!.ends).toEqual({ from: "plan", to: "arch" });
   });
 
+  // Read, edit, send back is the natural replace. An item as a member reads it
+  // spells what it left out as `null` and carries the `cursor` and `at` the
+  // server set, so the write shape takes `null` as it takes absence, and the two
+  // server-set fields are the only ones to strip.
+  it("accepts an item as it was read, null fields and all, once cursor and at are removed", async () => {
+    const p = await pairUp(h);
+    for (const item of [
+      { key: "plan", kind: "text", body: "1. read\n2. write" },
+      { key: "pr", kind: "link", title: "The PR", body: "https://github.com/bellman-sh/bellman/pull/1" },
+      { key: "arch", kind: "diagram", body: "flowchart LR\n  A --> B" },
+      { key: "c1", kind: "connector", ends: { from: "plan", to: "arch" } },
+    ]) {
+      const out = await write(p, item);
+      expect(out.isError, out.text).toBe(false);
+    }
+
+    const read = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, surface: true,
+    });
+    expect(read.isError, read.text).toBe(false);
+    const asRead = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items
+      .map((i) => i.data);
+    expect(asRead.map((i) => i.key)).toEqual(["arch", "c1", "plan", "pr"]);
+    const item = (key: string) => asRead.find((i) => i.key === key)!;
+    // The positive control: what was left out reads back as null and not as absent,
+    // and the server's own fields are on the item. Without it the sends below would
+    // pass just as well for a read that had dropped them.
+    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, cursor: expect.any(Number) });
+    expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
+
+    const asWritten = (data: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(data).filter(([k]) => k !== "cursor" && k !== "at"));
+
+    // The replace the review named: only `body` changed.
+    const edited = await write(p, { ...asWritten(item("plan")), body: "1. read\n2. write\n3. ship" });
+    expect(edited.isError, edited.text).toBe(false);
+    expect((await rows(p)).find((r) => r.key === "plan")!.body).toBe("1. read\n2. write\n3. ship");
+
+    // And every kind as it reads, the connector with its null body and placement
+    // among them, goes back unchanged.
+    for (const data of asRead) {
+      const out = await write(p, asWritten(data));
+      expect(out.isError, `${String(data.key)}: ${out.text}`).toBe(false);
+    }
+
+    // `cursor` and `at` are the server's to set, so they stay refused, and by name.
+    // Said last, because it is the control for the strictness `null` must not
+    // loosen: with the nulls accepted, the unrecognized keys are the first issue.
+    const unstripped = await write(p, { ...item("plan"), body: "kept as it was" });
+    expect(unstripped.isError).toBe(true);
+    expect(unstripped.text).toContain("cursor");
+  });
+
   it("lets the creator write before anyone has joined", async () => {
     const jesse = await h.connect(DEV_KEY.jesse);
     const started = await jesse.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
@@ -219,6 +272,10 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     await refused(p, { key: "d", kind: "diagram", title: "only a title" }, "needs a body");
     await refused(p, { key: "t2", kind: "text", body: "x", ends: { from: "plan", to: "arch" } }, "only a connector has ends");
     await refused(p, { key: "c", kind: "connector" }, "needs ends");
+    // The same two rules with the field spelled `null`, as an item read back spells
+    // it: null is absence, so each is refused for the rule and not for its type.
+    await refused(p, { key: "t", kind: "text", body: null }, "needs a body");
+    await refused(p, { key: "c", kind: "connector", ends: null }, "needs ends");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "plan" } }, "must differ");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "arch" }, placement: { x: 0, y: 0 } }, "no placement");
     await refused(p, { key: "c", kind: "connector", ends: { from: "plan", to: "ghost" } }, "not on the surface");

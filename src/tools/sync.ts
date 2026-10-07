@@ -259,11 +259,6 @@ If a room's creator has removed you, you still get the history up to and includi
           ),
           cursor,
           session_status: status,
-          // Only when nonzero, as `outstanding` and `removed` are: a room with
-          // no surface does not grow a field, and a client that has never
-          // heard of it keeps working.
-          ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
-          ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
           // Only when there are any, as `replayed` and `ambient` are: a client
           // that has never heard of it keeps working, and a quiet room's poll
           // does not grow a field saying nothing is pending.
@@ -307,6 +302,16 @@ If a room's creator has removed you, you still get the history up to and includi
           // wait: this poll is still capped by the event, and the next poll
           // reads the committed cursor and sets the flag.
           ...(cut !== undefined ? { removed: true as const } : {}),
+          // Last, after the fields that say whether the feed has ended: `removed` is
+          // the one field a client must never miss, and `surface` is the one block
+          // that can be large (64 items of up to 8,000 characters), so a read that
+          // is cut short loses the block and not the flag.
+          //
+          // Only when nonzero, as `outstanding` and `removed` are: a room with
+          // no surface does not grow a field, and a client that has never
+          // heard of it keeps working.
+          ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
+          ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },
         foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
       );

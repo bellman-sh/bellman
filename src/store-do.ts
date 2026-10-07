@@ -140,15 +140,17 @@ const auditIntent = (entry: AuditEntry): OutboxIntent => ({
 });
 
 /**
- * The extra storage rows an append owes, as one put.
+ * The extra storage rows an append owes: the rows to put, and the keys to delete.
  *
- * One function for both rules, and one `session` row: written as two builders
- * each returning `{ session: ... }`, the second would overwrite the first's
- * member array and silently drop its write.
+ * One function for every extra, and one `session` row: written as a builder per
+ * rule each returning `{ session: ... }`, the second would overwrite the first's
+ * member array and silently drop its write. The action-request stamp and the
+ * surface cursor ride in that same row.
  *
  * Empty when the append owes nothing — it asked for no extras, the stamp already
- * sits forward of this event, the cut is already recorded, or the member is not
- * on the roster. The caller folds the rows into the put it was already making:
+ * sits forward of this event, the cut is already recorded, the member is not on
+ * the roster, or the surface write is a no-op under `applySurfaceWrite`. The
+ * caller folds the rows into the put it was already making:
  * `#writeEvent`'s whole argument is that an event and the rows that belong with
  * it commit in ONE write, and a member write committed separately is the split
  * this exists to remove.
@@ -156,14 +158,16 @@ const auditIntent = (entry: AuditEntry): OutboxIntent => ({
  * A free function and not a method on the class: a Durable Object answers RPC for
  * every method on its class, so a writing helper reachable from outside would let
  * a plain stub forge one of these into any room. The rules it applies
- * (`creditReport`, `markRemoved`) are shared with MemoryStore and belong to
- * neither store.
+ * (`creditReport`, `markRemoved`, `applySurfaceWrite`) are shared with
+ * MemoryStore and belong to neither store.
  *
  * The surface row (#129) joins the member rules here. It needs the row it
  * replaces, which is a storage read, so this is async and takes the
  * transaction: read and write stay one unit, as `stored(txn)` and
  * `nextCursor(txn)` are. A removal is a `delete`, which a put map cannot
  * carry, so the result names both the rows to put and the keys to delete.
+ *
+ * A replay is handed these extras without `surface`; `appendEventOnce` says why.
  */
 async function extraRows(
   txn: DurableObjectTransaction,
@@ -1404,22 +1408,24 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         if (!original) {
           throw new Error(`Idempotency record names missing cursor ${record.cursor}`);
         }
-        // The replay applies its extras too, in this transaction. A retry cannot
-        // know whether the first attempt landed the stamp, and skipping it here is
-        // what made a stamp the first attempt never wrote permanent rather than
-        // late. `creditReport` is monotonic and `markRemoved` leaves a recorded
-        // cut where it is, so this is a repair or a no-op and never a regression
-        // — and it writes nothing at all when there is nothing to repair, which is
-        // why the put is guarded on the row being empty. `original` and not `e`,
-        // because `markRemoved` records the cut at the cursor the key names and
-        // `e` has none.
+        // The replay re-asserts the member extras (`creditReport`, `markRemoved`
+        // and `stampActionRequest`), in this transaction, and applies no surface
+        // write. A retry cannot know whether the first attempt landed a member
+        // write, and skipping it here is what made a stamp the first attempt never
+        // wrote permanent rather than late. `creditReport` and `stampActionRequest`
+        // are monotonic and `markRemoved` leaves a recorded cut where it is, so
+        // this is a repair or a no-op and never a regression — and it writes
+        // nothing at all when there is nothing to repair, which is why the put is
+        // guarded on the row being empty. `original` and not `e`, because
+        // `markRemoved` records the cut at the cursor the key names and `e` has
+        // none.
         //
-        // All but the surface write, so `extraRows` is handed the extras without
-        // it. The row committed with the event in one transaction, so there is
-        // nothing to repair, and whatever has happened to the key since carries a
-        // higher cursor. A removal leaves no tombstone, so re-applying the
-        // original write would read no row to compare against and could only put
-        // back what was removed. It also means a replay deletes nothing.
+        // The surface write is the exception, so `extraRows` is handed the extras
+        // without it. The row committed with the event in one transaction, so
+        // there is nothing to repair, and whatever has happened to the key since
+        // carries a higher cursor. A removal leaves no tombstone, so re-applying
+        // the original write would read no row to compare against and could only
+        // put back what was removed. It also means a replay deletes nothing.
         const owed = await extraRows(txn, s, original, { ...extras, surface: undefined });
         if (Object.keys(owed.puts).length > 0) await txn.put<unknown>(owed.puts);
         return { outcome: "replayed", event: original };

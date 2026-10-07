@@ -84,14 +84,23 @@ const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape })
 const boundedText = (max: number) =>
   z.string().min(1).refine((s) => s.length <= max, `must be at most ${max} characters`);
 
-/** An item as the wire carries it. Strict, so an unknown field is refused rather than dropped. */
+/**
+ * An item as the wire carries it. Strict, so an unknown field is refused rather
+ * than dropped: `cursor` and `at` are the server's to set, and an item sent back
+ * as it was read is refused for them until the sender takes them off.
+ *
+ * `null` is absence, for the four fields a read spells that way: an item as a
+ * member reads it carries `null` for each it left out, and read, edit, send back
+ * is the natural replace. `normalizeSurfaceWrite` reads null as absent in every
+ * rule below and stores absence as null either way.
+ */
 export const SurfaceItemShape = z.strictObject({
   key: SurfaceKeyShape,
   kind: z.enum(SURFACE_KINDS),
-  title: boundedText(MAX_SURFACE_TITLE_CHARS).optional(),
-  body: boundedText(MAX_SURFACE_BODY_CHARS).optional(),
-  ends: EndsShape.optional(),
-  placement: PlacementShape.optional(),
+  title: boundedText(MAX_SURFACE_TITLE_CHARS).nullish(),
+  body: boundedText(MAX_SURFACE_BODY_CHARS).nullish(),
+  ends: EndsShape.nullish(),
+  placement: PlacementShape.nullish(),
 });
 
 /** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */

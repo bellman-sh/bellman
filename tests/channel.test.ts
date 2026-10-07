@@ -77,9 +77,13 @@ interface Options {
   cached?: boolean;
   /** Put a readable identity beside the cached tokens, as a real sign-in does. */
   identity?: Record<string, unknown>;
+  /** BELLMAN_UPLOAD_ROOT for the process. Unset, the process is on its own default: the directory it was started in. */
+  uploadRoot?: string;
+  /** The directory to start the process in, which is its upload root while `uploadRoot` is unset. */
+  cwd?: string;
 }
 
-function startBridge(bellman: Bellman, { key, cached = true, identity }: Options = {}): Bridge {
+function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd }: Options = {}): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bellman-channel-"));
   dirs.push(configHome);
   servers.push(bellman.server);
@@ -111,8 +115,10 @@ function startBridge(bellman: Bellman, { key, cached = true, identity }: Options
   env.BELLMAN_URL = bellman.url;
   env.XDG_CONFIG_HOME = configHome;
   env.BELLMAN_NO_BROWSER = "1";
+  delete env.BELLMAN_UPLOAD_ROOT;
+  if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;
 
-  const proc = spawn(TSX, [ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = spawn(TSX, [ENTRY], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
   spawned.push(proc);
 
   let stderr = "";
@@ -338,15 +344,16 @@ describe("bellman_upload through the process", () => {
   it.each(cases)(
     "posts the file to the room's blob route on the server it was started against, with %s as the bearer",
     async (_who, options, authorization) => {
-      const bellman = await fakeBellman(forbids);
-      const bridge = startBridge(bellman, options);
-      const answered = answers(bridge);
-      await until(() => bridge.log().length > 0);
-
+      // The file's own directory is the process's upload root: a path outside it is refused before any post.
       const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
       dirs.push(dir);
       const path = join(dir, "notes.md");
       writeFileSync(path, "# notes\n");
+
+      const bellman = await fakeBellman(forbids);
+      const bridge = startBridge(bellman, { ...options, uploadRoot: dir });
+      const answered = answers(bridge);
+      await until(() => bridge.log().length > 0);
 
       initialize(bridge);
       bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
@@ -365,4 +372,46 @@ describe("bellman_upload through the process", () => {
       });
     },
   );
+
+  // The process's own default, which no in-process test can see: nothing in channel.ts widens it. Started in
+  // `project` with BELLMAN_UPLOAD_ROOT unset, the bridge posts a file under it (the room refuses it, as above:
+  // the request is what is observed) and a file beside it never reaches the network.
+  it("takes the directory it was started in as the upload root, and posts nothing from outside it", async () => {
+    const project = mkdtempSync(join(tmpdir(), "bellman-channel-project-"));
+    const beside = mkdtempSync(join(tmpdir(), "bellman-channel-beside-"));
+    dirs.push(project, beside);
+    writeFileSync(join(project, "in.md"), "# in\n");
+    writeFileSync(join(beside, "out.md"), "# out\n");
+
+    const bellman = await fakeBellman(forbids);
+    const bridge = startBridge(bellman, { key: "qk_dev_jesse", cached: false, cwd: project });
+    const answered = answers(bridge);
+    await until(() => bridge.log().length > 0);
+    initialize(bridge);
+    bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const upload = (id: number, path: string) =>
+      bridge.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "k" } },
+      });
+    const said = (id: number) => answered.get(id)?.result?.content?.[0]?.text;
+
+    upload(3, join(beside, "out.md"));
+    const refused = await until(() => answered.has(3));
+    expect({ refused, hits: bellman.hits.length, said: said(3) }).toEqual({
+      refused: true,
+      hits: 0,
+      said: expect.stringContaining(`${join(beside, "out.md")} is outside the upload root`),
+    });
+
+    upload(4, join(project, "in.md"));
+    const posted = await until(() => answered.has(4));
+    expect({ posted, hits: bellman.hits.map((hit) => hit.method), said: said(4) }).toEqual({
+      posted: true,
+      hits: ["POST"],
+      said: expect.stringContaining("upload refused (403)"),
+    });
+  });
 });

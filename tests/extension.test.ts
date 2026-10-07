@@ -135,4 +135,19 @@ describe("the Claude Desktop bundle manifest", () => {
     expect(manifest.user_config).not.toHaveProperty("bellman_key");
     expect(manifest.server.mcp_config.env).not.toHaveProperty("BELLMAN_KEY");
   });
+
+  // bellman_upload reads only from under BELLMAN_UPLOAD_ROOT, and the bridge's fallback is the directory it was
+  // started in, which Desktop chooses and the person does not. So the bundle hands the person a setting for it.
+  // A placeholder that names no declared setting is never filled: mcpb's replaceVariables leaves it in the value
+  // as written.
+  it("exposes the upload root as a folder setting, and every placeholder it passes names a setting it declares", () => {
+    expect(manifest.user_config.upload_root).toMatchObject({ type: "directory", title: "Upload folder", required: false });
+    expect(manifest.server.mcp_config.env.BELLMAN_UPLOAD_ROOT).toBe("${user_config.upload_root}");
+    const declared = Object.keys(manifest.user_config);
+    for (const [name, value] of Object.entries(manifest.server.mcp_config.env)) {
+      for (const [, key] of value.matchAll(/\$\{user_config\.([^}]+)\}/g)) {
+        expect(declared, `${name} names ${key}`).toContain(key);
+      }
+    }
+  });
 });

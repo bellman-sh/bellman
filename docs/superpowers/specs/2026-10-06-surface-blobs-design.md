@@ -205,9 +205,14 @@ holds (`BELLMAN_KEY`, or the cached sign-in's access token), then calls the
 upstream `bellman_send` with the `surface` item. `kind` defaults from the type:
 an allowlisted image is `image`, anything else `file`.
 
-Reading a path on the user's machine is not a new capability: the agent
-driving the bridge already has that filesystem. The tool is `readOnlyHint:
-false`, so a host that asks before writes asks here too.
+The read is bounded. `path` must resolve, links followed, under the upload
+root: the directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when
+that is set (`/` for any file; the Desktop bundle exposes it as the Upload
+folder setting). The agent driving the bridge may already read that
+filesystem, but a one-call send to every member of a room is new, and a room
+tool is the kind people allowlist; a line that arrives as peer content must
+not be able to ship a key file. The tool is `readOnlyHint: false`, so a host
+that asks before writes asks here too.
 
 `extension/manifest.json` gains the tool; `tests/extension.test.ts` fails until
 it does. A hosted connector with no bridge uploads through the panel (piece 3),

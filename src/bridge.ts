@@ -1,5 +1,7 @@
-import { closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { basename, extname, join } from "node:path";
+import {
+  closeSync, constants as fsConstants, fstatSync, lstatSync, openSync, readFileSync, realpathSync,
+} from "node:fs";
+import { basename, extname, join, sep } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -236,7 +238,7 @@ const UPLOAD_TOOL: Tool = {
 
 Args:
   - session_id, member_id: your handles from start/confirm; the seat must hold write_surface
-  - path: a regular file on this machine (not a symbolic link), at most ${MAX_BLOB_BYTES} bytes
+  - path: a regular file under the upload root (the directory the bridge was started in, or BELLMAN_UPLOAD_ROOT; / for any file), not a symbolic link, at most ${MAX_BLOB_BYTES} bytes
   - key: the surface key to place it under; an item already there is replaced
   - kind: "file" | "image". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file
   - title?, placement? ({ x, y, w?, h? }): as on bellman_send type "surface"
@@ -289,11 +291,36 @@ export function typeFromExtension(path: string): string {
  * file, and so is a file over the cap, before a byte of it is read. O_NOFOLLOW
  * refuses a link in the open itself where the platform has it, and the lstat
  * is what refuses one where it does not (Windows).
+ *
+ * So is anything outside `root` (#183, D7). The leaf is not the only place a link
+ * can be: a directory inside the root may point out of it, and the file under it is
+ * a regular file by every check above. So both are resolved, links followed, and
+ * the path must be the root or under it. That comparison comes before the open,
+ * so a file the root does not cover is not so much as opened; and a root that
+ * cannot be resolved covers nothing, and says so.
  */
-export function readLocalFile(path: string): { bytes: Buffer<ArrayBuffer> } {
+export function readLocalFile(path: string, root: string): { bytes: Buffer<ArrayBuffer> } {
   const link = () =>
     new Error(`${path} is a symbolic link, and the bridge will not follow one: whatever it points at would be read and sent to the server. Pass the file itself.`);
   if (isSymlink(path)) throw link();
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch (e) {
+    throw new Error(`the upload root ${root} does not exist or cannot be read (${(e as Error).message}): set BELLMAN_UPLOAD_ROOT to a directory that does, or start the bridge in the directory to upload from.`);
+  }
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch (e) {
+    throw new Error(`${path} could not be read: ${(e as Error).message}`);
+  }
+  // The root itself, or a path under it: the prefix ends at a separator, so /up does not cover /up-evil.
+  // A root that is already one (/, or a drive's) is its own prefix.
+  const prefix = realRoot.endsWith(sep) ? realRoot : realRoot + sep;
+  if (real !== realRoot && !real.startsWith(prefix)) {
+    throw new Error(`${path} is outside the upload root ${root}: the bridge uploads only from the directory it was started in, or from BELLMAN_UPLOAD_ROOT when that is set (/ for any file).`);
+  }
   let fd: number;
   try {
     fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
@@ -1113,8 +1140,10 @@ export function createBridge(opts: BridgeOptions) {
 
   /**
    * bellman_upload (#183, D7): read, post, place. The upload is refused locally
-   * for a link, a non-file or an oversized file before anything leaves the
-   * machine. The post carries the bearer the bridge holds and sets
+   * for a path outside the upload root, a link, a non-file or an oversized file
+   * before anything leaves the machine. The root is BELLMAN_UPLOAD_ROOT when
+   * that is set and not empty, else the directory the bridge was started in; it
+   * is read on each call. The post carries the bearer the bridge holds and sets
    * Content-Length itself — the route requires it, a real fetch keeps a
    * caller's value when it matches the body, and a fake server's Request
    * computes none. The placement is the upstream bellman_send, observed like
@@ -1134,7 +1163,7 @@ export function createBridge(opts: BridgeOptions) {
 
     let file: { bytes: Buffer<ArrayBuffer> };
     try {
-      file = readLocalFile(path);
+      file = readLocalFile(path, process.env.BELLMAN_UPLOAD_ROOT || process.cwd());
     } catch (e) {
       return fail((e as Error).message);
     }

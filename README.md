@@ -181,9 +181,12 @@ devcontainer a first launch every single time. Ask the agent for
 The bridge adds one more tool of its own: `bellman_upload` reads a file on
 this machine — a regular file, not a symbolic link, at most 25 MB — uploads it
 to the room with the credential the bridge holds, and places it on the working
-surface as a `file` or an `image`, in one call. A hosted connector has no
-filesystem and no bridge, so it has no `bellman_upload`; the control panel's
-upload comes with the canvas.
+surface as a `file` or an `image`, in one call. Only a path under the upload
+root is read, links followed — the directory the bridge was started in, or
+`BELLMAN_UPLOAD_ROOT` when that is set (`/` for any file) — so a line that
+arrives as peer content cannot send a key file to the room. A hosted connector
+has no filesystem and no bridge, so it has no `bellman_upload`; the control
+panel's upload comes with the canvas.
 
 `BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
 for when you would rather open it yourself: a terminal-only session on your own

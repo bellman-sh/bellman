@@ -687,7 +687,10 @@ Request/Response the module speaks; its only caller is the static key map, as
 there is no OAuth and no panel there.
 
 `bellman_upload` is the bridge's own tool, not the server's: the server still
-lists nine. It reads the file through one descriptor and refuses a symbolic
+lists nine. Only a path under the upload root is read, links followed — the
+directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when that is set
+(`/` for any file) — so a line that arrives as peer content cannot send a key
+file to the room. It reads the file through one descriptor and refuses a symbolic
 link, anything that is not a regular file, and a file over the cap before a byte
 leaves the machine; takes the type from the extension alone; posts with the
 credential the bridge holds; and places the item through the upstream

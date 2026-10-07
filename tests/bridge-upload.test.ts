@@ -4,8 +4,13 @@
  * upstream bellman_send — one call. The route is the real one, inside the fake
  * server, over a MemoryBlobStore the upstream's writeSurface then heads: what
  * the bridge uploaded is what the item names.
+ *
+ * The read is bounded to an upload root: BELLMAN_UPLOAD_ROOT, else the directory
+ * the bridge was started in. Every test but the ones about the root itself runs
+ * with it set to `dir`, where its files are; `outside` is a directory it does
+ * not cover.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -26,6 +31,8 @@ const jesse = resolveIdentity(`Bearer ${DEV_KEY.jesse}`)!;
 
 let fake: FakeBellman;
 let dir: string;
+let outside: string;
+let rootBefore: string | undefined;
 let fetches: number;
 let posted: string[];
 let sends: number;
@@ -59,6 +66,9 @@ beforeEach(async () => {
   fake = fakeBellman({ keys: { [DEV_KEY.jesse]: jesse } });
   await fake.store.createSession(session({ id: ROOM, members: [member()] }));
   dir = mkdtempSync(join(tmpdir(), "bellman-upload-"));
+  outside = mkdtempSync(join(tmpdir(), "bellman-outside-"));
+  rootBefore = process.env.BELLMAN_UPLOAD_ROOT;
+  process.env.BELLMAN_UPLOAD_ROOT = dir;
   fetches = 0;
   posted = [];
   sends = 0;
@@ -79,7 +89,11 @@ beforeEach(async () => {
 afterEach(async () => {
   await bridge.close();
   await client.close();
+  vi.restoreAllMocks();
+  if (rootBefore === undefined) delete process.env.BELLMAN_UPLOAD_ROOT;
+  else process.env.BELLMAN_UPLOAD_ROOT = rootBefore;
   rmSync(dir, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
 });
 
 async function upload(args: Record<string, unknown>) {
@@ -246,6 +260,110 @@ describe("bellman_upload", () => {
   });
 });
 
+// D7: the read is bounded. The agent driving the bridge may already read the filesystem, but a one-call send
+// to every member of a room is new, and a line that arrives as peer content must not be able to ship a key file.
+describe("bellman_upload's upload root", () => {
+  /** Nothing was read into a request: no post, no placement, and the surface as it was. */
+  const sentNothing = async () => {
+    expect(fetches).toBe(0);
+    expect(sends).toBe(0);
+    expect(await fake.store.surfaceOf(ROOM)).toEqual([]);
+  };
+  const setRoot = (value: string | undefined) => {
+    if (value === undefined) delete process.env.BELLMAN_UPLOAD_ROOT;
+    else process.env.BELLMAN_UPLOAD_ROOT = value;
+  };
+  const rowKeys = async () => (await fake.store.surfaceOf(ROOM)).map((row) => row.key).sort();
+
+  it("refuses a regular file outside the root, naming the path and the root, with nothing fetched or sent", async () => {
+    const secret = join(outside, "id_rsa");
+    writeFileSync(secret, "not for the room");
+    const out = await upload({ path: secret, key: "keys" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toBe(
+      `Error: ${secret} is outside the upload root ${dir}: the bridge uploads only from the directory it was started in, or from BELLMAN_UPLOAD_ROOT when that is set (/ for any file).`,
+    );
+    await sentNothing();
+  });
+
+  it("uploads that same file once BELLMAN_UPLOAD_ROOT names its directory, and when it is /", async () => {
+    const path = join(outside, "notes.md");
+    writeFileSync(path, "# notes\n");
+    expect((await upload({ path, key: "refused" })).isError, "the root of this test does not cover it").toBe(true);
+    setRoot(outside);
+    const named = await upload({ path, key: "named" });
+    expect(named.isError, named.text).toBe(false);
+    setRoot("/");
+    const anywhere = await upload({ path, key: "anywhere" });
+    expect(anywhere.isError, anywhere.text).toBe(false);
+    expect(await rowKeys()).toEqual(["anywhere", "named"]);
+  });
+
+  it("resolves the root as it does the path: a root that is itself a link covers what its target holds", async () => {
+    const door = join(outside, "door");
+    symlinkSync(dir, door);
+    setRoot(door);
+    const out = await upload({ path: file("in.md", "in"), key: "inside" });
+    expect(out.isError, out.text).toBe(false);
+  });
+
+  // The leaf here is a regular file, so the symbolic-link refusal and O_NOFOLLOW both pass it: the link is in
+  // a parent. Only the comparison of resolved paths sees where it goes.
+  it("refuses a regular file reached through a directory link that leaves the root", async () => {
+    writeFileSync(join(outside, "file.txt"), "x");
+    symlinkSync(outside, join(dir, "link"));
+    const through = join(dir, "link", "file.txt");
+    const out = await upload({ path: through, key: "k" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain(`${through} is outside the upload root ${dir}`);
+    await sentNothing();
+    // The control: a directory link that stays inside the root is no way out, and its file reads.
+    mkdirSync(join(dir, "real"));
+    writeFileSync(join(dir, "real", "f.txt"), "y");
+    symlinkSync(join(dir, "real"), join(dir, "inner"));
+    const inner = await upload({ path: join(dir, "inner", "f.txt"), key: "k" });
+    expect(inner.isError, inner.text).toBe(false);
+  });
+
+  it("does not take a sibling whose name begins with the root's for a path under it", async () => {
+    const sibling = `${dir}-evil`;
+    mkdirSync(sibling);
+    try {
+      writeFileSync(join(sibling, "f.txt"), "x");
+      const out = await upload({ path: join(sibling, "f.txt"), key: "k" });
+      expect(out.isError).toBe(true);
+      expect(out.text).toContain(`outside the upload root ${dir}:`);
+      await sentNothing();
+    } finally {
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses everything, naming the root, when the root does not exist", async () => {
+    const gone = join(dir, "no-such-dir");
+    setRoot(gone);
+    const out = await upload({ path: file("n.md", "x"), key: "n" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain(`the upload root ${gone} does not exist`);
+    await sentNothing();
+  });
+
+  it("starts from the directory the bridge was started in when BELLMAN_UPLOAD_ROOT is unset or empty", async () => {
+    vi.spyOn(process, "cwd").mockReturnValue(dir);
+    const elsewhere = join(outside, "there.md");
+    writeFileSync(elsewhere, "out");
+    for (const value of [undefined, ""]) {
+      setRoot(value);
+      const inside = await upload({ path: file("here.md", "in"), key: "inside" });
+      expect(inside.isError, `${JSON.stringify(value)}: ${inside.text}`).toBe(false);
+      const refused = await upload({ path: elsewhere, key: "outside" });
+      expect(refused.isError, JSON.stringify(value)).toBe(true);
+      expect(refused.text, JSON.stringify(value)).toContain(`outside the upload root ${dir}:`);
+    }
+    expect(await rowKeys()).toEqual(["inside"]);
+  });
+});
+
 describe("the local half", () => {
   it("types a file from its extension, case-insensitively, and falls back to an octet-stream", () => {
     expect(typeFromExtension("/a/b/photo.JPG")).toBe("image/jpeg");
@@ -260,8 +378,9 @@ describe("the local half", () => {
   it("reads a regular file through one descriptor and refuses everything else", () => {
     const path = join(dir, "r.txt");
     writeFileSync(path, "regular");
-    expect(readLocalFile(path).bytes.toString()).toBe("regular");
-    expect(() => readLocalFile(dir)).toThrow(/not a regular file/);
-    expect(() => readLocalFile(join(dir, "nope"))).toThrow(/could not be read/);
+    expect(readLocalFile(path, dir).bytes.toString()).toBe("regular");
+    // The root itself is covered (so what is refused here is the kind of thing it is), and what is not there is not read.
+    expect(() => readLocalFile(dir, dir)).toThrow(/not a regular file/);
+    expect(() => readLocalFile(join(dir, "nope"), dir)).toThrow(/could not be read/);
   });
 });

@@ -34,6 +34,7 @@
       ],
       "env": {
         "BELLMAN_URL": "${user_config.bellman_url}",
+        "BELLMAN_UPLOAD_ROOT": "${user_config.upload_root}",
         "BELLMAN_DELIVERY": "hook"
       }
     }
@@ -45,6 +46,12 @@
       "description": "The Bellman endpoint. Change this only if you run your own.",
       "required": false,
       "default": "https://mcp.bellman.sh/mcp"
+    },
+    "upload_root": {
+      "type": "directory",
+      "title": "Upload folder",
+      "description": "The folder bellman_upload may read files from. Set it to the folder you want to upload from; files anywhere else are refused.",
+      "required": false
     }
   },
   "tools": [

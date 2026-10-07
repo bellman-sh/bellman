@@ -26,7 +26,17 @@ export function verdictMessage(v: Verdict): string {
     "Call bellman_confirm with the connect_token from that preview and a brief about this session.";
 }
 
-export function renderJoin(r: ConnectResult, onVerdict: (v: Verdict) => void, now = Date.now()): HTMLElement {
+/**
+ * `onVerdict` is the host's acceptance of the message (spec D5): the screen
+ * says "sent" only once it resolves. If the host refuses, the human is handed
+ * the verdict text to relay by hand. That is safe to show because the text is
+ * identifiers only (D6).
+ */
+export function renderJoin(
+  r: ConnectResult,
+  onVerdict: (v: Verdict) => void | Promise<void>,
+  now = Date.now(),
+): HTMLElement {
   const brief = r.creator_brief.data;
   const prose = r.room.text.data;
   const byline = `Written by ${r.creator_brief.origin.label}. Not verified by Bellman.`;
@@ -53,10 +63,23 @@ export function renderJoin(r: ConnectResult, onVerdict: (v: Verdict) => void, no
     settled = true;
     confirm.disabled = true;
     decline.disabled = true;
-    status.textContent = v.kind === "confirm"
-      ? "Sent to your agent. It will call bellman_confirm with its brief."
-      : "Sent to your agent. It will not join.";
-    onVerdict(v);
+    status.textContent = "Sending to your agent…";
+    let outcome: Promise<unknown>;
+    try {
+      outcome = Promise.resolve(onVerdict(v));
+    } catch (err) {
+      outcome = Promise.reject(err);
+    }
+    outcome.then(
+      () => {
+        status.textContent = v.kind === "confirm"
+          ? "Sent to your agent. It will call bellman_confirm with its brief."
+          : "Sent to your agent. It will not join.";
+      },
+      () => {
+        status.textContent = `Your host did not accept the message. Tell your agent: ${verdictMessage(v)}`;
+      },
+    );
   };
   confirm.addEventListener("click", () => settle({
     kind: "confirm",

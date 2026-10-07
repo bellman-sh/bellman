@@ -47,10 +47,11 @@ function render(result: ToolOutcome): void {
   switch (screen.kind) {
     case "join":
       stopPolling();
-      show(renderJoin(screen.data, (verdict) => {
+      show(renderJoin(screen.data, async (verdict) => {
         // The human's decision, handed to the agent as one user message of
         // identifiers (spec D5, D6). The agent calls bellman_confirm itself.
-        void app.sendMessage({ role: "user", content: [{ type: "text", text: verdictMessage(verdict) }] });
+        // The screen reports "sent" only once the host has accepted it.
+        await app.sendMessage({ role: "user", content: [{ type: "text", text: verdictMessage(verdict) }] });
       }));
       return;
     case "monitor":

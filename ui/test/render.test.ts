@@ -40,7 +40,7 @@ describe("renderJoin", () => {
 
   it("hands the agent a verdict with the role and the capabilities the human left checked", () => {
     const verdicts: Verdict[] = [];
-    const node = renderJoin(connectFixture(), (v) => verdicts.push(v), NOW);
+    const node = renderJoin(connectFixture(), (v) => { verdicts.push(v); }, NOW);
     document.body.append(node);
     const boxes = [...node.querySelectorAll<HTMLInputElement>("input[type=checkbox]")];
     expect(boxes.map((b) => [b.dataset.capability, b.checked])).toEqual(
@@ -56,9 +56,34 @@ describe("renderJoin", () => {
     node.remove();
   });
 
+  it("says the message was sent only once the host accepted it", async () => {
+    let resolveSend!: () => void;
+    const node = renderJoin(connectFixture(), () => new Promise<void>((r) => { resolveSend = r; }), NOW);
+    const [confirm] = [...node.querySelectorAll("button")];
+    confirm.click();
+    expect(node.lastElementChild!.textContent).toMatch(/sending/i);
+    resolveSend();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(node.lastElementChild!.textContent).toMatch(/^Sent to your agent/);
+  });
+
+  // The screen's only action. A host that refuses ui/message must not leave
+  // the human waiting on "Sent"; the verdict is identifiers (D6), so it can be
+  // relayed by hand.
+  it("hands the human the verdict to relay when the host refuses the message", async () => {
+    const node = renderJoin(connectFixture(), () => Promise.reject(new Error("host declined")), NOW);
+    const [confirm, decline] = [...node.querySelectorAll("button")];
+    confirm.click();
+    await new Promise((r) => setTimeout(r, 0));
+    const status = node.lastElementChild!.textContent!;
+    expect(status).toMatch(/did not accept/i);
+    expect(status).toContain(verdictMessage({ kind: "confirm", role: "reviewer", capabilities: ["read_context", "receive_messages"] }));
+    expect(confirm.disabled && decline.disabled).toBe(true);
+  });
+
   it("declines with one click", () => {
     const verdicts: Verdict[] = [];
-    const node = renderJoin(connectFixture(), (v) => verdicts.push(v), NOW);
+    const node = renderJoin(connectFixture(), (v) => { verdicts.push(v); }, NOW);
     [...node.querySelectorAll("button")][1].click();
     expect(verdicts).toEqual([{ kind: "decline" }]);
   });

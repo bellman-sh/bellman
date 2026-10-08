@@ -22,7 +22,7 @@ import { JOIN_CODE_TTL, isActiveMember, type AppendExtras, type BellmanStore, ty
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
-import { IMAGE_TYPES, isImageType, type BlobStore } from "./blobs.js";
+import { IMAGE_TYPES, isImageType, mediaType, type BlobStore } from "./blobs.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -649,7 +649,7 @@ export async function revokeInvite(
  * exists: a second transport re-typing the sequence is a second chance to skip
  * the verb guard or the audit row. The order is the write path the spec gives:
  * the seat's guards (`gateSeat`, which also touches the caller), the payload's
- * shape and each kind's rule, the blob a file or image names, the rows for the
+ * shape and each kind's rule, the blob a file, image or html item names, the rows for the
  * cap and a connector's ends, the append with the row riding it, the audit row.
  *
  * The rows are read once and then the append happens, which is a
@@ -680,8 +680,8 @@ export async function writeSurface(
   // A blob-backed item carries the object's metadata, not the writer's (#183,
   // D5): the writer named an id, and what readers get is what the bucket holds
   // under this room's prefix. `head` resolves nothing from another room (D1),
-  // so a foreign id is "no blob" here too. The image check is on the STORED
-  // type, which D6 already decided at upload.
+  // so a foreign id is "no blob" here too. The image and html checks are on the
+  // STORED type, which D6 already decided at upload.
   if (normalized.blobId !== null && write.item !== null) {
     const meta = await blobs.head(sessionId, normalized.blobId);
     if (!meta) {
@@ -691,6 +691,12 @@ export async function writeSurface(
       return refuse(
         "invalid",
         `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
+      );
+    }
+    if (write.item.kind === "html" && mediaType(meta.type) !== "text/html") {
+      return refuse(
+        "invalid",
+        `surface html "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,
       );
     }
     write = {

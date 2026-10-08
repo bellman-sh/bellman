@@ -566,6 +566,15 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(viaRoute.surface_cursor).toBe(out.cursor);
   });
 
+  // Both transports call writeSurface, so the route takes an html page because the tool does (#185).
+  it("places an html page through the route, and a member's read gives it back as kind html with that body", async () => {
+    const page = "<!doctype html><p>hi</p>";
+    const res = (await put(DEV_KEY.jesse, "demo", { kind: "html", body: page }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { key: string; kind: string; body: string } }[] };
+    expect(body.items.map((i) => [i.data.key, i.data.kind, i.data.body])).toEqual([["demo", "html", page]]);
+  });
+
   it("reads back through the route what the tool wrote, and replaces by key", async () => {
     await placeThroughTool("plan", { kind: "text", body: "v1" });
     const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "v2" }))!;

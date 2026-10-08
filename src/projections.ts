@@ -72,6 +72,21 @@ export function publicMember(m: Member, connected: ReadonlySet<string>) {
 }
 
 /**
+ * The roster as it stood at `at`, for a viewer whose reading stopped there (#113):
+ * a member a creator removed reads the room up to the removal and nothing after
+ * it, and who joined or left later is after it. So this keeps the members who had
+ * joined by `at`, as facts about the record, with `active` as it was at `at` — a
+ * member who left later was still in. Nothing off the clock: no `presence`, which
+ * is the live roster's (`publicMember`), and live data is what such a viewer is
+ * not owed. A join in the very millisecond of the removal counts as before it.
+ */
+export function rosterAsOf(members: readonly Member[], at: number) {
+  return members
+    .filter((m) => m.joinedAt <= at)
+    .map((m) => ({ ...storedMember(m), active: m.leftAt === null || m.leftAt > at }));
+}
+
+/**
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
@@ -221,6 +236,31 @@ export function roomSummary(
         ...(canInvite ? { code: rec.code, join_url: joinUrl(rec.code) } : {}),
       })),
     last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,
+  };
+}
+
+/**
+ * A room on a person's list (#184, D1): identifiers, the server's numbers,
+ * and the room's name. `room` is creator prose; the panel renders it as text
+ * and never as markup, which is what makes it safe to carry unwrapped here
+ * where `roomPreview` wraps it for a joiner's MODEL. `status` is handed in
+ * because `sessionStatus` lives in rooms.ts, which imports this module.
+ *
+ * `cutAt` is given when the viewer was removed from the room (#113): `members`
+ * is then the count of the roster as of that moment (`rosterAsOf`), the number
+ * the detail's roster would give it, and not how many are in now.
+ */
+export function roomListEntry(s: StoredSession, viewerUserId: string, status: string, cutAt?: number) {
+  return {
+    id: s.id,
+    room: s.manifest.room,
+    mode: s.manifest.mode,
+    status,
+    members: cutAt === undefined
+      ? s.members.filter((m) => m.leftAt === null).length
+      : rosterAsOf(s.members, cutAt).filter((m) => m.active).length,
+    mine: s.createdBy === viewerUserId,
+    expires_at: new Date(s.expiresAt).toISOString(),
   };
 }
 

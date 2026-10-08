@@ -371,13 +371,18 @@ describe("preflight", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
     expect(res.headers.get("access-control-allow-credentials")).toBe("true");
     expect(res.headers.get("access-control-allow-methods")).toContain("POST");
-    expect(res.headers.get("access-control-allow-headers")).toBe("content-type");
+    expect(res.headers.get("access-control-allow-headers")).toBe("content-type, if-none-match");
     expect(Number(res.headers.get("access-control-max-age"))).toBeGreaterThan(0);
     expect(await res.text()).toBe("");
   });
 
   it("allows DELETE, which /admin/grants uses", () => {
     expect(preflightResponse(PANEL).headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+
+  it("allows PUT and the If-None-Match request header, which the room routes use", () => {
+    expect(preflightResponse(PANEL).headers.get("access-control-allow-methods")).toContain("PUT");
+    expect(preflightResponse(PANEL).headers.get("access-control-allow-headers")).toContain("if-none-match");
   });
 
   it("answers 204 with no CORS grant for a stranger, and no methods either", () => {

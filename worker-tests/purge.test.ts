@@ -309,6 +309,40 @@ it("holds the purge back while a queued row will not deliver, and purges once it
   expect(await rowCount("qs_stuck")).toBe(0);
 });
 
+// A throwing alarm() is retried by the runtime a few times and then left, with nothing armed. A closed
+// room past its window that nothing re-arms would sit there for good, so the one read every reader goes
+// through points the alarm at the purge again when it finds the room in that state. The read does not
+// run the purge: the alarm does, as it does for every other window.
+it("re-arms the alarm when a read finds a closed room past its window with nothing armed, and leaves the purge to the alarm", async () => {
+  const { store, closedAt } = await closedRoom("qs_given_up");
+  await runInDurableObject(stubOf("qs_given_up"), (_i: SessionDO, ctx) => ctx.storage.deleteAlarm());
+  expect(await armedAlarm("qs_given_up"), "the runtime gave up on it").toBeNull();
+  setClock(closedAt + WINDOW);
+
+  expect(await store.getSession("qs_given_up"), "read once, the room is served as any closed room is").toMatchObject({ closed: true });
+
+  expect(await armedAlarm("qs_given_up"), "armed again, at the purge").toBe(closedAt + WINDOW);
+  expect(await rowCount("qs_given_up"), "and the read purged nothing").toBeGreaterThan(0);
+  await runAlarm("qs_given_up");
+  expect(await rowCount("qs_given_up")).toBe(0);
+});
+
+it("arms nothing for a read of a closed room that is inside its window, or kept, or from before the window", async () => {
+  const store = new DurableObjectStore(env as never);
+  const inside = await closedRoom("qs_inside");
+  await closedRoom("qs_kept_read", { retainAfterCloseMs: null });
+  await store.createSession(room("qs_old_read", { closed: true, closedAt: null, retainAfterCloseMs: null }));
+  for (const id of ["qs_inside", "qs_kept_read", "qs_old_read"]) {
+    await runInDurableObject(stubOf(id), (_i: SessionDO, ctx) => ctx.storage.deleteAlarm());
+  }
+  setClock(inside.closedAt + WINDOW - 1); // the last millisecond inside the window
+
+  for (const id of ["qs_inside", "qs_kept_read", "qs_old_read"]) {
+    expect(await store.getSession(id), id).toMatchObject({ closed: true });
+    expect(await armedAlarm(id), id).toBeNull();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // The sweep of unnamed objects at close (#65, D3)
 // ---------------------------------------------------------------------------

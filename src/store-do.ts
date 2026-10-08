@@ -492,7 +492,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.#closeIfAbandoned(s, Date.now());
     // Re-read: closeIfAbandoned may have written closed=true and cleared the codes,
     // or stamped a socket's members.
-    return this.stored();
+    const read = await this.stored();
+    // A closed room whose purge is already due should have had its alarm run it. When one
+    // is found here, the alarm has been lost (a throwing alarm() is retried a few times
+    // and then left, with nothing armed), so point it at the purge again. Re-armed and not
+    // run from here: the alarm does the purge, as it does for every other room, so no read
+    // pays for deleting a prefix. Nothing is asked of a room still inside its window, a
+    // room kept until deleted, or one from before the window, whose purge is not due.
+    if (read?.closed) {
+      const purge = purgeDueAt(read);
+      if (purge !== null && Date.now() >= purge) await this.driver.reArm();
+    }
+    return read;
   }
 
   /**

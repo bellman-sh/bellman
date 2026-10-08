@@ -1050,6 +1050,13 @@ export async function handleOAuth(
     const origin = allowedOrigin(request, config.panelOrigins);
     const who = await caller(request, config);
     if (!who) {
+      // A browser with no session has nothing to see here: the account page
+      // lives in the control panel, which signs the person in and brings them
+      // back. A navigation is told from an API call by what it accepts, and a
+      // bearer client keeps the 401 with RFC 9728 discovery either way.
+      const panel = config.panelOrigins?.[0];
+      const navigation = (request.headers.get("accept") ?? "").includes("text/html") && !request.headers.get("authorization");
+      if (panel && navigation) return Response.redirect(`${panel}/billing`, 302);
       return new Response("Sign in to see your account.", {
         status: 401,
         headers: {

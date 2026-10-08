@@ -642,10 +642,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * owns in this room, departed members included, except one a creator removed
    * (#113): membersOf returns the others on purpose, so /ws and bellman_sync
    * agree about who may watch the open feed, and nothing removes a member from
-   * the roster. The list grows with seatings, not with the plan's cap on
-   * active members (ENTITLEMENTS in auth.ts), so it takes over a thousand
-   * seatings by one identity in one room's life. That is churn, not a breach
-   * of the cap.
+   * the roster. The list grows with seatings, not with the room's capacity
+   * (`capacityOf`), so it takes over a thousand seatings by one identity in one
+   * room's life. That is churn, not a breach of the capacity.
    */
   async fetch(request: Request): Promise<Response> {
     // The same reading as the route's, from the same module (#132). The Worker builds

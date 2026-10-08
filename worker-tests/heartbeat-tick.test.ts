@@ -137,9 +137,17 @@ const quietButDue = async (id: string) => {
   return env.SESSION.get(env.SESSION.idFromName(id));
 };
 
-const fireNamedTick = (stub: DurableObjectStub) =>
+/**
+ * One firing that names the tick. `rearm: false` leaves out the closing reArm(), for a
+ * case that fires a room whose window has lapsed: that re-arm points the alarm at a
+ * time already past.
+ */
+const fireNamedTick = (stub: DurableObjectStub, { rearm = true } = {}) =>
   runInDurableObject(stub, async (i: SessionDO) => {
     nameTheTick(i);
+    if (!rearm) {
+      (i as unknown as { driver: { reArm(): Promise<void> } }).driver.reArm = async () => {};
+    }
     await i.alarm();
   });
 
@@ -286,7 +294,12 @@ it("writes no tick into an abandoned room even when the alarm names the tick alo
   await ageRoom(stub);
   await lapseRoom(stub, Date.now() - ABANDONED_AFTER_MS - 1_000);
 
-  await fireNamedTick(stub);
+  // Without the closing reArm(), which on a lapsed room points the alarm at the
+  // abandonment time, already past. The alarm would refire back to back until
+  // afterEach aborts the object, and an instance workerd builds in its place would
+  // close the room under the assertion below. Deleting the alarm afterwards does not
+  // stop it: a firing already queued re-arms after the delete.
+  await fireNamedTick(stub, { rearm: false });
 
   const after = await rows(stub);
   expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);

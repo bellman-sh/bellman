@@ -204,7 +204,7 @@ that line.
 | Room empty and open | not the sweep's; `closeSessionIfEmpty` on the next leave or evict retry |
 | Swarm room at 100 | `seatMember` refuses `full`; `bellman_confirm`, `bellman_connect` and `bellman_invite` name the ceiling |
 | Stored row carrying `expiresAt` or `maxMembers` | stripped on read; rewritten without them on the next mutation |
-| Build rolled back after rows were rewritten | `now > undefined` is false and `seatVictims` given `undefined` seats everyone: rooms neither expire nor cap, which is the direction of travel |
+| Build rolled back after rows were rewritten | not supported, roll forward: the older build's `reArm()` calls `setAlarm(undefined)` for a row with no `expiresAt`, workerd rejects it, and the writes that re-arm commit and then fail (ADR 0001) |
 
 ## Testing
 

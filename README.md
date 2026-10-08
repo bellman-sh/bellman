@@ -332,7 +332,7 @@ Losing the room would be the wrong punishment for a failed card, and it is not r
 
 `session_status` reports `frozen` alongside `active` and `closed`, so a client can tell a lapsed plan from a room that is simply over — one of those is fixable by paying.
 
-**Nothing detects a lapse yet.** The capability is here and the store can freeze and thaw; wiring it to plan resolution is still to come. Sessions created before that capability shipped are not in the creator index and cannot be added to it — the registry never held a list of sessions to backfill from — so a lapse will not reach them. Those rooms persist like any other, so a lapse will not reach them.
+**Nothing detects a lapse yet.** The capability is here and the store can freeze and thaw; wiring it to plan resolution is still to come. Sessions created before that capability shipped are not in the creator index and cannot be added to it — the registry never held a list of sessions to backfill from — so a lapse will not reach them. Those rooms persist like any other, so this does not resolve itself.
 
 ## Production path
 

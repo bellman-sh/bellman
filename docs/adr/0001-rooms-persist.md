@@ -36,7 +36,12 @@ has to recreate.
 
 - Rooms alive at deploy persist: `hydrateStoredSession` strips `expiresAt` and
   `maxMembers` on read, and nothing is backfilled.
-- A rollback finds `now > undefined` false and `seatVictims` given `undefined`
-  seats everyone: rooms neither expire nor cap, which is the direction of travel.
+- Once rows have been rewritten, rolling back past this change is not
+  supported: the deployment rolls forward. The older build's derived alarm map
+  carries `undefined` for `ttl`, because a rewritten row has no `expiresAt`;
+  `earliestDue` returns it, and `reArm()` calls `setAlarm(undefined)`, which
+  workerd rejects. That call ends `alarm()` and follows the put in a join, a
+  seat, a removal and a freeze, so each of those commits and then reports
+  failure to its caller.
 - Reaching the ceiling is the trigger for moving members to rows of their own.
 - The site's plan copy follows in `bellman-sh/bellman.sh` (room size, FAQ, compare pages).

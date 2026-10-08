@@ -1165,8 +1165,11 @@ The heartbeat is the safer half of that rule. A stored `due:` row that an older
 build never consumes is the spin above; a derived due time that a build does not
 know is never computed, so there is nothing for it to leave behind. Rolling back
 past #111 strands no row and needs no cleanup, where rolling back past #62 does.
-An alarm already armed for a tick fires once into the older build, which finds
-nothing to run and re-arms for the abandonment time.
+An alarm already armed for a tick fires once into a build that knows the
+`abandoned` name, which finds nothing to run and re-arms for the abandonment
+time. A build older than #18 does not know that name: for a row #18 rewrote, its
+`reArm()` calls `setAlarm(undefined)`, which workerd rejects, so rolling back
+past #18 is not supported (ADR 0001).
 
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both

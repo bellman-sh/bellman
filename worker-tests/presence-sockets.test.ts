@@ -9,10 +9,11 @@
  * vouching, and that the answer survives the object being evicted and revived,
  * which is when it is hibernating and holding nothing in memory.
  *
- * Every room here is two or three seats with one present member and one or two
- * that have been quiet since the fixture's instant, past the presence cutoff. The identity behind the key
- * vitest.config.ts binds is u_jesse, which is the user a fixture member has by
- * default, so a default member is one this socket's identity owns.
+ * Every room here holds one or two members that have been quiet since the
+ * fixture's instant, past the presence cutoff, and in most of them one present
+ * member besides. The identity behind the key vitest.config.ts binds is u_jesse,
+ * which is the user a fixture member has by default, so a default member is one
+ * this socket's identity owns.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
@@ -188,24 +189,26 @@ describe("an open socket is liveness", () => {
   });
 
   it("keeps both members of a socket that serves two", async () => {
-    // Two seats held by the socket's identity and one by somebody else, in a
-    // pair room over-full by one. The contested confirm needs one seat: if the
-    // socket protected only one of the two, it would take the other.
-    const { id, store, stub } = await room([here("m_here"), quiet("m_a"), quiet("m_b")]);
+    // A pair room with both seats held by the socket's identity. The contested
+    // confirm needs one seat: if the socket protected only one of the two, it
+    // would take the other.
+    const { id, store, stub } = await room([quiet("m_a"), quiet("m_b")]);
     await open(id);
 
     // What the route built: every member the identity owned when it connected.
     expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_a", "m_b"] })]);
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
     expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
-    expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
+    expect(await roster(store, id)).toEqual([["m_a", null], ["m_b", null]]);
   });
 
   it("keeps a member of the identity that joined after the socket did", async () => {
     // The attachment is a snapshot of who the identity owned at upgrade. A
     // member of the identity that joins later is served by the same socket
-    // through the bus, and is not in the snapshot.
-    const { id, store, stub } = await room([here("m_here"), quiet("m_a")]);
+    // through the bus, and is not in the snapshot. A pair room with both seats
+    // held by the socket's identity: if the socket protected only the snapshot's
+    // ids, the contested confirm would take the late joiner.
+    const { id, store, stub } = await room([quiet("m_a")]);
     await open(id);
     expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_a"] })]);
 
@@ -213,7 +216,7 @@ describe("an open socket is liveness", () => {
 
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
     expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
-    expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
+    expect(await roster(store, id)).toEqual([["m_a", null], ["m_b", null]]);
   });
 
   it("stamps the late joiner too, not just the ids the attachment names", async () => {

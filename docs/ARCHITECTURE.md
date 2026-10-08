@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: 1addfcc
-last-updated: 2026-10-07
+last-verified-against-source: 7108634
+last-updated: 2026-10-08
 ---
 
 # Bellman Architecture
@@ -604,11 +604,11 @@ need the upgrade stamp as well and is not done.
 ### The working surface
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally
-placed items — `text`, `link`, `diagram`, `connector`, and the blob-backed
-`file` and `image` — that members read and a seat holding `write_surface` keeps
-current. The log is how the surface got that way; the surface is where things
-stand. Blobs, piece 2, are the next subsection; pieces 3 and 4 add a canvas and
-sandboxed HTML artifacts on top of it.
+placed items — `text`, `link`, `diagram`, `connector`, the blob-backed `file`
+and `image`, and `html` — that members read and a seat holding `write_surface`
+keeps current. The log is how the surface got that way; the surface is where
+things stand. Blobs, piece 2, are the next subsection; pieces 3 and 4 add a
+canvas and sandboxed HTML artifacts on top of it.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -637,12 +637,12 @@ for how long it is kept.
 
 ### Blobs
 
-A `file` or an `image` item (#183) names bytes that live in R2, under
-`rooms/<sessionId>/<blobId>`, behind the second seam storage has:
-`BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore` for tests
-and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only) for
-production, held to one contract by `tests/helpers/blob-store-contract.ts` the
-way the two session stores are. No row in the room object describes a blob:
+A `file` or an `image` item (#183) names bytes that live in R2 — and an `html`
+item may (#185) — under `rooms/<sessionId>/<blobId>`, behind the second seam
+storage has: `BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore`
+for tests and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only)
+for production, held to one contract by `tests/helpers/blob-store-contract.ts`
+the way the two session stores are. No row in the room object describes a blob:
 the object's own metadata — the type as decided at upload, the name, the
 uploading member, the time — is the metadata, because a row and an object are
 two systems with no transaction between them, and the one holding the bytes
@@ -876,6 +876,13 @@ loud:
   control characters and format characters (all but the two zero-width joiners
   and the soft hyphen, which names are spelled with, and a name left with
   nothing else is refused as a blank), and never derives a key.
+- **An `html` or `diagram` item never runs on a Bellman origin.** The API host
+  serves an `html` blob as a download (`application/octet-stream`, `attachment`,
+  `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
+  kinds only inside a frame served from a cross-site origin with no credential,
+  no network and an opaque document origin (the dash repo's sandbox, #185 and
+  its spec's D2 to D4). The server's part of that boundary is the download rule
+  and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and

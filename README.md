@@ -69,7 +69,7 @@ that way; the surface is where things stand.
 
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
   body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
-  `text`, `link`, `diagram`, `connector`, `file`, `image`. Items replace by key;
+  `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`. Items replace by key;
   every version stays in the log at its cursor.
 - A `file` or an `image` names a blob. Upload the bytes first — `POST
   /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
@@ -83,6 +83,10 @@ that way; the surface is where things stand.
   (`png`, `jpeg`, `gif`, `webp`), which are served inline; nothing from it is
   ever HTML. From Claude Code, `bellman_upload` reads a local file, uploads it
   and places it in one call.
+- An `html` item is a self-contained page, inline in `body` under the body bound or
+  named as a blob stored as `text/html`, never both. The server stores and serves
+  it as bytes; the panel renders it only in a sandboxed frame on another origin,
+  where it gets no network and no cookies (the frame is the dash repo's).
 - The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
   to the creator's seat alone; a manifest may give it to any seat. Reading is
   never gated.

@@ -125,10 +125,32 @@ export function rosterAsOf(members: readonly Member[], at: number) {
 export function roomPreview(session: StoredSession, viewerRole: string) {
   const m = session.manifest;
   const creator = session.members[0];
+  /**
+   * Whether a seat is asked to report. Shown before a joiner's human accepts
+   * the seat: this is the consent point, and a member that will be named silent
+   * in a tick has to be able to see that before joining, the same reason
+   * `your_verbs` is here.
+   *
+   * Through mustReport, which is what the tick itself calls, so what a joiner
+   * is SHOWN and what is ASKED are one computation and cannot drift apart.
+   *
+   * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
+   * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
+   * to answer. `mustReport` alone said `true` there and promised a joiner's
+   * human an obligation that never fires — and this is the consent surface, the
+   * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
+   * the same null-cadence check for themselves; this was the surface that did
+   * not. resolveManifest refuses the other half of the pair, a reporting seat
+   * that cannot send, so the only `reports: true` that reaches here is one a
+   * cadence would make real.
+   */
+  const asked = (role: string): boolean => m.heartbeatOnMs !== null && mustReport(m, role);
   const roles: Record<string, Verb[]> = {};
+  const reports: Record<string, boolean> = {};
   const descriptions: Record<string, string | null> = {};
   for (const [key, def] of Object.entries(m.roles)) {
     roles[key] = def.can;
+    reports[key] = asked(key);
     descriptions[key] = def.description;
   }
   return {
@@ -136,28 +158,15 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: verbsOfRole(m, viewerRole),
-    /**
-     * The obligation, shown before a joiner's human accepts the seat. This is
-     * the consent point: a member that will be named silent in a tick has to be
-     * able to see that before joining, the same reason `your_verbs` is here.
-     *
-     * Through mustReport, which is what the tick itself calls, so what a joiner
-     * is SHOWN and what is ASKED are one computation and cannot drift apart.
-     *
-     * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
-     * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
-     * to answer. `mustReport` alone said `true` there and promised a joiner's
-     * human an obligation that never fires — and this is the consent surface, the
-     * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
-     * the same null-cadence check for themselves; this was the surface that did
-     * not. resolveManifest refuses the other half of the pair, a reporting seat
-     * that cannot send, so the only `reports: true` that reaches here is one a
-     * cadence would make real.
-     */
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
-    you_report: m.heartbeatOnMs !== null && mustReport(m, viewerRole),
+    // The viewer's own obligation, hoisted as your_verbs is: the fact the
+    // joiner's human is deciding on.
+    you_report: asked(viewerRole),
     creator_role: m.creatorRole,
     roles,
+    // Every seat's obligation, by the same rule, so the roles table a joiner
+    // reads can compare seats (spec: "each role's verbs and whether it reports").
+    reports,
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },

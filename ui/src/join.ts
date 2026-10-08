@@ -26,15 +26,18 @@ export function verdictMessage(v: Verdict): string {
     "Call bellman_confirm with the connect_token from that preview and a brief about this session.";
 }
 
+/** What the host answers ui/message with: ext-apps reports a refusal as `isError`, not as a rejection. */
+export type Delivery = { isError?: boolean } | void;
+
 /**
  * `onVerdict` is the host's acceptance of the message (spec D5): the screen
- * says "sent" only once it resolves. If the host refuses, the human is handed
- * the verdict text to relay by hand. That is safe to show because the text is
- * identifiers only (D6).
+ * says "sent" only once it resolves without `isError`. If the host refuses,
+ * by rejecting or by answering `isError`, the human is handed the verdict text
+ * to relay by hand. That is safe to show because the text is identifiers only (D6).
  */
 export function renderJoin(
   r: ConnectResult,
-  onVerdict: (v: Verdict) => void | Promise<void>,
+  onVerdict: (v: Verdict) => Delivery | Promise<Delivery>,
   now = Date.now(),
 ): HTMLElement {
   const brief = r.creator_brief.data;
@@ -45,6 +48,7 @@ export function renderJoin(
     el("tr", { class: role === r.room.your_role ? "you" : "" },
       el("td", {}, role),
       el("td", {}, verbs.length > 0 ? verbs.join(", ") : "read only"),
+      el("td", {}, r.room.reports[role] ? "yes" : "no"),
       el("td", { class: "muted" }, prose.descriptions[role] ?? "")),
   );
 
@@ -56,7 +60,8 @@ export function renderJoin(
 
   const confirm = el("button", { class: "primary" }, `Join as ${r.room.your_role}`);
   const decline = el("button", {}, "Decline");
-  const status = el("p", { class: "muted" });
+  // A live region: the text below changes after the click, and a screen reader is told.
+  const status = el("p", { class: "muted", role: "status" });
   let settled = false;
   const settle = (v: Verdict) => {
     if (settled) return;
@@ -64,22 +69,21 @@ export function renderJoin(
     confirm.disabled = true;
     decline.disabled = true;
     status.textContent = "Sending to your agent…";
-    let outcome: Promise<unknown>;
+    const sent = () => {
+      status.textContent = v.kind === "confirm"
+        ? "Sent to your agent. It will call bellman_confirm with its brief."
+        : "Sent to your agent. It will not join.";
+    };
+    const refused = () => {
+      status.textContent = `Your host did not accept the message. Tell your agent: ${verdictMessage(v)}`;
+    };
+    let outcome: Promise<Delivery>;
     try {
       outcome = Promise.resolve(onVerdict(v));
     } catch (err) {
       outcome = Promise.reject(err);
     }
-    outcome.then(
-      () => {
-        status.textContent = v.kind === "confirm"
-          ? "Sent to your agent. It will call bellman_confirm with its brief."
-          : "Sent to your agent. It will not join.";
-      },
-      () => {
-        status.textContent = `Your host did not accept the message. Tell your agent: ${verdictMessage(v)}`;
-      },
-    );
+    outcome.then((answer) => (answer && answer.isError ? refused() : sent()), refused);
   };
   confirm.addEventListener("click", () => settle({
     kind: "confirm",
@@ -112,7 +116,7 @@ export function renderJoin(
     el("h2", {}, `Your seat: ${r.room.your_role}`),
     el("p", {}, seat),
     el("table", {},
-      el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Description (creator's words)"))),
+      el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Reports"), el("th", {}, "Description (creator's words)"))),
       el("tbody", {}, ...roleRows)),
     el("p", { class: "muted" },
       `${r.session.active_members} of ${r.session.max_members} seats taken, ${r.session.mode} room` +

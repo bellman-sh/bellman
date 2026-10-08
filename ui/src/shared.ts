@@ -18,6 +18,17 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+/**
+ * One call in flight at a time: a call made while one is running shares its
+ * promise. The monitor's refresh has a 15 s timer and a Refresh button behind
+ * it; two reads at once would be two bellman_rooms calls, and the older answer
+ * could land after the newer one.
+ */
+export function coalesce<T>(fn: () => Promise<T>): () => Promise<T> {
+  let inflight: Promise<T> | undefined;
+  return () => (inflight ??= fn().finally(() => { inflight = undefined; }));
+}
+
 /** "45s", "3m", "2h", "5d". */
 export function duration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));

@@ -24,7 +24,7 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
 surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.

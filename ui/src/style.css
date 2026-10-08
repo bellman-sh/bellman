@@ -30,7 +30,8 @@ tr.you td { font-weight: 600; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
 .actions { display: flex; gap: 8px; margin: 12px 0 4px; align-items: center; }
 button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+/* Text in the page's background colour: white on the light accent, near-black on the dark one, both past 4.5:1. */
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
 button:disabled { opacity: 0.5; cursor: default; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }
 fieldset label { display: block; margin: 4px 0; }

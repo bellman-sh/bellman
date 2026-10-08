@@ -11,7 +11,6 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   free: {
     modes: ["pair"],
     maxMembers: 2,
-    sessionTtlMs: 4 * 60 * 60 * 1000,
     monthlyCreates: 20,
     orgScoping: false,
     audit: false,
@@ -19,7 +18,6 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   pro: {
     modes: ["pair", "swarm"],
     maxMembers: 8,
-    sessionTtlMs: 72 * 60 * 60 * 1000,
     monthlyCreates: 500,
     orgScoping: false,
     audit: false,
@@ -29,7 +27,6 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   max: {
     modes: ["pair", "swarm"],
     maxMembers: 25,
-    sessionTtlMs: 14 * 24 * 60 * 60 * 1000,
     monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
@@ -37,7 +34,6 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   team: {
     modes: ["pair", "swarm"],
     maxMembers: 25,
-    sessionTtlMs: 30 * 24 * 60 * 60 * 1000,
     monthlyCreates: 5000,
     orgScoping: true,
     audit: true,

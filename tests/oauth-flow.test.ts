@@ -503,6 +503,15 @@ describe("the account surface", () => {
     expect(body.usage).toMatchObject({ sessions_created_this_month: 0, monthly_limit: 20, remaining: 20 });
   });
 
+  it("renders the account page without a session lifetime, because rooms persist (#18)", async () => {
+    const token = await tokenFor();
+    const res = await call("/account", { headers: { authorization: `Bearer ${token}`, accept: "text/html" } });
+    const html = await res.text();
+
+    expect(html, "control: the table is there").toContain("Modes");
+    expect(html).not.toContain("Session lifetime");
+  });
+
   it("names the operator when a plan was granted by the secret", async () => {
     const token = await tokenFor(admin);
     const res = await call("/account", { headers: { authorization: `Bearer ${token}`, accept: "application/json" } });

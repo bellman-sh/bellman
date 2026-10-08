@@ -67,7 +67,6 @@ export function session(over: Partial<Session> = {}): Session {
     orgId: "org_codenerd",
     orgOnly: false,
     joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
-    expiresAt: now + 4 * 60 * 60 * 1000,
     maxMembers: 2,
     members: [member()],
     events: [],

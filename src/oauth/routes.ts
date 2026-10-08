@@ -1095,7 +1095,6 @@ export async function handleOAuth(
         row("Sessions this month", `${used} of ${limits.monthlyCreates}`) +
         row("Modes", limits.modes.join(", ")) +
         row("Members per session", String(limits.maxMembers)) +
-        row("Session lifetime", `${Math.round(limits.sessionTtlMs / 3_600_000)} hours`) +
         `</table>` +
         `<p>Joining a session is free on every plan. Only creating one is limited.</p>`
     );

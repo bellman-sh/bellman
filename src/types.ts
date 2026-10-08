@@ -121,7 +121,9 @@ export interface Session {
    * gives: two fields for one fact could disagree.
    */
   joinCodes: Record<string, JoinCodeRecord>;
-  expiresAt: number;            // whole-session TTL
+  // There is no `expiresAt`: rooms persist (#18). A room ends when its last
+  // member leaves or when nobody has been in it for ABANDONED_AFTER_MS, and
+  // that time is derived from the members (`abandonedAt`), never stored.
   maxMembers: number;
   members: Member[];
   events: SessionEvent[];
@@ -183,7 +185,6 @@ export interface PlanGrant {
 export interface Entitlements {
   modes: SessionMode[];
   maxMembers: number;
-  sessionTtlMs: number;
   monthlyCreates: number;
   orgScoping: boolean;
   audit: boolean;

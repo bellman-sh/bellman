@@ -636,6 +636,8 @@ describe("INVARIANT 10 — every room is declared", () => {
       manifest: { room: "r", preset: "swarm" },
     });
     expect(res.isError, res.text).toBe(false);
+    // Rooms persist (#18): nothing on the return says when the room ends.
+    expect(res.data).not.toHaveProperty("session_expires_at");
     const session = await h.store.getSession(String(res.data.session_id));
     expect(session?.manifest.mode).toBe("swarm");
     expect(session?.maxMembers).toBeGreaterThan(2);

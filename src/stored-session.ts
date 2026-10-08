@@ -65,7 +65,7 @@ export interface StoredSession extends Omit<Session, "events"> {
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Five changes to the stored shape landed after the sessions now in production
+ * Six changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -92,8 +92,11 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
+ * - **expiresAt** (#18) is stripped. Rooms persist, so a missing clock is the
+ *   state every row is in now; a stored one would be a field the type forbids,
+ *   read by nothing.
  *
- * All five live here, in one gate, rather than in separate functions that could drift.
+ * All six live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -103,8 +106,8 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
 
   const {
-    joinCode, joinCodeExpiresAt, ...row
-  } = raw as StoredSession & { joinCode?: string | null; joinCodeExpiresAt?: number };
+    joinCode, joinCodeExpiresAt, expiresAt: _clock, ...row
+  } = raw as StoredSession & { joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number };
 
   return {
     ...row,

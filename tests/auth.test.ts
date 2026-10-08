@@ -96,9 +96,6 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.free.maxMembers).toBeLessThan(ENTITLEMENTS.pro.maxMembers);
     expect(ENTITLEMENTS.pro.maxMembers).toBeLessThan(ENTITLEMENTS.max.maxMembers);
     expect(ENTITLEMENTS.max.maxMembers).toBeLessThanOrEqual(ENTITLEMENTS.team.maxMembers);
-    expect(ENTITLEMENTS.free.sessionTtlMs).toBeLessThan(ENTITLEMENTS.pro.sessionTtlMs);
-    expect(ENTITLEMENTS.pro.sessionTtlMs).toBeLessThan(ENTITLEMENTS.max.sessionTtlMs);
-    expect(ENTITLEMENTS.max.sessionTtlMs).toBeLessThan(ENTITLEMENTS.team.sessionTtlMs);
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
     expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
     expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
@@ -106,7 +103,6 @@ describe("plan entitlements", () => {
 
   it("gives max the team-sized room: 25 members for 14 days, 2,000 a month (#45)", () => {
     expect(ENTITLEMENTS.max.maxMembers).toBe(25);
-    expect(ENTITLEMENTS.max.sessionTtlMs).toBe(14 * 24 * 60 * 60 * 1000);
     expect(ENTITLEMENTS.max.monthlyCreates).toBe(2000);
   });
 
@@ -135,7 +131,7 @@ describe("plan entitlements", () => {
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit",
+      "modes", "maxMembers", "monthlyCreates", "orgScoping", "audit",
     ].sort();
 
     for (const plan of plans) {

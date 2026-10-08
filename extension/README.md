@@ -43,8 +43,9 @@ Existing `.dxt` files still install. New bundles should be `.mcpb`. This
 manifest targets `manifest_version` **0.3**, which is what the current CLI
 validates against — `mcpb pack` prints *"Manifest schema validation passes"*
 and refuses to pack otherwise, so a stale manifest fails loudly rather than
-shipping broken. CI runs that same check (`mcpb validate`) on every push, so a
-manifest that could not pack fails there rather than during a release.
+shipping broken. CI packs a bundle from every PR (`./extension/build.sh --from .`),
+so a manifest that could not pack, or a server the bundle could not start, fails
+there rather than during a release.
 
 ## What a Bellman bundle needs
 
@@ -53,21 +54,26 @@ server's runtime dependencies. Bellman's is:
 
 ```
 manifest.json           manifest_version 0.3, version synced to the package
-package.json            pins @modelcontextprotocol/sdk only
+package.json            the package's dependencies, copied whole
 server/                 dist/ — from the npm tarball, or from this checkout
   channel.js            entry point — the stdio bridge
-node_modules/           the SDK and its transitive deps
+node_modules/           those, installed --omit=dev, checked against the server's imports
 ```
 
 Four decisions are worth explaining.
 
-**1. It bundles the SDK and nothing else.** The published package declares
-`express` and `zod` as dependencies, but `dist/channel.js` reaches only for
-`@modelcontextprotocol/sdk` — express serves the standalone server and zod
-builds its schemas, neither of which this stdio bridge runs. Installing all
-three roughly triples the bundle, so `build.sh` writes a minimal
-`package.json` for the staging directory rather than installing the package
-itself. The SDK range is read from the package, never hardcoded here.
+**1. It bundles every dependency the package declares, then checks the
+artifact.** The staging `package.json` once pinned `@modelcontextprotocol/sdk`
+alone, on the reading that `dist/channel.js` reached nothing else: express
+serves the standalone server, zod builds its schemas. That stopped being true
+when `src/bridge.ts` began reading `.bellman/room.yaml` through `yaml`, and
+nothing noticed — the v0.3.0 bundle died at its first import, and all Claude
+Desktop showed was *Server disconnected*. `build.sh` now copies the package's
+`dependencies` verbatim (the SDK already depends on express and zod, so the
+only addition is `yaml`), then runs `extension/check-deps.mjs`: it walks the
+imports of the staged server from `server/channel.js` and refuses to pack if
+any package is missing from the stage's `node_modules`. The npm package was
+never affected; it declares `yaml` and always did.
 
 **2. `BELLMAN_DELIVERY` is set to `hook`, not `channel`.** The bridge has two
 delivery modes. `channel` pushes peer events into the session as
@@ -155,12 +161,12 @@ From the repository root:
 ```bash
 npx @anthropic-ai/mcpb validate extension/manifest.json  # schema check, no build
 npm test -- tests/extension.test.ts                      # tool list matches the bridge
-./extension/build.sh --from .                            # stage and pack
+./extension/build.sh --from .                            # stage, check imports, pack
 npx @anthropic-ai/mcpb info extension/dist/bellman.mcpb   # inspect the result
 ```
 
-Last known-good build: **4.0 MB**, 2,424 files, v0.3.0 from this checkout,
-manifest schema validation passes.
+Last known-good build: **4.2 MB**, 2,579 files, v0.3.1 from this checkout,
+imports checked, manifest schema validation passes.
 
 To sign it once there is a certificate to sign with, `mcpb sign` and
 `mcpb verify` are in the same CLI.

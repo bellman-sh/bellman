@@ -47,9 +47,10 @@ stays until someone with the right to delete it does.
 when `closed` is set and the window is finite, derived from the record like
 `abandoned` is, so rooms closed before this shipped get their alarm the first time
 their object wakes. `derivedDue` answers nothing for a closed room today; the
-purge is the one thing a closed room still owes. `closedAt` is recorded wherever `closed` is set; a record
-that has `closed` and no `closedAt` reads `closedAt` as the moment it is first
-seen, and the window counts from there.
+purge is the one thing a closed room still owes. `closedAt` is recorded wherever `closed` is set. A record
+closed before this shipped has neither a window nor a `closedAt`, and is kept:
+deletion is the one irreversible act here, and no plan promised those rooms a
+clock. Delete on demand (D6) reaches them.
 
 When it fires: list and delete the room's R2 prefix in batches; enqueue, on
 the outbox, `forget(sessionId)` to the registry and `room_purged` to the audit

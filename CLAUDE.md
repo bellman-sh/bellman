@@ -88,8 +88,10 @@ or *peers*, where a peer is any other member rather than a counterpart.
   surface — the server's tools plus the bridge's own — so the manifest cannot
   silently fall behind. It already had: the list was missing `bellman_whoami`.
 - **`src/ui/assets.ts` is generated and gitignored.** Edit `ui/`, never the generated
-  file; every script that compiles or runs the server runs `build:ui` first, so a fresh
-  clone's `npm test` builds it. A page that reaches data does so by calling tools, never
+  file; every script that compiles or runs the server runs `build:ui` first, and wrangler
+  runs it itself through `[build]` in `wrangler.toml`, so a fresh clone's `npm test` builds
+  it and so does a bare `wrangler deploy`. Before that hook, #193 passed every check and
+  failed to deploy. A page that reaches data does so by calling tools, never
   `bellman_sync`: through the bridge that would count as the agent having read the events.
 
 ## Testing

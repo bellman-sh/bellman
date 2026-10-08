@@ -53,8 +53,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "verify": "npm run typecheck:ui && npm run typecheck && npm run typecheck:worker && npm run build && npm test && npm run test:worker",
     "typecheck:worker": "npm run build:ui && tsc -p tsconfig.worker.json",
-    "dev:worker": "npm run build:ui && wrangler dev",
-    "deploy": "npm run build:ui && wrangler deploy",
+    "dev:worker": "wrangler dev",
+    "deploy": "wrangler deploy",
     "rotate-key": "tsx scripts/rotate-key.ts",
     "grant-plan": "tsx scripts/grant-plan.ts",
     "prepublishOnly": "npm run verify && npm run typecheck:worker"

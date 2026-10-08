@@ -22,6 +22,12 @@ jobs:
 
       - run: npm ci
 
+      # The deploy job's path, on every PR: a fresh checkout, npm ci, and wrangler
+      # bundling the Worker with nothing run before it. #193 passed every step
+      # below and failed in deploy, because src/ui/assets.ts is generated and
+      # only the npm scripts had built it. --dry-run needs no credentials.
+      - run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
+
       # Two programs, two typechecks: the Node server, and the Worker, whose
       # files are excluded from the Node build because they import
       # cloudflare:workers.

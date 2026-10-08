@@ -6,6 +6,15 @@ compatibility_date = "2026-09-01"
 # few node builtins. nodejs_compat covers both.
 compatibility_flags = ["nodejs_compat"]
 
+# The page the MCP Apps resource serves is a generated module, src/ui/assets.ts
+# (gitignored; `npm run build:ui` is its only writer). Built here rather than
+# only in the npm scripts, so every path that bundles the Worker has it:
+# `wrangler deploy` from CI, `wrangler dev`, `wrangler versions upload`. #193
+# passed every check and failed to deploy because CI calls wrangler directly.
+[build]
+command = "npm run build:ui"
+watch_dir = ["src", "ui/src"]
+
 # account_id comes from CLOUDFLARE_ACCOUNT_ID in the environment, so this
 # file carries no account identifiers.
 

@@ -18,7 +18,14 @@ function memberRow(m: MemberRow, now: number): HTMLTableRowElement {
   );
 }
 
-function roomCard(room: RoomSummary, seen: Map<string, number>, now: number): HTMLElement {
+/** The room's canvas, one bellman_surface call away (canvas spec, "The canvas screen"). */
+function surfaceButton(sessionId: string, onSurface: (sessionId: string) => void): HTMLElement {
+  const button = el("button", {}, "Surface");
+  button.addEventListener("click", () => onSurface(sessionId));
+  return el("div", { class: "actions" }, button);
+}
+
+function roomCard(room: RoomSummary, seen: Map<string, number>, now: number, onSurface?: (sessionId: string) => void): HTMLElement {
   const latest = room.last_event?.cursor ?? 0;
   if (!seen.has(room.session_id)) seen.set(room.session_id, latest);
   const fresh = Math.max(0, latest - seen.get(room.session_id)!);
@@ -42,19 +49,26 @@ function roomCard(room: RoomSummary, seen: Map<string, number>, now: number): HT
       el("thead", {}, el("tr", {}, el("th", {}, "Member"), el("th", {}, "Presence"), el("th", {}, "Last beat"), el("th", {}, "Said"))),
       el("tbody", {}, ...room.members.map((m) => memberRow(m, now)))),
     codes.length > 0 ? el("ul", { class: "codes" }, ...codes) : el("p", { class: "muted" }, "No live join code."),
+    onSurface ? surfaceButton(room.session_id, onSurface) : null,
     el("p", { class: "muted" },
       room.last_event ? `Last event: ${room.last_event.type}, ${relative(room.last_event.at, now)}.` : "No events yet."),
   );
 }
 
-export function renderMonitor(r: RoomsResult, seen: Map<string, number>, onRefresh: () => void, now = Date.now()): HTMLElement {
+export function renderMonitor(
+  r: RoomsResult,
+  seen: Map<string, number>,
+  onRefresh: () => void,
+  now = Date.now(),
+  onSurface?: (sessionId: string) => void,
+): HTMLElement {
   const refresh = el("button", {}, "Refresh");
   refresh.addEventListener("click", onRefresh);
   const count = r.rooms.length;
   return el("section", { class: "monitor" },
     el("div", { class: "actions" }, el("h1", {}, `${count} room${count === 1 ? "" : "s"}`), refresh),
     ...(count > 0
-      ? r.rooms.map((room) => roomCard(room, seen, now))
+      ? r.rooms.map((room) => roomCard(room, seen, now, onSurface))
       : [el("p", { class: "muted" }, "You are in no rooms. Ask your agent to start one, or to join with a code.")]),
   );
 }

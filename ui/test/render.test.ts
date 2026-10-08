@@ -126,6 +126,15 @@ describe("verdictMessage", () => {
 });
 
 describe("renderMonitor", () => {
+  it("offers a Surface button per room that asks for that room's canvas, when a handler is given", () => {
+    const asked: string[] = [];
+    const node = renderMonitor(roomsFixture(), new Map(), () => {}, NOW, (id) => { asked.push(id); });
+    const surface = [...node.querySelectorAll("button")].find((b) => b.textContent === "Surface")!;
+    surface.click();
+    expect(asked).toEqual(["qs_1"]);
+    expect([...renderMonitor(roomsFixture(), new Map(), () => {}, NOW).querySelectorAll("button")].map((b) => b.textContent)).not.toContain("Surface");
+  });
+
   it("shows each room with its members, their roles, presence and beats", () => {
     const node = renderMonitor(roomsFixture(), new Map(), () => {}, NOW);
     const t = node.textContent!;

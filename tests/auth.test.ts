@@ -88,22 +88,24 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.modes).toContain("swarm");
   });
 
-  /**
-   * max buys team's room size for one person, so members may tie at the top;
-   * lifetime and quota still step up to team.
-   */
-  it("raises member ceilings, TTLs and quotas monotonically by plan", () => {
-    expect(ENTITLEMENTS.free.maxMembers).toBeLessThan(ENTITLEMENTS.pro.maxMembers);
-    expect(ENTITLEMENTS.pro.maxMembers).toBeLessThan(ENTITLEMENTS.max.maxMembers);
-    expect(ENTITLEMENTS.max.maxMembers).toBeLessThanOrEqual(ENTITLEMENTS.team.maxMembers);
+  /** max sells creates between pro and team; nothing else steps. */
+  it("raises quotas monotonically by plan", () => {
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
     expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
     expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
   });
 
-  it("gives max the team-sized room: 25 members for 14 days, 2,000 a month (#45)", () => {
-    expect(ENTITLEMENTS.max.maxMembers).toBe(25);
-    expect(ENTITLEMENTS.max.monthlyCreates).toBe(2000);
+  /**
+   * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
+   * differs from pro by creates alone; hosted agents (#188, #189) are the facet
+   * that will set it apart, and landing one is a deliberate edit to this line.
+   */
+  it("gives max nothing but creates over pro, until it has a facet", () => {
+    const { monthlyCreates: maxCreates, ...maxRest } = ENTITLEMENTS.max;
+    const { monthlyCreates: proCreates, ...proRest } = ENTITLEMENTS.pro;
+    expect(maxRest).toEqual(proRest);
+    expect(maxCreates).toBe(2000);
+    expect(proCreates).toBe(500);
   });
 
   /** The reason a company with several people creating rooms still buys team. */
@@ -131,7 +133,7 @@ describe("plan entitlements", () => {
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "maxMembers", "monthlyCreates", "orgScoping", "audit",
+      "modes", "monthlyCreates", "orgScoping", "audit",
     ].sort();
 
     for (const plan of plans) {

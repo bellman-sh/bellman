@@ -12,9 +12,9 @@ import {
   presentMembers, staleMembers,
 } from "../src/presence.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { MemoryStore, seatVictims, stampSeen } from "../src/store.js";
+import { MemoryStore, ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/store.js";
 import type { Identity } from "../src/types.js";
-import { member, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
@@ -241,7 +241,7 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     expect(second.refused).toBe("full");
     expect(second.reclaimed).toEqual([]);
     const room = await read();
-    expect(seatedMembers(room)).toHaveLength(room.maxMembers);
+    expect(seatedMembers(room)).toHaveLength(2);
     expect(room.members.filter((m) => m.leftAt !== null)).toHaveLength(1);
   });
 
@@ -280,18 +280,6 @@ describe("seatMember claims the seat and frees it in one operation", () => {
   it("refuses a session that does not exist", async () => {
     expect(await store.seatMember("qs_nope", joiner(), 0, Date.now()))
       .toEqual({ refused: "not_found", reclaimed: [], codesCleared: false });
-  });
-
-  it("does not close the room when it reclaims its last member", async () => {
-    await store.createSession(session({
-      maxMembers: 1, members: [member({ memberId: "m_only", lastSeenAt: 1 })],
-    }));
-
-    expect((await seat()).reclaimed.map((m) => m.memberId)).toEqual(["m_only"]);
-
-    // The joiner is seated in the same operation, so the room is never empty.
-    expect((await read()).closed).toBe(false);
-    expect(seatedMembers(await read()).map((m) => m.memberId)).toEqual(["m_late"]);
   });
 
   it("leaves the join code alone when the reclaim does not fill the room — freeing the seat is the whole point", async () => {
@@ -764,5 +752,18 @@ describe("stampSeen", () => {
     const stamped = stampSeen(roster, NOW);
     expect(roster[0].lastSeenAt).toBe(1);
     expect(stamped[0]).not.toBe(roster[0]);
+  });
+});
+
+describe("capacity is the manifest's (#18)", () => {
+  it("is two for a pair room and the ceiling for a swarm room", () => {
+    expect(capacityOf(roomManifest())).toBe(2);
+    expect(capacityOf(roomManifest({ mode: "swarm" }))).toBe(ROOM_MEMBER_CEILING);
+  });
+
+  it("puts the ceiling at 100, which a room of maximal briefs keeps under one stored value", () => {
+    // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
+    // of a 2 MB Durable Object value. 250 would be 3.7 MB.
+    expect(ROOM_MEMBER_CEILING).toBe(100);
   });
 });

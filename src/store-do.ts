@@ -11,8 +11,8 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  ABANDONED_AFTER_MS, abandonedAt, connectedAmong, creditReport, isAbandoned, isActiveMember,
-  isRemovedMember, markRemoved, seatVictims, stampSeen,
+  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, isAbandoned,
+  isActiveMember, isRemovedMember, markRemoved, seatVictims, stampSeen,
 } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
@@ -1039,7 +1039,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // caller first could not promise that: a member can connect in the gap, and
       // reclaiming it is final.
       const connected = connectedAmong(s.members, this.#attachedIds());
-      const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
+      const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
       if (victims === null) return { refused: "full" as const, ...no };
 
       const departed = new Set(victims.map((v) => v.memberId));
@@ -1070,7 +1070,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // while holding only one therefore reports `codesCleared: true`, which answers
       // this question and does not contradict the other. The contract suite pins this
       // side, and its expired-code cases for removeMember pin the other.
-      const full = seatVictims(seated, s.maxMembers, staleBefore, connected) === null;
+      const full = seatVictims(seated, capacityOf(s.manifest), staleBefore, connected) === null;
       const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
       const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
 

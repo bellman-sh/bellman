@@ -476,6 +476,22 @@ describe("a current row is untouched by the guard", () => {
     expect((rows.session as { joinCodes: unknown }).joinCodes).toEqual({});
     expect(eventsIn(rows)).toEqual([expect.objectContaining({ type: "session_expired" })]);
   });
+
+  it("seats past a legacy cap: a swarm row stamped maxMembers 8 holds a ninth", async () => {
+    // Review Focus 5. The cap is stripped on read and capacityOf reads the mode.
+    const seats = Array.from({ length: 8 }, (_, i) => member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "peer_b" }));
+    const storage = fakeStorage({
+      session: { ...currentRow({ manifest: roomManifest({ mode: "swarm", preset: null }), joinCodes: {}, members: seats }), maxMembers: 8 },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    const ninth = await doi.seatMember(member({ memberId: "m_9", userId: "u_9", roomRole: "peer_b" }), 1, Date.now());
+
+    expect(ninth.refused).toBeNull();
+    expect((await doi.getSession())!.members).toHaveLength(9);
+    expect(await doi.getSession()).not.toHaveProperty("maxMembers");
+  });
 });
 
 describe("closing a session drops its registry rows", () => {

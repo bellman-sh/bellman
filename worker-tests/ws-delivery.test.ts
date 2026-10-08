@@ -244,7 +244,7 @@ const mine = (memberId: string, over: Partial<Member> = {}) =>
  */
 const roomOf = (...seats: Member[]) =>
   room(`qs_removal_${++removals}`, {
-    createdBy: "u_boss", joinCodes: {}, maxMembers: 4, members: [boss(), ...seats],
+    createdBy: "u_boss", joinCodes: {}, members: [boss(), ...seats],
   });
 
 /** The creator speaking: what the member removed must stop hearing. */

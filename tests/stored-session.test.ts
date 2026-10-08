@@ -150,4 +150,10 @@ describe("hydrateStoredSession — a record stored with a clock", () => {
     const row = hydrateStoredSession({ ...raw, expiresAt: 1 })!;
     expect(row).not.toHaveProperty("expiresAt");
   });
+
+  it("strips maxMembers, so capacity is the manifest's from the next read", () => {
+    const { events: _events, ...raw } = session();
+    const row = hydrateStoredSession({ ...raw, maxMembers: 8 })!;
+    expect(row).not.toHaveProperty("maxMembers");
+  });
 });

@@ -1,5 +1,6 @@
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType, SurfaceRow,
+  AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
+  SurfaceRow,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
@@ -389,12 +390,12 @@ export interface SeatOutcome {
  */
 export function seatVictims(
   members: Member[],
-  maxMembers: number,
+  cap: number,
   staleBefore: number,
   connected: ReadonlySet<string> = NO_SOCKETS,
 ): Member[] | null {
   const active = members.filter(isActiveMember);
-  const needed = active.length - maxMembers + 1;
+  const needed = active.length - cap + 1;
   if (needed <= 0) return [];
   // Longest-quiet first: if only one seat has to go, it is the one whose member
   // has been gone longest.
@@ -1068,7 +1069,7 @@ export class MemoryStore implements BellmanStore {
     if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
-    const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
+    const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
     if (victims === null) return { refused: "full", reclaimed: [], codesCleared: false };
 
     const reclaimed: Member[] = [];
@@ -1101,7 +1102,7 @@ export class MemoryStore implements BellmanStore {
     // `codesCleared: true`, which answers this question and does not contradict the
     // other. The contract suite pins this side, and its expired-code cases for
     // removeMember pin the other.
-    const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
+    const full = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected) === null;
     const codes = full ? Object.values(s.joinCodes) : [];
     if (full) {
       for (const rec of codes) this.byJoinCode.delete(rec.code);
@@ -1720,6 +1721,30 @@ export class MemoryStore implements BellmanStore {
  * the budget is reached long before anything is at risk of being refused.
  */
 export const SWEEP_RPC_BUDGET = 300;
+
+/**
+ * How many members one room holds, on every plan that can start a swarm (#18).
+ *
+ * A ceiling, not a plan fact. A room is one value in SQLite-backed Durable Object
+ * storage, members and briefs included (events and surface rows are separate,
+ * #25), and a value holds 2 MB. A brief at the schema's maximum (src/tools/kit.ts:
+ * goal 500, state 2,000, twenty constraints and twenty open questions of 300) is
+ * 14,710 characters; 100 of them are 1.47 MB, under the limit with room for the
+ * manifest and the codes. 250 would be 3.7 MB. Two-byte text at the maximum in
+ * every brief of a full room is the remaining gap, and the transaction turns it
+ * into one failed join rather than a broken room. Reaching this is the trigger
+ * for moving members to rows of their own, which is what lifts it.
+ */
+export const ROOM_MEMBER_CEILING = 100;
+
+/**
+ * How many members this room holds. A `pair` room holds two because the preset
+ * says so; a `swarm` room holds as many as its creator invites, up to the
+ * ceiling. Derived from the manifest and never stored, for the rule written on
+ * the Session type: two fields for one fact could disagree.
+ */
+export const capacityOf = (manifest: RoomManifest): number =>
+  manifest.mode === "pair" ? 2 : ROOM_MEMBER_CEILING;
 
 export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
 export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

@@ -124,7 +124,8 @@ export interface Session {
   // There is no `expiresAt`: rooms persist (#18). A room ends when its last
   // member leaves or when nobody has been in it for ABANDONED_AFTER_MS, and
   // that time is derived from the members (`abandonedAt`), never stored.
-  maxMembers: number;
+  // There is no `maxMembers` either: capacity is `capacityOf(manifest)`, two
+  // for a pair room and the ceiling for a swarm.
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
@@ -184,7 +185,6 @@ export interface PlanGrant {
 
 export interface Entitlements {
   modes: SessionMode[];
-  maxMembers: number;
   monthlyCreates: number;
   orgScoping: boolean;
   audit: boolean;

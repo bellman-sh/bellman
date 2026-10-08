@@ -92,9 +92,10 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
- * - **expiresAt** (#18) is stripped. Rooms persist, so a missing clock is the
- *   state every row is in now; a stored one would be a field the type forbids,
- *   read by nothing.
+ * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
+ *   clock is the state every row is in now, and capacity is `capacityOf(manifest)`,
+ *   so a stored cap would be the stale mirror the Session type forbids. A swarm
+ *   room created under an 8- or 25-member cap holds the ceiling from its next read.
  *
  * All six live here, in one gate, rather than in separate functions that could drift.
  */
@@ -106,8 +107,10 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
 
   const {
-    joinCode, joinCodeExpiresAt, expiresAt: _clock, ...row
-  } = raw as StoredSession & { joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number };
+    joinCode, joinCodeExpiresAt, expiresAt: _clock, maxMembers: _cap, ...row
+  } = raw as StoredSession & {
+    joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number; maxMembers?: number;
+  };
 
   return {
     ...row,

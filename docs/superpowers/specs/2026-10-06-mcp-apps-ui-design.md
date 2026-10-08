@@ -353,6 +353,8 @@ the bridge in Desktop.
 - `visibility: ["app"]` and extension negotiation (D2).
 - Outstanding action requests in the monitor; they ride `bellman_sync`.
 - The dash panel. It shares `projections.ts`, not this iframe.
+- The working surface as a canvas: `2026-10-08-mcp-apps-canvas-design.md`
+  (2026-10-08), which added `bellman_surface` and the third screen.
 - Claude Code's terminal, which keeps the text.
 
 ## Acceptance

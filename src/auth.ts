@@ -89,6 +89,41 @@ function envKeys(): string | undefined {
     : undefined;
 }
 
+const ROLES: ReadonlySet<string> = new Set(["member", "admin"]);
+
+/**
+ * Whether a value read from a key table is an identity: every field present
+ * with its declared type, the plan one this server prices, the role one it
+ * knows. A key map is operator-written JSON, and a value that is not an
+ * identity (a string, a partial object, a plan nobody defined) must not become
+ * a caller whose undefined fields every later check reads as unrestricted.
+ */
+export function isIdentity(v: unknown): v is Identity {
+  if (typeof v !== "object" || v === null) return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.userId === "string" && o.userId.length > 0
+    && (typeof o.orgId === "string" || o.orgId === null)
+    && typeof o.plan === "string" && Object.hasOwn(ENTITLEMENTS, o.plan)
+    && typeof o.role === "string" && ROLES.has(o.role)
+    && typeof o.label === "string"
+  );
+}
+
+/**
+ * The one way a token reads a key table. Both tables are plain objects, and a
+ * plain object answers for every name on Object.prototype: `table[token]` with
+ * a bearer of `constructor` once returned the Object function, non-null, and it
+ * passed as an identity with every field undefined. Own keys only, and only
+ * values that are identities.
+ */
+function lookup(table: unknown, token: string): Identity | null {
+  if (typeof table !== "object" || table === null) return null;
+  if (!Object.hasOwn(table, token)) return null;
+  const v = (table as Record<string, unknown>)[token];
+  return isIdentity(v) ? v : null;
+}
+
 export function resolveIdentity(
   authHeader: string | undefined,
   keysJson?: string
@@ -105,8 +140,7 @@ export function resolveIdentity(
   const fromEnv = keysJson ?? envKeys(); // JSON map of key -> identity
   if (fromEnv) {
     try {
-      const parsed = JSON.parse(fromEnv) as Record<string, Identity>;
-      return parsed[token] ?? null;
+      return lookup(JSON.parse(fromEnv), token);
     } catch {
       // Fail closed. A malformed key map must reject every request rather
       // than silently downgrade the server to the dev identities.
@@ -115,7 +149,7 @@ export function resolveIdentity(
     }
   }
 
-  return DEV_KEYS[token] ?? null;
+  return lookup(DEV_KEYS, token);
 }
 
 export function entitlementsFor(identity: Identity): Entitlements {

@@ -65,7 +65,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
       // Seated, not active: a room held full by a session that died is
-      // previewable rather than refused here and at every retry until its TTL
+      // previewable rather than refused here and at every retry for good
       // (#103). This only counts. The stale seat is reclaimed by the
       // bellman_confirm that follows, so a preview removes nobody — which is the
       // rule whether or not the annotation claims read-only (it no longer does,

@@ -5,8 +5,12 @@
  * nothing into a room that cannot answer.
  */
 import { it, expect, afterEach } from "vitest";
-import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
+import {
+  env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
+} from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
+import type { Member } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
@@ -73,7 +77,7 @@ const nameTheTick = (i: SessionDO) => {
 };
 
 /**
- * Review Focus 1. #tickIfDue mirrors #expireIfDue, which calls #writeEvent
+ * Review Focus 1. #tickIfDue mirrors #closeIfAbandoned, which calls #writeEvent
  * DIRECTLY and so bypasses appendEvent's frozen guard. A naive copy writes a
  * tick into a frozen room and names members silent who cannot report out of it.
  * A freeze must cost nobody their standing.
@@ -172,9 +176,9 @@ it("arms nothing for a room whose roles ask for no reports", async () => {
   await runInDurableObject(
     env.SESSION.get(env.SESSION.idFromName("qs_none")),
     async (_i: SessionDO, ctx) => {
-      // Only the TTL, which is the session's expiry and not a tick.
-      const s = await ctx.storage.get<{ expiresAt: number }>("session");
-      expect(await ctx.storage.getAlarm()).toBe(s!.expiresAt);
+      // Only the abandonment time, which is not a tick.
+      const s = await ctx.storage.get<{ closed: boolean; frozenAt: number | null; members: Member[] }>("session");
+      expect(await ctx.storage.getAlarm()).toBe(abandonedAt(s!));
     },
   );
 });
@@ -239,34 +243,30 @@ it("writes no tick into a closed room even when the alarm names it", async () =>
 });
 
 /**
- * Push `expiresAt` into the past, as a room does by outliving its TTL between two
- * firings. Raw rows, and the room stays OPEN: `#expireIfDue` is what closes it,
+ * Push every member's `lastSeenAt` back, as a room does by sitting idle between two
+ * firings. Raw rows, and the room stays OPEN: `#closeIfAbandoned` is what closes it,
  * and this is the state the alarm finds before it has.
  */
-const lapseRoom = (stub: DurableObjectStub, expiresAt: number) =>
+const lapseRoom = (stub: DurableObjectStub, lastSeenAt: number) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
     const s = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", { ...s, expiresAt });
+    await ctx.storage.put("session", {
+      ...s, members: (s!.members as Member[]).map((m) => ({ ...m, lastSeenAt })),
+    });
   });
 
 /**
- * The expired room, and the only one of the three guards the ORDINARY path
- * reaches — no `nameTheTick` here, because nothing has to be told anything.
- *
- * `derivedDue` refuses a tick to a frozen or closed room, so those two guards are
- * on trial only when the alarm is told. An expired room is different: it is not
- * closed until `#expireIfDue` closes it, so `derivedDue` hands back BOTH names,
- * `dueNames` sorts them, and "heartbeat" sorts before "ttl". A firing delayed past
- * `expiresAt` therefore ran the tick first — appending and waking every watcher on
- * a room the very next iteration of that same loop closed. Members cannot answer
- * an expired room: every send into it is refused.
+ * `derivedDue` hands back both names, `dueNames` sorts them, and `abandoned` sorts
+ * before `heartbeat`, so the close runs first and the tick finds a closed room. That
+ * order is an accident of the alphabet; the guard the next case puts on trial is what
+ * holds if it changes.
  */
-it("writes no tick into a room past its TTL, which the alarm closes in the same firing", async () => {
+it("writes no tick into an abandoned room, which the alarm closes in the same firing", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(room("qs_lapsed"));
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_lapsed"));
   await ageRoom(stub);
-  await lapseRoom(stub, Date.now() - 1_000);
+  await lapseRoom(stub, Date.now() - ABANDONED_AFTER_MS - 1_000);
 
   await runInDurableObject(stub, (i: SessionDO) => i.alarm());
 
@@ -279,24 +279,39 @@ it("writes no tick into a room past its TTL, which the alarm closes in the same 
   expect(after.events.filter((e) => e.type === "session_expired")).toHaveLength(1);
 });
 
+it("writes no tick into an abandoned room even when the alarm names the tick alone", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_abandoned_tick"));
+  const stub = env.SESSION.get(env.SESSION.idFromName("qs_abandoned_tick"));
+  await ageRoom(stub);
+  await lapseRoom(stub, Date.now() - ABANDONED_AFTER_MS - 1_000);
+
+  await fireNamedTick(stub);
+
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  // Only the tick ran, so the guard, not the close, is what refused it.
+  expect(after.events.filter((e) => e.type === "session_expired")).toEqual([]);
+});
+
 /**
- * A room whose TTL is still ahead of it ticks as it always did, which is what says
- * the guard above refuses the lapsed room and not every room with a TTL. "appends
- * a tick from the server" is the same reading on the default expiry; this one puts
- * the expiry close enough to be the thing under test.
+ * A room whose window is still ahead of it ticks as it always did, which is what says
+ * the guard above refuses the abandoned room and not every room with a window.
+ * "appends a tick from the server" is the same reading on a fresh window; this one
+ * puts the window's end close enough to be the thing under test.
  *
- * The `>` / `>=` boundary itself is NOT pinned here, deliberately. `#expireIfDue`
- * acts only once `now` is past `expiresAt` and this guard matches it, but `alarm()`
+ * The `>` / `>=` boundary itself is NOT pinned here, deliberately. `#closeIfAbandoned`
+ * acts only once `now` is past `abandonedAt` and this guard matches it, but `alarm()`
  * reads its own clock, so no test outside the object can hold `now` equal to
- * `expiresAt` — and an assertion that cannot be made to fail for its own reason is
+ * `abandonedAt` — and an assertion that cannot be made to fail for its own reason is
  * worth less than the comment saying why.
  */
-it("still ticks a room whose expiry is ahead of it", async () => {
+it("still ticks a room whose window is still ahead of it", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(room("qs_before_expiry"));
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_before_expiry"));
   await ageRoom(stub);
-  await lapseRoom(stub, Date.now() + 30_000);
+  await lapseRoom(stub, Date.now() - ABANDONED_AFTER_MS + 30_000);
 
   await runInDurableObject(stub, (i: SessionDO) => i.alarm());
 
@@ -382,10 +397,11 @@ const joinerReports = roomManifest({
 
 /**
  * `joinCodes: {}` on purpose. A code would be queued for retirement when the seat
- * fills the room, and `enqueue` arms the alarm for that queue, sooner than the TTL,
- * which is all these assertions compare the alarm with. That is how a `pair` room
- * masks a missing arming. A room with no code to retire queues nothing, so nothing
- * arms the alarm as a side effect and the arming has to be the seating's own.
+ * fills the room, and `enqueue` arms the alarm for that queue, sooner than the
+ * abandonment time, which is all these assertions compare the alarm with. That is
+ * how a `pair` room masks a missing arming. A room with no code to retire queues
+ * nothing, so nothing arms the alarm as a side effect and the arming has to be the
+ * seating's own.
  */
 const swarm = (id: string, over = {}) =>
   session({
@@ -399,33 +415,33 @@ const swarm = (id: string, over = {}) =>
 const helper = (memberId: string) =>
   member({ memberId, userId: "u_helper", roomRole: "helper", label: `${memberId}@b` });
 
-const alarmAndExpiry = (stub: DurableObjectStub) =>
-  runInDurableObject(stub, async (_i: SessionDO, ctx) => ({
-    alarm: await ctx.storage.getAlarm(),
-    expiresAt: (await ctx.storage.get<{ expiresAt: number }>("session"))!.expiresAt,
-  }));
+const alarmAndAbandonment = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const row = await ctx.storage.get<{ closed: boolean; frozenAt: number | null; members: Member[] }>("session");
+    return { alarm: await ctx.storage.getAlarm(), abandonedAt: abandonedAt(row!)! };
+  });
 
 /**
  * **The regression test for this feature's headline behaviour.** Without the
  * arming, a room whose creator does not report never ticks at all: createSession
- * arms the TTL only, no later join arms the tick, and the next thing to touch the
- * alarm is the TTL firing, which closes the room.
+ * arms the abandonment time only, no later join arms the tick, and the next thing to
+ * touch the alarm is the abandonment time firing, which closes the room.
  */
 it("arms the tick when the member who answers it is seated", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(swarm("qs_seat_arms"));
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_seat_arms"));
 
-  // Nobody reports yet, so nextTickAt is null and only the TTL is armed.
-  const before = await alarmAndExpiry(stub);
-  expect(before.alarm).toBe(before.expiresAt);
+  // Nobody reports yet, so nextTickAt is null and only the abandonment time is armed.
+  const before = await alarmAndAbandonment(stub);
+  expect(before.alarm).toBe(before.abandonedAt);
 
   const seated = await store.seatMember("qs_seat_arms", helper("m_helper"), 0, Date.now());
   expect(seated.refused).toBe(null);
 
-  // A cadence is minutes; the TTL is hours. The tick is now the sooner of the two.
-  const after = await alarmAndExpiry(stub);
-  expect(after.alarm).toBeLessThan(after.expiresAt);
+  // A cadence is minutes; the abandonment time is days. The tick is now the sooner of the two.
+  const after = await alarmAndAbandonment(stub);
+  expect(after.alarm).toBeLessThan(after.abandonedAt);
   expect(after.alarm).toBeGreaterThan(Date.now());
 });
 
@@ -435,13 +451,13 @@ it("arms the tick when a reporting member is added", async () => {
   await store.createSession(swarm("qs_add_arms"));
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_add_arms"));
 
-  const before = await alarmAndExpiry(stub);
-  expect(before.alarm).toBe(before.expiresAt);
+  const before = await alarmAndAbandonment(stub);
+  expect(before.alarm).toBe(before.abandonedAt);
 
   expect(await store.addMember("qs_add_arms", helper("m_added"))).toBe(true);
 
-  const after = await alarmAndExpiry(stub);
-  expect(after.alarm).toBeLessThan(after.expiresAt);
+  const after = await alarmAndAbandonment(stub);
+  expect(after.alarm).toBeLessThan(after.abandonedAt);
 });
 
 /**
@@ -497,7 +513,7 @@ it("leaves a prompt member's own deadline armed after an overdue member forced a
   // **The line this test exists for.** One cadence after the REPORT, which is a
   // second before one cadence after this firing — not the boundary a whole cadence
   // further out.
-  const armed = await alarmAndExpiry(stub);
+  const armed = await alarmAndAbandonment(stub);
   expect(armed.alarm).toBeLessThan(firedAt + FIVE_MIN);
   expect(armed.alarm).toBeGreaterThanOrEqual(reportedAt + FIVE_MIN);
 });
@@ -507,12 +523,14 @@ it("leaves a prompt member's own deadline armed after an overdue member forced a
  * the tick, and clearing frozenAt is the only thing that can put it back.
  *
  * The firing between the freeze and the thaw is setup, and it is here so that the
- * premise below holds either way. A freeze does not disarm anything by itself —
- * the alarm stays pointed at the tick time it already held — so it takes a firing,
- * refused by #tickIfDue and re-armed to the TTL alone, to reach the state this
- * starts from. freezeSession re-arms directly now and would reach it without the
- * firing, but then the premise, not the conclusion, would be what failed before
- * the fix, and a test should fail on the line it is about.
+ * premise below holds. A freeze does not disarm anything by itself — the alarm
+ * stays pointed at the tick time it already held, and freezeSession's reArm()
+ * cannot move it, since a frozen room derives nothing (#18) and reArm() never
+ * clears an alarm — so it takes a firing, finding nothing due and left with no
+ * alarm, to reach the state this starts from. A real firing, through
+ * runDurableObjectAlarm, which consumes the alarm as workerd does: calling alarm()
+ * directly leaves the scheduled one where it was, and then the premise, not the
+ * conclusion, would be what failed.
  */
 it("arms the tick again when a frozen room is thawed", async () => {
   const store = new DurableObjectStore(env as never);
@@ -520,14 +538,14 @@ it("arms the tick again when a frozen room is thawed", async () => {
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_thaw"));
 
   await store.freezeSession("qs_thaw", Date.now());
-  await runInDurableObject(stub, (i: SessionDO) => i.alarm());
-  const frozen = await alarmAndExpiry(stub);
-  expect(frozen.alarm).toBe(frozen.expiresAt);
+  expect(await runDurableObjectAlarm(stub)).toBe(true);
+  const frozen = await alarmAndAbandonment(stub);
+  expect(frozen.alarm).toBeNull();
 
   await store.freezeSession("qs_thaw", null);
 
-  const thawed = await alarmAndExpiry(stub);
-  expect(thawed.alarm).toBeLessThan(thawed.expiresAt);
+  const thawed = await alarmAndAbandonment(stub);
+  expect(thawed.alarm).toBeLessThan(thawed.abandonedAt);
 });
 
 /**
@@ -543,9 +561,9 @@ it("arms, fires, and goes quiet once the seated member reports", async () => {
   const stub = env.SESSION.get(env.SESSION.idFromName("qs_chain"));
   await store.seatMember("qs_chain", helper("m_helper"), 0, Date.now());
 
-  // The tick is armed, and for the cadence rather than the TTL.
-  const armed = await alarmAndExpiry(stub);
-  expect(armed.alarm).toBeLessThan(armed.expiresAt);
+  // The tick is armed, and for the cadence rather than the abandonment time.
+  const armed = await alarmAndAbandonment(stub);
+  expect(armed.alarm).toBeLessThan(armed.abandonedAt);
 
   // Wait out one cadence, then let the armed alarm fire.
   await ageRoom(stub);
@@ -710,10 +728,10 @@ it("gives a thawed room a fresh cadence before it asks again", async () => {
   await store.freezeSession("qs_thaw_fresh", null);
 
   // A cadence out from the thaw, not from the twelve that went before it, and
-  // sooner than the TTL — so it is the tick that is armed and not the expiry.
-  const armed = await alarmAndExpiry(stub);
+  // sooner than the abandonment time — so it is the tick that is armed and not the sweep.
+  const armed = await alarmAndAbandonment(stub);
   expect(armed.alarm).toBeGreaterThanOrEqual(thawedAt + FIVE_MIN - 2_000);
-  expect(armed.alarm).toBeLessThan(armed.expiresAt);
+  expect(armed.alarm).toBeLessThan(armed.abandonedAt);
 
   // And asked now, the handler says nobody owes an answer yet.
   await fireNamedTick(stub);

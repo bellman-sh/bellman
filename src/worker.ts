@@ -265,11 +265,11 @@ export default {
       if (closed) return new Response("This room is closed", { status: 409 });
 
       // This 409 is the early one, not the guarantee. membersOf and the upgrade are
-      // two invocations of the object, so a close or the TTL alarm can land between
-      // them; SessionDO.fetch rechecks and answers 409 itself, and that response is
-      // returned here unchanged (#133). What this check is for is the 403/404
-      // distinction above, which the object cannot make without naming the room to a
-      // stranger, and not upgrading a caller who owns nothing here.
+      // two invocations of the object, so a close or the abandonment alarm can land
+      // between them; SessionDO.fetch rechecks and answers 409 itself, and that
+      // response is returned here unchanged (#133). What this check is for is the
+      // 403/404 distinction above, which the object cannot make without naming the
+      // room to a stranger, and not upgrading a caller who owns nothing here.
       return stub.fetch(
         new Request(`https://session/ws?cursor=${cursor}`, {
           headers: { upgrade: "websocket", "x-bellman-members": memberIds.join(",") },

@@ -27,6 +27,8 @@ import {
   OUTBOX_GRACE_MS, OUTBOX_HANDLER, OUTBOX_PREFIX, dueKey, outboxKey, type OutboxRow,
 } from "../src/outbox.js";
 import { JOIN_CODE_TTL } from "../src/store.js";
+import { ABANDONED_AFTER_MS } from "../src/presence.js";
+import type { Member } from "../src/types.js";
 // The shared fixture, not a hand-rolled literal: hydrateStoredSession returns
 // undefined for a session whose manifest has no roles object, so a `manifest: null`
 // fixture reads as GONE and every assertion below would fail against correct code.
@@ -151,11 +153,13 @@ const parkAlarm = async (id: string) => {
   return at;
 };
 
-/** Put the session's expiry in the past, as alarms.test.ts does. */
+/** Put the session's members past the window, as alarms.test.ts does. */
 const lapse = (id: string) =>
   runInDurableObject(sessionStub(id), async (_i: SessionDO, ctx) => {
     const stored = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", { ...stored, expiresAt: Date.now() - 1 });
+    await ctx.storage.put("session", {
+      ...stored, members: (stored!.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
+    });
   });
 
 /**
@@ -514,7 +518,7 @@ it("takes an expired room's codes out of the registry when the alarm expires it"
   await store.createSession(twoCodes(id));
   await lapse(id);
 
-  // createSession's backstop alarm, run now. It is the TTL handler that closes the room.
+  // createSession's backstop alarm, run now. It is the abandonment handler that closes the room.
   expect(await runDurableObjectAlarm(sessionStub(id))).toBe(true);
 
   const raw = await runInDurableObject(sessionStub(id), (_i: SessionDO, ctx) =>
@@ -742,20 +746,21 @@ it("keeps a row of a kind it cannot deliver, rather than dropping it", async () 
 });
 
 /**
- * createSession arms the alarm for the queue and not for the TTL, because the TTL is
- * derived from a session that does not exist yet when the queue is armed. The TTL
- * follows when that alarm fires. A room created with a code must still end up armed for
- * its expiry, or it never expires: nothing else would come back for it.
+ * createSession arms the alarm for the queue and not for the abandonment time, because
+ * the abandonment time is derived from a session that does not exist yet when the queue
+ * is armed. The abandonment time follows when that alarm fires. A room created with a
+ * code must still end up armed for its abandonment, or it is never swept: nothing else
+ * would come back for it.
  */
-it("arms the TTL once the backstop has fired, for a room created with a join code", async () => {
+it("arms the abandonment time once the backstop has fired, for a room created with a join code", async () => {
   const store = new DurableObjectStore(env as never);
   const id = "qs_ttl_chain";
-  const expiresAt = Date.now() + 3_600_000;
-  await store.createSession(session({ id, expiresAt, joinCodes: oneCode(A, "peer_b") }));
+  const seen = Date.now() - 1_000;
+  await store.createSession(session({ id, joinCodes: oneCode(A, "peer_b"), members: [member({ lastSeenAt: seen })] }));
 
   expect(await runDurableObjectAlarm(sessionStub(id))).toBe(true);
 
-  expect(await armedAlarm(id)).toBe(expiresAt);
+  expect(await armedAlarm(id)).toBe(seen + ABANDONED_AFTER_MS);
 });
 
 /**
@@ -783,7 +788,7 @@ it("does not answer over RPC for the delivery", async () => {
 
 /**
  * The two methods that write what their caller hands them are `#private` as well.
- * expireIfDue overwrites the session record with the one it is given and queues the
+ * closeIfAbandoned overwrites the session record with the one it is given and queues the
  * removal of every code in it, and writeEvent writes the event it is given and any extra
  * rows. Called over RPC with a forged record they would rewrite this room's session and
  * reach into the registry's index, for anything holding the SESSION binding. The forged
@@ -799,18 +804,18 @@ it("does not answer over RPC for the methods that write what their caller suppli
   expect(await stub.getSession()).toBeUndefined();
   expect(await indexed(A)).toEqual(["qs_victim"]);
 
-  // A record that is lapsed and open, so expireIfDue would act on it if it could be reached.
+  // A record that is abandoned and open, so closeIfAbandoned would act on it if it could be reached.
   const { events: _events, ...forged } = session({
-    id, expiresAt: 1, joinCodes: { peer_b: { code: A, expiresAt: live() } },
+    id, members: [member({ lastSeenAt: 1 })], joinCodes: { peer_b: { code: A, expiresAt: live() } },
   });
   const answered = (call: Promise<unknown>) =>
     call.then(() => "answered", (err: unknown) => String(err));
   const outcomes = {
-    expireIfDue: await answered(stub.expireIfDue(forged, Date.now())),
+    closeIfAbandoned: await answered(stub.closeIfAbandoned(forged, Date.now())),
     writeEvent: await answered(stub.writeEvent({ cursor: 1, type: "message" }, { "forged:row": 1 })),
   };
 
-  expect(outcomes.expireIfDue).toMatch(/does not implement/);
+  expect(outcomes.closeIfAbandoned).toMatch(/does not implement/);
   expect(outcomes.writeEvent).toMatch(/does not implement/);
   // Neither ran: nothing was written here, and the other room's code is still registered.
   expect(await everything(id)).toEqual({});

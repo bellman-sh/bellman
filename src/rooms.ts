@@ -612,7 +612,7 @@ export async function revokeInvite(
 
   // An expired code is not a live code, and nothing prunes joinCodes when a
   // code merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
-  // the session-TTL sweep touch the map. So presence alone is not enough, or a
+  // the abandonment sweep touch the map. So presence alone is not enough, or a
   // bare revoke announces the closing of a door that had already shut by
   // itself: an event, an audit row, and over-reported roles.
   const retired = (role ? [role] : Object.keys(session.joinCodes)).filter((r) => {

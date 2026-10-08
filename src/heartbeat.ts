@@ -106,7 +106,7 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
  * Null for a room with no cadence, no member to ask, or that cannot be answered
  * — a frozen or closed room. Deriving a time for a closed session would re-arm
  * the alarm to a moment already past and fire for as long as the object lived,
- * which is the reason `derivedDue` already gives about the TTL.
+ * which is the reason `derivedDue` already gives about abandonment.
  *
  * It may return a time in the past, once, for an object that slept through a
  * tick or for a room that gained a cadence after its members joined. That is

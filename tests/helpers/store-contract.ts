@@ -384,6 +384,15 @@ export function describeStoreContract(
       expect(connected.size).toBe(0);
     });
 
+    /**
+     * The seatMember cases' clock. `at(n)` is n ms past a base 9,000,000 ms before the
+     * suite's clock, so the rosters keep their arithmetic (stale before 1,000,000,
+     * seated at 9,000,000) and sit inside the 90-day window. Dated from the epoch they
+     * read as abandoned (#18), and a Durable Object's alarm closes an abandoned room as
+     * soon as it is created, before the seat is asked for.
+     */
+    const at = (n: number) => Date.now() - 9_000_000 + n;
+
     it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
       // The production join path. Read-then-write capacity was the bug: two
       // confirms agreeing on one seat overfill the room, and a sync landing in
@@ -391,8 +400,8 @@ export function describeStoreContract(
       // every store has to decide and write without yielding.
       const s = session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: at(1) }),
         ],
       });
       (await store.createSession(s));
@@ -400,31 +409,31 @@ export function describeStoreContract(
       const outcome = await store.seatMember(
         s.id,
         member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }),
-        1_000_000,
-        9_000_000,
+        at(1_000_000),
+        at(9_000_000),
       );
 
       expect(outcome.refused).toBeNull();
       expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
       // Reported with leftAt already set, so the caller announces a removal
       // that happened rather than one it predicted.
-      expect(outcome.reclaimed[0].leftAt).toBe(9_000_000);
+      expect(outcome.reclaimed[0].leftAt).toBe(at(9_000_000));
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(at(9_000_000));
       expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
     });
 
     it("seatMember seats into a room with a spare seat, reclaiming nobody", async () => {
       const s = session({
         maxMembers: 5,
-        members: [member({ memberId: "m_quiet", lastSeenAt: 1 })],
+        members: [member({ memberId: "m_quiet", lastSeenAt: at(1) })],
       });
       (await store.createSession(s));
 
       const outcome = await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       );
 
       expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
@@ -437,14 +446,14 @@ export function describeStoreContract(
     it("seatMember refuses a full room of present members, reclaiming nobody", async () => {
       const s = session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: at(2_000_000) }),
         ],
       });
       (await store.createSession(s));
 
       expect(await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members).toHaveLength(2);
     });
@@ -452,8 +461,8 @@ export function describeStoreContract(
     it("seatMember refuses a frozen room, and a closed one, reclaiming nobody", async () => {
       const stale = () => session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 1 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: at(1) }),
         ],
       });
       const frozen = stale();
@@ -465,7 +474,7 @@ export function describeStoreContract(
       // appendEvent returns null, so reaping here would remove members
       // permanently AND silently from a state meant to be reversible.
       expect(await store.seatMember(
-        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "frozen", reclaimed: [], codesCleared: false });
       expect((await store.getSession(frozen.id))!.members
         .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
@@ -473,7 +482,7 @@ export function describeStoreContract(
       (await store.freezeSession(frozen.id, null));
       (await store.closeSession(frozen.id));
       expect((await store.seatMember(
-        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).refused).toBe("closed");
     });
 
@@ -481,9 +490,9 @@ export function describeStoreContract(
       const s = session({
         maxMembers: 2,
         members: [
-          member({ memberId: "m_a", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_b", userId: "u_b", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_c", userId: "u_c", lastSeenAt: 1 }),
+          member({ memberId: "m_a", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_b", userId: "u_b", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_c", userId: "u_c", lastSeenAt: at(1) }),
         ],
       });
       (await store.createSession(s));
@@ -492,7 +501,7 @@ export function describeStoreContract(
       // only one is reclaimable. A partial reap would remove a member for
       // somebody who never got in.
       expect(await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
         .toEqual([]);

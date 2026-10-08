@@ -7,8 +7,8 @@
  * real SessionDO, RegistryDO and DurableObjectStore over a fake storage, so
  * deleting the call turns them red.
  *
- * Which row a test uses matters. alarm() acts only on a row that is past its TTL:
- * expireIfDue returns early on any other, with or without the guard. A test that calls
+ * Which row a test uses matters. alarm() acts only on a row that is abandoned:
+ * closeIfAbandoned returns early on any other, with or without the guard. A test that calls
  * alarm() on a row that is not due proves nothing about the guard, so the alarm tests
  * here use due rows. When you add a SessionDO method that reads the row, add a test
  * that goes red if the guard is bypassed in that method alone, and bypass it by hand
@@ -77,6 +77,7 @@ import type { BellmanEnv } from "../src/store-do.js";
 import type { Member, Session } from "../src/types.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../src/payload.js";
 import { publicEvent } from "../src/public-event.js";
+import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { member, oneCode, roomManifest, session } from "./helpers/fixtures.js";
 
 type StoreDo = typeof storeDo;
@@ -406,13 +407,13 @@ describe("a pre-manifest row is dropped at the single Durable Object read", () =
     expect(legacyStorage.snapshot()).toEqual(before);
   });
 
-  it("alarm() leaves it alone even when it is past its TTL", async () => {
-    // expireIfDue changes only a row that is past its TTL and returns early on any other.
+  it("alarm() leaves it alone even when it is abandoned", async () => {
+    // closeIfAbandoned changes only a row that is abandoned and returns early on any other.
     // A row that is not due passes through alarm() untouched with or without the guard,
     // so it would prove nothing.
     const { legacy, legacyStorage } = await worldOn(
       storeDo,
-      legacyRow({ expiresAt: Date.now() - 1 }),
+      legacyRow({ members: [member({ lastSeenAt: 1 })] }),
     );
     const before = legacyStorage.snapshot();
 
@@ -455,7 +456,7 @@ describe("a current row is untouched by the guard", () => {
     expect((await store.getSessionByJoinCode("BELL-NEW-01"))?.session.manifest).toEqual(s.manifest);
   });
 
-  it("still expires when its alarm fires", async () => {
+  it("still closes when its alarm fires", async () => {
     const storage = fakeStorage();
     // Its join code is registered on the way in and dropped on the way out, so it needs
     // a registry to deliver to: without one every delivery would fail and be retried,
@@ -463,7 +464,7 @@ describe("a current row is untouched by the guard", () => {
     const registry = new storeDo.RegistryDO({ storage: fakeStorage() } as never, {} as never);
     const env = { REGISTRY: { idFromName: (name: string) => name, get: () => registry } };
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, env as never);
-    await doi.createSession(session({ id: "qs_expired", expiresAt: Date.now() - 1 }));
+    await doi.createSession(session({ id: "qs_expired", members: [member({ lastSeenAt: 1 })] }));
 
     await doi.alarm();
 
@@ -649,7 +650,7 @@ describe("negative control: the same calls with the guard removed", () => {
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
     const viaAlarm = await worldOn(unguarded, {
-      ...legacyRow({ expiresAt: Date.now() - 1 }), joinCodes: {}, manifest: { heartbeatOnMs: null },
+      ...legacyRow({ members: [member({ lastSeenAt: 1 })] }), joinCodes: {}, manifest: { heartbeatOnMs: null },
     });
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
@@ -1007,15 +1008,15 @@ describe("membersOf", () => {
     expect(await doi.membersOf("u1")).toEqual({ memberIds: ["m1"], closed: true });
   });
 
-  it("reports a room past its TTL as closed, and writes nothing", async () => {
-    // getSession closes a room past its TTL on read (expireIfDue), so
+  it("reports an abandoned room as closed, and writes nothing", async () => {
+    // getSession closes an abandoned room on read (closeIfAbandoned), so
     // bellman_sync sees it as closed while its alarm is still pending. /ws
     // must say the same, or the two delivery paths disagree about whether the
     // room is live. membersOf gets there by computing it: authorizing a watch
-    // must not mutate the room, and expireIfDue would write the closed flag,
+    // must not mutate the room, and closeIfAbandoned would write the closed flag,
     // clear the join codes and append session_expired.
     const storage = fakeStorage({
-      session: { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt: Date.now() - 1 },
+      session: withMembers({ memberId: "m1", userId: "u1", lastSeenAt: 1 }),
       cursor: 0,
     });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
@@ -1027,36 +1028,59 @@ describe("membersOf", () => {
     expect(storage.alarms).toEqual([]);
   });
 
-  it("agrees with getSession about a room at its TTL boundary", async () => {
+  it("agrees with getSession about a room at its abandonment boundary", async () => {
     // The invariant is that membersOf and getSession agree about whether a
     // room is closed, so this compares them instead of asserting a literal per
     // timestamp. A literal would test today's rule and need editing whenever
     // the guard moves; a comparison goes red when the guard moves on one side
-    // only. It cannot see both sides wrong together, which is what the TTL
-    // case above is for.
+    // only. It cannot see both sides wrong together, which is what the
+    // abandoned case above is for.
     //
-    // The clock is pinned because > and >= differ only at now === expiresAt,
+    // The clock is pinned because > and >= differ only at now === abandonedAt,
     // a millisecond a real clock almost never lands on. Two objects per row,
-    // because getSession can expire the room it reads.
+    // because getSession can close the room it reads.
     const now = 1_000_000;
     vi.setSystemTime(now);
     try {
-      for (const [where, expiresAt] of [
-        ["a millisecond past", now - 1],
-        ["exactly at", now],
-        ["a millisecond short of", now + 1],
+      for (const [where, lastSeenAt] of [
+        ["a millisecond past", now - ABANDONED_AFTER_MS - 1],
+        ["exactly at", now - ABANDONED_AFTER_MS],
+        ["a millisecond short of", now - ABANDONED_AFTER_MS + 1],
       ] as const) {
-        const row = { ...withMembers({ memberId: "m1", userId: "u1" }), expiresAt };
+        const row = withMembers({ memberId: "m1", userId: "u1", lastSeenAt });
         const asked = new storeDo.SessionDO(
           fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
         const polled = new storeDo.SessionDO(
           fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
-        expect((await asked.membersOf("u1")).closed, `${where} its TTL`).toBe(
+        expect((await asked.membersOf("u1")).closed, `${where} its window`).toBe(
           (await polled.getSession())?.closed);
       }
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reads an aged room as open while a socket vouches for an active member, and closed once it does not", async () => {
+    // Review Focus 3. The reader and the alarm share isAbandoned, sockets included.
+    const open = (ctx: ReturnType<typeof fakeCtx>, cursor: number, members = "m1") =>
+      new Request("https://do/ws?cursor=" + cursor, {
+        headers: { upgrade: "websocket", "x-bellman-members": members },
+      });
+    const row = withMembers({ memberId: "m1", userId: "u1", lastSeenAt: 1 });
+    const vouchedStorage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
+    const vouched = fakeCtx(vouchedStorage);
+    const doiVouched = new storeDo.SessionDO(vouched as never, {} as never);
+    // m1's socket, opened while the room is fresh and then aged under it: fetch
+    // refuses an upgrade onto a row that already reads closed, as an aged row with
+    // no socket does.
+    expect((await doiVouched.fetch(open(vouched, 0))).status).toBe(101);
+    await vouchedStorage.put("session", row);
+    expect((await doiVouched.membersOf("u1")).closed).toBe(false);
+    // fetch is the other reader: a second upgrade while m1's socket vouches is served.
+    expect((await doiVouched.fetch(open(vouched, 0))).status).toBe(101);
+
+    const alone = new storeDo.SessionDO(fakeCtx(fakeStorage({ session: row, cursor: 0 })) as never, {} as never);
+    expect((await alone.membersOf("u1")).closed, "control: the same row with no socket").toBe(true);
   });
 
   it("reports an unknown room as closed with no members", async () => {
@@ -1292,9 +1316,9 @@ describe("fetch: websocket upgrade", () => {
 
   /**
    * The recheck (#133). The Worker asked membersOf in a separate invocation and the
-   * input gate spans neither it nor the gap after it, so a close or the TTL can land
-   * between the authorization and the accept. fetch therefore asks `readsClosed`
-   * again for itself, and these rooms are what it sees when it does.
+   * input gate spans neither it nor the gap after it, so a close or the abandonment
+   * alarm can land between the authorization and the accept. fetch therefore asks
+   * `readsClosed` again for itself, and these rooms are what it sees when it does.
    *
    * worker-tests/ws-close-race.test.ts puts a real close in the real gap, through the
    * real route. These are the method's own contract, and cheaper: both rules by which
@@ -1309,7 +1333,7 @@ describe("fetch: websocket upgrade", () => {
 
     const CASES = [
       { what: "closed outright", over: { closed: true } },
-      { what: "past its TTL with the alarm still to come", over: { expiresAt: Date.now() - 1 } },
+      { what: "abandoned with the alarm still to come", over: { members: [member({ lastSeenAt: 1 })] } },
     ];
 
     it.each(CASES)("is refused 409 when it is $what", async ({ over }) => {
@@ -1334,7 +1358,7 @@ describe("fetch: websocket upgrade", () => {
 
 /**
  * wake()'s socket arm. wake() is private and reached through its three callers,
- * appendEvent, appendEventOnce and the TTL alarm (by way of expireIfDue), so
+ * appendEvent, appendEventOnce and the abandonment alarm (by way of closeIfAbandoned), so
  * these drive those. The waiter arm is the long poll that remote MCP clients
  * keep using, and it stays: "still resolves a long-poll waiter" pins that both
  * arms serve one event.
@@ -1451,17 +1475,48 @@ describe("wake: socket delivery", () => {
     // The socket opens while the room is still live and the room lapses under it. It
     // cannot be the other way round any more: fetch rechecks and refuses an upgrade
     // onto a room that already reads closed (#133). This order is production's own —
-    // a watcher connects, and the TTL arrives beneath them — and it is the one that
+    // a watcher connects, and the window closes beneath them — and it is the one that
     // makes the case mean something, since a socket opened after the expiry would
     // have nothing to be told.
-    const live = currentRow();
+    const live = currentRow({ members: [
+      member({ memberId: "m1", userId: "u1", leftAt: 5 }),
+      member({ memberId: "m2", userId: "u2", lastSeenAt: Date.now() }),
+    ] });
     const storage = fakeStorage({ session: live, cursor: 0 });
     const ctx = fakeCtx(storage);
     const doi = new storeDo.SessionDO(ctx as never, {} as never);
-    await doi.fetch(open(ctx, 0));
-    await storage.put("session", { ...live, expiresAt: Date.now() - 1 });
+    await doi.fetch(open(ctx, 0)); // the socket names m1, who has left
+    await storage.put("session", {
+      ...live, members: (live.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
+    });
     await doi.alarm();
     expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
+  });
+
+  it("stamps the members a socket vouches for and re-arms 90 days out, instead of closing", async () => {
+    // Review Focus 1: a room held open on one socket for a season. Without the
+    // stamp the alarm finds the same abandoned row every firing and reArm()
+    // points it straight back, back to back for as long as the socket lives.
+    const live = currentRow({ members: [member({ memberId: "m1", userId: "u1" })] });
+    const storage = fakeStorage({ session: live, cursor: 0 });
+    const ctx = fakeCtx(storage);
+    const doi = new storeDo.SessionDO(ctx as never, {} as never);
+    // Opened while the room is fresh, then aged under it, as the case above does:
+    // fetch refuses an upgrade onto a room that already reads closed (#133), and an
+    // aged row with no socket yet does.
+    expect((await doi.fetch(open(ctx, 0))).status).toBe(101);
+    await storage.put("session", {
+      ...live, members: (live.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
+    });
+    const before = Date.now();
+
+    await doi.alarm();
+
+    const row = (await storage.get("session")) as { closed: boolean; members: { lastSeenAt: number }[] };
+    expect(row.closed).toBe(false);
+    expect(row.members[0].lastSeenAt).toBeGreaterThanOrEqual(before);
+    expect(ctx.sockets[0].sent).toEqual([]);
+    expect(storage.alarms.at(-1)).toBeGreaterThanOrEqual(before + ABANDONED_AFTER_MS);
   });
 
   // The cases below pin what the seven above leave open.
@@ -1834,31 +1889,33 @@ describe("receive-only", () => {
 });
 
 /**
- * The TTL alarm at its boundary. createSession arms the alarm once, and
- * expireIfDue's guard is `now <= expiresAt`, so a firing that lands exactly on
- * the boundary expires nothing. That would have gone unnoticed while
- * bellman_sync called getSession on every poll, which expires the room lazily.
+ * The abandonment alarm at its boundary. createSession arms the alarm once, and
+ * closeIfAbandoned's guard is `now <= abandonedAt`, so a firing that lands exactly on
+ * the boundary closes nothing. That would have gone unnoticed while
+ * bellman_sync called getSession on every poll, which closes the room lazily.
  * A member watching over a socket does not poll, so on a quiet room nothing
  * calls it, and the alarm has to finish the job itself.
  *
  * It does, through the named-alarm driver and with no re-arm of its own:
- * alarm() ends in reArm(), which points the alarm back at the TTL for as long
+ * alarm() ends in reArm(), which points the alarm back at the window for as long
  * as the room is open. These tests pin that, and the two ends of it: the loop
  * stops once the room is closed, and a firing that lands early does not make an
  * alarm that is already due.
  *
  * The clock is pinned with vi.setSystemTime and put back in a finally, as in
  * membersOf's boundary case: a test cannot make a real clock read exactly
- * expiresAt.
+ * abandonedAt.
  */
-describe("SessionDO.alarm: the TTL re-arm", () => {
-  it("points the alarm back at the TTL when it fires exactly on the boundary", async () => {
-    // The boundary: expireIfDue's guard is `now <= expiresAt`, so an alarm
-    // landing exactly on expiresAt expires nothing. Without the driver's
+describe("SessionDO.alarm: the abandonment re-arm", () => {
+  it("points the alarm back at the window when it fires exactly on the boundary", async () => {
+    // The boundary: closeIfAbandoned's guard is `now <= abandonedAt`, so an alarm
+    // landing exactly on abandonedAt closes nothing. Without the driver's
     // closing reArm() the room is then immortal until something calls
     // getSession, and a room watched over sockets is not polled.
     const at = Date.now() + 10_000;
-    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const storage = fakeStorage({
+      session: currentRow({ members: [member({ lastSeenAt: at - ABANDONED_AFTER_MS })] }), cursor: 0,
+    });
     const ctx = fakeCtx(storage);
     const doi = new storeDo.SessionDO(ctx as never, {} as never);
 
@@ -1870,32 +1927,33 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     }
 
     expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
-    // At the TTL, which is no later than this firing's own clock: due at once.
+    // At the window, which is no later than this firing's own clock: due at once.
     expect(storage.alarms).toEqual([at]);
   });
 
   it("closes the room on the first firing past the boundary, and arms nothing after it", async () => {
     // Why the loop terminates, run rather than argued. The re-arm is set for
-    // expiresAt, not after it, so the firing it buys can land in the same
+    // abandonedAt, not after it, so the firing it buys can land in the same
     // millisecond and find the boundary again; that one re-arms the same way.
-    // The first firing to read now > expiresAt closes the room, and a closed
-    // room derives no TTL, so that firing arms nothing: an alarm set for a time
-    // already behind the clock would be due the moment it was set, and would set
-    // the next one the same way.
+    // The first firing to read now > abandonedAt closes the room, and a closed
+    // room derives no abandonment time, so that firing arms nothing: an alarm
+    // set for a time already behind the clock would be due the moment it was
+    // set, and would set the next one the same way.
     //
-    // A room with no join code. Expiring one that holds a code queues the registry's
-    // removal of it, and that is the outbox's alarm, not the TTL's: it is armed on
-    // purpose and would be counted here. This test is about the TTL, so the room has
+    // A room with no join code. Closing one that holds a code queues the registry's
+    // removal of it, and that is the outbox's alarm, not the window's: it is armed on
+    // purpose and would be counted here. This test is about the window, so the room has
     // nothing for the outbox to do.
     const at = Date.now() + 10_000;
     const storage = fakeStorage({
-      session: { ...currentRow({ joinCodes: {} }), expiresAt: at }, cursor: 0,
+      session: currentRow({ joinCodes: {}, members: [member({ lastSeenAt: at - ABANDONED_AFTER_MS })] }),
+      cursor: 0,
     });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
     try {
       vi.setSystemTime(at);
-      await doi.alarm(); // the boundary firing: nothing to expire, TTL kept
+      await doi.alarm(); // the boundary firing: nothing to close, window kept
       await doi.alarm(); // the firing it buys, in the same millisecond: the same again
       expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
       expect(storage.alarms).toEqual([at, at]);
@@ -1911,11 +1969,11 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
   });
 
   it("does not re-arm a room that is already closed", async () => {
-    // closeSession leaves the TTL alarm pending, so it still fires on a room
-    // that is already closed, and expireIfDue returns early on it without
-    // writing. Nothing is left to expire, so nothing is re-armed.
+    // closeSession leaves the abandonment alarm pending, so it still fires on a room
+    // that is already closed, and closeIfAbandoned returns early on it without
+    // writing. Nothing is left to close, so nothing is re-armed.
     const storage = fakeStorage({
-      session: { ...currentRow(), closed: true, expiresAt: Date.now() - 1 }, cursor: 0,
+      session: { ...currentRow({ members: [member({ lastSeenAt: 1 })] }), closed: true }, cursor: 0,
     });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
@@ -1924,17 +1982,19 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     expect(storage.alarms).toEqual([]);
   });
 
-  it("points a firing that lands before the room is due at the TTL, still ahead of the clock", async () => {
-    // An alarm set for expiresAt is expected to run at or after it, so a firing
+  it("points a firing that lands before the room is due at the window, still ahead of the clock", async () => {
+    // An alarm set for abandonedAt is expected to run at or after it, so a firing
     // before it points to a handler clock that disagrees with the one that
     // scheduled the alarm. The contract suite's frozen fake clock is such a
-    // disagreement. Nothing is due, so nothing expires, and the closing reArm()
-    // sets the TTL: at expiresAt, which this clock still reads as ahead. An
+    // disagreement. Nothing is due, so nothing closes, and the closing reArm()
+    // sets the window: at abandonedAt, which this clock still reads as ahead. An
     // alarm set at or behind the clock would be due at once and re-armed again,
     // until the object is torn down.
     const at = Date.now() + 10_000;
     const early = at - 5_000;
-    const storage = fakeStorage({ session: { ...currentRow(), expiresAt: at }, cursor: 0 });
+    const storage = fakeStorage({
+      session: currentRow({ members: [member({ lastSeenAt: at - ABANDONED_AFTER_MS })] }), cursor: 0,
+    });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
 
     try {
@@ -1947,6 +2007,21 @@ describe("SessionDO.alarm: the TTL re-arm", () => {
     expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
     expect(storage.alarms).toEqual([at]);
     expect(storage.alarms[0]).toBeGreaterThan(early);
+  });
+
+  it("keeps a room thawed past the window open on the next firing", async () => {
+    // Review Focus 2. The thaw stamps, so the firing it re-arms finds a fresh window.
+    const storage = fakeStorage({
+      session: { ...currentRow({ members: [member({ lastSeenAt: 1 })] }), frozenAt: Date.now() - ABANDONED_AFTER_MS },
+      cursor: 0,
+    });
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    await doi.freezeSession(null);
+    await doi.alarm();
+
+    expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: false });
+    expect(storage.alarms.at(-1)).toBeGreaterThan(Date.now() + ABANDONED_AFTER_MS - 60_000);
   });
 });
 

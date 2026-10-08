@@ -15,8 +15,9 @@ data/
 # dual-graph local tooling: session memory, never project content
 .dual-graph/
 
-# wrangler local secrets
+# wrangler local secrets, and its state and dry-run output
 .dev.vars
+.wrangler/
 .dual-graph/
 
 # Personal, per-project instructions and session handoff (not committed)

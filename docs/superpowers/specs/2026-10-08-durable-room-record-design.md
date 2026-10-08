@@ -79,11 +79,16 @@ whole prefix anyway.
 an org read that org's log, and `AuditDO` writes one entry per org a room
 involved. The same three conditions, plus one, admit a reader to a room they
 never sat in: the room's roster carries at least one member whose `org_id` is
-the caller's. `GET /rooms/:id` and `GET /rooms/:id/surface` try membership
-first and fall back to this; the answer carries `viewer: "admin"`, an empty
-`my_handles`, a preview with no `your_role` and no `your_verbs`, and the roster
-and surface as a member would read them after close. The surface writes stay
-refused: an admin holds no seat, and seats are the only thing that writes.
+the caller's. `GET /rooms/:id`, `GET /rooms/:id/surface` and
+`GET /rooms/:id/blobs/:blobId` try membership first and fall back to this; the
+answer carries `viewer: "admin"`, an empty `my_handles`, a preview with no
+`your_role` and no `your_verbs`, and the roster and surface as a member would
+read them after close. The surface writes stay refused: an admin holds no seat,
+and seats are the only thing that writes. The fallback also applies to a viewer
+every handle of whom was removed, once the room is closed, and `my_handles` then
+lists the removed handles so the page can say so: the cut protects a running room
+from a removed member, and an org admin's read of the closed room is the audit
+precedent.
 
 The read is of a closed room only. An open room is its members' and the
 audit log is the admin's window into it while it runs; a 404 for an open room

@@ -278,14 +278,20 @@ describe("tool surface", () => {
   });
 
   // The loop above reads the send kinds, so a kind added to SURFACE_KINDS with no clause in the `surface` line
-  // would pass it (#185 is the case this closes). The same limit applies: this is a substring of the whole text,
-  // so it fails for a kind named nowhere in it, which is how a new kind goes missing, and not for the removal of
-  // a clause whose name appears elsewhere in the text, as `text` does.
-  it("names every surface kind in bellman_send's description", async () => {
+  // would pass it (#185 is the case this closes). This one reads the Kinds sentence alone, from `Kinds:` to the
+  // `placement is` after it, so a kind whose name appears elsewhere in the description (`code` is in "code/doc/data
+  // payload") still has to be named in that sentence. It is still a substring of the sentence: `text` is satisfied
+  // by `text/html` inside it, so this catches a kind added without a clause, not the removal of `text`'s.
+  it("names every surface kind in the Kinds sentence of bellman_send's description", async () => {
     const { tools } = await jesse.listTools();
-    const send = tools.find((t) => t.name === "bellman_send")!;
+    const description = tools.find((t) => t.name === "bellman_send")!.description!;
+    const from = description.indexOf("Kinds:");
+    const to = description.indexOf("placement is", from);
+    expect(from, "the surface line has a Kinds: sentence").toBeGreaterThanOrEqual(0);
+    expect(to, "and it ends where `placement is` begins").toBeGreaterThan(from);
+    const sentence = description.slice(from, to);
     for (const kind of SURFACE_KINDS) {
-      expect(send.description, `${kind} missing from the description`).toContain(kind);
+      expect(sentence, `${kind} missing from the Kinds sentence`).toContain(kind);
     }
   });
 });

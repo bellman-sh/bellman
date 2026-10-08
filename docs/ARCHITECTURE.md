@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: f79b599
+last-verified-against-source: cfb4981
 last-updated: 2026-10-08
 ---
 
@@ -607,8 +607,9 @@ A room carries a surface as well as a log (#129): keyed, typed, optionally
 placed items — `text`, `link`, `diagram`, `connector`, the blob-backed `file`
 and `image`, and `html` — that members read and a seat holding `write_surface`
 keeps current. The log is how the surface got that way; the surface is where
-things stand. Blobs, piece 2, are the next subsection; pieces 3 and 4 add a
-canvas and sandboxed HTML artifacts on top of it.
+things stand. Blobs, piece 2, are the next subsection. The `html` kind (#185) is
+the server's half of piece 4; the canvas (piece 3) and the sandbox that renders
+`html` and `diagram` items (`bellman-sh/dash#14`) are the control panel's.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -1397,13 +1398,13 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~6,499** | every request, whether or not you are in a room |
+| Tool definitions | **~6,516** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,499
+Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,516
 tokens in all, of which `bellman_rooms` (#28) is 255 and the `_meta.ui` on
 `bellman_connect` 16. The figure before it was 6,372, from 2026-10-07 after #183
 and #28 both landed; the last paragraphs of this section account for the
@@ -1420,7 +1421,7 @@ leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
 `77396879` it gives 4,962, the figure recorded after #111, on `c9789ae`
 6,008, the figure recorded after #129, and on `f79b599` 6,499, the figure
-recorded after #185. So the measurements are comparable.
+recorded after #185's `html` clause. So the measurements are comparable.
 
 #111 added `heartbeat_on` and `reports` to the manifest schema inside
 `bellman_start`, and `progress` to `bellman_send`. It added nothing to
@@ -1469,15 +1470,19 @@ no other tool moved. Per tool, now: `bellman_start` 1,507, `bellman_send` 1,092,
 #185 added the `html` kind to `bellman_send`: one clause in the `surface`
 line's `Kinds:` sentence, which says the page is inline in `body` or a blob
 stored as `text/html`, never both, and what the sandboxed frame that renders it
-allows and withholds. It added no tool and no field.
+allows and withholds, and a pointer for a bridge user to `bellman_upload` with
+`kind: "html"`. It added no tool and no field. The bridge's own `bellman_upload`
+gained the kind too; as in #183's paragraph, that tool is listed only to a
+client that connects through the bridge, so it is not in these figures.
 
-Counted this way the total is 6,499, which is 127 more than the 6,372 recorded.
+Counted this way the total is 6,516, which is 144 more than the 6,372 recorded.
 26 of those predate #185, so the recorded figure was already out of date on
 main: `bellman_start` +13 and `bellman_connect` +13, the same words in both
 `Returns:` lines (`reports (per role, whether that seat is asked to report)`,
-#196). The other 101 are #185's, all of them `bellman_send`, which went from
-1,092 to 1,193; no other tool moved. Per tool, now: `bellman_start` 1,520,
-`bellman_send` 1,193, `bellman_confirm` 760, `bellman_sync` 716,
+#196). The other 118 are #185's, all of them `bellman_send`, which went from
+1,092 to 1,210: 101 for the clause and 17 for the pointer that followed it in
+the same PR; no other tool moved. Per tool, now: `bellman_start` 1,520,
+`bellman_send` 1,210, `bellman_confirm` 760, `bellman_sync` 716,
 `bellman_invite` 704, `bellman_connect` 529 (its `_meta.ui` is 16 of them),
 `bellman_evict` 489, `bellman_rooms` 255, `bellman_audit` 178 and
 `bellman_leave` 155.

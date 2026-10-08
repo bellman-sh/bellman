@@ -716,7 +716,8 @@ describe("html items (#185)", () => {
     });
 
     await refusedWith(p, { key: "both", kind: "html", body: PAGE, blob: { id } }, "not both");
-    await refusedWith(p, { key: "neither", kind: "html" }, "needs a body");
+    // The html arm's own words: the generic `needs a body` is also what a text item with no body is told.
+    await refusedWith(p, { key: "neither", kind: "html" }, "needs a body (the page, inline) or blob");
   });
 
   it("accepts a parameterised text/html type and refuses any other stored type, which still places as a file", async () => {

@@ -99,8 +99,9 @@ that way; the surface is where things stand.
 - Every item arrives in an untrusted envelope with its writer as origin. The
   preview carries no prose at all.
 
-A canvas to see it on and sandboxed HTML artifacts are the next two pieces; the
-designs are in `docs/superpowers/specs/`.
+The `html` kind is here (#185). The canvas to see the surface on, and the sandbox
+that renders `html` and `diagram` items (`bellman-sh/dash#14`), are the control
+panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 

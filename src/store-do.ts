@@ -1468,6 +1468,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * The tail of the log. Events are keyed `e:<padded cursor>` (`eventKey`), so
+   * the newest `limit` are one reverse list; reversed back so the caller reads
+   * them in cursor order like `eventsAfter`. Public on purpose: a read, like
+   * `eventsAfter`, and the facade calls it over RPC.
+   */
+  async recentEvents(limit: number): Promise<SessionEvent[]> {
+    if (limit <= 0) return [];
+    const map = await this.ctx.storage.list<SessionEvent>({ prefix: "e:", reverse: true, limit });
+    return [...map.values()].reverse();
+  }
+
+  /**
    * Every surface row (#129), in key order — `list` returns keys sorted, which
    * is the order the contract promises. A read, so it answers RPC like
    * `eventsAfter` does.
@@ -2739,6 +2751,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
     return this.session(sessionId).eventAt(cursor);
+  }
+
+  async recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]> {
+    return this.session(sessionId).recentEvents(limit);
   }
 
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {

@@ -2,7 +2,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    include: ["tests/**/*.test.ts"],
+    include: ["tests/**/*.test.ts", "ui/test/**/*.test.ts"],
     environment: "node",
     // Integration tests bind ephemeral ports and hold long-polls; give them room
     // but keep the suite honest about hangs.

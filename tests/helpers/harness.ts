@@ -40,6 +40,14 @@ export class Peer {
     return this.client.listTools();
   }
 
+  async listResources() {
+    return this.client.listResources();
+  }
+
+  async readResource(uri: string) {
+    return this.client.readResource({ uri });
+  }
+
   serverCapabilities() {
     return this.client.getServerCapabilities();
   }

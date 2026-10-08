@@ -20,7 +20,7 @@ import {
   sanitizeName, storedType, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { publicMember, roomPreview, roomSummary, rosterAsOf } from "../projections.js";
+import { publicMember, roomPreview, roomListEntry, rosterAsOf } from "../projections.js";
 import { verbsOfRole } from "../roles.js";
 import { findMember, gateSeat, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { isRemovedMember, type BellmanStore } from "../store.js";
@@ -311,7 +311,7 @@ async function downloadBlob(
  * The newest 50 of a larger set is #49's summary index.
  *
  * A room this person was removed from (#113) is listed with its member count as
- * of the removal (`roomSummary`), the number its detail would give.
+ * of the removal (`roomListEntry`), the number its detail would give.
  */
 async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -329,7 +329,7 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
   const truncated = created.length >= MAX_ROOMS_LISTED || joined.length >= MAX_ROOMS_LISTED || mine.length > MAX_ROOMS_LISTED;
   const rooms = mine
     .slice(0, MAX_ROOMS_LISTED)
-    .map((s) => roomSummary(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
+    .map((s) => roomListEntry(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
   return json(200, { rooms, truncated }, origin);
 }
 

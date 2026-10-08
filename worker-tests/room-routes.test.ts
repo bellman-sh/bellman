@@ -9,8 +9,11 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { newBlobId } from "../src/blobs.js";
+import { R2BlobStore } from "../src/blobs-r2.js";
 import { DurableObjectStore, type RegistryDO } from "../src/store-do.js";
 import worker from "../src/worker.js";
+import { text } from "../tests/helpers/blob-bytes.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";
@@ -93,5 +96,32 @@ describe("an org admin's reads and delete on demand, through the Worker (#65)", 
     expect((await call("/rooms/qs_worker_other", { headers: bearer })).status).toBe(404);
     expect((await call("/rooms/qs_worker_other", { method: "DELETE", headers: bearer })).status).toBe(404);
     expect(await store.getSession("qs_worker_other")).toMatchObject({ closed: true });
+  });
+
+  // The download door (#65, D4): the bytes come out of the real bucket for an admin that holds no seat, under the
+  // headers a member is given, and an open room's or another org's come out for no one.
+  it("serves the org's admin a file of the closed room from the real bucket, and an open room's or another org's none", async () => {
+    const store = await closedOrgRoom();
+    await store.createSession(session({ id: "qs_worker_open", createdBy: "u_peer", joinCodes: {}, members: [peerSeat()] }));
+    await store.createSession(session({
+      id: "qs_worker_other", createdBy: "u_other", closed: true, closedAt: Date.now(), joinCodes: {},
+      members: [member({ memberId: "m_other", userId: "u_other", label: "other@elsewhere", orgId: "org_elsewhere" })],
+    }));
+    const bucket = new R2BlobStore((env as unknown as { BLOBS: R2Bucket }).BLOBS);
+    const put = async (room: string) => {
+      const id = newBlobId();
+      const bytes = text("the plan");
+      await bucket.put(room, id, bytes.buffer, { bytes: bytes.byteLength, type: "text/plain", name: "plan.txt", by: "m_peer", at: Date.now() });
+      return id;
+    };
+    const [closed, open, other] = [await put(ROOM), await put("qs_worker_open"), await put("qs_worker_other")];
+
+    const served = await call(`/rooms/${ROOM}/blobs/${closed}`, { headers: bearer });
+    expect(served.status, await served.clone().text()).toBe(200);
+    expect(served.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''plan.txt");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox");
+    expect(await served.text()).toBe("the plan");
+    expect((await call(`/rooms/qs_worker_open/blobs/${open}`, { headers: bearer })).status).toBe(404);
+    expect((await call(`/rooms/qs_worker_other/blobs/${other}`, { headers: bearer })).status).toBe(404);
   });
 });

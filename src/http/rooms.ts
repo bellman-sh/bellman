@@ -264,6 +264,13 @@ async function uploadBlob(
  * closed room serves, as every read of a closed room does, and so does a
  * frozen one. An unknown room, a room the caller is no member of, an unknown
  * id and a malformed one are one answer, so a stranger learns nothing.
+ *
+ * The one other door is the org admin's (#65, D4), the one the detail and the
+ * surface read open (`readsAsAdmin`): the admin of an org that sat in a *closed*
+ * room, with no handle in it or none but removed ones, is served what a member
+ * is, or the page would show a file item that it could not fetch. An open room
+ * stays its members', and a removed member who is no such admin stays refused
+ * after the close.
  */
 async function downloadBlob(
   request: Request,
@@ -277,9 +284,10 @@ async function downloadBlob(
 
   const notFound = () => problem(404, "not_found", "no such blob", origin);
   const session = await deps.store.getSession(sessionId);
-  const mine = session?.members.filter((m) => m.userId === who.identity.userId) ?? [];
-  if (!session || mine.length === 0) return notFound();
-  if (mine.every(isRemovedMember)) {
+  const mine = session ? handlesOf(session, who.identity) : [];
+  const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
+  if (!session || (mine.length === 0 && !asAdmin)) return notFound();
+  if (mine.every(isRemovedMember) && !asAdmin) {
     return problem(403, "forbidden", "a member the room's creator removed cannot read its blobs", origin);
   }
   if (!isBlobId(blobId)) return notFound();
@@ -388,10 +396,11 @@ const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string 
   identity.role === "admin" && entitlementsFor(identity).audit && Boolean(identity.orgId);
 
 /**
- * Whether this caller may read a closed room it never sat in (#65, D4): the audit log's three
- * conditions, plus the org tie on the roster. The roster keeps a member who left and one a
- * creator removed, so an org whose only member was removed still sat in the room, and its admin
- * reads all of it: the cut is a seat's, and an admin holds none.
+ * Whether the room admits this caller as the admin of an org that sat in it (#65, D4): the audit
+ * log's three conditions, plus the org tie on the roster. The roster keeps a member who left and
+ * one a creator removed, so an org whose only member was removed still sat in the room, and its
+ * admin reads all of it: the cut is a seat's, and an admin holds none. Whether the caller reads
+ * the room as that admin or as a member is `readsAsAdmin`'s to say.
  *
  * Never an open room: that is its members', and the audit log is the admin's window into it
  * while it runs. A 404 for an open room says to an admin what it says to a stranger.
@@ -400,6 +409,33 @@ const admitsAdmin = (session: StoredSession, identity: Identity): boolean =>
   session.closed &&
   isOrgAdmin(identity) &&
   session.members.some((m) => m.orgId === identity.orgId);
+
+/**
+ * Whether this person reads the room as an org admin and not as a member (#65, D4): the room admits
+ * one (`admitsAdmin`), and the person holds no handle that is still a seat, which is to say they hold
+ * none, or every one they hold was removed by the creator. A handle still in the room, or one that
+ * left of its own accord, is a member's, and membership is tried first: a seat is the closer fact.
+ *
+ * A removal cuts what a seat reads, and the admin's read is not a seat's. Were it otherwise, one admin
+ * of an org would read a closed room whole and another, whom the creator had removed, would read it to
+ * a cut, though the org sat in the room and an admin is an admin. While the room runs `admitsAdmin` is
+ * false, and the cut stands.
+ *
+ * The detail, the surface read and the download door all ask this one question, so a room cannot show
+ * a person an item the same person cannot fetch.
+ */
+const readsAsAdmin = (session: StoredSession, identity: Identity, mine: readonly Member[]): boolean =>
+  (mine.length === 0 || mine.every(isRemovedMember)) && admitsAdmin(session, identity);
+
+/** What the page needs of each seat a person holds, to pick one to write with: the server refuses either way (D6). */
+const myHandles = (session: StoredSession, mine: readonly Member[]) =>
+  mine.map((m) => ({
+    member_id: m.memberId,
+    room_role: m.roomRole,
+    verbs: verbsOfRole(session.manifest, m.roomRole),
+    active: m.leftAt === null,
+    removed: isRemovedMember(m),
+  }));
 
 /** The roster now: every member, with `presence` read off the clock and the sockets. */
 const liveRoster = async (store: BellmanStore, session: StoredSession) => {
@@ -420,6 +456,11 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * `rosterAsOf` the latest of their removals, with no `presence`, and nothing
  * live is read for it. One handle still in the room, or one that left of its own
  * accord, keeps the live roster, as `bellman_sync` keeps the open feed.
+ *
+ * The exception is an admin of an org in a *closed* room (#65, D4): with nothing left in
+ * the room but removed handles, or no handle at all, it is served the admin's read
+ * (`readsAsAdmin`), the whole room with `viewer: "admin"`. `my_handles` still lists the
+ * removed ones, so the page can say so, and an admin with no handle has none to list.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -427,15 +468,16 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
   const session = await deps.store.getSession(sessionId);
   const mine = session ? handlesOf(session, who.identity) : [];
   // Membership first, then the admin's fallback (#65, D4): a seat is the closer fact, and a person
-  // who sits in the room reads it as the member they are, cut and all.
-  if (session && mine.length === 0 && admitsAdmin(session, who.identity)) {
+  // who sits in the room reads it as the member they are, cut and all. `readsAsAdmin` is false for
+  // anyone with a handle that is still a seat.
+  if (session && readsAsAdmin(session, who.identity, mine)) {
     return json(200, {
       id: session.id,
       session_status: sessionStatus(session),
       viewer: "admin",
       preview: roomPreview(session, null),
       members: await liveRoster(deps.store, session),
-      my_handles: [],
+      my_handles: myHandles(session, mine),
     }, origin);
   }
   if (!session || mine.length === 0) {
@@ -452,13 +494,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     viewer: "member",
     preview: roomPreview(session, viewer.roomRole),
     members,
-    my_handles: mine.map((m) => ({
-      member_id: m.memberId,
-      room_role: m.roomRole,
-      verbs: verbsOfRole(session.manifest, m.roomRole),
-      active: m.leftAt === null,
-      removed: isRemovedMember(m),
-    })),
+    my_handles: myHandles(session, mine),
   }, origin);
 }
 
@@ -544,16 +580,20 @@ const cutAtFor = (handles: readonly Member[]): number | undefined =>
  * two reads, so an eviction that commits between them leaves this one poll
  * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
  * gap from the `member_evicted` event in its slice, and this route reads no events.
+ *
+ * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
+ * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
+ * Its ETag is the record's cursor, as a member still in the room has.
  */
 async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
   const mine = session ? handlesOf(session, who.identity) : [];
-  // The admin's fallback (#65, D4): the whole surface of a closed room, with no cut, because the
-  // cut is a seat's and an admin holds none. `cutFor` is not asked of an empty list, which would
-  // read as every handle removed and cut the read to nothing.
-  const asAdmin = session !== undefined && mine.length === 0 && admitsAdmin(session, who.identity);
+  // The admin's fallback (#65, D4): the whole surface of a closed room, with no cut. `cutFor` is not
+  // asked of an empty list, which would read as every handle removed and cut the read to nothing, nor
+  // of an admin whose every handle was removed: the cut is a seat's, and this read is not one.
+  const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
   if (!session || (mine.length === 0 && !asAdmin)) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }

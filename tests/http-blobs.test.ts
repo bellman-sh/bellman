@@ -14,6 +14,7 @@ import {
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { MemoryStore, type BlobCharge } from "../src/store.js";
+import type { Identity } from "../src/types.js";
 import { PNG, text } from "./helpers/blob-bytes.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
@@ -43,9 +44,15 @@ let store: MemoryStore;
 let blobs: RecordingBlobStore;
 let deps: RoomRouteDeps;
 
-/** Bearer: a dev key. Cookie: the dev key as the cookie's value, read straight off it. */
+/** A caller the dev keys do not hold (#65): the team plan's admin of an org that never sat in the rooms below. */
+const EXTRA: Record<string, Identity> = {
+  qk_other_admin: { userId: "u_other_admin", orgId: "org_other", plan: "team", role: "admin", label: "admin@other" },
+};
+
+/** Bearer: a dev key, or one of EXTRA. Cookie: the dev key as the cookie's value, read straight off it. */
 const caller = async (request: Request): Promise<RoomCaller | null> => {
-  const bearer = resolveIdentity(request.headers.get("authorization") ?? undefined);
+  const header = request.headers.get("authorization") ?? undefined;
+  const bearer = resolveIdentity(header) ?? (header ? EXTRA[header.replace(/^Bearer\s+/i, "").trim()] : undefined);
   if (bearer) return { identity: bearer, via: "bearer" };
   const cookie = /bellman_session=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
   const identity = cookie ? resolveIdentity(`Bearer ${cookie}`) : null;
@@ -454,5 +461,116 @@ describe("GET /rooms/:id/blobs/:blobId", () => {
     expect((await download(DEV_KEY.peer, blob_id))!.status).toBe(403);
     // The control: the creator still reads it.
     expect((await download(DEV_KEY.jesse, blob_id))!.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An org admin's download from a closed room (#65, D4)
+// ---------------------------------------------------------------------------
+
+describe("an org admin's download from a closed room (#65)", () => {
+  const ORG_ROOM = "qs_blobs_org";
+  const DOWNLOAD_HEADER_NAMES = [
+    "content-type", "content-disposition", "x-content-type-options", "content-security-policy", "cache-control", "etag",
+  ];
+
+  // peer created this room and sits in it, in the seat that writes. jesse, the team plan's admin of peer's org, holds no handle.
+  beforeEach(async () => {
+    await store.createSession(session({
+      id: ORG_ROOM, createdBy: "u_peer", blobBytesCeiling: 1024,
+      members: [member({ memberId: "m_owner", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_a" })],
+    }));
+  });
+
+  /** The room's one member uploads through the route, so the bytes are ones a member put. */
+  async function storedByOwner(body: string) {
+    const res = (await upload(DEV_KEY.peer, body, { room: ORG_ROOM, member: "m_owner", name: "notes.txt" }))!;
+    expect(res.status, await res.clone().text()).toBe(201);
+    return (await res.json()) as { blob_id: string };
+  }
+
+  it("serves a closed room's blob to the admin of an org that sat in it, though it holds no seat, as it serves a member", async () => {
+    const { blob_id } = await storedByOwner("the plan");
+    await store.closeSession(ORG_ROOM);
+
+    const asAdmin = (await download(DEV_KEY.jesse, blob_id, { origin: PANEL }, ORG_ROOM))!;
+    const asMember = (await download(DEV_KEY.peer, blob_id, { origin: PANEL }, ORG_ROOM))!;
+
+    expect(asAdmin.status).toBe(200);
+    expect(asAdmin.headers.get("content-type")).toBe("application/octet-stream");
+    expect(asAdmin.headers.get("content-disposition")).toMatch(/^attachment; filename\*=UTF-8''/);
+    expect(asAdmin.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(asAdmin.headers.get("content-security-policy")).toBe("sandbox");
+    expect(asAdmin.headers.get("cache-control")).toBe("private, max-age=300");
+    expect(asAdmin.headers.get("etag")).toMatch(/^".+"$/);
+    expect(asAdmin.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(await asAdmin.text()).toBe("the plan");
+    // The same door: every header a member is given, the member's bytes.
+    for (const name of DOWNLOAD_HEADER_NAMES) expect(asAdmin.headers.get(name), name).toBe(asMember.headers.get(name));
+    expect(await asMember.text()).toBe("the plan");
+  });
+
+  it("answers a conditional download from the admin 304, as it does a member", async () => {
+    const { blob_id } = await storedByOwner("cached");
+    await store.closeSession(ORG_ROOM);
+    const etag = (await download(DEV_KEY.jesse, blob_id, {}, ORG_ROOM))!.headers.get("etag")!;
+    const again = (await download(DEV_KEY.jesse, blob_id, { "if-none-match": etag }, ORG_ROOM))!;
+    expect(again.status).toBe(304);
+    expect(again.headers.get("etag")).toBe(etag);
+    expect(await again.text()).toBe("");
+  });
+
+  it("answers 404 while the room is open: an open room's bytes are its members'", async () => {
+    const { blob_id } = await storedByOwner("the plan");
+
+    expect((await download(DEV_KEY.jesse, blob_id, {}, ORG_ROOM))!.status).toBe(404);
+    // The control: the blob is there, and a member is given it.
+    expect((await download(DEV_KEY.peer, blob_id, {}, ORG_ROOM))!.status).toBe(200);
+  });
+
+  it("answers 404 to a caller who is no admin of an org in the room, as it answers a room that is not there", async () => {
+    const { blob_id } = await storedByOwner("the plan");
+    await store.closeSession(ORG_ROOM);
+    const unknown = await (await download(DEV_KEY.jesse, blob_id, {}, "qs_nowhere"))!.text();
+
+    // outsider: no org, no admin role. qk_other_admin: an admin on the team plan, of an org the room never held.
+    for (const key of [DEV_KEY.outsider, "qk_other_admin"]) {
+      const res = (await download(key, blob_id, {}, ORG_ROOM))!;
+      expect(res.status, key).toBe(404);
+      expect(await res.text(), key).toBe(unknown);
+    }
+  });
+
+  // The detail and the surface serve a person every one of whose handles the creator removed the admin's read of a closed
+  // room, when the room admits one; the door follows, or the page would show a file it cannot fetch.
+  it("serves an admin the creator removed once the room has closed, and still refuses a removed member who is no admin", async () => {
+    const id = "qs_blobs_removed";
+    await store.createSession(session({
+      id, createdBy: "u_outsider", blobBytesCeiling: 1024,
+      members: [
+        member({ memberId: "m_owner", userId: "u_outsider", label: "outsider", orgId: null, roomRole: "peer_a" }),
+        member({ memberId: "m_admin", roomRole: "peer_b" }),
+        member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }),
+      ],
+    }));
+    const uploaded = (await upload(DEV_KEY.outsider, "the plan", { room: id, member: "m_owner" }))!;
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id } = (await uploaded.json()) as { blob_id: string };
+    for (const removed of ["m_admin", "m_peer"]) {
+      const evicted = await store.appendEvent(id, {
+        type: "member_evicted", fromMemberId: "system", fromUserId: "u_outsider", fromLabel: "outsider",
+        payload: { member_id: removed }, refId: null,
+      }, { markRemoved: removed });
+      expect(evicted, removed).not.toBeNull();
+    }
+
+    // While the room runs a removed member is refused, an admin among them: the cut is what it read.
+    expect((await download(DEV_KEY.jesse, blob_id, {}, id))!.status).toBe(403);
+    expect((await download(DEV_KEY.peer, blob_id, {}, id))!.status).toBe(403);
+
+    await store.closeSession(id);
+    // Closed, the org's admin reads it as an admin does. A removed member of the same org who is no admin is still refused.
+    expect((await download(DEV_KEY.jesse, blob_id, {}, id))!.status).toBe(200);
+    expect((await download(DEV_KEY.peer, blob_id, {}, id))!.status).toBe(403);
   });
 });

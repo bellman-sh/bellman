@@ -208,13 +208,16 @@ project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
 "surface"` calls. Membership is the tenant boundary: a stranger and an unknown
 room are one 404. The one exception is an org admin's read of a *closed* room
-its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id` and the
-surface read fall back to it for a caller with no seat, `GET /rooms?as=admin`
-lists those rooms from the registry's org index, and `DELETE /rooms/:id` lets
-the room's creator or such an admin ask for the purge, answered 202 because the
-room's own alarm does it. A member a creator removed (#113) is served the room as it
-stood at its removal and nothing after: the surface to the rows it was shown,
-and the roster and the member count as of the removal, with no `presence`. The
+its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id`, the
+surface read and the blob download fall back to it for a caller with no seat,
+`GET /rooms?as=admin` lists those rooms from the registry's org index, and
+`DELETE /rooms/:id` lets the room's creator or such an admin ask for the purge,
+answered 202 because the room's own alarm does it. A member a creator removed
+(#113) is served the room as it stood at its removal and nothing after: the
+surface to the rows it was shown, and the roster and the member count as of the
+removal, with no `presence`. The one exception is the org's admin: once the room
+has closed, a removed member who is also an admin of an org in it reads it
+whole, because the cut is a seat's and they no longer hold one. The
 list is bounded at 50 rooms and says when it was (`truncated`), because neither
 registry index orders by recency; the newest 50 of a larger set is #49's summary
 index. A poll that finds nothing new costs one record read, because the ETag is
@@ -672,7 +675,12 @@ can be dropped.
 The download is membership: a member a creator removed is refused, as `/ws`
 refuses it, while one who left or timed out is served, and so is a closed or a
 frozen room. An unknown room, a room the caller is no member of, and an unknown
-or malformed blob id are one 404, so a stranger learns nothing. The type is the
+or malformed blob id are one 404, so a stranger learns nothing. The one other
+door is the org admin's (#65): the admin of an org that sat in a *closed* room,
+with no handle in it or none but removed ones, is served what a member is, by
+the predicate the detail and the surface read ask, so the page never shows a
+file item it cannot fetch. An open room's bytes stay its members', and a removed
+member who is no such admin stays refused after the close. The type is the
 server's word: an image claim is read against the four signatures and a
 mismatch is stored as `application/octet-stream`; the download serves an image
 on the allowlist inline and everything else as an octet-stream attachment, with
@@ -895,10 +903,14 @@ loud:
   its members', and the audit log is an admin's window into it while it runs, so
   a 404 for an open room says to an admin what it says to a stranger. Membership
   is tried first, so an admin who sits in the room reads it as the member it is.
-  The read is a read: a write to the surface from an admin is a 403, since it
-  holds no seat, and a file item's bytes still come down only to members, because
-  the download route admits no one else. The delete is the one write, and the
-  room's creator may ask for it as well.
+  An admin every one of whose handles a creator removed holds no seat that is
+  still a seat, and reads as the admin, whole: one predicate (`readsAsAdmin`)
+  answers for the detail, the surface read and the download, so the page never
+  shows a file it cannot fetch, and `my_handles` still lists the removed handles
+  so the page can say so. The read is a read: a write to the surface from an
+  admin is a 403, since it holds no seat, and a file item's bytes come down
+  through the download route under the headers a member's do. The delete is the
+  one write, and the room's creator may ask for it as well.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and

@@ -11,7 +11,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { MemoryStore } from "../src/store.js";
-import type { Identity, Session, SurfaceItem } from "../src/types.js";
+import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 
@@ -947,6 +947,123 @@ describe("an org admin's read of a closed room (#65)", () => {
     await store.createSession(session({ id: "qs_admin_sits", closed: true, closedAt: 1_700_000_000_000, members: [member(), peer()] }));
     const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_admin_sits"));
     expect(body).toMatchObject({ viewer: "member", my_handles: [{ member_id: "m_creator" }] });
+  });
+
+  // A person the creator removed who is also an admin of an org in the room. While the room runs, the cut bounds what that
+  // person reads, as it bounds any removed member. Once the room has closed the cut is a seat's, which this person no longer
+  // holds, so the room is read as its org's admin reads it: whole. Otherwise one admin of the org would read all of it and
+  // another, removed, would read to a cut, though the org sat in the room and an admin is an admin.
+  describe("an admin the creator removed", () => {
+    /**
+     * A room its creator, outside the org, ran with `removed` in the second seat: the creator wrote "before", removed that
+     * member, let a late joiner in, and wrote "after"; then the room closes, or stays open. The removal is the creator's,
+     * through the tool, so the cut is the one its own event carries.
+     */
+    async function removedRoom(id: string, removed: Member, close: boolean) {
+      await store.createSession(session({
+        id, createdBy: "u_outsider",
+        members: [member({ memberId: "m_owner", userId: "u_outsider", label: "outsider", orgId: null }), removed],
+      }));
+      const h = new Harness(store, blobs);
+      const owner = await h.connect(DEV_KEY.outsider);
+      const write = async (key: string) => {
+        const out = await owner.call("bellman_send", { session_id: id, member_id: "m_owner", type: "surface", payload: { key, kind: "text", body: key } });
+        expect(out.isError, out.text).toBe(false);
+        return (out.data as { cursor: number }).cursor;
+      };
+      const before = await write("before");
+      const evicted = await owner.call("bellman_evict", { session_id: id, member_id: removed.memberId });
+      expect(evicted.isError, evicted.text).toBe(false);
+      const cutAt = (await store.getSession(id))!.members.find((m) => m.memberId === removed.memberId)!.leftAt!;
+      await store.addMember(id, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
+      const after = await write("after");
+      await h.close();
+      if (close) await store.closeSession(id);
+      return { before, after };
+    }
+    /** jesse, the team plan's admin of org_codenerd, in the seat that gets removed. */
+    const removedAdmin = () => member({ memberId: "m_admin", roomRole: "peer_b" });
+
+    it("is served the closed room as its admin reads it, with the removed handle still listed", async () => {
+      await removedRoom("qs_rm_closed", removedAdmin(), true);
+
+      const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_rm_closed")) as { members: Record<string, unknown>[] };
+
+      expect(body).toMatchObject({
+        id: "qs_rm_closed", session_status: "closed", viewer: "admin",
+        preview: { your_role: null, your_verbs: [] },
+        my_handles: [{ member_id: "m_admin", room_role: "peer_b", verbs: expect.any(Array), active: false, removed: true }],
+      });
+      // Every member, a joiner after the removal among them, each with presence: nothing of the cut.
+      expect(body.members.map((m) => m.member_id).sort()).toEqual(["m_admin", "m_late", "m_owner"]);
+      expect(body.members.every((m) => "presence" in m)).toBe(true);
+    });
+
+    it("reads the closed room's surface whole, past the cut, with the ETag the record carries", async () => {
+      const { after } = await removedRoom("qs_rm_surface", removedAdmin(), true);
+
+      const res = (await call(DEV_KEY.jesse, "/rooms/qs_rm_surface/surface"))!;
+
+      const body = await bodyOf(res) as { surface_cursor: number; items: { data: { key: string } }[] };
+      expect(body.items.map((i) => i.data.key).sort(), "an item written after the admin was cut").toEqual(["after", "before"]);
+      expect(body.surface_cursor).toBe(after);
+      expect(res.headers.get("etag")).toBe(`"${after}"`);
+      const again = (await call(DEV_KEY.jesse, "/rooms/qs_rm_surface/surface", { headers: { "if-none-match": `"${after}"` } }))!;
+      expect(again.status).toBe(304);
+    });
+
+    it("keeps the cut on the detail while the room is open: the roster as of the removal, no presence, the member's own view", async () => {
+      await removedRoom("qs_rm_open", removedAdmin(), false);
+
+      const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_rm_open")) as { members: Record<string, unknown>[] };
+
+      expect(body).toMatchObject({ session_status: "active", viewer: "member", my_handles: [{ member_id: "m_admin", removed: true }] });
+      expect(body.members.map((m) => m.member_id).sort()).toEqual(["m_admin", "m_owner"]);
+      expect(body.members.some((m) => "presence" in m)).toBe(false);
+    });
+
+    it("keeps the cut on the surface while the room is open, and derives the cursor from what it is shown", async () => {
+      const { before } = await removedRoom("qs_rm_open_surface", removedAdmin(), false);
+
+      const res = (await call(DEV_KEY.jesse, "/rooms/qs_rm_open_surface/surface"))!;
+
+      const body = await bodyOf(res) as { surface_cursor: number; items: { data: { key: string } }[] };
+      expect(body.items.map((i) => i.data.key)).toEqual(["before"]);
+      expect(body.surface_cursor).toBe(before);
+      expect(res.headers.get("etag")).toBe(`"${before}"`);
+    });
+
+    // The admin's read is for a person with no seat left: "every handle removed", not "a handle removed".
+    it("serves an admin as the member when one of its handles is still in the room, though another was removed", async () => {
+      await store.createSession(session({
+        id: "qs_rm_mixed", createdBy: "u_outsider", closed: true, closedAt: 1_700_000_000_000,
+        members: [
+          member({ memberId: "m_owner", userId: "u_outsider", label: "outsider", orgId: null }),
+          member({ memberId: "m_old", roomRole: "peer_b", leftAt: 1_700_000_000_000, removedAtCursor: 3 }),
+          member({ memberId: "m_new", roomRole: "peer_b" }),
+        ],
+      }));
+
+      const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_rm_mixed"));
+
+      expect(body).toMatchObject({
+        viewer: "member",
+        my_handles: [{ member_id: "m_old", active: false, removed: true }, { member_id: "m_new", active: true, removed: false }],
+      });
+    });
+
+    // The org must have an admin to read past the cut: peer is in the same org and is not one.
+    it("leaves a removed member who is no admin at the cut after the room has closed, on both reads", async () => {
+      const { before } = await removedRoom("qs_rm_peer", peer(), true);
+
+      const detail = await bodyOf(await call(DEV_KEY.peer, "/rooms/qs_rm_peer")) as { members: Record<string, unknown>[] };
+      expect(detail).toMatchObject({ session_status: "closed", viewer: "member", my_handles: [{ member_id: "m_peer", removed: true }] });
+      expect(detail.members.map((m) => m.member_id).sort()).toEqual(["m_owner", "m_peer"]);
+      expect(detail.members.some((m) => "presence" in m)).toBe(false);
+      const surface = await bodyOf(await call(DEV_KEY.peer, "/rooms/qs_rm_peer/surface")) as { surface_cursor: number; items: { data: { key: string } }[] };
+      expect(surface.items.map((i) => i.data.key)).toEqual(["before"]);
+      expect(surface.surface_cursor).toBe(before);
+    });
   });
 });
 

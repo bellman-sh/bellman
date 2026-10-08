@@ -106,6 +106,12 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // The room's own byte ceiling (#183), from the plan creating it. Nothing
         // downstream asks a plan again.
         blobBytesCeiling: ent.blobBytesPerRoom,
+        // The window a closed room is kept for (#65, D1), stamped as the ceiling above is: a plan
+        // change after the fact never shortens a room that was promised one.
+        retainAfterCloseMs: ent.retainAfterCloseMs,
+        closedAt: null,
+        purgeAt: null,
+        blobsSwept: false,
         members: [creator],
         events: [],
         closed: false,

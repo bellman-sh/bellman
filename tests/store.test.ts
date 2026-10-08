@@ -1,10 +1,31 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryStore } from "../src/store.js";
+import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
-import { roomManifest, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 describeStoreContract("MemoryStore", () => new MemoryStore());
+
+/**
+ * `closedAt` is the clock of whoever closed the room (#65): an abandonment that `sweep(now)` closes is
+ * dated `now`, as its `session_expired` event is, and not the wall clock the call happened to run at. The
+ * Durable Object store has no `sweep(now)` to hand a clock to, so this is MemoryStore's alone.
+ */
+describe("closedAt on MemoryStore's abandonment close", () => {
+  it("is the clock the sweep was handed, the one the closing event carries", async () => {
+    const store = new MemoryStore();
+    const handed = Date.now() + 5_000;
+    // Open at the wall clock, a millisecond past the window as of the sweep's.
+    const s = session({ members: [member({ lastSeenAt: handed - ABANDONED_AFTER_MS - 1 })] });
+    await store.createSession(s);
+
+    await store.sweep(handed);
+
+    expect((await store.getSession(s.id))).toMatchObject({ closed: true, closedAt: handed });
+    expect((await store.eventsAfter(s.id, 0)).at(-1)).toMatchObject({ type: "session_expired", at: handed });
+  });
+});
 
 describe("manifest persistence", () => {
   it("round-trips a manifest through the store unchanged", async () => {

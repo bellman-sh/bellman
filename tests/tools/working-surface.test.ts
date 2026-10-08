@@ -574,6 +574,24 @@ describe("a room's byte ceiling", () => {
   });
 });
 
+// The window a closed room is kept for is stamped at the same moment and from the same plan (#65, D1),
+// so a plan change later never shortens a room that was promised one. The literals are the promise: read
+// back through ENTITLEMENTS alone, a table that said the wrong thing would agree with the stamp.
+describe("a room's retention window", () => {
+  it.each([
+    ["team", DEV_KEY.jesse, null],
+    ["free", DEV_KEY.peer, 7 * 24 * 60 * 60 * 1000],
+  ] as const)("stamps a room started on the %s plan with that plan's window, open and not asked to go", async (plan, key, window) => {
+    const creator = await h.connect(key);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    expect(started.data.plan).toBe(plan);
+    const room = (await h.store.getSession(String(started.data.session_id)))!;
+    expect(room.retainAfterCloseMs).toBe(window);
+    expect(room).toMatchObject({ closedAt: null, purgeAt: null, blobsSwept: false });
+  });
+});
+
 describe("file and image items (#183)", () => {
   const MD = text("# notes\n");
 

@@ -1255,7 +1255,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async closeSession(): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    await this.ctx.storage.put("session", { ...s, closed: true });
+    // `closedAt` once (#65): the window starts at the first close, and a second one
+    // does not move it.
+    await this.ctx.storage.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
   }
 
   /**
@@ -1282,7 +1284,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) return false;
       if (s.closed) return true;
       if (s.members.some(isActiveMember)) return false;
-      await txn.put("session", { ...s, closed: true });
+      await txn.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
       return true;
     });
   }
@@ -1856,7 +1858,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         at: now,
       };
       await this.#writeEvent(txn, expired, {
-        session: { ...s, closed: true, joinCodes: {} }, ...rows,
+        session: { ...s, closed: true, closedAt: s.closedAt ?? now, joinCodes: {} }, ...rows,
       });
       return expired;
     });

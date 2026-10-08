@@ -1297,9 +1297,15 @@ export class MemoryStore implements BellmanStore {
    *
    * Agrees with closeIfAbandoned: a closed room's codes stop resolving AND stop
    * occupying the index, rather than relying on the `closed` guard alone.
+   *
+   * Dates the close once (#65): `closedAt` is where the retention window starts, so a
+   * second close, or a read that finds the room closed again, must not move it. `at` is
+   * the clock of the caller that has one, so an abandonment is dated as its
+   * `session_expired` event is.
    */
-  private closeNow(s: Session): void {
+  private closeNow(s: Session, at = Date.now()): void {
     s.closed = true;
+    s.closedAt ??= at;
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     s.joinCodes = {};
   }
@@ -1761,7 +1767,7 @@ export class MemoryStore implements BellmanStore {
       s.members = stampSeen(s.members, now, connected);
       return;
     }
-    this.closeNow(s);
+    this.closeNow(s, now);
     const event: SessionEvent = {
       cursor: s.events.length + 1,
       type: "session_expired" as EventType,

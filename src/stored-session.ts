@@ -112,8 +112,13 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   written before the field was stamped from no plan, so the conservative
  *   number is the honest one, and it ends with the room rather than being
  *   migrated.
+ * - **closedAt, retainAfterCloseMs, purgeAt and blobsSwept** (#65) default to the
+ *   readings that keep the room: no known close time, no window, no delete asked
+ *   for, and a sweep that has not run. A room closed before the purge existed was
+ *   promised no window, and a purge is the one irreversible act here, so only a
+ *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All eight live here, in one gate, rather than in separate functions that could drift.
+ * All nine live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -137,6 +142,12 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     // Required on the type, absent on a row written before #183: the cast says
     // so where `??` alone would read as redundant.
     blobBytesCeiling: (row as { blobBytesCeiling?: number }).blobBytesCeiling ?? ENTITLEMENTS.free.blobBytesPerRoom,
+    // Required on the type, absent on a row written before #65: the cast says so where `??`
+    // alone would read as redundant, and the room is kept (see above).
+    closedAt: row.closedAt ?? null,
+    retainAfterCloseMs: (row as { retainAfterCloseMs?: number | null }).retainAfterCloseMs ?? null,
+    purgeAt: row.purgeAt ?? null,
+    blobsSwept: row.blobsSwept ?? false,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

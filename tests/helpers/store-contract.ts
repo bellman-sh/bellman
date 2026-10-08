@@ -831,6 +831,22 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    it("stamps closedAt when a room closes, once, by every close path", async () => {
+      const a = session({ id: "qs_close_a" });
+      await store.createSession(a);
+      await store.closeSession(a.id);
+      const closedAt = (await store.getSession(a.id))!.closedAt;
+      expect(closedAt).toBe(Date.now());
+      vi.advanceTimersByTime(60_000);
+      await store.closeSession(a.id);
+      expect((await store.getSession(a.id))!.closedAt).toBe(closedAt);
+
+      const b = session({ id: "qs_close_b", members: [member({ leftAt: Date.now() })] });
+      await store.createSession(b);
+      expect(await store.closeSessionIfEmpty(b.id)).toBe(true);
+      expect((await store.getSession(b.id))!.closedAt).toBe(Date.now());
+    });
+
     // ------------------------------------------------- closing an empty room
     /**
      * A room closes when nobody is left in it, and that has to be one operation.
@@ -3073,6 +3089,16 @@ export function describeStoreContract(
       const s = abandonedRoom();
       (await store.createSession(s));
       expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    // The third close path, beside closeSession and closeSessionIfEmpty (#65).
+    it("stamps closedAt when abandonment closes the room, and a later read keeps it", async () => {
+      const s = abandonedRoom();
+      (await store.createSession(s));
+      const closedAt = Date.now();
+      expect((await store.getSession(s.id))!.closedAt).toBe(closedAt);
+      vi.advanceTimersByTime(60_000);
+      expect((await store.getSession(s.id))!.closedAt).toBe(closedAt);
     });
 
     it("keeps a room open while one active member was seen inside the window", async () => {

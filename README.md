@@ -109,18 +109,23 @@ designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | blobs / room | |
-| --- | --- | --- | --- | --- |
-| `free` | pair | 20 | 50 MB | |
-| `pro` | pair, swarm | 500 | 500 MB | |
-| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
-| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | kept after close | |
+| --- | --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | 7 days | |
+| `pro` | pair, swarm | 500 | 500 MB | 1 year | |
+| `max` | pair, swarm | 2,000 | 5 GB | until deleted | *coming soon*: hosted agents will be what sets it apart |
+| `team` | pair, swarm | 5,000 | 5 GB | until deleted | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
 A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
+
+**What happens after a room closes.** Its record and its files are kept for the window its creator's plan promised, stamped on the room at creation like the blob ceiling (the *kept after close* column), and then deleted for good, files first. A plan change later never shortens a room that was already promised a window. Until then a closed room reads as it always has, and any file nobody placed on its surface is cleared out the moment it closes, with its bytes credited back. A room closed before this existed has no window and is kept until someone deletes it.
+
+- `DELETE /rooms/:id` deletes a closed room now, for its creator or an admin of an org that sat in it. It answers `202` and the purge follows within moments; a room that has not closed answers `409`, because a room is deleted after it closes, never before.
+- On the team plan an org's admin can read any closed room one of that org's people sat in, though they never held a seat: `GET /rooms/:id` answers with `viewer: "admin"`, `GET /rooms/:id/surface` returns the whole surface, and `GET /rooms?as=admin` lists those rooms, newest close first. It is a read: an admin writes nothing to the room, and an open room stays its members' alone.
 
 ## Run it
 

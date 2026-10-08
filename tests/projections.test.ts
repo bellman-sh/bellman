@@ -31,6 +31,8 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { roomPreview } from "../src/projections.js";
+import { session } from "./helpers/fixtures.js";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 
@@ -143,5 +145,27 @@ describe("the projection layer stays importable from both transports", () => {
     // at top level and always will — if this comes back clean, the check above
     // is proving nothing about projections.ts.
     expect(offenders(resolve(SRC, "server.ts"))).not.toEqual([]);
+  });
+});
+
+/**
+ * The preview for a viewer who holds no seat (#65, D4): an org admin reading a closed room their org sat in.
+ * It is the preview a seat sees with the three fields that are about the viewer's own seat emptied, so the
+ * page that renders one renders the other.
+ */
+describe("roomPreview for a viewer with no seat", () => {
+  const room = session();
+
+  it("names no role, grants no verb, and asks nothing of the viewer", () => {
+    expect(roomPreview(room, null)).toMatchObject({ your_role: null, your_verbs: [], you_report: false });
+  });
+
+  it("is otherwise the preview a seat sees", () => {
+    const { your_role: _a, your_verbs: _b, you_report: _c, ...seated } = roomPreview(room, "peer_a");
+    const { your_role: _d, your_verbs: _e, you_report: _f, ...seatless } = roomPreview(room, null);
+    expect(seatless).toEqual(seated);
+    // Control: the three fields really are the ones a seat fills in.
+    expect(roomPreview(room, "peer_a")).toMatchObject({ your_role: "peer_a" });
+    expect(roomPreview(room, "peer_a").your_verbs.length).toBeGreaterThan(0);
   });
 });

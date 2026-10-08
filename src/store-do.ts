@@ -65,6 +65,13 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
  */
 const deliveredKey = (intentId: string) => `d:${intentId}`;
 /**
+ * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
+ * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
+ * `[A-Za-z0-9_-]` where grants are written (isOrgId), but an identity's org can come from a key
+ * map nobody validated, and grant-index.ts makes the same argument at more length.
+ */
+const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)}:`;
+/**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
  */
@@ -2094,6 +2101,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     for (const userId of new Set(s.members.map((m) => m.userId))) {
       await registry.dropMembershipIndex(userId, s.id);
     }
+    for (const orgId of orgsOnRoster(s)) await registry.dropOrgIndex(orgId, s.id);
     for (const orgId of orgsOnRoster(s)) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
         .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
@@ -2648,6 +2656,35 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return [...map.keys()].map((k) => k.slice(prefix.length));
   }
 
+  /**
+   * `uo:<org>:<room>` — which rooms an org sat in (#65, D5), for the admin's list of the
+   * closed ones. The same shape as `um:`, keyed by org, so a room several of an org's people
+   * joined is one entry, and a room people from two orgs joined is in both lists.
+   *
+   * **It starts at its deploy, like the two above.** A room created before it is not listed,
+   * and cannot be backfilled: this registry has never held a list of rooms to walk. The
+   * admin's read of such a room by id does not use the index and works. And a write that fails
+   * is logged rather than thrown (`DurableObjectStore.writeIndex`), for the reason `um:` gives,
+   * so a room can be missing from the list and present for the read.
+   *
+   * Kept for a closed room, which is what it is for, and dropped by the purge
+   * (`dropOrgIndex`).
+   */
+  async indexOrg(orgId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`${orgRoomPrefix(orgId)}${sessionId}`, Date.now());
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    const prefix = orgRoomPrefix(orgId);
+    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /** The purge's (#65), and only the purge's: a room that is gone is no room any org sat in. Idempotent. */
+  async dropOrgIndex(orgId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`${orgRoomPrefix(orgId)}${sessionId}`);
+  }
+
   async recordCreate(userId: string): Promise<void> {
     const key = `cr:${userId}`;
     const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
@@ -2808,6 +2845,12 @@ export class DurableObjectStore implements BellmanStore {
       await this.writeIndex("um", m.userId, s.id, () =>
         this.registry.indexMembership(m.userId, s.id));
     }
+    // `uo:` is how an org's admin finds a closed room its people sat in (#65, D5): one row for each
+    // org on the roster it starts with, the creator's included. A missed entry leaves the room out of
+    // that one list, and the admin's read of it by id works all the same.
+    for (const orgId of orgsOnRoster(s)) {
+      await this.writeIndex("uo", orgId, s.id, () => this.registry.indexOrg(orgId, s.id));
+    }
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
@@ -2856,6 +2899,10 @@ export class DurableObjectStore implements BellmanStore {
     if (added) {
       await this.writeIndex("um", member.userId, sessionId, () =>
         this.registry.indexMembership(member.userId, sessionId));
+      // The member's org, when it has one: a person from another org joining puts the room in that
+      // org's list too (#65, D5).
+      const orgId = member.orgId;
+      if (orgId) await this.writeIndex("uo", orgId, sessionId, () => this.registry.indexOrg(orgId, sessionId));
     }
     return added;
   }
@@ -2875,6 +2922,8 @@ export class DurableObjectStore implements BellmanStore {
     if (seated.refused === null) {
       await this.writeIndex("um", member.userId, sessionId, () =>
         this.registry.indexMembership(member.userId, sessionId));
+      const orgId = member.orgId;
+      if (orgId) await this.writeIndex("uo", orgId, sessionId, () => this.registry.indexOrg(orgId, sessionId));
     }
     return seated;
   }
@@ -3002,6 +3051,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
     return this.registry.sessionsJoinedBy(userId, limit);
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsForOrg(orgId, limit);
   }
 
   async appendEvent(

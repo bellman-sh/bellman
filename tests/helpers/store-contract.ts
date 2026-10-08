@@ -3443,6 +3443,96 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------------------ the org index (#65)
+    /**
+     * Which rooms an org sat in (D5), for the admin's list: written when a room is created for the org of
+     * everyone it starts with, and when a member joins for that member's org. It keeps a closed room, which
+     * is what an admin lists it for, and a purge is what removes one.
+     */
+    describe("the org index (#65, D5)", () => {
+      it("lists a room for the org of its creator, and for the org of each member who joins", async () => {
+        const s = session({ id: "qs_org_join", joinCodes: {} });
+        await store.createSession(s);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+
+        expect(await store.addMember(s.id, peer({ memberId: "m_o1", userId: "u_o1" }))).toBe(true);
+
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+      });
+
+      it("lists a room for the org of a member seated into it", async () => {
+        const s = swarmSession({ id: "qs_org_seat", joinCodes: {} });
+        await store.createSession(s);
+
+        const out = await store.seatMember(s.id, peer({ memberId: "m_seated", userId: "u_seated" }), Date.now() - 600_000, Date.now());
+
+        expect(out.refused).toBeNull();
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+      });
+
+      it("lists a room for the orgs of the members it is created with", async () => {
+        const s = session({ id: "qs_org_both", joinCodes: {}, members: [member(), peer()] });
+        await store.createSession(s);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+      });
+
+      it("adds a room to no org's list for a member who has none or a blank one, and does not fail", async () => {
+        const s = session({ id: "qs_org_none", joinCodes: {} });
+        await store.createSession(s);
+        expect(await store.addMember(s.id, peer({ memberId: "m_solo", userId: "u_solo", orgId: null }))).toBe(true);
+        expect(await store.addMember(s.id, peer({ memberId: "m_blank", userId: "u_blank", orgId: "" }))).toBe(true);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+        expect(await store.sessionsForOrg("", 10), "a blank org is no org").toEqual([]);
+      });
+
+      // The prefix is `uo:<org>:` and ends at the separator: without it org_a would list org_ab's rooms.
+      it("keeps one org's rooms out of another's, including an org whose id begins with the other's", async () => {
+        const made = (id: string, org: string) =>
+          store.createSession(session({ id, orgId: org, joinCodes: {}, members: [member({ orgId: org })] }));
+        await made("qs_in_org_a", "org_a");
+        await made("qs_in_org_ab", "org_ab");
+
+        expect(await store.sessionsForOrg("org_a", 10)).toEqual(["qs_in_org_a"]);
+        expect(await store.sessionsForOrg("org_ab", 10)).toEqual(["qs_in_org_ab"]);
+        expect(await store.sessionsForOrg("org_nobody", 10)).toEqual([]);
+      });
+
+      // An identity's org can come from a key map nobody validated, so an id may spell the key's own separator:
+      // `uo:org:x:<room>` would otherwise be a row of org "org" with a room named "x:<room>".
+      it("keeps an org whose id spells the separator apart from the org it begins with", async () => {
+        const made = (id: string, org: string) =>
+          store.createSession(session({ id, orgId: org, joinCodes: {}, members: [member({ orgId: org })] }));
+        await made("qs_in_org", "org");
+        await made("qs_in_org_x", "org:x");
+
+        expect(await store.sessionsForOrg("org", 10)).toEqual(["qs_in_org"]);
+        expect(await store.sessionsForOrg("org:x", 10)).toEqual(["qs_in_org_x"]);
+      });
+
+      it("returns at most the limit it is handed", async () => {
+        for (const n of [1, 2, 3]) await store.createSession(session({ id: `qs_org_many_${n}`, joinCodes: {} }));
+        expect(await store.sessionsForOrg("org_codenerd", 2)).toHaveLength(2);
+      });
+
+      it("keeps listing a closed room until it is purged, and then drops it from every org that sat in it", async () => {
+        const s = session({ id: "qs_org_purge", retainAfterCloseMs: 60_000, joinCodes: {}, members: [member(), peer()] });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+        expect(await store.sessionsForOrg("org_codenerd", 10), "closed, inside the window").toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+
+        expect(await store.sessionsForOrg("org_codenerd", 10)).not.toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+      });
+    });
+
     // ----------------------------------------------------- removing a member
     const leaveEvent = (memberId: string): EventBody => ({
       type: "member_left",

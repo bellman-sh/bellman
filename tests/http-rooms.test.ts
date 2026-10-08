@@ -11,6 +11,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { MemoryStore } from "../src/store.js";
+import type { Identity, Session, SurfaceItem } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 
@@ -22,9 +23,22 @@ let store: MemoryStore;
 let blobs: MemoryBlobStore;
 let deps: RoomRouteDeps;
 
-/** Bearer: a dev key. Cookie: the dev key as the cookie's value, read straight off it. */
+/**
+ * Callers the dev keys do not hold (#65), for the cases that need exactly one condition of the admin's read
+ * missing: each is `jesse`, the team plan's admin for org_codenerd, less one thing.
+ */
+const EXTRA: Record<string, Identity> = {
+  qk_free_admin: { userId: "u_free_admin", orgId: "org_codenerd", plan: "free", role: "admin", label: "free-admin@codenerd" },
+  qk_team_member: { userId: "u_team_member", orgId: "org_codenerd", plan: "team", role: "member", label: "member@codenerd" },
+  qk_other_admin: { userId: "u_other_admin", orgId: "org_other", plan: "team", role: "admin", label: "admin@other" },
+  qk_orgless_admin: { userId: "u_orgless_admin", orgId: null, plan: "team", role: "admin", label: "admin@nowhere" },
+  qk_blank_admin: { userId: "u_blank_admin", orgId: "", plan: "team", role: "admin", label: "admin@blank" },
+};
+
+/** Bearer: a dev key, or one of EXTRA. Cookie: the dev key as the cookie's value, read straight off it. */
 const caller = async (request: Request): Promise<RoomCaller | null> => {
-  const bearer = resolveIdentity(request.headers.get("authorization") ?? undefined);
+  const header = request.headers.get("authorization") ?? undefined;
+  const bearer = resolveIdentity(header) ?? (header ? EXTRA[header.replace(/^Bearer\s+/i, "").trim()] : undefined);
   if (bearer) return { identity: bearer, via: "bearer" };
   const cookie = /bellman_session=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
   const identity = cookie ? resolveIdentity(`Bearer ${cookie}`) : null;
@@ -298,7 +312,7 @@ describe("GET /rooms/:id", () => {
     expect(await bodyOf(anonymous)).toMatchObject({ error: "unauthorized" });
     const post = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`, { method: "POST", body: {} }))!;
     expect(post.status).toBe(405);
-    expect(post.headers.get("allow")).toBe("GET");
+    expect(post.headers.get("allow")).toBe("GET, DELETE");
   });
 
   // #113 on this route: a person every one of whose handles was removed reads the room as it stood at the removal and
@@ -780,5 +794,358 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(placed.status, await placed.clone().text()).toBe(200);
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { blob: unknown } }[] };
     expect(body.items[0].data.blob).toEqual({ id: blob_id, bytes: 5, type: "text/plain", name: "notes.txt" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An org admin's read of a closed room, the org's list, and delete on demand (#65)
+// ---------------------------------------------------------------------------
+
+const ORG_ROOM = "qs_org_room";
+
+/** A closed room created and sat in by peer (org_codenerd), where jesse, that org's admin, holds no handle. */
+const orgRoom = (over: Partial<Session> = {}) =>
+  session({ id: ORG_ROOM, createdBy: "u_peer", closed: true, closedAt: 1_700_000_000_000, members: [peer()], ...over });
+
+/** A member of another org, in the seat the fixture gives peer. */
+const otherOrgPeer = (over: Parameters<typeof member>[0] = {}) =>
+  member({ memberId: "m_peer", userId: "u_peer", label: "peer@other", roomRole: "peer_b", orgId: "org_other", ...over });
+
+/** An item on a room's surface, written the way the store is asked to commit one, by peer. */
+async function placeDirect(room: string, key: string, body: string) {
+  const item: SurfaceItem = { key, kind: "text", title: null, body, ends: null, placement: null, blob: null };
+  return (await store.appendEvent(
+    room,
+    { type: "surface", fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", payload: item, refId: null },
+    { surface: { key, item } },
+  ))!;
+}
+
+describe("an org admin's read of a closed room (#65)", () => {
+  it("reads the closed room of an org it administers: the preview with no seat, the roster, and no handles", async () => {
+    await store.createSession(orgRoom());
+
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}`))!;
+
+    expect(res.status).toBe(200);
+    const body = (await bodyOf(res)) as { members: { member_id: string }[] };
+    expect(body).toMatchObject({
+      id: ORG_ROOM, session_status: "closed", viewer: "admin", my_handles: [],
+      preview: { your_role: null, your_verbs: [], you_report: false },
+    });
+    expect(body.members.map((m) => m.member_id)).toEqual(["m_peer"]);
+  });
+
+  it("answers 404 while the room is open, on both reads: an open room is its members'", async () => {
+    await store.createSession(orgRoom({ closed: false, closedAt: null }));
+    expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}`))!.status).toBe(404);
+    expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/surface`))!.status).toBe(404);
+  });
+
+  it("answers 404 for a closed room none of whose members is in the admin's org", async () => {
+    await store.createSession(orgRoom({ members: [otherOrgPeer()] }));
+    expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}`))!.status).toBe(404);
+    expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/surface`))!.status).toBe(404);
+  });
+
+  // Each caller is jesse less one of the four conditions, so a refusal here is that condition and no other.
+  it.each([
+    ["an admin on the free plan, which does not pay for the audit log", "qk_free_admin"],
+    ["a member of the org who is not an admin", "qk_team_member"],
+    ["an admin of another org", "qk_other_admin"],
+    ["an admin with no org", "qk_orgless_admin"],
+  ])("answers 404 to %s", async (_name, key) => {
+    await store.createSession(orgRoom());
+    expect((await call(key, `/rooms/${ORG_ROOM}`))!.status).toBe(404);
+    expect((await call(key, `/rooms/${ORG_ROOM}/surface`))!.status).toBe(404);
+  });
+
+  it("does not read a blank org id as an org, in the caller or on the roster", async () => {
+    await store.createSession(orgRoom({ members: [peer()].map((m) => ({ ...m, orgId: "" })) }));
+    expect((await call("qk_blank_admin", `/rooms/${ORG_ROOM}`))!.status).toBe(404);
+  });
+
+  it("answers a stranger and an unknown room alike", async () => {
+    await store.createSession(orgRoom());
+    const stranger = (await call("qk_other_admin", `/rooms/${ORG_ROOM}`))!;
+    const unknown = (await call("qk_other_admin", "/rooms/qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+  });
+
+  // Review Focus 3. The org sat in the room, so its admin reads it, and the creator's removal of the member
+  // cut that member's reading and not the admin's.
+  it("reads a closed room whose only member of the org was removed, past the cut that member has", async () => {
+    await store.createSession(session({
+      id: "qs_removed_org", createdBy: "u_outsider",
+      members: [member({ memberId: "m_owner", userId: "u_outsider", label: "outsider", orgId: null }), peer()],
+    }));
+    const h = new Harness(store, blobs);
+    const owner = await h.connect(DEV_KEY.outsider);
+    const evicted = await owner.call("bellman_evict", { session_id: "qs_removed_org", member_id: "m_peer" });
+    expect(evicted.isError, evicted.text).toBe(false);
+    const placed = await owner.call("bellman_send", {
+      session_id: "qs_removed_org", member_id: "m_owner", type: "surface",
+      payload: { key: "after", kind: "text", body: "written after the removal" },
+    });
+    expect(placed.isError, placed.text).toBe(false);
+    const left = await owner.call("bellman_leave", { session_id: "qs_removed_org", member_id: "m_owner" });
+    expect(left.isError, left.text).toBe(false);
+    await h.close();
+    expect((await store.getSession("qs_removed_org"))!.closed, "the last member leaving closed it").toBe(true);
+
+    const detail = (await call(DEV_KEY.jesse, "/rooms/qs_removed_org"))!;
+    expect(detail.status).toBe(200);
+    expect(await bodyOf(detail)).toMatchObject({ viewer: "admin" });
+    const read = (await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_removed_org/surface"))) as { items: { data: { key: string } }[] };
+    expect(read.items.map((item) => item.data.key), "an item written after the member was cut").toEqual(["after"]);
+    // The control: the member is cut from exactly that.
+    const cut = (await bodyOf(await call(DEV_KEY.peer, "/rooms/qs_removed_org/surface"))) as { items: unknown[] };
+    expect(cut.items).toEqual([]);
+  });
+
+  it("reads the surface of a closed room whole, with the ETag a member's read carries, and answers 304 on it", async () => {
+    await store.createSession(orgRoom());
+    const placed = await placeDirect(ORG_ROOM, "plan", "ship it");
+
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/surface`))!;
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe(`"${placed.cursor}"`);
+    const body = (await bodyOf(res)) as { surface_cursor: number; items: { data: { key: string; body: string } }[] };
+    expect(body.surface_cursor).toBe(placed.cursor);
+    expect(body.items.map((item) => [item.data.key, item.data.body])).toEqual([["plan", "ship it"]]);
+    const again = (await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/surface`, { headers: { "if-none-match": `"${placed.cursor}"` } }))!;
+    expect(again.status).toBe(304);
+  });
+
+  it("refuses a write to the surface from the admin, which holds no seat, and a removal too", async () => {
+    await store.createSession(orgRoom());
+    await placeDirect(ORG_ROOM, "plan", "ship it");
+    const before = await store.surfaceOf(ORG_ROOM);
+
+    const write = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "rewritten" }, { room: ORG_ROOM, member: "m_peer" }))!;
+    const removal = (await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/surface/plan?member_id=m_peer`, { method: "DELETE" }))!;
+
+    expect([write.status, removal.status]).toEqual([403, 403]);
+    expect(await bodyOf(write)).toMatchObject({ error: "forbidden" });
+    expect(await store.surfaceOf(ORG_ROOM)).toEqual(before);
+  });
+
+  it("leaves a stranger's write at 404, as it was: only an admitted admin is told it holds no seat", async () => {
+    await store.createSession(orgRoom());
+    const res = (await put("qk_other_admin", "plan", { kind: "text", body: "x" }, { room: ORG_ROOM, member: "m_peer" }))!;
+    expect(res.status).toBe(404);
+  });
+
+  it("marks a member's answers as a member's", async () => {
+    expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`))).toMatchObject({ viewer: "member" });
+  });
+
+  // Membership first: a seat is the closer fact, and an admin who sits in the room reads it as the member it is.
+  it("serves an admin who is also in the room as the member, with its handles", async () => {
+    await store.createSession(session({ id: "qs_admin_sits", closed: true, closedAt: 1_700_000_000_000, members: [member(), peer()] }));
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_admin_sits"));
+    expect(body).toMatchObject({ viewer: "member", my_handles: [{ member_id: "m_creator" }] });
+  });
+});
+
+describe("GET /rooms?as=admin (#65)", () => {
+  const list = (key: string | null) => call(key, "/rooms?as=admin");
+  const closedRoom = (id: string, closedAt: number | null, over: Partial<Session> = {}) =>
+    session({ id, createdBy: "u_peer", closed: true, closedAt, members: [peer()], ...over });
+
+  it("lists the closed rooms of the caller's org and only those, newest close first, with a close not dated last", async () => {
+    await store.createSession(closedRoom("qs_adm_old", 2_000));
+    await store.createSession(closedRoom("qs_adm_new", 3_000));
+    await store.createSession(closedRoom("qs_adm_undated", null));
+    await store.createSession(closedRoom("qs_adm_open", null, { closed: false }));
+    await store.createSession(closedRoom("qs_adm_other_org", 4_000, { members: [otherOrgPeer()] }));
+    // Created by another org, and sat in by this one while it was open: the room is in this org's index
+    // too. Closed after, so its close is the newest of them all.
+    await store.createSession(closedRoom("qs_adm_joined", null, { closed: false, members: [otherOrgPeer()] }));
+    await store.addMember("qs_adm_joined", member({ memberId: "m_peer2", userId: "u_peer2", label: "peer2@codenerd", roomRole: "peer_b" }));
+    await store.closeSession("qs_adm_joined");
+
+    const res = (await list(DEV_KEY.jesse))!;
+
+    expect(res.status).toBe(200);
+    const body = (await bodyOf(res)) as { rooms: { id: string; status: string; mine: boolean }[]; truncated: boolean; viewer: string };
+    expect(body.viewer).toBe("admin");
+    expect(body.truncated).toBe(false);
+    expect(body.rooms.map((r) => r.id)).toEqual(["qs_adm_joined", "qs_adm_new", "qs_adm_old", "qs_adm_undated"]);
+    expect(body.rooms.every((r) => r.status === "closed" && r.mine === false)).toBe(true);
+    expect(body.rooms[0]).toMatchObject({ room: "test-room", mode: "pair", members: 2 });
+  });
+
+  it("lists nothing of another org's, and nothing for an org with no closed room", async () => {
+    await store.createSession(closedRoom("qs_adm_theirs", 2_000));
+    const body = (await bodyOf(await list("qk_other_admin"))) as { rooms: unknown[]; viewer: string };
+    expect(body).toMatchObject({ rooms: [], viewer: "admin" });
+  });
+
+  it.each([
+    ["a member of the org on the free plan", DEV_KEY.peer],
+    ["a member of the org on the team plan who is not an admin", "qk_team_member"],
+    ["an admin on the free plan", "qk_free_admin"],
+    ["an admin with no org", "qk_orgless_admin"],
+  ])("answers 403 to %s", async (_name, key) => {
+    const res = (await list(key))!;
+    expect(res.status).toBe(403);
+    expect(await bodyOf(res)).toEqual({
+      error: "forbidden",
+      error_description: "the admin list requires the team plan, the admin role and an org",
+    });
+  });
+
+  it("answers 401 without a credential", async () => {
+    expect((await list(null))!.status).toBe(401);
+  });
+
+  // The window is the index's: the first MAX_ROOMS_LISTED rows of the org, open rooms among them, so the
+  // fixture's own open room takes a place in it that a closed one could have had. That is the bound's cost
+  // and the reason `truncated` exists; #49's summary index is what removes it.
+  it("is bounded at MAX_ROOMS_LISTED, and says it may have been cut", async () => {
+    for (let i = 0; i < MAX_ROOMS_LISTED + 5; i++) await store.createSession(closedRoom(`qs_adm_many_${i}`, 1_000 + i));
+    const body = (await bodyOf(await list(DEV_KEY.jesse))) as { rooms: unknown[]; truncated: boolean };
+    expect(body.rooms.length).toBeGreaterThan(MAX_ROOMS_LISTED - 5);
+    expect(body.rooms.length).toBeLessThanOrEqual(MAX_ROOMS_LISTED);
+    expect(body.truncated).toBe(true);
+  });
+
+  it("reads no more rooms than the bound", async () => {
+    for (let i = 0; i < MAX_ROOMS_LISTED + 5; i++) await store.createSession(closedRoom(`qs_adm_reads_${i}`, 1_000 + i));
+    let reads = 0;
+    const read = store.getSession.bind(store);
+    store.getSession = async (id: string) => { reads++; return read(id); };
+    await list(DEV_KEY.jesse);
+    expect(reads).toBeLessThanOrEqual(MAX_ROOMS_LISTED);
+  });
+
+  it("leaves the member list as it was, and marks it a member's", async () => {
+    const body = (await bodyOf(await call(DEV_KEY.jesse, "/rooms"))) as { rooms: { id: string }[]; viewer: string };
+    expect(body.viewer).toBe("member");
+    expect(body.rooms.map((r) => r.id)).toEqual([ROOM]);
+    // Any other value of the parameter is the member list too.
+    const other = (await bodyOf(await call(DEV_KEY.jesse, "/rooms?as=everything"))) as { viewer: string };
+    expect(other.viewer).toBe("member");
+  });
+});
+
+describe("DELETE /rooms/:id (#65)", () => {
+  const removeRoom = (key: string | null, room: string, over: CallOptions = {}) =>
+    call(key, `/rooms/${room}`, { method: "DELETE", ...over });
+  /** A closed room jesse created, with peer in it. */
+  const mineClosed = (id: string, over: Partial<Session> = {}) =>
+    session({ id, closed: true, closedAt: Date.now() - 1_000, members: [member(), peer()], ...over });
+
+  it("lets the creator delete a closed room: 202 at once, and the room is gone once the purge has run", async () => {
+    await store.createSession(mineClosed("qs_del_mine"));
+    const asked = Date.now();
+
+    const res = (await removeRoom(DEV_KEY.jesse, "qs_del_mine"))!;
+
+    expect(res.status).toBe(202);
+    const body = (await bodyOf(res)) as { id: string; purge_at: string };
+    expect(body.id).toBe("qs_del_mine");
+    expect(new Date(body.purge_at).getTime()).toBeGreaterThanOrEqual(asked);
+    // Review Focus 2: a read before the purge has run answers the closed room, not a crash.
+    const before = (await call(DEV_KEY.peer, "/rooms/qs_del_mine"))!;
+    expect(before.status).toBe(200);
+    expect(await bodyOf(before)).toMatchObject({ session_status: "closed" });
+
+    await store.sweep(Date.now());
+
+    expect((await call(DEV_KEY.jesse, "/rooms/qs_del_mine"))!.status).toBe(404);
+    const { rooms } = (await bodyOf(await call(DEV_KEY.jesse, "/rooms"))) as { rooms: { id: string }[] };
+    expect(rooms.map((r) => r.id)).not.toContain("qs_del_mine");
+  });
+
+  it("lets an admin of an org in the room delete it, though it holds no seat", async () => {
+    await store.createSession(orgRoom());
+    expect((await removeRoom(DEV_KEY.jesse, ORG_ROOM))!.status).toBe(202);
+    await store.sweep(Date.now());
+    expect(await store.getSession(ORG_ROOM)).toBeUndefined();
+  });
+
+  it("refuses a member who is not the creator with 403, and the room stays", async () => {
+    await store.createSession(mineClosed("qs_del_peer"));
+    const res = (await removeRoom(DEV_KEY.peer, "qs_del_peer"))!;
+    expect(res.status).toBe(403);
+    expect(await bodyOf(res)).toMatchObject({
+      error: "forbidden", error_description: "only the room's creator or an admin of an org in it may delete it",
+    });
+    await store.sweep(Date.now());
+    expect(await store.getSession("qs_del_peer")).toBeDefined();
+  });
+
+  it("answers an open room 409 to its creator: a room is deleted after it closes", async () => {
+    const res = (await removeRoom(DEV_KEY.jesse, ROOM))!;
+    expect(res.status).toBe(409);
+    expect(await bodyOf(res)).toMatchObject({ error: "conflict", error_description: "a room is deleted after it closes" });
+    await store.sweep(Date.now());
+    expect((await store.getSession(ROOM))?.closed).toBe(false);
+  });
+
+  it("asks who may before it asks whether the room is closed: a member who is not the creator gets 403 on an open room", async () => {
+    expect((await removeRoom(DEV_KEY.peer, ROOM))!.status).toBe(403);
+  });
+
+  it("answers a stranger, an admin of an open room it is not in, and an unknown room with one 404", async () => {
+    await store.createSession(orgRoom({ closed: false, closedAt: null }));
+    const stranger = (await removeRoom(DEV_KEY.outsider, ROOM))!;
+    const adminOpen = (await removeRoom(DEV_KEY.jesse, ORG_ROOM))!;
+    const unknown = (await removeRoom(DEV_KEY.jesse, "qs_nope"))!;
+    expect([stranger.status, adminOpen.status, unknown.status]).toEqual([404, 404, 404]);
+    expect(await bodyOf(adminOpen)).toEqual(await bodyOf(unknown));
+    expect((await store.getSession(ORG_ROOM))?.closed).toBe(false);
+  });
+
+  it("refuses without a credential, with CORS on the refusal", async () => {
+    const res = (await removeRoom(null, ROOM, { headers: { origin: PANEL } }))!;
+    expect(res.status).toBe(401);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
+  it("refuses a cookie caller with no Origin, and takes one with the panel's", async () => {
+    await store.createSession(mineClosed("qs_del_cookie"));
+    const forged = (await removeRoom(null, "qs_del_cookie", { cookie: DEV_KEY.jesse }))!;
+    expect(forged.status).toBe(403);
+    await store.sweep(Date.now());
+    expect(await store.getSession("qs_del_cookie"), "the room is untouched").toBeDefined();
+
+    const real = (await removeRoom(null, "qs_del_cookie", { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect(real.status).toBe(202);
+    await store.sweep(Date.now());
+    expect(await store.getSession("qs_del_cookie")).toBeUndefined();
+  });
+
+  // Review Focus 5: a row closed before the window existed carries no window and no close time.
+  it("lets the creator delete a room closed before the window existed", async () => {
+    await store.createSession(mineClosed("qs_del_legacy", { closedAt: null, retainAfterCloseMs: null }));
+    await store.sweep(Date.now());
+    expect(await store.getSession("qs_del_legacy"), "kept however long it sits").toBeDefined();
+
+    expect((await removeRoom(DEV_KEY.jesse, "qs_del_legacy"))!.status).toBe(202);
+    await store.sweep(Date.now());
+
+    expect(await store.getSession("qs_del_legacy")).toBeUndefined();
+  });
+
+  it("answers a repeated delete 202 again, and files one entry for who asked", async () => {
+    await store.createSession(mineClosed("qs_del_twice"));
+    expect((await removeRoom(DEV_KEY.jesse, "qs_del_twice"))!.status).toBe(202);
+    expect((await removeRoom(DEV_KEY.jesse, "qs_del_twice"))!.status).toBe(202);
+
+    const asked = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.sessionId === "qs_del_twice");
+    expect(asked).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+  });
+
+  it("answers 405 to a method the detail does not take, naming GET and DELETE, and the preflight allows DELETE", async () => {
+    const put = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`, { method: "PUT", body: {} }))!;
+    expect([put.status, put.headers.get("allow")]).toEqual([405, "GET, DELETE"]);
+    const pre = (await call(null, `/rooms/${ROOM}`, { method: "OPTIONS", headers: { origin: PANEL } }))!;
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get("access-control-allow-methods")).toContain("DELETE");
   });
 });

@@ -877,6 +877,22 @@ export interface BellmanStore {
    * survive `limit` is unspecified too.
    */
   sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
+  /**
+   * Rooms an org sat in, closed ones included (#65, D5): the ids the admin's list resolves. A room
+   * is listed for the org of everyone it is created with, and for the org of each member who joins
+   * it afterwards, so a person from another org joining adds the room to their org's list as well.
+   * A member with no org adds it to none. The one thing that removes a row is the purge.
+   *
+   * Ids only, as `sessionsJoinedBy` answers them, and for the same reasons: no status parameter,
+   * because the admin's list wants the closed rooms and a freeze sweep would want others; the
+   * caller resolves each id and checks the record, since an index row names a room and only the
+   * roster says whether the org is in it; and no order is promised, so which rooms survive `limit`
+   * is unspecified.
+   *
+   * The Durable Objects store starts at its deploy, as its other indexes do: a room created
+   * before then is not listed, and the admin's read of it by id works all the same.
+   */
+  sessionsForOrg(orgId: string, limit: number): Promise<string[]>;
 
   /**
    * Append an event. Null means the session is frozen, for the same reason.
@@ -1032,6 +1048,8 @@ export class MemoryStore implements BellmanStore {
   private byJoinCode = new Map<string, string>();
   private byCreator = new Map<string, Set<string>>();
   private byMember = new Map<string, Set<string>>();
+  /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
+  private byOrg = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -1072,6 +1090,7 @@ export class MemoryStore implements BellmanStore {
     // hands over the creator in `members` and never calls addMember — so they
     // are indexed here. addMember indexes everyone who joins afterwards.
     for (const m of stored.members) this.indexMember(m.userId, stored.id);
+    for (const orgId of orgsOnRoster(stored)) this.indexOrg(orgId, stored.id);
   }
 
   /**
@@ -1083,6 +1102,14 @@ export class MemoryStore implements BellmanStore {
     const joined = this.byMember.get(userId) ?? new Set<string>();
     joined.add(sessionId);
     this.byMember.set(userId, joined);
+  }
+
+  /** The org index's one writer (#65, D5), for the same reason: a member with no org writes nothing. */
+  private indexOrg(orgId: string | null, sessionId: string): void {
+    if (!orgId) return;
+    const rooms = this.byOrg.get(orgId) ?? new Set<string>();
+    rooms.add(sessionId);
+    this.byOrg.set(orgId, rooms);
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
@@ -1154,6 +1181,7 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused add leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
+    this.indexOrg(member.orgId, sessionId);
     return true;
   }
 
@@ -1184,6 +1212,7 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
+    this.indexOrg(member.orgId, sessionId);
 
     // A full room has no seat for ANY role, so every code goes — decided and
     // written here rather than by the caller afterwards. As a second call made
@@ -1482,6 +1511,10 @@ export class MemoryStore implements BellmanStore {
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
     return [...(this.byMember.get(userId) ?? [])].slice(0, limit);
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    return [...(this.byOrg.get(orgId) ?? [])].slice(0, limit);
   }
 
   async appendEvent(
@@ -1878,6 +1911,7 @@ export class MemoryStore implements BellmanStore {
     await this.blobs.deleteAll(s.id);
     this.byCreator.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
+    for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);

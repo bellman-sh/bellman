@@ -112,6 +112,12 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * creator's); resolveManifest checked both against `roles`. Do not pass a name
  * that has not been validated that way.
  *
+ * Or null, for a reader who holds no seat: an org admin reading a closed room
+ * their org sat in (#65, D4). The preview is then the one a seat sees with the
+ * three fields about the viewer's own seat emptied (`your_role` null,
+ * `your_verbs` none, `you_report` false), so the page that renders one renders
+ * the other, and nothing here promises a seat that does not exist.
+ *
  * The creator gets the same block, not a second shape: their own words come back
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
@@ -122,7 +128,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * lookup back into this function: a preview that over-promised by a single verb
  * is the failure this whole design exists to prevent.
  */
-export function roomPreview(session: StoredSession, viewerRole: string) {
+export function roomPreview(session: StoredSession, viewerRole: string | null) {
   const m = session.manifest;
   const creator = session.members[0];
   /**
@@ -157,11 +163,11 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     preset: m.preset,
     mode: m.mode,
     your_role: viewerRole,
-    your_verbs: verbsOfRole(m, viewerRole),
+    your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
     // The viewer's own obligation, hoisted as your_verbs is: the fact the
     // joiner's human is deciding on.
-    you_report: asked(viewerRole),
+    you_report: viewerRole === null ? false : asked(viewerRole),
     creator_role: m.creatorRole,
     roles,
     // Every seat's obligation, by the same rule, so the roles table a joiner

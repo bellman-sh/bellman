@@ -2,6 +2,8 @@
  * The HTTP room routes (#183, #184; #49 is where the rest go): the list, the
  * detail, the surface read and its writes, and the two doors a room's bytes
  * pass through. What the control panel calls, and what any bearer caller may.
+ * Since #65, also an org admin's read of a closed room its org sat in, the
+ * list of those rooms, and the delete a creator or such an admin may ask for.
  *
  * Runtime-free, like rooms.ts: a web Request in, a Response out, so the Worker
  * dispatches here and the root test program drives the same code over
@@ -14,6 +16,7 @@
  * to a status, the way rooms.ts says a route should; `RoomFailure` is a closed
  * union, so a code the table below forgets is a compile error.
  */
+import { entitlementsFor } from "../auth.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
@@ -121,8 +124,9 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     }
     const detail = DETAIL.exec(path);
     if (detail) {
-      if (request.method !== "GET") return methodNotAllowed("GET", origin);
-      return await roomDetail(request, detail[1], origin, deps);
+      if (request.method === "GET") return await roomDetail(request, detail[1], origin, deps);
+      if (request.method === "DELETE") return await deleteRoom(request, detail[1], origin, deps);
+      return methodNotAllowed("GET, DELETE", origin);
     }
     const surface = SURFACE.exec(path);
     if (surface) {
@@ -316,6 +320,7 @@ async function downloadBlob(
 async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  if (new URL(request.url).searchParams.get("as") === "admin") return listOrgRooms(who, origin, deps);
   const userId = who.identity.userId;
   const [created, joined] = await Promise.all([
     deps.store.sessionsCreatedBy(userId, MAX_ROOMS_LISTED),
@@ -330,12 +335,71 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
   const rooms = mine
     .slice(0, MAX_ROOMS_LISTED)
     .map((s) => roomListEntry(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
-  return json(200, { rooms, truncated }, origin);
+  return json(200, { rooms, truncated, viewer: "member" }, origin);
 }
+
+/**
+ * The closed rooms an org's admin may read (#65, D4, D5), for `GET /rooms?as=admin`. The caller is
+ * checked for the audit log's three conditions before any room is looked at: an admin on another
+ * plan, a member, or a caller with no org is told so with a 403, where the read of one room hides
+ * itself with a 404, because this route has no room to hide. The identity's own org is the only one
+ * it can ask for; the query names none.
+ *
+ * The org index names the rooms and the record decides, as the member list does: each is resolved
+ * and kept only if it is closed and has a member in the org. Newest close first, a room whose close
+ * was never dated last. `truncated` says what the member list's says, and for the same reason: the
+ * index came back full, which may have been exactly full, or more were kept than the bound.
+ */
+async function listOrgRooms(who: RoomCaller, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const { identity } = who;
+  if (!isOrgAdmin(identity)) {
+    return problem(403, "forbidden", "the admin list requires the team plan, the admin role and an org", origin);
+  }
+  const ids = await deps.store.sessionsForOrg(identity.orgId, MAX_ROOMS_LISTED);
+  const found = await Promise.all(ids.map((id) => deps.store.getSession(id)));
+  const kept = found
+    .filter((s): s is StoredSession => s !== undefined && admitsAdmin(s, identity))
+    .sort(closedAtDescending);
+  const truncated = ids.length >= MAX_ROOMS_LISTED || kept.length > MAX_ROOMS_LISTED;
+  const rooms = kept
+    .slice(0, MAX_ROOMS_LISTED)
+    .map((s) => roomListEntry(s, identity.userId, sessionStatus(s)));
+  return json(200, { rooms, truncated, viewer: "admin" }, origin);
+}
+
+/** Newest close first; a room closed before the close was dated has no time to sort by and goes last. */
+const closedAtDescending = (a: StoredSession, b: StoredSession): number => {
+  if (a.closedAt === b.closedAt) return 0;
+  if (a.closedAt === null) return 1;
+  if (b.closedAt === null) return -1;
+  return b.closedAt - a.closedAt;
+};
 
 /** Every handle this person holds in the room, in roster order. Empty means a stranger. */
 const handlesOf = (session: StoredSession, identity: Identity): Member[] =>
   session.members.filter((m) => m.userId === identity.userId);
+
+/**
+ * The three conditions `bellman_audit` already asks of a reader of an org's log (#65, D4): the
+ * team plan, which is what pays for the audit log, the admin role, and an org. A falsy org is no
+ * org, as a falsy id names no stream anywhere else (ARCHITECTURE.md, runtime fact 4).
+ */
+const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string } =>
+  identity.role === "admin" && entitlementsFor(identity).audit && Boolean(identity.orgId);
+
+/**
+ * Whether this caller may read a closed room it never sat in (#65, D4): the audit log's three
+ * conditions, plus the org tie on the roster. The roster keeps a member who left and one a
+ * creator removed, so an org whose only member was removed still sat in the room, and its admin
+ * reads all of it: the cut is a seat's, and an admin holds none.
+ *
+ * Never an open room: that is its members', and the audit log is the admin's window into it
+ * while it runs. A 404 for an open room says to an admin what it says to a stranger.
+ */
+const admitsAdmin = (session: StoredSession, identity: Identity): boolean =>
+  session.closed &&
+  isOrgAdmin(identity) &&
+  session.members.some((m) => m.orgId === identity.orgId);
 
 /** The roster now: every member, with `presence` read off the clock and the sockets. */
 const liveRoster = async (store: BellmanStore, session: StoredSession) => {
@@ -362,6 +426,18 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
   const mine = session ? handlesOf(session, who.identity) : [];
+  // Membership first, then the admin's fallback (#65, D4): a seat is the closer fact, and a person
+  // who sits in the room reads it as the member they are, cut and all.
+  if (session && mine.length === 0 && admitsAdmin(session, who.identity)) {
+    return json(200, {
+      id: session.id,
+      session_status: sessionStatus(session),
+      viewer: "admin",
+      preview: roomPreview(session, null),
+      members: await liveRoster(deps.store, session),
+      my_handles: [],
+    }, origin);
+  }
   if (!session || mine.length === 0) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
@@ -373,6 +449,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
   return json(200, {
     id: session.id,
     session_status: sessionStatus(session),
+    viewer: "member",
     preview: roomPreview(session, viewer.roomRole),
     members,
     my_handles: mine.map((m) => ({
@@ -383,6 +460,44 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       removed: isRemovedMember(m),
     })),
   }, origin);
+}
+
+/**
+ * Delete on demand (#65, D6): the room's creator, or an admin the read above admits, asks for a
+ * closed room to be purged now. 202, because this asks and the room's own alarm does it: the route
+ * and a window that ran out are one code path, and no request holds a room open for as long as a
+ * prefix takes to delete. Until the purge has run the room reads as the closed room it is.
+ *
+ * The CSRF check comes first for a cookie, as on every write. Then who may: a person with no part in
+ * the room, and the same person against a room that is not there, get the one 404; a member who is
+ * not the creator knows the room is there and gets a 403 that says who may. That comes before whether
+ * the room has closed, so an open room tells a stranger nothing and a member nothing it does not know.
+ * Closing stays what it is, the last member leaving or ninety days with nobody in the room, and a
+ * delete never closes one: the store says "open" and this says 409.
+ *
+ * Asked again, it is answered again: the store keeps the first request and files who asked once, and
+ * `purge_at` is the time of this one.
+ */
+async function deleteRoom(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+
+  const session = await deps.store.getSession(sessionId);
+  const sits = session !== undefined && handlesOf(session, who.identity).length > 0;
+  const admin = session !== undefined && admitsAdmin(session, who.identity);
+  const notFound = () => problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  if (!session || (!sits && !admin)) return notFound();
+  if (session.createdBy !== who.identity.userId && !admin) {
+    return problem(403, "forbidden", "only the room's creator or an admin of an org in it may delete it", origin);
+  }
+
+  const at = Date.now();
+  const outcome = await deps.store.schedulePurge(sessionId, at, who.identity.userId);
+  if (outcome === "open") return problem(409, "conflict", "a room is deleted after it closes", origin);
+  if (outcome === "missing") return notFound();
+  return json(202, { id: sessionId, purge_at: new Date(at).toISOString() }, origin);
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
@@ -435,7 +550,11 @@ async function readSurfaceRoute(request: Request, sessionId: string, origin: str
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
   const mine = session ? handlesOf(session, who.identity) : [];
-  if (!session || mine.length === 0) {
+  // The admin's fallback (#65, D4): the whole surface of a closed room, with no cut, because the
+  // cut is a seat's and an admin holds none. `cutFor` is not asked of an empty list, which would
+  // read as every handle removed and cut the read to nothing.
+  const asAdmin = session !== undefined && mine.length === 0 && admitsAdmin(session, who.identity);
+  if (!session || (mine.length === 0 && !asAdmin)) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   const ifNoneMatch = request.headers.get("if-none-match");
@@ -445,7 +564,7 @@ async function readSurfaceRoute(request: Request, sessionId: string, origin: str
   const notModified = (cursor: number) =>
     new Response(null, { status: 304, headers: { ...exposed, "cache-control": "no-store", etag: surfaceTag(cursor) } });
 
-  const cut = cutFor(mine);
+  const cut = asAdmin ? undefined : cutFor(mine);
   if (cut === undefined && etagMatches(ifNoneMatch, surfaceTag(surfaceCursor(session)))) {
     return notModified(surfaceCursor(session));
   }
@@ -530,6 +649,11 @@ async function writeSurfaceRoute(
   // `forbidden` then means the seat itself.
   const found = await deps.store.getSession(sessionId);
   if (!found || !findMember(found, memberId, who.identity)) {
+    // An admin admitted to read a closed room (#65, D4) knows it is there, and holds no seat in
+    // it: that is a refusal, and not a room that is hidden. Everyone else keeps the 404.
+    if (found && handlesOf(found, who.identity).length === 0 && admitsAdmin(found, who.identity)) {
+      return problem(403, "forbidden", "an admin reads a closed room and holds no seat in it, so it cannot write to it", origin);
+    }
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   const out = await writeSurface(deps.store, deps.blobs, who.identity, sessionId, memberId, payload);

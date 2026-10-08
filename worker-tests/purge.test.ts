@@ -74,8 +74,8 @@ it("purges a closed room when its window has run out, and a second alarm finds n
   const { store, closedAt } = await closedRoom("qs_window");
   await putObject("qs_window", "b_one");
   expect(await armedAlarm("qs_window"), "the purge is armed from the close").toBe(closedAt + WINDOW);
-  expect(await registryRows("qs_window"), "the registry lists it before").toEqual(
-    ["um:u_jesse:qs_window", "us:u_jesse:qs_window"],
+  expect(await registryRows("qs_window"), "the registry lists it before: joined, org's, created").toEqual(
+    ["um:u_jesse:qs_window", "uo:org_codenerd:qs_window", "us:u_jesse:qs_window"],
   );
 
   setClock(closedAt + WINDOW); // the window's last millisecond is the first that purges

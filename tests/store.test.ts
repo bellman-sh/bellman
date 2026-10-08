@@ -1,11 +1,19 @@
 import { describe, it, expect, vi } from "vitest";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
-describeStoreContract("MemoryStore", () => new MemoryStore());
+// A fresh blob store for each case, handed both to the store, which purges from it, and to the cases,
+// which put objects in it: a purge that missed the bucket the store was built over is seen.
+let blobs = new MemoryBlobStore();
+describeStoreContract(
+  "MemoryStore",
+  () => { blobs = new MemoryBlobStore(); return new MemoryStore({ blobs }); },
+  { blobsFor: () => blobs },
+);
 
 /**
  * `closedAt` is the clock of whoever closed the room (#65): an abandonment that `sweep(now)` closes is
@@ -24,6 +32,65 @@ describe("closedAt on MemoryStore's abandonment close", () => {
 
     expect((await store.getSession(s.id))).toMatchObject({ closed: true, closedAt: handed });
     expect((await store.eventsAfter(s.id, 0)).at(-1)).toMatchObject({ type: "session_expired", at: handed });
+  });
+});
+
+class RefusingBlobStore extends MemoryBlobStore {
+  refusals = 1;
+  override async deleteAll(sessionId: string): Promise<number> {
+    if (this.refusals-- > 0) throw new Error("bucket unavailable");
+    return super.deleteAll(sessionId);
+  }
+}
+
+/**
+ * The purge's order (#65, Review Focus 1) for the store that has no alarm to retry it: the bytes go first, and
+ * a bucket that refuses leaves the room whole for the next sweep. Never a room that names bytes that are gone.
+ */
+describe("a purge whose bucket refuses", () => {
+  it("leaves the room, its listings and its audit alone, and the next sweep purges it", async () => {
+    const blobs = new RefusingBlobStore();
+    const store = new MemoryStore({ blobs });
+    const s = session({ id: "qs_refused", retainAfterCloseMs: 60_000, joinCodes: {} });
+    await store.createSession(s);
+    await blobs.put(s.id, "b_one", new Uint8Array(3).buffer as ArrayBuffer, {
+      bytes: 3, type: "text/plain", name: "a.txt", by: "m_creator", at: Date.now(),
+    });
+    await store.closeSession(s.id);
+    const due = (await store.getSession(s.id))!.closedAt! + 60_000;
+
+    await expect(store.sweep(due)).rejects.toThrow("bucket unavailable");
+
+    expect(await store.getSession(s.id), "the room is kept").toMatchObject({ closed: true });
+    expect(await store.sessionsJoinedBy("u_jesse", 10), "and listed").toContain(s.id);
+    expect(await blobs.list(s.id), "with its bytes").toHaveLength(1);
+    expect(await store.auditForOrg("org_codenerd", 50), "and nothing says it is gone").toEqual([]);
+
+    await store.sweep(due);
+
+    expect(await store.getSession(s.id)).toBeUndefined();
+    expect(await blobs.list(s.id)).toEqual([]);
+    expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+  });
+});
+
+/**
+ * A poll registers a promise and a timer, and the timer settles it by looking the waiter up. A purge that
+ * dropped the waiter would leave the promise for ever, with nothing left to find it. MemoryStore's alone: a
+ * room's poll in the Durable Objects store is that object's own, and it times out there.
+ */
+describe("a poll waiting on a room that is purged", () => {
+  it("settles with nothing, and does not wait out its timeout", async () => {
+    const store = new MemoryStore();
+    const s = session({ id: "qs_poll", retainAfterCloseMs: 60_000, joinCodes: {} });
+    await store.createSession(s);
+    await store.closeSession(s.id);
+    const waiting = store.waitForEvents(s.id, 0, 120_000);
+
+    await store.sweep(Date.now() + 60_001);
+
+    expect(await store.getSession(s.id)).toBeUndefined();
+    expect(await waiting).toEqual([]);
   });
 });
 

@@ -2,7 +2,9 @@ import type {
   AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
   SurfaceRow,
 } from "./types.js";
+import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
+import { orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry } from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
@@ -767,6 +769,19 @@ export interface BellmanStore {
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
+   * Ask for a closed room to be purged at `at` rather than at the end of its window (#65, D6):
+   * the delete on demand. Resolves to "scheduled" for a closed room, "open" for a room that has
+   * not closed, which a delete never closes, and "missing" for a room that is not there, a purged
+   * one included. The purge itself is the store's own to carry out, by `sweep` for MemoryStore and
+   * by the room's alarm for the Durable Objects store, so "scheduled" means asked, not done.
+   *
+   * Asking again changes nothing and files nothing: the first request stands. A client that
+   * retries a delete it never heard the answer to is the case, and the audit log owes one
+   * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
+   * `by` is null when the caller is not a person.
+   */
+  schedulePurge(sessionId: string, at: number, by: string | null): Promise<"scheduled" | "open" | "missing">;
+  /**
    * Sessions this user created that are not closed — newest first is not
    * promised, only that a lapsed plan can find the rooms it has to freeze. The
    * create *counts* used for quota cannot answer that: they are timestamps, not
@@ -834,6 +849,8 @@ export interface BellmanStore {
    * This answers which rooms a person HELD a handle in, so a closed one is the
    * history being asked for rather than a tombstone, and a row whose room has
    * closed is still a true answer. The growth is the cost of that promise.
+   * The one thing that prunes it is the purge (#65): a room that has been deleted
+   * is no room at all, and its rows go with it.
    *
    * Order is not promised, and it differs between the stores — insertion order
    * in MemoryStore, key order in the Durable Objects store — so which rooms
@@ -976,6 +993,12 @@ export interface BellmanStore {
   appendAudit(a: AuditEntry): Promise<void>;
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
 
+  /**
+   * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
+   * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
+   * and drops expired connect tokens. MemoryStore does all of it here; the Durable Objects store
+   * does none, because each room's alarm does its room's.
+   */
   sweep(now: number): Promise<void>;
 }
 
@@ -1006,6 +1029,16 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /**
+   * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
+   * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
+   * store holds one of its own, which has nothing in it unless the caller put it there.
+   */
+  private readonly blobs: BlobStore;
+
+  constructor(options: { blobs?: BlobStore } = {}) {
+    this.blobs = options.blobs ?? new MemoryBlobStore();
+  }
 
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
@@ -1344,6 +1377,19 @@ export class MemoryStore implements BellmanStore {
       // one the freeze spent.
       s.members = stampSeen(clearSilence(s, now), now);
     }
+  }
+
+  async schedulePurge(
+    sessionId: string, at: number, by: string | null,
+  ): Promise<"scheduled" | "open" | "missing"> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return "missing";
+    if (!s.closed) return "open";
+    // Asked already: the first request stands, and is on the record once.
+    if (s.purgeAt !== null) return "scheduled";
+    s.purgeAt = at;
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    return "scheduled";
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
@@ -1737,9 +1783,37 @@ export class MemoryStore implements BellmanStore {
 
   async sweep(now: number): Promise<void> {
     for (const s of this.sessions.values()) this.closeIfAbandoned(s, now);
+    // After the abandonment pass, so a room it has just closed is judged on the same clock. Walked
+    // from a copy, because a purge deletes from the map.
+    for (const s of [...this.sessions.values()]) {
+      const due = purgeDueAt(s);
+      if (due !== null && now >= due) await this.purgeNow(s, now);
+    }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }
+  }
+
+  /**
+   * The purge (#65, D2), in the order the Durable Objects store keeps: the bytes first, then what
+   * the rest of the store holds about the room, then the room. The first step is the only one that
+   * can fail, and it fails before anything is forgotten, so a failed purge leaves a room the next
+   * sweep tries again, and never a room that names bytes that are gone.
+   *
+   * A poll still waiting on the room is answered with nothing rather than dropped: it registered a
+   * promise, and its own timer would find no waiter to settle.
+   */
+  private async purgeNow(s: Session, now: number): Promise<void> {
+    await this.blobs.deleteAll(s.id);
+    this.byCreator.get(s.createdBy)?.delete(s.id);
+    for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, now)));
+    for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
+    this.waiters.delete(s.id);
+    this.keys.delete(s.id);
+    this.surfaces.delete(s.id);
+    this.sessions.delete(s.id);
   }
 
   /** Resolve every waiter on a session from its own cursor. */

@@ -1,6 +1,10 @@
-import type { Member, SurfaceRow, Verb } from "./types.js";
+import type { Member, SessionEvent, SurfaceRow, Verb } from "./types.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
+import { reportRow } from "./heartbeat.js";
+import { asked, isActiveMember } from "./store.js";
+import { activeMembers, sessionStatus } from "./rooms.js";
+import { joinUrl } from "./codes.js";
 import type { StoredSession } from "./stored-session.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
@@ -143,6 +147,80 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },
     ),
+  };
+}
+
+/** How many events `bellman_rooms` reads from the end of each room's log. */
+export const ROOM_TAIL = 100;
+
+/**
+ * A member's heartbeat standing as the monitor shows it (#28). The numbers are
+ * `reportRow`'s, the tick's own computation (D8). `asked` is whether this room
+ * asks this seat at all: a cadence AND a reporting seat, the same two
+ * conditions `you_report` in roomPreview reads. `silent` is forced false for a
+ * seat not asked, because silence is only a finding about a member that was
+ * expected to speak. `note` is the member's latest `progress` payload, peer
+ * prose, so it ships in the untrusted envelope like every other peer string.
+ */
+export function beatOf(s: StoredSession, m: Member, now: number, latest: SessionEvent | undefined) {
+  const every = s.manifest.heartbeatOnMs;
+  const isAsked = every !== null && asked(s, m);
+  const row = reportRow(m, now, every);
+  return {
+    asked: isAsked,
+    last_report_at: row.last_report_at,
+    silent_for_seconds: row.silent_for_seconds,
+    silent: isAsked && row.silent,
+    note: latest ? untrusted({ memberId: m.memberId, label: m.label }, latest.payload) : null,
+  };
+}
+
+/**
+ * One room as `bellman_rooms` returns it, from the caller's seat (#28).
+ *
+ * `room` is roomPreview from that seat, so your role and verbs come through the
+ * accessors the server enforces with. `members` are the live roster (a member
+ * who left is not "in" the room, which is the question a monitor asks). A join
+ * code's string and link appear only when the caller's seat holds `invite`
+ * (D7): `bellman_invite` hands a code only to such a seat, and this must not be
+ * a cheaper route to the same authority. `tail` is the newest events in cursor
+ * order, from `recentEvents`; the latest `progress` per member is read off it.
+ */
+export function roomSummary(
+  s: StoredSession,
+  me: Member,
+  connected: ReadonlySet<string>,
+  tail: SessionEvent[],
+  now: number,
+) {
+  const canInvite = (verbsOfRole(s.manifest, me.roomRole) as readonly Verb[]).includes("invite");
+  const latestNote = new Map<string, SessionEvent>();
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const e = tail[i];
+    if (e.type === "progress" && !latestNote.has(e.fromMemberId)) latestNote.set(e.fromMemberId, e);
+  }
+  const last = tail.length > 0 ? tail[tail.length - 1] : undefined;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return {
+    session_id: s.id,
+    status: sessionStatus(s),
+    expires_at: iso(s.expiresAt),
+    max_members: s.maxMembers,
+    active_members: activeMembers(s).length,
+    your_member_id: me.memberId,
+    room: roomPreview(s, me.roomRole),
+    members: s.members.filter(isActiveMember).map((m) => ({
+      ...publicMember(m, connected),
+      beat: beatOf(s, m, now, latestNote.get(m.memberId)),
+    })),
+    join_codes: Object.entries(s.joinCodes)
+      .filter(([, rec]) => rec.expiresAt > now)
+      .map(([role, rec]) => ({
+        role,
+        expires_at: iso(rec.expiresAt),
+        ...(canInvite ? { code: rec.code, join_url: joinUrl(rec.code) } : {}),
+      })),
+    last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,
   };
 }
 

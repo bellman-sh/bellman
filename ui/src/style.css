@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light dark;
+  --fg: light-dark(#1b1b1f, #e8e8ec);
+  --muted: light-dark(#5c5c66, #9a9aa6);
+  --bg: light-dark(#ffffff, #16161a);
+  --line: light-dark(#dcdce2, #2e2e36);
+  --accent: light-dark(#2456c8, #7aa2ff);
+  --warn: light-dark(#b45309, #f5a524);
+  --peer: light-dark(#fff7e6, #2a2419);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+body { margin: 0; padding: 12px 16px; }
+h1 { font-size: 18px; margin: 0 0 8px; }
+h2 { font-size: 15px; margin: 16px 0 6px; }
+p, dl { margin: 6px 0; }
+dt { color: var(--muted); font-size: 12px; margin-top: 6px; }
+dd { margin: 0; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; }
+tr.you td { font-weight: 600; }
+.untrusted { border: 1px dashed var(--warn); background: var(--peer); padding: 8px 12px; border-radius: 6px; }
+.caption, .muted { color: var(--muted); font-size: 12px; }
+.chip { display: inline-block; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: 12px; margin-left: 6px; }
+.silent { color: var(--warn); font-weight: 600; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 10px 0; }
+.actions { display: flex; gap: 8px; margin: 12px 0 4px; align-items: center; }
+button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: 0.5; cursor: default; }
+fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }
+fieldset label { display: block; margin: 4px 0; }
+.error { color: var(--warn); }

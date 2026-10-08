@@ -76,6 +76,10 @@
       "description": "Fetch peer events. Long-polls up to 25 seconds."
     },
     {
+      "name": "bellman_rooms",
+      "description": "The rooms you hold a seat in: members, roles, last beats, codes and expiry."
+    },
+    {
       "name": "bellman_wait",
       "description": "Block until a queued peer event arrives."
     },

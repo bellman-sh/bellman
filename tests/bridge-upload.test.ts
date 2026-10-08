@@ -194,6 +194,42 @@ describe("bellman_upload", () => {
     expect((await fake.store.surfaceOf(ROOM))[0].kind).toBe("file");
   });
 
+  // #185: the enum and the text are what an agent is shown, and the default is the part that is easy to get
+  // wrong: a page uploaded without asking is a file, so the text has to say what to ask for.
+  it("lists html among its kinds, and says a .html upload is a file unless html is asked for", async () => {
+    const tool = (await client.listTools()).tools.find((t) => t.name === "bellman_upload")!;
+    const kind = (tool.inputSchema.properties as Record<string, { enum?: string[] }>).kind;
+    expect(kind.enum).toEqual(["file", "image", "html"]);
+    expect(tool.description).toContain('kind: "file" | "image" | "html"');
+    expect(tool.description).toContain('a .html file is placed as a file unless kind: "html" is asked for');
+  });
+
+  it("places a page as an html item when asked and as a file when not, and the result says which", async () => {
+    const page = "<!doctype html><title>demo</title><button>press</button>";
+    const asked = await upload({ path: file("demo.html", page), key: "demo", kind: "html" });
+    expect(asked.isError, asked.text).toBe(false);
+    expect(asked.data).toMatchObject({ type: "text/html", kind: "html" });
+    expect((await fake.store.surfaceOf(ROOM)).find((r) => r.key === "demo")).toMatchObject({
+      kind: "html", body: null, blob: { type: "text/html", name: "demo.html", bytes: page.length },
+    });
+
+    const unasked = await upload({ path: file("plain.html", page), key: "plain" });
+    expect(unasked.isError, unasked.text).toBe(false);
+    expect(unasked.data).toMatchObject({ type: "text/html", kind: "file" });
+    expect((await fake.store.surfaceOf(ROOM)).find((r) => r.key === "plain")?.kind).toBe("file");
+  });
+
+  // The bridge passes the word through and the server is the one that checks the stored type, so a file the
+  // server does not store as text/html is refused as the server words it, with the blob kept for a file.
+  it("leaves the stored-type rule to the server: html over a markdown file is refused, with the blob reported", async () => {
+    const out = await upload({ path: file("notes.md", "# notes\n"), key: "notes", kind: "html" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("not text/html");
+    expect(out.text).toMatch(/uploaded blob [a-f0-9]{32} \(8 bytes, stored as text\/markdown\)/);
+    expect(await fake.store.surfaceOf(ROOM)).toEqual([]);
+    expect(fetches).toBe(1);
+  });
+
   it("refuses a symbolic link, a directory, a missing path and an oversized file locally, with nothing sent", async () => {
     const target = file("real.txt", "x");
     const link = join(dir, "link.txt");

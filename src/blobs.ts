@@ -29,9 +29,6 @@ export type ImageType = (typeof IMAGE_TYPES)[number];
 export const isImageType = (type: string): type is ImageType =>
   (IMAGE_TYPES as readonly string[]).includes(type);
 
-/** The media type without its parameters, lower-cased: `text/html; charset=utf-8` is `text/html`. */
-export const mediaType = (type: string): string => type.split(";")[0].trim().toLowerCase();
-
 /** How many leading bytes `sniffImageType` needs: WebP's marker ends at byte 12. */
 export const SNIFF_BYTES = 12;
 

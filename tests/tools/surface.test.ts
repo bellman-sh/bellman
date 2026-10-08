@@ -10,6 +10,7 @@ import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
+import { SURFACE_KINDS } from "../../src/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
@@ -272,6 +273,18 @@ describe("tool surface", () => {
     // once listed five after `progress` was added — `progress` is named elsewhere
     // in the text, so that slip passes here.
     for (const kind of kinds!) {
+      expect(send.description, `${kind} missing from the description`).toContain(kind);
+    }
+  });
+
+  // The loop above reads the send kinds, so a kind added to SURFACE_KINDS with no clause in the `surface` line
+  // would pass it (#185 is the case this closes). The same limit applies: this is a substring of the whole text,
+  // so it fails for a kind named nowhere in it, which is how a new kind goes missing, and not for the removal of
+  // a clause whose name appears elsewhere in the text, as `text` does.
+  it("names every surface kind in bellman_send's description", async () => {
+    const { tools } = await jesse.listTools();
+    const send = tools.find((t) => t.name === "bellman_send")!;
+    for (const kind of SURFACE_KINDS) {
       expect(send.description, `${kind} missing from the description`).toContain(kind);
     }
   });

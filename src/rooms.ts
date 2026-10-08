@@ -22,7 +22,7 @@ import { JOIN_CODE_TTL, isActiveMember, type AppendExtras, type BellmanStore, ty
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
-import { IMAGE_TYPES, isImageType, mediaType, type BlobStore } from "./blobs.js";
+import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -693,7 +693,9 @@ export async function writeSurface(
         `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
       );
     }
-    if (write.item.kind === "html" && mediaType(meta.type) !== "text/html") {
+    // normalizeMediaType drops parameters and lower-cases, so text/html; charset=utf-8 places; a type it cannot
+    // read comes back as an octet-stream, which is no more text/html than the original was.
+    if (write.item.kind === "html" && normalizeMediaType(meta.type) !== "text/html") {
       return refuse(
         "invalid",
         `surface html "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not text/html; place it as a file.`,

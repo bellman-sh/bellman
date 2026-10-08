@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: 7108634
+last-verified-against-source: f79b599
 last-updated: 2026-10-08
 ---
 
@@ -1397,19 +1397,20 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~6,372** | every request, whether or not you are in a room |
+| Tool definitions | **~6,499** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-07, after #183 and #28 both landed:
-6,372 tokens in all, of which `bellman_rooms` (#28) is 255 and the
-`_meta.ui` on `bellman_connect` 16. The three rows below that one are from
-the original measurement and have not been re-measured since. The joining row
-predates the surface: `bellman_connect` now carries its index and
-`bellman_confirm` its items, so a joiner pays for the room's surface too, up to
-64 items.
+Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,499
+tokens in all, of which `bellman_rooms` (#28) is 255 and the `_meta.ui` on
+`bellman_connect` 16. The figure before it was 6,372, from 2026-10-07 after #183
+and #28 both landed; the last paragraphs of this section account for the
+difference. The three rows below that one are from the original measurement and
+have not been re-measured since. The joining row predates the surface:
+`bellman_connect` now carries its index and `bellman_confirm` its items, so a
+joiner pays for the room's surface too, up to 64 items.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as
@@ -1417,8 +1418,9 @@ List the real server's tools through an in-memory MCP client, as
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
 leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
-`77396879` it gives 4,962, the figure recorded after #111, and on `c9789ae`
-6,008, the figure recorded after #129. So the measurements are comparable.
+`77396879` it gives 4,962, the figure recorded after #111, on `c9789ae`
+6,008, the figure recorded after #129, and on `f79b599` 6,499, the figure
+recorded after #185. So the measurements are comparable.
 
 #111 added `heartbeat_on` and `reports` to the manifest schema inside
 `bellman_start`, and `progress` to `bellman_send`. It added nothing to
@@ -1464,7 +1466,23 @@ no other tool moved. Per tool, now: `bellman_start` 1,507, `bellman_send` 1,092,
 `bellman_connect` 500, `bellman_evict` 489, `bellman_audit` 178 and
 `bellman_leave` 155.
 
-`bellman_start` alone is 1,507 tokens, 25% of the tool budget, paid even by
+#185 added the `html` kind to `bellman_send`: one clause in the `surface`
+line's `Kinds:` sentence, which says the page is inline in `body` or a blob
+stored as `text/html`, never both, and what the sandboxed frame that renders it
+allows and withholds. It added no tool and no field.
+
+Counted this way the total is 6,499, which is 127 more than the 6,372 recorded.
+26 of those predate #185, so the recorded figure was already out of date on
+main: `bellman_start` +13 and `bellman_connect` +13, the same words in both
+`Returns:` lines (`reports (per role, whether that seat is asked to report)`,
+#196). The other 101 are #185's, all of them `bellman_send`, which went from
+1,092 to 1,193; no other tool moved. Per tool, now: `bellman_start` 1,520,
+`bellman_send` 1,193, `bellman_confirm` 760, `bellman_sync` 716,
+`bellman_invite` 704, `bellman_connect` 529 (its `_meta.ui` is 16 of them),
+`bellman_evict` 489, `bellman_rooms` 255, `bellman_audit` 178 and
+`bellman_leave` 155.
+
+`bellman_start` alone is 1,520 tokens, 23% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

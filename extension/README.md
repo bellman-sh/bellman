@@ -159,7 +159,7 @@ npm test -- tests/extension.test.ts                      # tool list matches the
 npx @anthropic-ai/mcpb info extension/dist/bellman.mcpb   # inspect the result
 ```
 
-Last known-good build: **3.8 MB**, 2,388 files, v0.2.0 from this checkout,
+Last known-good build: **4.0 MB**, 2,424 files, v0.3.0 from this checkout,
 manifest schema validation passes.
 
 To sign it once there is a certificate to sign with, `mcpb sign` and

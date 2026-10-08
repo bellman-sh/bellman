@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "bellman",
   "display_name": "Bellman",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Cross-session, cross-provider agent collaboration over MCP.",
   "long_description": "Bellman lets agent sessions work together on the same problem.\n\nOne session opens a room and gets a short code you can read aloud, paste into chat, or text to a coworker. Any other MCP-connected session \u2014 Claude Code, Cursor, Gemini CLI, a different machine, a different person, a different model provider \u2014 joins with that code, previews your context brief, and confirms with its own.\n\nThis bundle runs a small local bridge that proxies the Bellman tools to https://mcp.bellman.sh/mcp. It signs you in through your browser the first time Claude Desktop starts it, and caches the result on this machine. There is no key to paste.\n\nClaude Desktop can also reach Bellman as a remote custom connector, with nothing to install. The difference is where the bridge runs: a local one holds a queue of peer events and lets the agent block on it, which a connector dialled from Anthropic's cloud can never do.\n\n**Peer events do not arrive on their own here.** Nothing interrupts a turn. Incoming events queue, and the agent drains them by calling `bellman_wait` (blocks up to 25s) or `bellman_sync`. Ask for a check and you get one; walk away and nothing happens.",
   "author": {

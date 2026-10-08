@@ -28,6 +28,12 @@
  *                     turning something off should not leave it on over a spelling.
  *                     Read at launch, and per bridge: one with it off does not stop the
  *                     others sharing a bus among themselves.
+ *   BELLMAN_UPLOAD_ROOT  optional. Where bellman_upload may read from: a path outside this
+ *                     directory, links followed, is refused. Unset or empty, it is the
+ *                     directory the bridge was started in, unless that directory contains
+ *                     your home directory (the filesystem root included), which is
+ *                     refused: name it here to allow that much. "/" is any file. Read on
+ *                     each upload.
  *
  * The sign-in is NOT lazy, and it is worth being plain about it. Claude Code
  * lists a server's tools as soon as it connects, the bridge proxies tools/list
@@ -123,6 +129,12 @@ const bridge = createBridge({
   inboxDir,
   remote: connect,
   whoami,
+  /**
+   * Where bellman_upload posts (#183): the blob routes on this server's origin,
+   * as whoever the bridge is — the BELLMAN_KEY, or the cached sign-in's access
+   * token, read on every upload because it rotates every ten minutes.
+   */
+  upload: { serverUrl: url, bearer: busCredentials(url, key).bearer },
   /**
    * One upstream connection per room, shared by every bridge on this machine (#43, #99). It is asked for when the
    * first membership is armed and not before, so nothing is read and no socket made at launch: a signed-in bridge

@@ -146,6 +146,27 @@ export interface HeartbeatPayload {
 }
 
 /**
+ * One member's standing against the cadence, measured at `now`. The tick's
+ * snapshot is built from this and so is the monitor's beat (#28, D8): a
+ * dashboard that said "silent" where the tick did not would be a second rule
+ * for one fact. `every` is null for a room that declares no cadence, and
+ * nothing is silent against a cadence that does not exist.
+ */
+export function reportRow(m: Member, now: number, every: number | null): ReportRow {
+  // `??`, not truthiness. Epoch 0 is a timestamp, and `m.lastReportAt ? … :
+  // null` read it as "never reported" — the bug `lastReport` above already
+  // avoids this way.
+  const at = m.lastReportAt ?? null;
+  return {
+    member_id: m.memberId,
+    label: m.label,
+    last_report_at: at === null ? null : new Date(at).toISOString(),
+    silent_for_seconds: Math.max(0, Math.round((now - lastReport(m)) / 1000)),
+    silent: every !== null && now - lastReport(m) >= 2 * every,
+  };
+}
+
+/**
  * What the tick carries: the thing only the server can see.
  *
  * **Invariant 7 holds here and the payload is where it would break.** Every
@@ -185,18 +206,6 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
     cadence_seconds: Math.round(every / 1000),
     ask: "The members listed below: reply with bellman_send type=\"progress\", payload { note } "
       + "— one line on where you are. Nobody else is being asked.",
-    members: reporting(s).map((m) => {
-      // `??`, not truthiness. Epoch 0 is a timestamp, and `m.lastReportAt ? … :
-      // null` read it as "never reported" — the bug `lastReport` above already
-      // avoids this way, and this was the one place in the module that did not.
-      const at = m.lastReportAt ?? null;
-      return {
-        member_id: m.memberId,
-        label: m.label,
-        last_report_at: at === null ? null : new Date(at).toISOString(),
-        silent_for_seconds: Math.max(0, Math.round((now - lastReport(m)) / 1000)),
-        silent: now - lastReport(m) >= 2 * every,
-      };
-    }),
+    members: reporting(s).map((m) => reportRow(m, now, every)),
   };
 }

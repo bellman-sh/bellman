@@ -84,8 +84,12 @@ unset, `src/channel.ts` opens a browser and caches the credential under
 `~/.config/bellman/`. The manifest declared a *required*
 `user_config.bellman_key` and fed it to the server's environment for two
 releases after that stopped being necessary — an install field collecting a
-secret for nothing. Only `bellman_url` remains, for pointing the bundle at your
-own deployment.
+secret for nothing. `bellman_url` is the one setting left that is about the
+server, for pointing the bundle at your own deployment; the other, **Upload
+folder** (`upload_root`, passed to the bridge as `BELLMAN_UPLOAD_ROOT`), is the
+root `bellman_upload` may read from, and it has no default. Unset, the bridge
+falls back to the directory it was started in, which it refuses when that
+directory contains your home directory (the filesystem root included).
 
 One consequence worth stating plainly: the bridge proxies `tools/list`, and
 proxying it means connecting, so on a machine with no cached credential the
@@ -101,10 +105,11 @@ bridge over the real tool handlers and asserts the manifest names exactly what
 that bridge lists. It found the bug it was written for: the list had been
 missing `bellman_whoami` since the bridge grew it.
 
-That surface is the server's eight tools plus the bridge's own two, and *which*
+That surface is the server's nine tools plus the bridge's own three, and *which*
 of its own depends on the delivery mode — `bellman_wait` exists under `hook`
-and not under `channel`. So the test asserts the declared mode as well; without
-that, the comparison would be circular.
+and not under `channel`, while `bellman_whoami` and `bellman_upload` exist
+under both. So the test asserts the declared mode as well; without that, the
+comparison would be circular.
 
 Descriptions are not compared. The manifest's one-liners are deliberately
 shorter than the tool descriptions the model is shown, and holding them

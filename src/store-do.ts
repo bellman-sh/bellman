@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -11,8 +11,8 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, isAbandoned,
-  isActiveMember, isRemovedMember, markRemoved, seatVictims, stampSeen,
+  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
+  isAbandoned, isActiveMember, isRemovedMember, markRemoved, seatVictims, stampSeen,
 } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
@@ -1478,6 +1478,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * The tail of the log. Events are keyed `e:<padded cursor>` (`eventKey`), so
+   * the newest `limit` are one reverse list; reversed back so the caller reads
+   * them in cursor order like `eventsAfter`. Public on purpose: a read, like
+   * `eventsAfter`, and the facade calls it over RPC.
+   */
+  async recentEvents(limit: number): Promise<SessionEvent[]> {
+    if (limit <= 0) return [];
+    const map = await this.ctx.storage.list<SessionEvent>({ prefix: "e:", reverse: true, limit });
+    return [...map.values()].reverse();
+  }
+
+  /**
    * Every surface row (#129), in key order — `list` returns keys sorted, which
    * is the order the contract promises. A read, so it answers RPC like
    * `eventsAfter` does.
@@ -1485,6 +1497,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async surfaceOf(): Promise<SurfaceRow[]> {
     const map = await this.ctx.storage.list<SurfaceRow>({ prefix: SURFACE_PREFIX });
     return [...map.values()];
+  }
+
+  /**
+   * The quota's bound (#183, D3), decided in this object in one transaction
+   * against the ceiling stamped on its own record: the read of the total and
+   * the write that raises it are one unit, so two uploads cannot both fit the
+   * last megabyte. An abandoned room reads as closed through `readsClosed`,
+   * the rule every reader of "closed" shares; the rest of the decision is
+   * `decideBlobCharge`'s, the same call `MemoryStore` makes. Nothing is written
+   * for a refusal. `blobBytes` is the sum charged so far; nothing here credits it.
+   */
+  async chargeBlobBytes(bytes: number): Promise<BlobCharge> {
+    return this.ctx.storage.transaction<BlobCharge>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found", used: 0 };
+      const charge = decideBlobCharge(s, readsClosed(s, Date.now(), this.#attachedIds()), bytes);
+      if (charge.ok) await txn.put("session", { ...s, blobBytes: charge.used });
+      return charge;
+    });
   }
 
   /**
@@ -2750,8 +2781,16 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).eventAt(cursor);
   }
 
+  async recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]> {
+    return this.session(sessionId).recentEvents(limit);
+  }
+
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
     return this.session(sessionId).surfaceOf();
+  }
+
+  async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
+    return this.session(sessionId).chargeBlobBytes(bytes);
   }
 
   async waitForEvents(

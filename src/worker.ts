@@ -1,11 +1,13 @@
 /// <reference types="@cloudflare/workers-types" />
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
+import { R2BlobStore } from "./blobs-r2.js";
+import { roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
-import { handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
+import { caller, handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
@@ -31,6 +33,8 @@ export { AuthDO } from "./oauth/store.js";
 /** Worker bindings: the session stores, plus the authorization server's. */
 export interface WorkerEnv extends BellmanEnv {
   AUTH: DurableObjectNamespace<AuthDO>;
+  /** The room blob store (#183): one private bucket, keyed by room. */
+  BLOBS: R2Bucket;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
   GITHUB_CLIENT_ID?: string;
@@ -159,11 +163,27 @@ async function resolveCaller(
   return identity;
 }
 
+/**
+ * Who is calling a room route, and how (#183). The bearer paths /mcp takes —
+ * an access token, then the key map — and then the panel cookie through the
+ * authorization server's own `caller`, so a route and a tool cannot disagree
+ * about who someone is. A bearer that is present and bad stops here: `caller`
+ * sees the header, fails the token, and never falls through to a cookie.
+ */
+async function roomCaller(request: Request, env: WorkerEnv, oauth?: OAuthConfig): Promise<RoomCaller | null> {
+  const identity = await resolveCaller(request, env, oauth);
+  if (identity) return { identity, via: "bearer" };
+  if (!oauth) return null;
+  const who = await caller(request, oauth);
+  return who ? { identity: who.identity, via: who.via } : null;
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     const store = new DurableObjectStore(env);
     const oauth = oauthConfig(request, env, store);
+    const blobs = new R2BlobStore(env.BLOBS);
 
     // Ahead of the OAuth routes: Stripe signs its own requests and carries no
     // bearer token, so it must not fall through anything expecting one.
@@ -187,6 +207,22 @@ export default {
         // Stripe happened to send another event about it, which it may never do.
         reconcile: (userId) => auth.reconcile(userId),
       });
+    }
+
+    // The room routes (#183, #184), ahead of the OAuth routes: /rooms/ is that
+    // module's prefix, and /rooms with no slash is the list. The fail-closed
+    // guard /ws has covers them all — a deploy with neither a key map nor OAuth
+    // serves no room.
+    if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await roomRoutes(request, {
+        store,
+        blobs,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
     }
 
     if (oauth) {
@@ -291,7 +327,7 @@ export default {
     if (!identity) return unauthorized(oauth);
 
     try {
-      const server = buildServer(identity, store);
+      const server = buildServer(identity, store, blobs);
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

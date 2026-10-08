@@ -9,6 +9,7 @@ import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from ".
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
 import { CONNECT_TOKEN_TTL, capacityOf } from "../store.js";
 import type { BellmanStore } from "../store.js";
+import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConnect(server: McpServer, identity: Identity, s: BellmanStore): void {
   // ------------------------------------------------------------ bellman_connect
@@ -23,7 +24,7 @@ Show the returned preview to your human. If they want to proceed, call bellman_c
 Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
-Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
+Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
 max_members is the room's capacity: 2 for a pair room, 100 for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
 surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
@@ -55,6 +56,9 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
         // visible by design and the claim cannot be rescued.
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
+      // Rendered as the join screen by a host that supports MCP Apps; the text
+      // result is unchanged for every other host (#28).
+      _meta: APP_UI_META,
     },
     async ({ join_code }): Promise<ToolResult> => {
       const hit = await s.getSessionByJoinCode(normalizeJoinCode(join_code));

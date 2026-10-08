@@ -1,8 +1,9 @@
 import { createApp } from "./app.js";
+import { MemoryBlobStore } from "./blobs.js";
 import { MemoryStore, type BellmanStore } from "./store.js";
 
 const store: BellmanStore = new MemoryStore();
-const app = createApp(store);
+const app = createApp(store, new MemoryBlobStore());
 
 // Periodic expiry of sessions and pending connect tokens.
 setInterval(() => {

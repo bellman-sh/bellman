@@ -27,6 +27,9 @@ producing bugs. Read it before changing how the pieces fit together.
   bound to a caller identity, composed from `src/tools/`.
 - `src/tools/` — one file per tool, plus `kit.ts` for what they share (the MCP
   result shape, the zod input shapes). A new tool is a new file here.
+- `ui/` — the MCP Apps page (join screen and room monitor). `npm run build:ui` bundles it with
+  Vite into `src/ui/assets.ts`, a generated string constant the server imports.
+- `src/ui/resource.ts` — the one `ui://` resource and the `_meta` a tool carries to be rendered through it.
 - `src/projections.ts` — `Session` in, wire object out. Runtime-free on purpose,
   so the HTTP routes can import it without the MCP SDK; `src/public-event.ts` is
   the same layer. `tests/projections.test.ts` asserts that, transitively.
@@ -85,6 +88,12 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `tests/extension.test.ts` asserts it against a hook-mode bridge's real
   surface — the server's tools plus the bridge's own — so the manifest cannot
   silently fall behind. It already had: the list was missing `bellman_whoami`.
+- **`src/ui/assets.ts` is generated and gitignored.** Edit `ui/`, never the generated
+  file; every script that compiles or runs the server runs `build:ui` first, and wrangler
+  runs it itself through `[build]` in `wrangler.toml`, so a fresh clone's `npm test` builds
+  it and so does a bare `wrangler deploy`. Before that hook, #193 passed every check and
+  failed to deploy. A page that reaches data does so by calling tools, never
+  `bellman_sync`: through the bridge that would count as the agent having read the events.
 
 ## Testing
 

@@ -486,6 +486,31 @@ export type SetJoinCode =
   | { ok: true; replacedLive: boolean }
   | { ok: false; reason: "frozen" | "live_code_exists" };
 
+/** What a blob charge did (#183, D3). `used` is the room's total after the call, or as it stood when refused. */
+export type BlobCharge =
+  | { ok: true; used: number }
+  | { ok: false; reason: "over_quota" | "frozen" | "closed" | "not_found"; used: number };
+
+/**
+ * The charge rule (#183, D3), applied by both stores and decided nowhere else: the
+ * order of the refusals, what `used` says on each, and the one comparison that is
+ * the bound. Whether the room reads as closed is the caller's, because that is the
+ * one input the stores compute differently (`closeIfAbandoned` in `MemoryStore`,
+ * `readsClosed` in the room object). Returns the refusal, or the new total for the
+ * caller to write.
+ */
+export function decideBlobCharge(
+  s: Pick<StoredSession, "frozenAt" | "blobBytesCeiling" | "blobBytes">,
+  closed: boolean,
+  bytes: number,
+): BlobCharge {
+  const used = s.blobBytes ?? 0;
+  if (closed) return { ok: false, reason: "closed", used };
+  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used };
+  if (used + bytes > s.blobBytesCeiling) return { ok: false, reason: "over_quota", used };
+  return { ok: true, used: used + bytes };
+}
+
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -859,6 +884,18 @@ export interface BellmanStore {
    * this way; reading the whole history to find one event is what #25 was.
    */
   eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined>;
+  /**
+   * The last `limit` events, in cursor order. A bounded read for callers that
+   * want the end of the log and nothing else: the monitor's poll (#28) reads it
+   * for each member's latest `progress` note and the room's last event, every
+   * 15 seconds, for every room a user is in. `eventsAfter(id, 0)` would read
+   * the whole log each time, and nothing guards that read the way
+   * `lastActionRequestAt` guards `bellman_sync`'s.
+   *
+   * `[]` for an unknown room, and for a limit of zero or less: `slice(-0)` is
+   * the whole array, so the memory store has to say so itself.
+   */
+  recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]>;
   waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
   /**
    * Every surface row of this room, sorted by key, as detached copies. An
@@ -867,6 +904,18 @@ export interface BellmanStore {
    * method and not N `eventAt` reads from a handler.
    */
   surfaceOf(sessionId: string): Promise<SurfaceRow[]>;
+  /**
+   * Charge `bytes` to this room's blob total unless that would pass the
+   * room's own `blobBytesCeiling` (#183, D3), stamped at creation from the
+   * plan that made it. The read and the write are one operation, for
+   * seatMember's reason: two uploads landing together must not both read the
+   * same total and both fit the last megabyte. Refused for a closed or frozen
+   * room as every write is, with the total it would have charged against, and
+   * `not_found` for no room. The upload route pre-checks the ceiling as a
+   * courtesy and this is the bound: a refusal here is what deletes the object
+   * just put. Nothing credits the total; retention (#65) will.
+   */
+  chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -1465,11 +1514,29 @@ export class MemoryStore implements BellmanStore {
     return e ? detach(e) : undefined;
   }
 
+  async recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]> {
+    const s = this.sessions.get(sessionId);
+    if (!s || limit <= 0) return [];
+    return detach(s.events.slice(-limit));
+  }
+
   async surfaceOf(sessionId: string): Promise<SurfaceRow[]> {
     const rows = this.surfaces.get(sessionId);
     if (!rows) return [];
     const sorted = [...rows.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return detach(sorted);
+  }
+
+  async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
+    // No await from the read to the write — the rule, and the reason, seatMember
+    // gives. `closeIfAbandoned` first, as getSession does: an abandoned room is
+    // closed whether or not anything has written that down yet.
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found", used: 0 };
+    this.closeIfAbandoned(s, Date.now());
+    const charge = decideBlobCharge(s, s.closed, bytes);
+    if (charge.ok) (s as { blobBytes?: number }).blobBytes = charge.used;
+    return charge;
   }
 
   /**

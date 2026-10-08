@@ -6,13 +6,15 @@
  * INVARIANT 5: transports are stateless — state survives across independent
  *              HTTP requests only because it lives in the store.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import type { Server } from "node:http";
 import { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createApp } from "../src/app.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
+import { text } from "./helpers/blob-bytes.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 
 let http: Server;
@@ -21,7 +23,7 @@ let base: string;
 
 beforeAll(async () => {
   store = new MemoryStore();
-  const app = createApp(store);
+  const app = createApp(store, new MemoryBlobStore());
   http = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -85,10 +87,10 @@ describe("HTTP surface", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists the 9 tools over HTTP", async () => {
+  it("lists the 10 tools over HTTP", async () => {
     const client = await mcpClient("qk_dev_jesse");
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(9);
+    expect(tools).toHaveLength(10);
     await client.close();
   });
 });
@@ -193,5 +195,112 @@ describe("cross-provider pairing over the wire", () => {
     expect(JSON.stringify(sync.data.events)).toContain("unblocked");
 
     await Promise.all([jesse.close(), peer.close()]);
+  });
+});
+
+describe("the room routes over the Node server (#183)", () => {
+  it("uploads and downloads a blob through the app, and the tool heads what the route stored", async () => {
+    const jesse = await mcpClient("qk_dev_jesse");
+    const started = await call(jesse, "bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const memberId = String(started.data.member_id);
+
+    const body = text("# notes\n");
+    const uploaded = await fetch(`${base}/rooms/${sessionId}/blobs?member_id=${memberId}&name=notes.md`, {
+      method: "POST",
+      headers: { authorization: "Bearer qk_dev_jesse", "content-type": "text/markdown" },
+      body,
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id, bytes } = (await uploaded.json()) as { blob_id: string; bytes: number };
+    expect(bytes).toBe(body.byteLength);
+
+    // The same MemoryBlobStore behind the tool: the placement heads the object the route stored.
+    const placed = await call(jesse, "bellman_send", {
+      session_id: sessionId, member_id: memberId, type: "surface",
+      payload: { key: "notes", kind: "file", blob: { id: blob_id } },
+    });
+    expect(placed.isError, placed.text).toBe(false);
+
+    const served = await fetch(`${base}/rooms/${sessionId}/blobs/${blob_id}`, { headers: { authorization: "Bearer qk_dev_jesse" } });
+    expect(served.status).toBe(200);
+    expect(served.headers.get("content-type")).toBe("application/octet-stream");
+    expect(served.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''notes.md");
+    expect(served.headers.get("content-security-policy")).toBe("sandbox");
+    expect(new Uint8Array(await served.arrayBuffer())).toEqual(body);
+
+    expect((await fetch(`${base}/rooms/${sessionId}/blobs/${blob_id}`)).status).toBe(401);
+    expect((await fetch(`${base}/rooms/${sessionId}/blobs`, { method: "POST", headers: { authorization: "Bearer qk_dev_jesse" }, body: "x" })).status).toBe(400);
+    await jesse.close();
+  });
+
+  // The translation's other branch: an answer with no body (a 304 to a conditional GET, a preflight's
+  // 204) ends the response, where a stream is piped for every other. Without the branch the route's
+  // `null` body reaches Readable.fromWeb and the request answers 500.
+  it("answers a conditional GET 304 and a preflight 204 with their headers and no body", async () => {
+    const jesse = await mcpClient("qk_dev_jesse");
+    const started = await call(jesse, "bellman_start", { manifest: manifestFixture(), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const memberId = String(started.data.member_id);
+    const bearer = { authorization: "Bearer qk_dev_jesse" };
+
+    const uploaded = await fetch(`${base}/rooms/${sessionId}/blobs?member_id=${memberId}&name=notes.md`, {
+      method: "POST",
+      headers: { ...bearer, "content-type": "text/markdown" },
+      body: text("# notes\n"),
+    });
+    expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+    const { blob_id } = (await uploaded.json()) as { blob_id: string };
+    const blobUrl = `${base}/rooms/${sessionId}/blobs/${blob_id}`;
+
+    const served = await fetch(blobUrl, { headers: bearer });
+    expect(served.status).toBe(200);
+    const etag = served.headers.get("etag");
+    expect(etag).toBeTruthy();
+    await served.arrayBuffer();
+
+    const unchanged = await fetch(blobUrl, { headers: { ...bearer, "if-none-match": etag! } });
+    expect(unchanged.status).toBe(304);
+    expect(await unchanged.text()).toBe("");
+    expect(unchanged.headers.get("etag")).toBe(etag);
+    expect(unchanged.headers.get("cache-control")).toBe("private, max-age=300");
+    expect(unchanged.headers.get("content-security-policy")).toBe("sandbox");
+
+    // A stranger's preflight: 204 and no grant, because this server has no panel origins.
+    const preflight = await fetch(`${base}/rooms/${sessionId}/blobs`, { method: "OPTIONS" });
+    expect(preflight.status).toBe(204);
+    expect(await preflight.text()).toBe("");
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+    await jesse.close();
+  });
+
+  // The list path, with no trailing slash, reaches the module. The key is outsider's: the store is shared
+  // across this file and the tests above leave rooms behind them for jesse, so only a person who made none
+  // answers the empty list this asserts.
+  it("serves GET /rooms, with no trailing slash, from the room routes module", async () => {
+    const res = await fetch(`${base}/rooms`, { headers: { authorization: "Bearer qk_dev_outsider" } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toEqual({ rooms: [], truncated: false });
+  });
+
+  // A handler that throws is answered by the route module, in JSON. Left to Express, a rejected async handler
+  // is answered with its own HTML error page, which a bridge or the panel cannot read as the error it is.
+  it("answers a route whose store throws with the module's JSON, not Express's HTML page", async () => {
+    const throwing = vi.spyOn(store, "getSession").mockRejectedValueOnce(new Error("the store is unreachable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await fetch(`${base}/rooms/qs_nowhere/blobs/${"a".repeat(32)}`, {
+        headers: { authorization: "Bearer qk_dev_jesse" },
+      });
+      expect(res.status).toBe(500);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(await res.json()).toMatchObject({ error: "internal" });
+    } finally {
+      throwing.mockRestore();
+      log.mockRestore();
+    }
   });
 });

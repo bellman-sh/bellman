@@ -26,6 +26,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
 import { createBridge, type Remote } from "../src/bridge.js";
 import { buildServer } from "../src/server.js";
+import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
@@ -66,7 +67,7 @@ async function bundleTools(): Promise<string[]> {
     delivery: "hook",
     inboxDir,
     remote: async (): Promise<Remote> => {
-      const server = buildServer(identity, store);
+      const server = buildServer(identity, store, new MemoryBlobStore());
       const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "bridge-remote", version: "0.0.1" });
       await Promise.all([server.connect(serverSide), client.connect(clientSide)]);
@@ -101,9 +102,9 @@ describe("the Claude Desktop bundle manifest", () => {
   });
 
   // The count as an assertion, not prose: tests/tools/surface.test.ts once said 7 over a
-  // list of 8 and nothing failed. Eleven is the server's nine plus the bridge's two.
-  it("declares exactly eleven tools", () => {
-    expect(declared()).toHaveLength(11);
+  // list of 8 and nothing failed. Thirteen is the server's ten plus the bridge's three.
+  it("declares exactly thirteen tools", () => {
+    expect(declared()).toHaveLength(13);
   });
 
   // Not cosmetic: the expected list above is mode-dependent, so this is what makes the
@@ -133,5 +134,20 @@ describe("the Claude Desktop bundle manifest", () => {
   it("asks for no key: the bridge signs itself in", () => {
     expect(manifest.user_config).not.toHaveProperty("bellman_key");
     expect(manifest.server.mcp_config.env).not.toHaveProperty("BELLMAN_KEY");
+  });
+
+  // bellman_upload reads only from under BELLMAN_UPLOAD_ROOT, and the bridge's fallback is the directory it was
+  // started in, which Desktop chooses and the person does not. So the bundle hands the person a setting for it.
+  // A placeholder that names no declared setting is never filled: mcpb's replaceVariables leaves it in the value
+  // as written.
+  it("exposes the upload root as a folder setting, and every placeholder it passes names a setting it declares", () => {
+    expect(manifest.user_config.upload_root).toMatchObject({ type: "directory", title: "Upload folder", required: false });
+    expect(manifest.server.mcp_config.env.BELLMAN_UPLOAD_ROOT).toBe("${user_config.upload_root}");
+    const declared = Object.keys(manifest.user_config);
+    for (const [name, value] of Object.entries(manifest.server.mcp_config.env)) {
+      for (const [, key] of value.matchAll(/\$\{user_config\.([^}]+)\}/g)) {
+        expect(declared, `${name} names ${key}`).toContain(key);
+      }
+    }
   });
 });

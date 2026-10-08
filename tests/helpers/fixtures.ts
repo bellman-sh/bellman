@@ -1,4 +1,5 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
+import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { JOIN_CODE_TTL } from "../../src/store.js";
 
@@ -67,6 +68,7 @@ export function session(over: Partial<Session> = {}): Session {
     orgId: "org_codenerd",
     orgOnly: false,
     joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
+    blobBytesCeiling: ENTITLEMENTS.team.blobBytesPerRoom,
     members: [member()],
     events: [],
     closed: false,

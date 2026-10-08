@@ -758,7 +758,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
@@ -885,6 +885,23 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     expect(preview.data.room).toMatchObject({ heartbeat_on_seconds: null, you_report: false });
     // The creator's seat reports too, and is equally unasked.
     expect(started.data.room).toMatchObject({ heartbeat_on_seconds: null, you_report: false });
+  });
+
+  // The roles table a joiner reads compares seats (spec: "each role's verbs and whether
+  // it reports"), so the preview says it per role, by the rule you_report uses.
+  it("says which seats report, through the rule you_report uses", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const asked = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: true, navigator: false }), brief: brief(),
+    });
+    expect(asked.isError, asked.text).toBe(false);
+    expect(asked.data.room).toMatchObject({ reports: { driver: true, navigator: false } });
+    // No cadence, no obligation for any seat: the same rule, per role.
+    const quiet = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: true, navigator: true }, { heartbeat_on: null }), brief: brief(),
+    });
+    expect(quiet.isError, quiet.text).toBe(false);
+    expect(quiet.data.room).toMatchObject({ reports: { driver: false, navigator: false } });
   });
 
   it("says so when the room expects no reports", async () => {
@@ -1041,7 +1058,7 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     // The two heartbeat keys (#111) are spine: a number or null and a boolean, computed by
     // the server, so there is no authored string in them to leak and the guard below holds.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
 

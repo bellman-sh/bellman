@@ -11,6 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { resolveIdentity } from "../../src/auth.js";
 import { buildServer } from "../../src/server.js";
 import { MemoryStore, type BellmanStore } from "../../src/store.js";
+import { MemoryBlobStore, type BlobStore } from "../../src/blobs.js";
 import type { Identity } from "../../src/types.js";
 
 export interface Outcome {
@@ -39,6 +40,14 @@ export class Peer {
     return this.client.listTools();
   }
 
+  async listResources() {
+    return this.client.listResources();
+  }
+
+  async readResource(uri: string) {
+    return this.client.readResource({ uri });
+  }
+
   serverCapabilities() {
     return this.client.getServerCapabilities();
   }
@@ -56,10 +65,12 @@ export const DEV_KEY = {
 
 export class Harness {
   readonly store: BellmanStore;
+  readonly blobs: BlobStore;
   private readonly peers: Peer[] = [];
 
-  constructor(store: BellmanStore = new MemoryStore()) {
+  constructor(store: BellmanStore = new MemoryStore(), blobs: BlobStore = new MemoryBlobStore()) {
     this.store = store;
+    this.blobs = blobs;
   }
 
   /** Connect a new client bound to a dev bearer key. */
@@ -71,7 +82,7 @@ export class Harness {
 
   /** Connect a client bound to an arbitrary identity (for plan-matrix tests). */
   async connectAs(identity: Identity): Promise<Peer> {
-    const server = buildServer(identity, this.store);
+    const server = buildServer(identity, this.store, this.blobs);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: `test-${identity.userId}`, version: "0.0.1" });
     await Promise.all([

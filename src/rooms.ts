@@ -25,6 +25,7 @@ import {
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
+import { IMAGE_TYPES, isImageType, type BlobStore } from "./blobs.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -448,8 +449,11 @@ export async function leaveRoom(
  * it too: its authority is creator-only, which no verb expresses, and it must
  * work for a creator who has already left the room, whom a gate that requires
  * the caller's handle to still be in it would refuse.
+ *
+ * Exported for the upload route (#183), which runs it as the tool does and maps
+ * its codes to statuses.
  */
-async function gateSeat(
+export async function gateSeat(
   store: BellmanStore,
   actor: Identity,
   sessionId: string,
@@ -657,8 +661,8 @@ export async function revokeInvite(
  * exists: a second transport re-typing the sequence is a second chance to skip
  * the verb guard or the audit row. The order is the write path the spec gives:
  * the seat's guards (`gateSeat`, which also touches the caller), the payload's
- * shape and each kind's rule, the rows for the cap and a connector's ends,
- * the append with the row riding it, the audit row.
+ * shape and each kind's rule, the blob a file or image names, the rows for the
+ * cap and a connector's ends, the append with the row riding it, the audit row.
  *
  * The rows are read once and then the append happens, which is a
  * read-then-write with the window open: two writers can both add a 64th item,
@@ -670,6 +674,7 @@ export async function revokeInvite(
  */
 export async function writeSurface(
   store: BellmanStore,
+  blobs: BlobStore,
   actor: Identity,
   sessionId: string,
   memberId: string,
@@ -682,7 +687,29 @@ export async function writeSurface(
 
   const normalized = normalizeSurfaceWrite(payload);
   if (!normalized.ok) return refuse("invalid", normalized.reason);
-  const { write } = normalized;
+  let { write } = normalized;
+
+  // A blob-backed item carries the object's metadata, not the writer's (#183,
+  // D5): the writer named an id, and what readers get is what the bucket holds
+  // under this room's prefix. `head` resolves nothing from another room (D1),
+  // so a foreign id is "no blob" here too. The image check is on the STORED
+  // type, which D6 already decided at upload.
+  if (normalized.blobId !== null && write.item !== null) {
+    const meta = await blobs.head(sessionId, normalized.blobId);
+    if (!meta) {
+      return refuse("invalid", `surface ${write.item.kind} "${write.key}": no blob ${normalized.blobId} has been uploaded to this room.`);
+    }
+    if (write.item.kind === "image" && !isImageType(meta.type)) {
+      return refuse(
+        "invalid",
+        `surface image "${write.key}": blob ${normalized.blobId} is stored as ${meta.type}, which is not an image this server serves as one (${IMAGE_TYPES.join(", ")}); place it as a file.`,
+      );
+    }
+    write = {
+      key: write.key,
+      item: { ...write.item, blob: { id: normalized.blobId, bytes: meta.bytes, type: meta.type, name: meta.name } },
+    };
+  }
 
   const rows = await store.surfaceOf(sessionId);
   const byKey = new Map(rows.map((r) => [r.key, r] as const));
@@ -742,7 +769,10 @@ export async function writeSurface(
     await audit(
       store, session, actor, "sent_surface",
       write.item !== null
-        ? { key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0 }
+        ? {
+            key: write.key, kind: write.item.kind, chars: write.item.body?.length ?? 0,
+            ...(write.item.blob ? { bytes: write.item.blob.bytes } : {}),
+          }
         : { key: write.key, removed: true },
     );
   }

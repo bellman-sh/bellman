@@ -37,7 +37,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
@@ -103,6 +103,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         orgId: identity.orgId,
         orgOnly: org_only,
         joinCodes: { [manifest.defaultRole]: defaultCode },
+        // The room's own byte ceiling (#183), from the plan creating it. Nothing
+        // downstream asks a plan again.
+        blobBytesCeiling: ent.blobBytesPerRoom,
         members: [creator],
         events: [],
         closed: false,

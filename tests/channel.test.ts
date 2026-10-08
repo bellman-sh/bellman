@@ -25,14 +25,14 @@ interface Bellman {
   server: Server;
   url: string;
   /** The requests that actually arrived — the bridge talking to Bellman, observed. */
-  hits: { authorization: string | undefined }[];
+  hits: { authorization: string | undefined; method: string | undefined; url: string | undefined }[];
 }
 
 /** A Bellman that takes the request and answers however the test says, or never. */
 async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellman> {
   const hits: Bellman["hits"] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
-    hits.push({ authorization: req.headers.authorization });
+    hits.push({ authorization: req.headers.authorization, method: req.method, url: req.url });
     answer(res);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
@@ -44,6 +44,10 @@ async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellm
 const hangs = () => undefined;
 const refuses = (res: ServerResponse) => {
   res.writeHead(500, { "content-type": "text/plain" }).end("nope");
+};
+/** A room that will not take the upload: the answer the bridge reports, without needing a Bellman behind it. */
+const forbids = (res: ServerResponse) => {
+  res.writeHead(403, { "content-type": "application/json" }).end(JSON.stringify({ error: "forbidden" }));
 };
 
 interface Bridge {
@@ -73,9 +77,13 @@ interface Options {
   cached?: boolean;
   /** Put a readable identity beside the cached tokens, as a real sign-in does. */
   identity?: Record<string, unknown>;
+  /** BELLMAN_UPLOAD_ROOT for the process. Unset, the process is on its own default: the directory it was started in. */
+  uploadRoot?: string;
+  /** The directory to start the process in, which is its upload root while `uploadRoot` is unset. */
+  cwd?: string;
 }
 
-function startBridge(bellman: Bellman, { key, cached = true, identity }: Options = {}): Bridge {
+function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd }: Options = {}): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bellman-channel-"));
   dirs.push(configHome);
   servers.push(bellman.server);
@@ -107,8 +115,10 @@ function startBridge(bellman: Bellman, { key, cached = true, identity }: Options
   env.BELLMAN_URL = bellman.url;
   env.XDG_CONFIG_HOME = configHome;
   env.BELLMAN_NO_BROWSER = "1";
+  delete env.BELLMAN_UPLOAD_ROOT;
+  if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;
 
-  const proc = spawn(TSX, [ENTRY], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = spawn(TSX, [ENTRY], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
   spawned.push(proc);
 
   let stderr = "";
@@ -287,6 +297,151 @@ describe("the bridge as a process", () => {
       authorization: "Bearer qk_dev_jesse",
       // No sign-in was attempted, so there is no sign-in failure to report either.
       log: [`ready: channel delivery via ${bellman.url} (BELLMAN_KEY)`],
+    });
+  });
+});
+
+/**
+ * What the process writes to stdout is the MCP transport: a JSON-RPC message a line, the tool results among them.
+ * Collected by id, so a test can wait for the answer to the call it made.
+ */
+interface Answer {
+  id?: unknown;
+  result?: { isError?: boolean; content?: { text?: string }[] };
+}
+
+function answers(bridge: Bridge): Map<number, Answer> {
+  const byId = new Map<number, Answer>();
+  let pending = "";
+  bridge.proc.stdout!.on("data", (chunk) => {
+    pending += String(chunk);
+    for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n")) {
+      const line = pending.slice(0, end);
+      pending = pending.slice(end + 1);
+      try {
+        const message = JSON.parse(line) as Answer;
+        if (typeof message.id === "number") byId.set(message.id, message);
+      } catch {
+        // Not a message: nothing else is meant to be on this stream.
+      }
+    }
+  });
+  return byId;
+}
+
+describe("bellman_upload through the process", () => {
+  /**
+   * src/channel.ts is the one place the bridge is told where to post and as whom (#183). Every other test builds a
+   * bridge of its own with an `upload` of its own, and the tool is listed whether or not it has a target, so a
+   * channel.ts that never passed one would ship with every test green and `bellman_upload` answering "no upload
+   * target". The room refuses (403) on purpose: the request is what is observed, and a refusal needs no Bellman
+   * behind it. The post comes before any connection to /mcp, so the one request that arrives is the upload.
+   */
+  const cases: [string, Options, string][] = [
+    ["a BELLMAN_KEY", { key: "qk_dev_jesse", cached: false }, "Bearer qk_dev_jesse"],
+    ["the cached sign-in's access token", {}, "Bearer not.a.jwt"],
+  ];
+  it.each(cases)(
+    "posts the file to the room's blob route on the server it was started against, with %s as the bearer",
+    async (_who, options, authorization) => {
+      // The file's own directory is the process's upload root: a path outside it is refused before any post.
+      const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
+      dirs.push(dir);
+      const path = join(dir, "notes.md");
+      writeFileSync(path, "# notes\n");
+
+      const bellman = await fakeBellman(forbids);
+      const bridge = startBridge(bellman, { ...options, uploadRoot: dir });
+      const answered = answers(bridge);
+      await until(() => bridge.log().length > 0);
+
+      initialize(bridge);
+      bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      bridge.send({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "notes" } },
+      });
+      const replied = await until(() => answered.has(3));
+
+      expect({ replied, hits: bellman.hits, said: answered.get(3)?.result?.content?.[0]?.text }).toEqual({
+        replied: true,
+        hits: [{ method: "POST", url: "/rooms/qs_room/blobs?member_id=m_me&name=notes.md", authorization }],
+        said: expect.stringContaining("upload refused (403)"),
+      });
+    },
+  );
+
+  // The process's own default, which no in-process test can see: nothing in channel.ts widens it. Started in
+  // `project` with BELLMAN_UPLOAD_ROOT unset, the bridge posts a file under it (the room refuses it, as above:
+  // the request is what is observed) and a file beside it never reaches the network.
+  it("takes the directory it was started in as the upload root, and posts nothing from outside it", async () => {
+    const project = mkdtempSync(join(tmpdir(), "bellman-channel-project-"));
+    const beside = mkdtempSync(join(tmpdir(), "bellman-channel-beside-"));
+    dirs.push(project, beside);
+    writeFileSync(join(project, "in.md"), "# in\n");
+    writeFileSync(join(beside, "out.md"), "# out\n");
+
+    const bellman = await fakeBellman(forbids);
+    const bridge = startBridge(bellman, { key: "qk_dev_jesse", cached: false, cwd: project });
+    const answered = answers(bridge);
+    await until(() => bridge.log().length > 0);
+    initialize(bridge);
+    bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    const upload = (id: number, path: string) =>
+      bridge.send({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "k" } },
+      });
+    const said = (id: number) => answered.get(id)?.result?.content?.[0]?.text;
+
+    upload(3, join(beside, "out.md"));
+    const refused = await until(() => answered.has(3));
+    expect({ refused, hits: bellman.hits.length, said: said(3) }).toEqual({
+      refused: true,
+      hits: 0,
+      said: expect.stringContaining(`${join(beside, "out.md")} is outside the upload root`),
+    });
+
+    upload(4, join(project, "in.md"));
+    const posted = await until(() => answered.has(4));
+    expect({ posted, hits: bellman.hits.map((hit) => hit.method), said: said(4) }).toEqual({
+      posted: true,
+      hits: ["POST"],
+      said: expect.stringContaining("upload refused (403)"),
+    });
+  });
+
+  // The same refusal from a real process whose working directory really is `/`, with no mock between this test and
+  // process.cwd(): a default root that contains the home directory, as `/` does, is refused, so nothing is read and
+  // nothing is posted.
+  it("refuses to take the filesystem root as its default upload root, and posts nothing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "bellman-channel-upload-"));
+    dirs.push(dir);
+    const path = join(dir, "notes.md");
+    writeFileSync(path, "# notes\n");
+
+    const bellman = await fakeBellman(forbids);
+    const bridge = startBridge(bellman, { key: "qk_dev_jesse", cached: false, cwd: "/" });
+    const answered = answers(bridge);
+    await until(() => bridge.log().length > 0);
+    initialize(bridge);
+    bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    bridge.send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "bellman_upload", arguments: { session_id: "qs_room", member_id: "m_me", path, key: "notes" } },
+    });
+    const replied = await until(() => answered.has(3));
+
+    expect({ replied, hits: bellman.hits, said: answered.get(3)?.result?.content?.[0]?.text }).toEqual({
+      replied: true,
+      hits: [],
+      said: expect.stringContaining("the bridge was started in /, which contains your home directory"),
     });
   });
 });

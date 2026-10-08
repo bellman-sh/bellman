@@ -8,7 +8,7 @@ One session starts a room and gets a human-relayable code that carries a role (`
 
 MCP is the one protocol every major provider's clients now speak, which makes a neutral Bellman server *provider-agnostic by default*. The design sticks to the lowest common denominator so nothing breaks outside Claude:
 
-- **Tools only** — no MCP resources, sampling, or elicitation (spotty support elsewhere)
+- **Tools first** — every capability is a tool whose text result stands on its own. UI resources ([MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview)) are additive: a host that renders them shows a screen, one that does not loses nothing. No sampling or elicitation.
 - **Text-first responses**, `structuredContent` as progressive enhancement
 - **Bearer keys and OAuth 2.1 + DCR**, either one — a static key for CI and scripts, sign-in for people (`src/auth.ts`, `src/oauth/`)
 - **Long-poll capped at 25s** to stay under the strictest client tool-call timeouts
@@ -22,6 +22,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_confirm` | Phase 2: ship your brief, become a member. |
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
+| `bellman_rooms` | The rooms you hold a seat in: members with their roles, presence and last beat, live codes, expiry. Backs the in-chat monitor. |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. |
@@ -67,9 +68,21 @@ members read and one seat keeps current. The event log is how the surface got
 that way; the surface is where things stand.
 
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
-  body?, ends?, placement? }`, or remove with `{ key, remove: true }`. Kinds:
-  `text`, `link`, `diagram`, `connector`. Items replace by key; every version
-  stays in the log at its cursor.
+  body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
+  `text`, `link`, `diagram`, `connector`, `file`, `image`. Items replace by key;
+  every version stays in the log at its cursor.
+- A `file` or an `image` names a blob. Upload the bytes first — `POST
+  /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
+  25 MB per file, a bearer token or the panel's cookie, the seat holding
+  `write_surface` — then place `{ key, kind: "file", blob: { id } }`. The item
+  carries the object's size, type and name as the server stored them, not as
+  the uploader claimed them: an image claim is checked against the bytes, and
+  a mismatch is stored as `application/octet-stream`. `GET
+  /rooms/:id/blobs/:blobId` serves the bytes to the room's members — one a
+  creator removed excepted — as a download, except the four image types
+  (`png`, `jpeg`, `gif`, `webp`), which are served inline; nothing from it is
+  ever HTML. From Claude Code, `bellman_upload` reads a local file, uploads it
+  and places it in one call.
 - The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
   to the creator's seat alone; a manifest may give it to any seat. Reading is
   never gated.
@@ -82,8 +95,8 @@ that way; the surface is where things stand.
 - Every item arrives in an untrusted envelope with its writer as origin. The
   preview carries no prose at all.
 
-Documents, images, a canvas to see it on, and sandboxed HTML artifacts are the
-next three pieces; the designs are in `docs/superpowers/specs/`.
+A canvas to see it on and sandboxed HTML artifacts are the next two pieces; the
+designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 
@@ -96,16 +109,18 @@ next three pieces; the designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | |
-| --- | --- | --- | --- |
-| `free` | pair | 20 | |
-| `pro` | pair, swarm | 500 | |
-| `max` | pair, swarm | 2,000 | *coming soon*: hosted agents will be what sets it apart |
-| `team` | pair, swarm | 5,000 | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | |
+| --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | |
+| `pro` | pair, swarm | 500 | 500 MB | |
+| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
+| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
+
+A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
 
 ## Run it
 
@@ -166,6 +181,19 @@ expect it again anywhere the cache is not, which makes a fresh CI container or
 devcontainer a first launch every single time. Ask the agent for
 `bellman_whoami` to see which account a room will show peers.
 
+The bridge adds one more tool of its own: `bellman_upload` reads a file on
+this machine — a regular file, not a symbolic link, at most 25 MB — uploads it
+to the room with the credential the bridge holds, and places it on the working
+surface as a `file` or an `image`, in one call. Only a path under the upload
+root is read, links followed — the directory the bridge was started in, or
+`BELLMAN_UPLOAD_ROOT` when that is set (`/` for any file) — so a line that
+arrives as peer content cannot send a key file to the room. The
+working-directory default is refused when that directory contains your home
+directory (the filesystem root included); naming it in `BELLMAN_UPLOAD_ROOT`
+allows that much on purpose. A hosted connector has no filesystem and no
+bridge, so it has no `bellman_upload`; the control panel's upload comes with
+the canvas.
+
 `BELLMAN_NO_BROWSER=1` prints the sign-in URL instead of launching a browser,
 for when you would rather open it yourself: a terminal-only session on your own
 desktop, or a container that shares the browser's network namespace. It does
@@ -205,7 +233,7 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **One connection per room.** Every Claude Code session starts a bridge of its own, and each used to long-poll Bellman for every room it was in. The bridges on a machine now share one connection per room instead: one of them, whichever got there first, holds a WebSocket to each room and hands every event to the others over a Unix socket in `~/.claude/bellman/bus/`, so several sessions in one room make one connection and not several. Where that cannot be set up (Windows, a socket path that is too long, a directory it cannot write to), or when it stops working, a bridge polls for its own members as it did before. To turn it off yourself, launch the bridge with `BELLMAN_BUS=off`: it then polls for its own members and makes no socket (`claude mcp add --scope user bellman -e BELLMAN_BUS=off -- bellman-channel`). It is read when the bridge starts, so restart Claude Code after changing it. `0`, `false` and `no` also mean off, and so does a value it does not recognise: the bridge says so on stderr rather than keep a bus you tried to turn off.
 
-**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's.
+**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's. Claude Desktop and claude.ai render MCP Apps, so there `bellman_connect` shows the join screen and `bellman_rooms` the room monitor; a host that does not render them gets the same results as text.
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
@@ -302,8 +330,8 @@ quiet, and `reports: true` on a role says members in that seat must answer it,
 by sending `progress` — so that role must hold `send`, and a manifest that
 asks a verbless seat for reports is refused. With no `heartbeat_on` there is
 no tick and `reports` asks for nothing; no preset sets either key. A joiner sees both before it
-accepts a seat: the connect preview carries `heartbeat_on_seconds` and
-`you_report`.
+accepts a seat: the connect preview carries `heartbeat_on_seconds`,
+`you_report`, and `reports` for every role.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

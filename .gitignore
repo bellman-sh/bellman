@@ -15,8 +15,9 @@ data/
 # dual-graph local tooling: session memory, never project content
 .dual-graph/
 
-# wrangler local secrets
+# wrangler local secrets, and its state and dry-run output
 .dev.vars
+.wrangler/
 .dual-graph/
 
 # Personal, per-project instructions and session handoff (not committed)
@@ -29,6 +30,10 @@ worker-tests/node_modules
 # The .mcpb staging directory. extension/dist/ is already covered by `dist/`
 # above; this is the tree build.sh assembles before packing.
 extension/build/
+
+# The UI, built by `npm run build:ui` into a string constant the Worker imports.
+# ui/dist/ is already covered by `dist/` above.
+src/ui/assets.ts
 
 # The SDD executor's per-plan scratch (ledger, briefs). Never committed.
 .superpowers/

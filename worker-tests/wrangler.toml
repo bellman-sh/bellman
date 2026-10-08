@@ -21,6 +21,10 @@ class_name = "AuditDO"
 name = "AUTH"
 class_name = "AuthDO"
 
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "bellman-blobs"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO", "AuthDO"]

@@ -28,7 +28,7 @@ has to recreate.
    start one. 100 because a room is one 2 MB stored value: 100 maximal briefs are
    1.47 MB, 250 would be 3.7 MB. `maxMembers` left `Session` rather than becoming
    `null`, for the rule on that type: two fields for one fact can disagree.
-3. **Max is coming soon.** It differs from pro by `monthlyCreates` alone, stays in
+3. **Max is coming soon.** It differs from pro by `monthlyCreates` and `blobBytesPerRoom` alone, stays in
    `ENTITLEMENTS` for hand grants and as the shape hosted agents (#188, #189)
    attach to, and is not sold.
 

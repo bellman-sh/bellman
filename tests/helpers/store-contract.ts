@@ -21,6 +21,7 @@ import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
+import { blobBytesUsed } from "../../src/blobs.js";
 import type { Session, SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
@@ -316,6 +317,23 @@ export function describeStoreContract(
     });
 
     // --------------------------------------------------------------- members
+    it("recentEvents returns the tail in cursor order, shorter when the log is, and nothing for a bad limit", async () => {
+      const s = session();
+      await store.createSession(s);
+      for (const n of [1, 2, 3]) {
+        await store.appendEvent(s.id, {
+          type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
+          fromLabel: "jesse", payload: { n }, refId: null,
+        });
+      }
+      expect((await store.recentEvents(s.id, 2)).map((e) => e.cursor)).toEqual([2, 3]);
+      expect((await store.recentEvents(s.id, 10)).map((e) => e.cursor)).toEqual([1, 2, 3]);
+      // Review Focus 3: slice(-0) is the whole array; the contract says nothing.
+      expect(await store.recentEvents(s.id, 0)).toEqual([]);
+      expect(await store.recentEvents(s.id, -1)).toEqual([]);
+      expect(await store.recentEvents("qs_missing", 5)).toEqual([]);
+    });
+
     it("addMember appends a member", async () => {
       const s = session();
       (await store.createSession(s));
@@ -1848,7 +1866,7 @@ export function describeStoreContract(
      */
     describe("the surface rows", () => {
       const plan = (body = "1. read\n2. write"): SurfaceItem => ({
-        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null,
+        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null, blob: null,
       });
       const wrote = (item: SurfaceItem | null = plan()): EventBody => ({
         type: "surface",
@@ -2021,6 +2039,75 @@ export function describeStoreContract(
         expect(await store.appendEvent(s.id, wrote(), { surface: { key: "plan", item: plan() } })).toBeNull();
         expect(await store.surfaceOf(s.id)).toEqual([]);
         expect(await cursorOf(s.id)).toBe(0);
+      });
+    });
+
+    /**
+     * The quota's bound (#183, D3). The read of the total and the write that
+     * raises it are one operation, decided in the room object; the route's
+     * pre-check is a courtesy. The store charges bytes it is handed and never
+     * asks what they are for.
+     */
+    describe("charging a room for its blobs", () => {
+      const used = async (id: string) => blobBytesUsed((await store.getSession(id))!);
+
+      it("reads 0 off a room never charged, and charges to the room's own ceiling", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        expect(await used(s.id)).toBe(0);
+        expect(await store.chargeBlobBytes(s.id, 60)).toEqual({ ok: true, used: 60 });
+        expect(await store.chargeBlobBytes(s.id, 40)).toEqual({ ok: true, used: 100 });
+        expect(await used(s.id)).toBe(100);
+      });
+
+      it("refuses past the ceiling, reports the total, and charges nothing for a refusal", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 90);
+        expect(await store.chargeBlobBytes(s.id, 11)).toEqual({ ok: false, reason: "over_quota", used: 90 });
+        expect(await used(s.id)).toBe(90);
+        // The controls: the ten that fit exactly land, and the ceiling is this
+        // room's own — a roomier record takes what this one refused.
+        expect(await store.chargeBlobBytes(s.id, 10)).toEqual({ ok: true, used: 100 });
+        const roomy = session({ id: "qs_roomy", blobBytesCeiling: 1_000 });
+        await store.createSession(roomy);
+        expect(await store.chargeBlobBytes(roomy.id, 101)).toEqual({ ok: true, used: 101 });
+      });
+
+      it("refuses a frozen room and a closed one, with the total", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 5);
+        await store.freezeSession(s.id, Date.now());
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "frozen", used: 5 });
+        await store.freezeSession(s.id, null);
+        await store.closeSession(s.id);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "closed", used: 5 });
+        expect(await used(s.id)).toBe(5);
+      });
+
+      // Closed wins over frozen, as in closeIfEmpty (src/rooms.ts): "frozen" tells the caller to restore the plan, which cannot reopen a room that is over.
+      it("reads a room that is both frozen and closed as closed", async () => {
+        const s = session({ blobBytesCeiling: 100 });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 5);
+        await store.freezeSession(s.id, Date.now());
+        await store.closeSession(s.id);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "closed", used: 5 });
+      });
+
+      it("answers not_found for a room that does not exist", async () => {
+        expect(await store.chargeBlobBytes("qs_nobody", 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
+      });
+
+      // Against MemoryStore this reaches `closeIfAbandoned`. Against the Durable Object it
+      // reaches `s.closed` and not the abandonment read: the alarm has closed a room created
+      // already abandoned before the charge arrives. The abandoned room with the alarm still to
+      // come, which is what `readsClosed` answers for, is pinned in worker-tests/blob-charge.test.ts.
+      it("reads an abandoned room as closed", async () => {
+        const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 })] });
+        await store.createSession(s);
+        expect(await store.chargeBlobBytes(s.id, 1)).toMatchObject({ ok: false, reason: "closed" });
       });
     });
 

@@ -1,15 +1,16 @@
 /**
- * INVARIANT 9: the tool surface stays at 9. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 10. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
- * INVARIANT 4: lowest-common-denominator MCP — tools only, text-first
- *              responses, long-poll capped at 25s.
+ * INVARIANT 4: tools first — every tool's text result stands alone; one UI
+ *              resource (MCP Apps) and no other primitive; long-poll capped at 25s.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
+import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
   "bellman_start",
@@ -21,6 +22,7 @@ const EXPECTED_TOOLS = [
   "bellman_audit",
   "bellman_invite",
   "bellman_evict",
+  "bellman_rooms",
 ].sort();
 
 describe("tool surface", () => {
@@ -42,7 +44,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(9);
+    expect(EXPECTED_TOOLS).toHaveLength(10);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -163,14 +165,44 @@ describe("tool surface", () => {
     expect(listed!.split(", ").sort()).toEqual([...VERBS].sort());
   });
 
-  /** INVARIANT 4: tools only — no resources, prompts, sampling or elicitation. */
-  it("advertises tools and nothing else", () => {
+  /** INVARIANT 4: tools first. One UI resource, and no other primitive beyond tools. */
+  it("advertises tools and the one UI resource, and nothing else", () => {
     const caps = jesse.serverCapabilities();
     expect(caps?.tools).toBeDefined();
-    expect(caps?.resources).toBeUndefined();
+    expect(caps?.resources).toBeDefined();
     expect(caps?.prompts).toBeUndefined();
     expect(caps?.completions).toBeUndefined();
     expect(caps?.logging).toBeUndefined();
+  });
+
+  it("lists exactly one resource, the app, with the MCP Apps mimeType", async () => {
+    const { resources } = await jesse.listResources();
+    expect(resources.map((r) => [r.uri, r.mimeType])).toEqual([[APP_RESOURCE_URI, APP_MIME_TYPE]]);
+  });
+
+  it("reads the app as one HTML document that asks the host for a border", async () => {
+    const { contents } = await jesse.readResource(APP_RESOURCE_URI);
+    expect(contents).toHaveLength(1);
+    const page = contents[0] as { mimeType?: string; text?: string; _meta?: { ui?: { prefersBorder?: boolean } } };
+    expect(page.mimeType).toBe(APP_MIME_TYPE);
+    expect(typeof page.text).toBe("string");
+    expect(/^<!doctype html>/i.test(page.text!.trimStart())).toBe(true);
+    expect(page._meta?.ui?.prefersBorder).toBe(true);
+  });
+
+  // The host renders a tool through the resource its _meta names. A tool that
+  // named a resource this server does not serve would render nothing, so every
+  // ui meta present must point at the one resource.
+  it("attaches the app to bellman_connect and bellman_rooms, and to no other tool", async () => {
+    const { tools } = await jesse.listTools();
+    const uiOf = (t: { _meta?: Record<string, unknown> }) =>
+      (t._meta as { ui?: { resourceUri?: string } } | undefined)?.ui;
+    const withApp = tools.filter((t) => uiOf(t)?.resourceUri === APP_RESOURCE_URI).map((t) => t.name).sort();
+    expect(withApp).toEqual(["bellman_connect", "bellman_rooms"]);
+    for (const t of tools) {
+      const ui = uiOf(t);
+      if (ui) expect(ui.resourceUri, t.name).toBe(APP_RESOURCE_URI);
+    }
   });
 
   /** INVARIANT 4: text-first, structuredContent as enhancement. */

@@ -93,19 +93,25 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
     expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
     expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
+    expect(ENTITLEMENTS.free.blobBytesPerRoom).toBe(50 * 1024 * 1024);
+    expect(ENTITLEMENTS.pro.blobBytesPerRoom).toBe(500 * 1024 * 1024);
+    expect(ENTITLEMENTS.max.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
+    expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
   /**
    * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
-   * differs from pro by creates alone; hosted agents (#188, #189) are the facet
+   * differs from pro by creates and the blob ceiling alone; hosted agents (#188, #189) are the facet
    * that will set it apart, and landing one is a deliberate edit to this line.
    */
-  it("gives max nothing but creates over pro, until it has a facet", () => {
-    const { monthlyCreates: maxCreates, ...maxRest } = ENTITLEMENTS.max;
-    const { monthlyCreates: proCreates, ...proRest } = ENTITLEMENTS.pro;
+  it("gives max nothing but creates and the blob ceiling over pro, until it has a facet", () => {
+    const { monthlyCreates: maxCreates, blobBytesPerRoom: maxBlobs, ...maxRest } = ENTITLEMENTS.max;
+    const { monthlyCreates: proCreates, blobBytesPerRoom: proBlobs, ...proRest } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
     expect(maxCreates).toBe(2000);
     expect(proCreates).toBe(500);
+    expect(maxBlobs).toBe(5 * 1024 * 1024 * 1024);
+    expect(proBlobs).toBe(500 * 1024 * 1024);
   });
 
   /** The reason a company with several people creating rooms still buys team. */
@@ -129,11 +135,12 @@ describe("plan entitlements", () => {
   /**
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
-   * on what you pay — this test is the tripwire.
+   * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
+   * bounds what a room stores, not who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "monthlyCreates", "orgScoping", "audit",
+      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
     ].sort();
 
     for (const plan of plans) {

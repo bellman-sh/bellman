@@ -13,15 +13,19 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 20,
     orgScoping: false,
     audit: false,
+    // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
+    // A room is what a plan already rations, so nothing here is monthly.
+    blobBytesPerRoom: 50 * 1024 * 1024,
   },
   pro: {
     modes: ["pair", "swarm"],
     monthlyCreates: 500,
     orgScoping: false,
     audit: false,
+    blobBytesPerRoom: 500 * 1024 * 1024,
   },
   // Coming soon. With no room lifetime and no member cap (#18), max differs from
-  // pro by creates alone, so nothing sells it: no Stripe price names it and
+  // pro by creates and the blob ceiling alone, so nothing sells it: no Stripe price names it and
   // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404. It
   // stays here because a hand grant still works and because it is the shape
   // hosted agents (#188, #189) attach their facet to. tests/auth.test.ts pins
@@ -31,12 +35,14 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
+    blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
   },
   team: {
     modes: ["pair", "swarm"],
     monthlyCreates: 5000,
     orgScoping: true,
     audit: true,
+    blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
   },
 };
 

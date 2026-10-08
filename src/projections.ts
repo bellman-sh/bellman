@@ -1,6 +1,10 @@
-import type { Member, SurfaceRow, Verb } from "./types.js";
+import type { Member, SessionEvent, SurfaceRow, Verb } from "./types.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
+import { reportRow } from "./heartbeat.js";
+import { asked, capacityOf, isActiveMember } from "./store.js";
+import { activeMembers, sessionStatus } from "./rooms.js";
+import { joinUrl } from "./codes.js";
 import type { StoredSession } from "./stored-session.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
@@ -68,6 +72,21 @@ export function publicMember(m: Member, connected: ReadonlySet<string>) {
 }
 
 /**
+ * The roster as it stood at `at`, for a viewer whose reading stopped there (#113):
+ * a member a creator removed reads the room up to the removal and nothing after
+ * it, and who joined or left later is after it. So this keeps the members who had
+ * joined by `at`, as facts about the record, with `active` as it was at `at` — a
+ * member who left later was still in. Nothing off the clock: no `presence`, which
+ * is the live roster's (`publicMember`), and live data is what such a viewer is
+ * not owed. A join in the very millisecond of the removal counts as before it.
+ */
+export function rosterAsOf(members: readonly Member[], at: number) {
+  return members
+    .filter((m) => m.joinedAt <= at)
+    .map((m) => ({ ...storedMember(m), active: m.leftAt === null || m.leftAt > at }));
+}
+
+/**
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
@@ -106,10 +125,32 @@ export function publicMember(m: Member, connected: ReadonlySet<string>) {
 export function roomPreview(session: StoredSession, viewerRole: string) {
   const m = session.manifest;
   const creator = session.members[0];
+  /**
+   * Whether a seat is asked to report. Shown before a joiner's human accepts
+   * the seat: this is the consent point, and a member that will be named silent
+   * in a tick has to be able to see that before joining, the same reason
+   * `your_verbs` is here.
+   *
+   * Through mustReport, which is what the tick itself calls, so what a joiner
+   * is SHOWN and what is ASKED are one computation and cannot drift apart.
+   *
+   * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
+   * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
+   * to answer. `mustReport` alone said `true` there and promised a joiner's
+   * human an obligation that never fires — and this is the consent surface, the
+   * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
+   * the same null-cadence check for themselves; this was the surface that did
+   * not. resolveManifest refuses the other half of the pair, a reporting seat
+   * that cannot send, so the only `reports: true` that reaches here is one a
+   * cadence would make real.
+   */
+  const asked = (role: string): boolean => m.heartbeatOnMs !== null && mustReport(m, role);
   const roles: Record<string, Verb[]> = {};
+  const reports: Record<string, boolean> = {};
   const descriptions: Record<string, string | null> = {};
   for (const [key, def] of Object.entries(m.roles)) {
     roles[key] = def.can;
+    reports[key] = asked(key);
     descriptions[key] = def.description;
   }
   return {
@@ -117,32 +158,116 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: verbsOfRole(m, viewerRole),
-    /**
-     * The obligation, shown before a joiner's human accepts the seat. This is
-     * the consent point: a member that will be named silent in a tick has to be
-     * able to see that before joining, the same reason `your_verbs` is here.
-     *
-     * Through mustReport, which is what the tick itself calls, so what a joiner
-     * is SHOWN and what is ASKED are one computation and cannot drift apart.
-     *
-     * **The cadence AND the seat, not the seat alone.** `reports: true` in a room
-     * with no `heartbeat_on` asks for nothing: nothing ticks, so nothing arrives
-     * to answer. `mustReport` alone said `true` there and promised a joiner's
-     * human an obligation that never fires — and this is the consent surface, the
-     * one place over-promising costs the most. `nextTickAt` and `dueMembers` make
-     * the same null-cadence check for themselves; this was the surface that did
-     * not. resolveManifest refuses the other half of the pair, a reporting seat
-     * that cannot send, so the only `reports: true` that reaches here is one a
-     * cadence would make real.
-     */
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
-    you_report: m.heartbeatOnMs !== null && mustReport(m, viewerRole),
+    // The viewer's own obligation, hoisted as your_verbs is: the fact the
+    // joiner's human is deciding on.
+    you_report: asked(viewerRole),
     creator_role: m.creatorRole,
     roles,
+    // Every seat's obligation, by the same rule, so the roles table a joiner
+    // reads can compare seats (spec: "each role's verbs and whether it reports").
+    reports,
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },
     ),
+  };
+}
+
+/** How many events `bellman_rooms` reads from the end of each room's log. */
+export const ROOM_TAIL = 100;
+
+/**
+ * A member's heartbeat standing as the monitor shows it (#28). The numbers are
+ * `reportRow`'s, the tick's own computation (D8). `asked` is whether this room
+ * asks this seat at all: a cadence AND a reporting seat, the same two
+ * conditions `you_report` in roomPreview reads. `silent` is forced false for a
+ * seat not asked, because silence is only a finding about a member that was
+ * expected to speak. `note` is the member's latest `progress` payload, peer
+ * prose, so it ships in the untrusted envelope like every other peer string.
+ */
+export function beatOf(s: StoredSession, m: Member, now: number, latest: SessionEvent | undefined) {
+  const every = s.manifest.heartbeatOnMs;
+  const isAsked = every !== null && asked(s, m);
+  const row = reportRow(m, now, every);
+  return {
+    asked: isAsked,
+    last_report_at: row.last_report_at,
+    silent_for_seconds: row.silent_for_seconds,
+    silent: isAsked && row.silent,
+    note: latest ? untrusted({ memberId: m.memberId, label: m.label }, latest.payload) : null,
+  };
+}
+
+/**
+ * One room as `bellman_rooms` returns it, from the caller's seat (#28).
+ *
+ * `room` is roomPreview from that seat, so your role and verbs come through the
+ * accessors the server enforces with. `members` are the live roster (a member
+ * who left is not "in" the room, which is the question a monitor asks). A join
+ * code's string and link appear only when the caller's seat holds `invite`
+ * (D7): `bellman_invite` hands a code only to such a seat, and this must not be
+ * a cheaper route to the same authority. `tail` is the newest events in cursor
+ * order, from `recentEvents`; the latest `progress` per member is read off it.
+ */
+export function roomSummary(
+  s: StoredSession,
+  me: Member,
+  connected: ReadonlySet<string>,
+  tail: SessionEvent[],
+  now: number,
+) {
+  const canInvite = (verbsOfRole(s.manifest, me.roomRole) as readonly Verb[]).includes("invite");
+  const latestNote = new Map<string, SessionEvent>();
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const e = tail[i];
+    if (e.type === "progress" && !latestNote.has(e.fromMemberId)) latestNote.set(e.fromMemberId, e);
+  }
+  const last = tail.length > 0 ? tail[tail.length - 1] : undefined;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  return {
+    session_id: s.id,
+    status: sessionStatus(s),
+    max_members: capacityOf(s.manifest),
+    active_members: activeMembers(s).length,
+    your_member_id: me.memberId,
+    room: roomPreview(s, me.roomRole),
+    members: s.members.filter(isActiveMember).map((m) => ({
+      ...publicMember(m, connected),
+      beat: beatOf(s, m, now, latestNote.get(m.memberId)),
+    })),
+    join_codes: Object.entries(s.joinCodes)
+      .filter(([, rec]) => rec.expiresAt > now)
+      .map(([role, rec]) => ({
+        role,
+        expires_at: iso(rec.expiresAt),
+        ...(canInvite ? { code: rec.code, join_url: joinUrl(rec.code) } : {}),
+      })),
+    last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,
+  };
+}
+
+/**
+ * A room on a person's list (#184, D1): identifiers, the server's numbers,
+ * and the room's name. `room` is creator prose; the panel renders it as text
+ * and never as markup, which is what makes it safe to carry unwrapped here
+ * where `roomPreview` wraps it for a joiner's MODEL. `status` is handed in
+ * because `sessionStatus` lives in rooms.ts, which imports this module.
+ *
+ * `cutAt` is given when the viewer was removed from the room (#113): `members`
+ * is then the count of the roster as of that moment (`rosterAsOf`), the number
+ * the detail's roster would give it, and not how many are in now.
+ */
+export function roomListEntry(s: StoredSession, viewerUserId: string, status: string, cutAt?: number) {
+  return {
+    id: s.id,
+    room: s.manifest.room,
+    mode: s.manifest.mode,
+    status,
+    members: cutAt === undefined
+      ? s.members.filter((m) => m.leftAt === null).length
+      : rosterAsOf(s.members, cutAt).filter((m) => m.active).length,
+    mine: s.createdBy === viewerUserId,
   };
 }
 
@@ -182,6 +307,9 @@ export function surfaceItem(r: SurfaceRow) {
       body: r.body,
       ends: r.ends,
       placement: r.placement,
+      // `?? null` for rows written before blobs (#183): a reader never tells
+      // "absent" from "null", and a legacy row has no key at all.
+      blob: r.blob ?? null,
       cursor: r.cursor,
       at: new Date(r.at).toISOString(),
     },

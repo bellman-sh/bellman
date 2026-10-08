@@ -19,7 +19,7 @@ import {
   STALE_AFTER_MS, connectedAmong, presenceOf, presentMembers, staleMembers,
 } from "../src/presence.js";
 import { MemoryStore, seatVictims } from "../src/store.js";
-import { member, session } from "./helpers/fixtures.js";
+import { member, session, swarmSession } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY } from "./helpers/harness.js";
 import { brief } from "./helpers/fixtures.js";
 
@@ -152,7 +152,7 @@ describe("the four places a handler reads presence", () => {
   const read = async () => (await store.getSession("qs_test"))!;
 
   it("bellman_connect counts a connected member's seat as held", async () => {
-    await store.createSession(session({ members: [creator(), quiet()], maxMembers: 2 }));
+    await store.createSession(session({ members: [creator(), quiet()] }));
     const peer = await h.connect(DEV_KEY.peer);
 
     store.attached.add("m_quiet");
@@ -168,8 +168,8 @@ describe("the four places a handler reads presence", () => {
   });
 
   it("bellman_confirm reports the member present and retires the codes of a full room", async () => {
-    // Three seats: the creator, a quiet member on a socket, and the joiner.
-    await store.createSession(session({ members: [creator(), quiet()], maxMembers: 3 }));
+    // Two seats: a quiet member on a socket, and the joiner.
+    await store.createSession(session({ members: [quiet()] }));
     store.attached.add("m_quiet");
     const peer = await h.connect(DEV_KEY.peer);
 
@@ -184,16 +184,15 @@ describe("the four places a handler reads presence", () => {
 
     const roster = confirmed.data.members as { member_id: string; presence: string }[];
     expect(roster.map((m) => [m.member_id, m.presence])).toEqual([
-      ["m_creator", "present"],
       ["m_quiet", "present"],
       [String(confirmed.data.member_id), "present"],
     ]);
-    // Three present members in three seats: no code can be redeemed.
+    // Two present members in two seats: no code can be redeemed.
     expect((await read()).joinCodes).toEqual({});
   });
 
   it("bellman_confirm still reports a quiet member without a socket as stale", async () => {
-    await store.createSession(session({ members: [creator(), quiet()], maxMembers: 3 }));
+    await store.createSession(swarmSession({ members: [creator(), quiet()] }));
     const peer = await h.connect(DEV_KEY.peer);
 
     const preview = await peer.call("bellman_connect", { join_code: "BELL-TEST-01" });
@@ -206,17 +205,13 @@ describe("the four places a handler reads presence", () => {
 
     const roster = confirmed.data.members as { member_id: string; presence: string }[];
     expect(roster.find((m) => m.member_id === "m_quiet")?.presence).toBe("stale");
-    // Two present members in three seats: the code stays.
+    // Two present members in a swarm room: the code stays.
     expect(Object.keys((await read()).joinCodes)).not.toEqual([]);
   });
 
   it("bellman_invite refuses a room whose seats are all held by present members", async () => {
-    // Full only if the quiet member's socket counts: creator, quiet, and a
-    // third present member in three seats.
-    await store.createSession(session({
-      members: [creator(), quiet(), member({ memberId: "m_third", userId: "u_third", lastSeenAt: Date.now() })],
-      maxMembers: 3,
-    }));
+    // Full only if the quiet member's socket counts: creator and quiet in two seats.
+    await store.createSession(session({ members: [creator(), quiet()] }));
     const host = await h.connect(DEV_KEY.jesse);
 
     store.attached.add("m_quiet");
@@ -232,7 +227,7 @@ describe("the four places a handler reads presence", () => {
   it("bellman_confirm does not reap a connected member to make room", async () => {
     // Contested: a two-seat room, the creator present, the other seat held by a
     // member that has been quiet for hours but has a socket.
-    await store.createSession(session({ members: [creator(), quiet()], maxMembers: 2 }));
+    await store.createSession(session({ members: [creator(), quiet()] }));
     store.attached.add("m_quiet");
 
     const outcome = await store.seatMember(
@@ -252,5 +247,28 @@ describe("the four places a handler reads presence", () => {
     );
     expect(reaped.refused).toBeNull();
     expect(reaped.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet"]);
+  });
+
+  it("a sweep stamps the members a socket vouches for instead of closing the room (#18)", async () => {
+    await store.createSession(session({ members: [
+      creator(), member({ memberId: "m_quiet", userId: "u_quiet", roomRole: "peer_b", lastSeenAt: 1 }),
+    ] }));
+    // Both quiet past any window (1 ms after the epoch); only m_quiet is on a socket.
+    await store.updateMember("qs_test", "m_creator", { lastSeenAt: 1 });
+    store.attached.add("m_quiet");
+    const now = Date.now();
+
+    await store.sweep(now);
+
+    const after = await read();
+    expect(after.closed).toBe(false);
+    expect(after.members.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_creator", 1], ["m_quiet", now]]);
+    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+
+    // The same sweep with the socket gone closes it: the stamp was the socket's.
+    store.attached.clear();
+    await store.updateMember("qs_test", "m_quiet", { lastSeenAt: 1 });
+    await store.sweep(now);
+    expect((await read()).closed).toBe(true);
   });
 });

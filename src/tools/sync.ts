@@ -170,9 +170,9 @@ If a room's creator has removed you, you still get the history up to and includi
       // arrived after they were cut is not theirs to answer or to wait on.
       //
       // The cost is a full read of the log on every poll. That is bounded by
-      // the room's TTL rather than by anything here, and the fix if it stops
-      // being enough is a stored cursor for the last `action_request`, which
-      // turns this into a bounded tail read.
+      // the room's abandonment rather than by anything here, and the fix if it
+      // stops being enough is a stored cursor for the last `action_request`,
+      // which turns this into a bounded tail read.
       // The guard that keeps this off the common path. `lastActionRequestAt` is
       // the only thing read from the record here, and it decides whether the log
       // is worth reading at all — never what any request's state is, which stays

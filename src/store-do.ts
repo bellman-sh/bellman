@@ -11,8 +11,8 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  connectedAmong, creditReport, decideBlobCharge, isActiveMember, isRemovedMember, markRemoved,
-  seatVictims,
+  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
+  isAbandoned, isActiveMember, isRemovedMember, markRemoved, seatVictims, stampSeen,
 } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
@@ -42,7 +42,7 @@ import { applySurfaceWrite } from "./surface.js";
  *               DO is reachable from the other.
  *
  * On sweep(): MemoryStore scans every session on a timer. There is no cheap
- * global iteration across a DO namespace, so session TTL is enforced by a
+ * global iteration across a DO namespace, so abandonment is enforced by a
  * per-object alarm and connect tokens expire lazily on read. sweep() is
  * therefore a no-op — see the comment on the method.
  */
@@ -64,6 +64,12 @@ const deliveredKey = (intentId: string) => `d:${intentId}`;
  * only: its due time is derived, never stored under `due:`. See derivedDue().
  */
 const HEARTBEAT_HANDLER = "heartbeat";
+/**
+ * The alarm handler that closes a room nobody has been in for 90 days (#18). A
+ * name only, derived like the heartbeat's: never stored under `due:`, so a
+ * rollback strands nothing. See derivedDue().
+ */
+const ABANDONED_HANDLER = "abandoned";
 
 type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
@@ -208,27 +214,24 @@ async function extraRows(
 }
 
 /**
- * Past its TTL. `#expireIfDue`'s rule for whether there is expiring to do, and the
- * one definition of it, because `membersOf`, `fetch` and `#tickIfDue` all have to
- * reach the same verdict as the alarm about a room whose expiry has arrived and
- * whose alarm has not fired yet. Two copies of `now > s.expiresAt` and the four
- * disagree the first time one of them is edited.
- */
-const pastTtl = (s: StoredSession, now: number): boolean => now > s.expiresAt;
-
-/**
  * Whether a room reads as closed, deciding it without writing: closed outright, or
- * past its TTL with the alarm still to come. A row that is gone reads closed, which
+ * abandoned with the alarm still to come. A row that is gone reads closed, which
  * is the answer an unknown room has always had.
+ *
+ * `attached` is what the object's sockets carry (`#attachedIds()`), because a
+ * socket vouching for an active member is the one thing that keeps a room past
+ * its window open. The rule is `isAbandoned`'s, shared with `#closeIfAbandoned`
+ * and both stores' sweeps, so a room reads closed here exactly when the alarm
+ * would close it.
  *
  * Every read that refuses a closed room goes through here, so the rule and the
  * refusals cannot drift apart. `membersOf` authorizes a watch with it and `fetch`
- * rechecks it before accepting the socket — one rule asked twice, which is what #133
- * was missing: with no recheck, a close landing between the two calls left a socket
+ * rechecks it before accepting the socket: one rule asked twice, which is what #133
+ * was missing. With no recheck, a close landing between the two calls left a socket
  * on a closed room and nothing to close it.
  */
-const readsClosed = (s: StoredSession | undefined, now: number): boolean =>
-  !s || s.closed || pastTtl(s, now);
+const readsClosed = (s: StoredSession | undefined, now: number, attached: Iterable<string>): boolean =>
+  !s || s.closed || isAbandoned(s, now, connectedAmong(s.members, attached));
 
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
@@ -250,13 +253,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * holding a code that nothing could resolve, and no scan could find it, because a
    * Durable Object namespace cannot be enumerated.
    *
-   * "ttl" expires the session. It is DERIVED from the session record rather than
-   * stored as a `due:` row, because sessions written before named alarms have no row
-   * and an alarm re-armed from stored rows alone would leave every one of them with
-   * no expiry. See derivedDue().
+   * "abandoned" closes a room nobody has been in for 90 days (#18). It is DERIVED
+   * from the members' lastSeenAt rather than stored as a `due:` row, because sessions
+   * written before named alarms have no row and an alarm re-armed from stored rows
+   * alone would leave every one of them unswept. See derivedDue().
    *
    * "heartbeat" asks the room's members where they are, when the room declared a
-   * cadence and one of them owes an answer (#111). Derived like "ttl", and for a
+   * cadence and one of them owes an answer (#111). Derived like "abandoned", and for a
    * firmer reason: a stored row that an older build never consumes is the spin
    * alarm() warns about. See derivedDue() and #tickIfDue().
    */
@@ -322,7 +325,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The one raw read of the "session" record. Everything in this class reads it
    * through here, so hydrateStoredSession's rules reach all of it: getSession
    * (and the facade's getSession and getSessionByJoinCode with it), every
-   * mutator, and the TTL alarm. A row predating Session.manifest reads as gone;
+   * mutator, and the abandonment alarm. A row predating Session.manifest reads as gone;
    * one predating frozenAt reads as not frozen; one predating the heartbeat reads
    * as asking for none. Nothing rewrites any of them.
    *
@@ -440,7 +443,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // Session, seed events, cursor and the registrations its join codes owe land
     // together. Separately committed, an interruption could leave a session with no
     // events, or events with a cursor of zero, or a session whose code nothing can
-    // resolve — and the alarm is what expires it, so a session that half-exists
+    // resolve — and the alarm is what sweeps it, so a session that half-exists
     // would also never be cleaned up.
     const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
     for (const e of events) seeded[eventKey(e.cursor)] = e;
@@ -451,18 +454,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await txn.put<unknown>({ ...seeded, ...rows });
     });
     if (intents.length > 0) {
-      // enqueue armed the alarm for the queue, inside the transaction. The TTL is
-      // armed when that alarm fires, because alarm() ends by pointing the alarm at
-      // whatever is due next. A reArm() here would point it at the queue's marker
-      // instead, which is dated now, and bring the alarm in a few milliseconds
-      // behind the commit to race the delivery below.
+      // enqueue armed the alarm for the queue, inside the transaction. The
+      // abandonment time is armed when that alarm fires, because alarm() ends by
+      // pointing the alarm at whatever is due next. A reArm() here would point it at
+      // the queue's marker instead, which is dated now, and bring the alarm in a few
+      // milliseconds behind the commit to race the delivery below.
       await this.driver.deliverNow();
     } else {
       // Nothing was queued, so nothing armed an alarm, and the session still needs
-      // its TTL. It is DERIVED from the session record rather than stored as a due
-      // row: sessions written before named alarms have no due row, and re-arming
-      // from stored rows alone would leave every one of them with no alarm and no
-      // expiry.
+      // its abandonment time. It is DERIVED from the members' lastSeenAt rather than
+      // stored as a due row: sessions written before named alarms have no due row, and
+      // re-arming from stored rows alone would leave every one of them with no alarm,
+      // never swept.
       await this.driver.reArm();
     }
   }
@@ -470,8 +473,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async getSession(): Promise<StoredSession | undefined> {
     const s = await this.stored();
     if (!s) return undefined;
-    await this.#expireIfDue(s, Date.now());
-    // Re-read: expireIfDue may have written closed=true and cleared the codes.
+    await this.#closeIfAbandoned(s, Date.now());
+    // Re-read: closeIfAbandoned may have written closed=true and cleared the codes,
+    // or stamped a socket's members.
     return this.stored();
   }
 
@@ -495,14 +499,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * Two reasons the route asks here rather than calling getSession. This
    * returns two fields, not the whole record (live join codes and every
-   * member's brief) across an RPC hop. And it does not expire the room as a
-   * side effect: getSession runs expireIfDue, which can write, and authorizing
+   * member's brief) across an RPC hop. And it does not close the room as a
+   * side effect: getSession runs closeIfAbandoned, which can write, and authorizing
    * a watch must not.
    *
    * The second reason carries an obligation. The two paths must still agree
-   * on "closed", or a room past its TTL whose alarm has not fired yet reads
+   * on "closed", or an abandoned room whose alarm has not fired yet reads
    * as open here while bellman_sync, through getSession, reads it as closed.
-   * So `closed` comes from `readsClosed`, expireIfDue's own rule, and is not
+   * So `closed` comes from `readsClosed`, closeIfAbandoned's own rule, and is not
    * written. That predicate is where the rule lives for all of its readers.
    *
    * What this answer does NOT settle is whether the room is still open by the
@@ -520,7 +524,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       memberIds: s
         ? s.members.filter((m) => m.userId === userId && !isRemovedMember(m)).map((m) => m.memberId)
         : [],
-      closed: readsClosed(s, Date.now()),
+      closed: readsClosed(s, Date.now(), this.#attachedIds()),
     };
   }
 
@@ -563,7 +567,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * It answers RPC like every method on this class. What it adds to getSession
    * is which members have a socket open, which every member of the room already
    * reads as `presence`, less precisely, and only code holding the SESSION
-   * binding can ask. Like membersOf it writes nothing and does not expire the
+   * binding can ask. Like membersOf it writes nothing and does not close the
    * room, because it is a question about who is connected and not a reason to
    * change the room.
    */
@@ -638,10 +642,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * owns in this room, departed members included, except one a creator removed
    * (#113): membersOf returns the others on purpose, so /ws and bellman_sync
    * agree about who may watch the open feed, and nothing removes a member from
-   * the roster. The list grows with seatings, not with the plan's cap on
-   * active members (ENTITLEMENTS in auth.ts), so it takes over a thousand
-   * seatings by one identity in one room's life. That is churn, not a breach
-   * of the cap.
+   * the roster. The list grows with seatings, not with the room's capacity
+   * (`capacityOf`), so it takes over a thousand seatings by one identity in one
+   * room's life. That is churn, not a breach of the capacity.
    */
   async fetch(request: Request): Promise<Response> {
     // The same reading as the route's, from the same module (#132). The Worker builds
@@ -662,7 +665,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // ONE roster read answering both rechecks (#133 and #113). The Worker's
     // membersOf said open, and said who this identity holds, but that was a
     // second invocation of this object and the input gate spans neither it nor
-    // the gap after it: a close, the TTL alarm, or a removal lands there. So
+    // the gap after it: a close, the abandonment alarm, or a removal lands there. So
     // both guards are asked HERE, where the registration is, and all of it is
     // one invocation — the read-and-register rule again, with "closed" and the
     // roster as the things read instead of the cursor.
@@ -681,7 +684,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // `s` through it, and the cut below reads `s.members`. Naming the case here
     // is honest about why, where a non-null assertion would hide that the two
     // guards agree. Change `readsClosed` to a predicate and this collapses.
-    if (!s || readsClosed(s, Date.now())) {
+    if (!s || readsClosed(s, Date.now(), this.#attachedIds())) {
       return new Response("This room is closed", { status: 409 });
     }
 
@@ -811,7 +814,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * One put for every member, not one each: this is a read-modify-write of the
    * whole session blob, and a socket serving several members would otherwise pay
    * it several times. No reArm, for `updateMember`'s reason — `lastSeenAt`
-   * reaches `nextTickAt` not at all.
+   * reaches `nextTickAt` not at all, and it moves `abandonedAt` only later, so the
+   * armed alarm is early at worst and the reArm() that ends `alarm()` corrects it.
    *
    * Swallowed on failure, `touchMember`'s rule again: this rides on somebody
    * else's teardown, and a liveness write that failed must not turn a close into
@@ -830,7 +834,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const now = Date.now();
       await this.ctx.storage.put("session", {
         ...s,
-        members: s.members.map((m) => (stamped.has(m.memberId) ? { ...m, lastSeenAt: now } : m)),
+        members: stampSeen(s.members, now, stamped),
       });
     } catch (err) {
       console.error("socket close stamp failed:", err);
@@ -1017,8 +1021,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * finished. By then the marker is gone unless a delivery failed, and a marker
    * still present means a delivery genuinely is owed, so arming for it is recovery
    * rather than a race. A seating that retired nothing queued nothing, so the only
-   * due times reArm() sees are the TTL, the tick, and a marker some earlier call
-   * left behind.
+   * due times reArm() sees are the abandonment time, the tick, and a marker some
+   * earlier call left behind.
    */
   async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
     const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
@@ -1034,7 +1038,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // caller first could not promise that: a member can connect in the gap, and
       // reclaiming it is final.
       const connected = connectedAmong(s.members, this.#attachedIds());
-      const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
+      const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
       if (victims === null) return { refused: "full" as const, ...no };
 
       const departed = new Set(victims.map((v) => v.memberId));
@@ -1065,7 +1069,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // while holding only one therefore reports `codesCleared: true`, which answers
       // this question and does not contradict the other. The contract suite pins this
       // side, and its expired-code cases for removeMember pin the other.
-      const full = seatVictims(seated, s.maxMembers, staleBefore, connected) === null;
+      const full = seatVictims(seated, capacityOf(s.manifest), staleBefore, connected) === null;
       const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
       const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
 
@@ -1290,16 +1294,21 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * off null for a room whose cadence and roster were there all along, and without
    * it a thawed room never ticks again.
    *
-   * It earns its place on the freeze too, and is unconditional for that reason. A
-   * freeze does not disarm anything — the alarm stays pointed at the tick time it
-   * already held — so without this, a frozen room wakes once at that time to be
-   * refused by #tickIfDue, and only then re-arms to the TTL. Re-arming here moves
-   * it out to the TTL at the freeze and spends that wake on nothing.
+   * On the freeze it arms nothing of the room's own: a frozen room derives neither
+   * an abandonment time nor a tick (#18), and reArm() never clears an alarm. So a
+   * freeze leaves the alarm pointed at whatever it already held, and the room wakes
+   * once at that time, finds nothing due and arms nothing after it. The call is
+   * unconditional all the same, for the reason the last paragraph gives.
    *
    * The thaw also credits every reporting seat with a report, so the interval
    * nobody was allowed to report in costs nobody their standing — spec D10, and
    * `clearSilence` carries the whole argument. The rule belongs to heartbeat.ts;
    * this picks the moment to apply it.
+   *
+   * The thaw also stamps every active member as seen now (#18): `touchMember`
+   * refuses a frozen room, so the window did not move while it was frozen, and the
+   * `reArm()` below would otherwise point at an abandonment time already past and
+   * the next firing would close the room the thaw just gave back.
    *
    * **The moment is the TRANSITION, not the argument.** `frozenAt === null` alone
    * credits on a call that thawed nothing, because the room was already thawed —
@@ -1318,7 +1327,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const s = await this.stored();
     if (!s) return;
     const thawing = frozenAt === null && s.frozenAt !== null;
-    const members = thawing ? clearSilence(s, Date.now()) : s.members;
+    const now = Date.now();
+    const members = thawing ? stampSeen(clearSilence(s, now), now) : s.members;
     await this.ctx.storage.put("session", { ...s, frozenAt, members });
     await this.driver.reArm();
   }
@@ -1493,7 +1503,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The quota's bound (#183, D3), decided in this object in one transaction
    * against the ceiling stamped on its own record: the read of the total and
    * the write that raises it are one unit, so two uploads cannot both fit the
-   * last megabyte. A room past its TTL reads as closed through `readsClosed`,
+   * last megabyte. An abandoned room reads as closed through `readsClosed`,
    * the rule every reader of "closed" shares; the rest of the decision is
    * `decideBlobCharge`'s, the same call `MemoryStore` makes. Nothing is written
    * for a refusal. `blobBytes` is the sum charged so far; nothing here credits it.
@@ -1502,7 +1512,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.transaction<BlobCharge>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "not_found", used: 0 };
-      const charge = decideBlobCharge(s, readsClosed(s, Date.now()), bytes);
+      const charge = decideBlobCharge(s, readsClosed(s, Date.now(), this.#attachedIds()), bytes);
       if (charge.ok) await txn.put("session", { ...s, blobBytes: charge.used });
       return charge;
     });
@@ -1708,26 +1718,27 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /**
    * The object's single alarm, shared by name: the driver reports which handlers
    * are due and this dispatches on them. The outbox drains here when the inline
-   * attempt never ran or could not finish, and the session TTL fires here rather
+   * attempt never ran or could not finish, and the abandonment time fires here rather
    * than in a global sweep.
    *
    * Nothing here clears a handler's due time. Each decides its next one from state
    * it has already changed, so a handler that throws keeps its due time and the
    * alarm is retried instead of forgotten. The outbox's drain moves its own marker,
    * deleting it when the queue is empty and dating it ahead after a failure. The
-   * TTL's handler is idempotent: expireIfDue does nothing to a session that is
-   * closed or not yet past its expiry. The heartbeat's moves its own clock:
+   * abandonment handler is idempotent: closeIfAbandoned does nothing to a session that
+   * is closed or not yet abandoned. The heartbeat's moves its own clock:
    * #tickIfDue advances `lastTickAt` on every firing, written or not, so the time
    * derivedDue returns next is in the future.
    *
    * **The loop's order is `dueNames`' alphabet, which is not a priority.** A firing
-   * delayed past `expiresAt` finds "heartbeat" and "ttl" both due and runs the tick
-   * first, because "h" sorts before "t". Each handler therefore reads the state it
-   * needs for itself rather than relying on its place here: #tickIfDue refuses a
-   * room already past its expiry, with the same `now > expiresAt` test #expireIfDue
-   * uses. Reordering the names would fix this one pair and leave the next one to be
-   * discovered, and the handler that reads its own precondition is the one a reader
-   * can check.
+   * delayed past `abandonedAt` finds "abandoned" and "heartbeat" both due and runs
+   * the close first, because "a" sorts before "h". That is the right order for this
+   * pair, and it is right by accident: before #18 the room's clock had a name that
+   * sorted after the tick's, and the tick ran first. Each handler therefore reads
+   * the state it needs for itself rather than relying on its place here: #tickIfDue
+   * refuses an abandoned room with the same `isAbandoned` test #closeIfAbandoned
+   * uses. A rename would undo the order and leave the next pair to be discovered,
+   * and the handler that reads its own precondition is the one a reader can check.
    *
    * Each handler reads the session itself, inside the transaction it writes in, so
    * nothing is passed down from here: a record read in this loop and written by a
@@ -1739,27 +1750,31 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * exactly that to an object holding a `due:outbox` row, so roll back past this one
    * only after clearing them.
    *
-   * The closing reArm() is what keeps the TTL alive when this ran for another
-   * reason. A fired alarm is consumed, so without it a live session would be left
-   * with none.
+   * The closing reArm() is what keeps the abandonment time alive when this ran for
+   * another reason. A fired alarm is consumed, so without it a live session would be
+   * left with none.
    *
-   * It is also what covers the boundary, so the TTL needs no re-arm of its own.
-   * expireIfDue acts only once now is past expiresAt and the driver counts a handler
-   * due AT its time, so a firing exactly on expiresAt finds the TTL due, expires
-   * nothing, and reArm() points the alarm at expiresAt again, due at once. The first
-   * firing to read now > expiresAt closes the room, and a closed room derives no TTL,
-   * so that firing arms nothing. The re-arm is not strictly after the boundary: a
-   * firing can land in the same millisecond and go round once more, and the clock is
-   * what ends it. A socket-watched room is not polled, so no getSession is there to
-   * expire it lazily; this is the only thing that does.
+   * It is also what covers the boundary, so the abandonment time needs no re-arm of
+   * its own. closeIfAbandoned acts only once now is past abandonedAt and the driver
+   * counts a handler due AT its time, so a firing exactly on abandonedAt finds the
+   * abandonment time due, closes nothing, and reArm() points the alarm at abandonedAt
+   * again, due at once. The first firing to read now > abandonedAt closes the room,
+   * and a closed room derives no abandonment time, so that firing arms nothing. The
+   * re-arm is not strictly after the boundary: a firing can land in the same
+   * millisecond and go round once more, and the clock is what ends it. A
+   * socket-watched room is not polled, so no getSession is there to close it lazily;
+   * this is the only thing that does.
+   *
+   * A socket vouching past the window is the third case: the handler stamps and the
+   * derived time moves a window ahead, so that firing is not repeated either.
    */
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const name of await this.driver.dueNow(now)) {
       if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
-      if (name === "ttl") {
+      if (name === ABANDONED_HANDLER) {
         const s = await this.stored();
-        if (s) await this.#expireIfDue(s, now);
+        if (s) await this.#closeIfAbandoned(s, now);
       }
       if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
     }
@@ -1767,20 +1782,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * Due times this object computes rather than stores. A closed session has no TTL
-   * left to enforce: deriving one for it would re-arm the alarm to a time already
-   * past, and it would fire again for as long as the session existed. It has no
-   * tick to send either, which is why the early return covers both.
+   * Due times this object computes rather than stores. A closed session has nothing
+   * left to enforce: deriving a time for it would re-arm the alarm to a moment already
+   * past, and it would fire again for as long as the session existed. It has no tick
+   * to send either, which is why the early return covers both. A frozen room derives
+   * neither (both functions answer null for it), and reArm() never clears an alarm,
+   * so a freeze leaves the one already armed to fire once, find nothing due and arm
+   * nothing after it. The thaw re-arms.
    */
   async #derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
     if (!s || s.closed) return new Map();
-    const due = new Map([["ttl", s.expiresAt]]);
+    const due = new Map<string, number>();
     // Derived rather than a stored `due:` row, deliberately. A name the driver
-    // can report with no branch below is never consumed, and the closing reArm()
-    // fires the alarm back to back for good — the rollback hazard this object's
-    // alarm() comment records for `due:outbox`. A build that does not know this
-    // name does not compute it either, so rolling back strands nothing.
+    // can report with no branch in alarm() is never consumed, and the closing
+    // reArm() fires the alarm back to back for good: the rollback hazard this
+    // object's alarm() comment records for `due:outbox`. A build that does not
+    // know this name does not compute it either, so rolling back strands nothing.
+    const abandoned = abandonedAt(s);
+    if (abandoned !== null) due.set(ABANDONED_HANDLER, abandoned);
     const tick = nextTickAt(s);
     if (tick !== null) due.set(HEARTBEAT_HANDLER, tick);
     return due;
@@ -1791,31 +1811,38 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * the registry's removal of every code in it. A Durable Object answers RPC for every
    * method on its class, so a TypeScript `private` one would let anything holding the
    * SESSION binding rewrite a room and reach into the registry's index.
+   *
+   * Reached from the alarm and from any read that finds the room abandoned. Two
+   * outcomes past the window. A socket vouching for an active member means the room
+   * is not abandoned whatever `lastSeenAt` says, and that is written down: those
+   * members are stamped as seen now, the stamp `webSocketClose` makes on a drop
+   * (#152) made on a schedule, so reArm() points the alarm a window ahead instead
+   * of straight back at this one. Otherwise the room closes: the close, the registry
+   * removals its codes owe and the `session_expired` event are one commit (#124).
+   * Split, an interruption after the close left a room closed with no event, and
+   * nothing wrote one afterwards, because the retry found the room closed and had
+   * nothing left to do. In one transaction an interruption leaves the room as it
+   * was, still abandoned, and the next read or the alarm does all of it again.
    */
-  async #expireIfDue(s: StoredSession, now: number): Promise<void> {
-    // Already closed, so there is nothing to expire; not lapsed, so there is nothing
-    // to expire yet. `pastTtl` is the second half, shared with the three readers that
-    // answer "closed" from it without writing (see readsClosed).
-    if (s.closed || !pastTtl(s, now)) return;
-    // The close clears the session's codes, so their rows leave the registry's index with
-    // it, in the same transaction. Otherwise an expired room's codes stay there for good.
-    // They are already inert, because getSessionByJoinCode refuses a closed session; this
-    // is about not leaking rows.
+  async #closeIfAbandoned(s: StoredSession, now: number): Promise<void> {
+    const due = abandonedAt(s);
+    if (due === null || now <= due) return;
+    // The sockets as they are now, synchronous, so the decision and the write are
+    // made against the same set. Nothing but storage is awaited between the read
+    // that produced `s` and the put below, so the input gate holds across both.
+    const connected = connectedAmong(s.members, this.#attachedIds());
+    if (!isAbandoned(s, now, connected)) {
+      await this.ctx.storage.put("session", { ...s, members: stampSeen(s.members, now, connected) });
+      return;
+    }
+    // The close clears the session's codes, so their rows leave the registry's index
+    // with it, in the same transaction. Otherwise an abandoned room's codes stay there
+    // for good. They are already inert, because getSessionByJoinCode refuses a closed
+    // session; this is about not leaking rows.
     const intents = Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code));
-    // The close, those removals and the expiry event are one commit (#124). They were two:
-    // the event took its cursor in a transaction of its own "like any append", and the
-    // comment that kept it apart said folding the two "would change what an interruption
-    // between them leaves, which is not this change's to decide". That change was #120's,
-    // which moved the cursor read into a transaction and stopped there. This is the
-    // decision, and what the split left is why: an interruption after the close left a
-    // room closed with no event, and it stayed that way, because the retry (the next read,
-    // or the alarm) finds the room closed and has nothing to expire, so nothing wrote the
-    // event a poll was waiting on. In one transaction an interruption leaves the room as
-    // it was, still lapsed, and the next read or the alarm does all of it again.
-    //
-    // What "like any append" asked for still holds: the cursor is read in the transaction
-    // that writes it (see nextCursor), and that transaction is now this one. Every write
-    // is to this object's own storage, so a transaction is enough and no outbox is needed.
+    // The cursor is read in the transaction that writes the event (see nextCursor), and
+    // every write is to this object's own storage, so a transaction is enough and no
+    // outbox is needed for the event.
     const event = await this.ctx.storage.transaction<SessionEvent>(async (txn) => {
       const rows = await this.driver.enqueue(txn, intents);
       const expired: SessionEvent = {
@@ -1824,7 +1851,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         fromMemberId: "system",
         fromUserId: "system",
         fromLabel: "bellman",
-        payload: { reason: "ttl" },
+        payload: { reason: "abandoned", last_seen_at: new Date(due - ABANDONED_AFTER_MS).toISOString() },
         refId: null,
         at: now,
       };
@@ -1835,7 +1862,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     });
     this.#wake(event);
     // Last, so a poll woken above does not wait on the registry. Reached from the
-    // alarm and from any read that finds the session lapsed, and both drain here
+    // alarm and from any read that finds the room abandoned, and both drain here
     // rather than leave the rows for the next alarm.
     if (intents.length > 0) await this.driver.deliverNow();
   }
@@ -1848,7 +1875,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * erased, so a plain stub could otherwise forge a tick into any room.
    *
    * **The guards are the point of this method, not a formality.** It writes
-   * through `#writeEvent`, as `#expireIfDue` does, which means it does NOT
+   * through `#writeEvent`, as `#closeIfAbandoned` does, which means it does NOT
    * inherit `appendEvent`'s frozen check. Without them:
    *
    * - A **frozen** room gets ticks naming members silent who cannot report out
@@ -1856,13 +1883,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *   keeps `reclaimStaleSeats` out of a frozen room.
    * - A **closed** room gets a tick nobody can answer, because every send into
    *   it is refused.
-   * - A room **past its TTL** gets the same, and it is reachable where the other
-   *   two are not. `dueNames` sorts the due handlers, "heartbeat" sorts before
-   *   "ttl", and a firing delayed past `expiresAt` finds both due — so the tick
-   *   ran, appended and woke every watcher on a room the very next iteration of
-   *   that loop was about to close. `pastTtl` is `#expireIfDue`'s own test for
-   *   lapsed, read here rather than reordering the handlers: a guard is
-   *   checkable where a name's place in an alphabet is an accident.
+   * - An **abandoned** room gets the same, and it is reachable where the other
+   *   two are not: it is not closed until `#closeIfAbandoned` closes it, so a
+   *   firing told of the tick alone would ask members who are not there.
+   *   `isAbandoned` is `#closeIfAbandoned`'s own test, read here rather than
+   *   relying on `dueNames`' order: a guard is checkable where a name's place in
+   *   an alphabet is an accident.
    *
    * **One transaction, for the reason `stored()` gives, and it is what makes the
    * clock safe to advance.** The session read, the cursor read and the write are
@@ -1886,7 +1912,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return null;
-      if (s.closed || s.frozenAt !== null || pastTtl(s, now)) return null;
+      if (s.closed || s.frozenAt !== null) return null;
+      if (isAbandoned(s, now, connectedAmong(s.members, this.#attachedIds()))) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
       const due = dueMembers(s, now);
@@ -2293,9 +2320,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * This registry has never known which sessions exist — it holds join codes,
    * which are consumed, and create counts, which are bare timestamps. There is
    * no list to backfill from, so the gap cannot be closed by a migration; it
-   * closes by itself as those sessions reach their TTL and expire. Until then
-   * a lapse will not freeze them, which means a room outliving its plan rather
-   * than a room lost.
+   * closes only as those rooms end, and since #18 a room ends when its last
+   * member leaves or nobody has been in it for 90 days. Until then a lapse will
+   * not freeze them, which means a room outliving its plan rather than a room
+   * lost.
    *
    * **Sessions created after this deploy can be missing too.**
    * `DurableObjectStore` puts this row once the room has committed, and logs a
@@ -2303,7 +2331,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * would report a failed create for a room that already exists. Nothing
    * rebuilds the row, so the outcome is the one above: a lapse cannot freeze a
    * room it cannot find, and the room keeps working on a plan that no longer
-   * pays for it. The gap above only shrinks, as those rooms expire; this one
+   * pays for it. The gap above only shrinks, as those rooms end; this one
    * also grows whenever a put fails. A creator's `um:` row is a separate put, so
    * either row can land without the other, and a room can be listed for its
    * creator and still be out of a lapse's reach.
@@ -2362,15 +2390,15 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * that already existed included.** For the rooms `us:` knows about, a backfill
    * is possible in principle — `us:` enumerates their creators and each session
    * lists its members — and is not worth walking the registry for a listing that
-   * fills itself in as sessions reach their TTL. Older rooms have no list to
-   * enumerate (see `us:`), so for them expiry is the only repair. Until then a
-   * joined room is missing from one screen, which is not a room lost.
+   * fills itself in as older rooms end. Older rooms have no list to enumerate
+   * (see `us:`), so for them their end is the only repair. Until then a joined
+   * room is missing from one screen, which is not a room lost.
    *
    * **Members who joined after this deploy can be missing too, creators
    * included.** `DurableObjectStore` puts this row once the seat has committed,
    * and logs a failed put rather than throwing it (`writeIndex`), deliberately:
    * a throw would report a failed join for a seat that had already landed.
-   * Nothing rebuilds the row. The gap above only shrinks, as those rooms expire;
+   * Nothing rebuilds the row. The gap above only shrinks, as those rooms end;
    * this one also grows whenever a put fails. A creator's `us:` row is a
    * separate put, so either row can land without the other.
    */
@@ -2667,7 +2695,7 @@ export class DurableObjectStore implements BellmanStore {
    * caller meant by it.
    *
    * Closed is the whole predicate, and `getSession` is what decides it: it runs
-   * the TTL check, so a room past its expiry reads closed here even if no alarm
+   * the abandonment check, so an abandoned room reads closed here even if no alarm
    * has fired yet. A room that is merely frozen stays — a lapse freezing an
    * already-frozen room is harmless, and leaving it out would hide it from the
    * one listing that can find it again.
@@ -2852,7 +2880,7 @@ export class DurableObjectStore implements BellmanStore {
 
   /**
    * No-op by design. MemoryStore sweeps on a timer because it can iterate every
-   * session cheaply; a DO namespace cannot. Session TTL is enforced by the
+   * session cheaply; a DO namespace cannot. Abandonment is enforced by the
    * per-object alarm set in SessionDO.createSession, and connect tokens are
    * checked for expiry when taken. Nothing is left for a sweep to do.
    */

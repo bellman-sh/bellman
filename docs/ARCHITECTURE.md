@@ -19,10 +19,11 @@ last-updated: 2026-10-08
 server. An agent connects to it, creates or joins a room, and exchanges messages
 with every other member — other machines, other people, other model providers.
 
-A room holds as many members as the creator's plan allows. Two is the smallest
-useful number and not the shape of the thing: a `swarm` room fills to the plan's
-member limit, join codes can be reissued to add people later, and a long-lived
-hub room ([#18](../../../issues/18)) is meant to accumulate members over weeks.
+A room holds as many members as its creator invites, up to one ceiling for every
+plan. Two is the smallest useful number and not the shape of the thing: a `swarm`
+room takes members until it reaches that ceiling, join codes can be reissued to
+add people later, and a long-lived hub room ([#18](../../../issues/18)) is meant
+to accumulate members over weeks.
 Where this document says *peer* it means any other member of the room, however
 many there are.
 
@@ -316,13 +317,13 @@ storage reads, so the events read is still the last await before the attach.
 
 **And the guard belongs in the same invocation as the accept.** `/ws` is *two*
 invocations of one object — `membersOf`, then the upgrade — and the input gate
-covers each but not the pair. So a close, or the TTL alarm, lands between them,
+covers each but not the pair. So a close, or the abandonment alarm, lands between them,
 and `fetch` accepted the socket onto a closed room where nothing was left to
 close it: the close had already happened ([#133](../../../issues/133)). The
 Worker's check could not be moved and could not be trusted alone; `fetch`
 rechecks `closed` for itself, before the event read and the accept, and refuses
 with 409. One rule asked twice, from `readsClosed` in `store-do.ts`, which is
-also what the TTL alarm expires a room by. The Worker's check stays because it is
+also what the abandonment alarm closes a room by. The Worker's check stays because it is
 what tells 403 from 404 without naming the room to a stranger, and what spares an
 upgrade for a caller who owns nothing here. This is read-and-register again with
 a guard in place of the cursor, and it is the same family as
@@ -417,7 +418,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, TTL alarm,<br/>freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, abandonment alarm,<br/>freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -457,7 +458,7 @@ A member has three readings, and only two of them are written down:
 
 `leftAt` records a goodbye — a `bellman_leave`, an eviction, a reaped seat — and
 a crashed session never says one. So a `pair` room whose peer's laptop closed
-used to read as full for the rest of its TTL, with no removal path anywhere in
+used to read as full for good, with no removal path anywhere in
 the store (#103). `Member.lastSeenAt` is the second signal, and it costs no new
 traffic: `bellman_sync` long-polls every ~25 seconds, so a watching member is
 already announcing itself, and `touchMember` stops throwing that away.
@@ -741,7 +742,7 @@ flowchart TB
     OPER --> ENT
     GRANT --> ENT
     FREE --> ENT
-    ENT["entitlementsFor identity<br/>modes, members, TTL, quota, audit"]
+    ENT["entitlementsFor identity<br/>modes, quota, audit"]
 
     STRIPE(["Stripe webhook"]) -->|"writes source: purchase"| G
 ```
@@ -973,18 +974,19 @@ a stale decision overwriting a fresh one.
 
 Within one object the problem is tractable: the guarded grant writes,
 `moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember`, the two
-appends, the expiry, and `AuthDO`'s `admitRegistration`, `touchSession` and `replanSession`
+appends, the abandonment close, and `AuthDO`'s `admitRegistration`, `touchSession` and `replanSession`
 are single transactions. An append carries the rows that belong with its
 event — the cursor, an idempotency key's record, and for a `progress` send the
 sending member's own `lastReportAt`. That last one was a second `updateMember`
 call after the append returned, which is a second transaction with the wake
 between them: a due tick could read the committed event while the stale stamp
 still named that member silent, and a retry skipped the patch outright. The
-expiry is the same shape with the room's close in place of a member's stamp: it
-commits the close, the registry removals its codes owe and the `session_expired`
-event together ([#124](../../../issues/124)). Split, an interruption after the
-close left a room closed with no event, and nothing wrote one afterwards, because
-the retry finds the room closed and has nothing to expire.
+abandonment close is the same shape with the room's close in place of a
+member's stamp: it commits the close, the registry removals its codes owe and
+the `session_expired` event together ([#124](../../../issues/124)). Split, an
+interruption after the close left a room closed with no event, and nothing wrote
+one afterwards, because the retry finds the room closed and has nothing to
+close.
 `updateMember`, `closeSession` and
 `freezeSession` are single invocations that await only storage. The input gate
 covers those, and a transaction would be the stronger form: it holds even if an
@@ -1069,9 +1071,12 @@ loss is findable, and retention (#65) is what sweeps it.
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
    session record, and a stored row wins. `SessionDO` has three handlers,
-   `outbox`, `ttl` and `heartbeat`, and only `outbox` is stored. The TTL is
-   derived from `expiresAt`, so sessions written before named alarms still
-   expire. The tick (#111) is derived from `nextTickAt`, which asks each member
+   `outbox`, `abandoned` and `heartbeat`, and only `outbox` is stored. The
+   abandonment time is derived from the members' `lastSeenAt` (`abandonedAt`,
+   #18), so a room written before named alarms, or before rooms persisted, is
+   still swept; a socket vouching for a member moves it a window ahead instead
+   of closing the room.
+   The tick (#111) is derived from `nextTickAt`, which asks each member
    at its own `lastReport + cadence` — except one already due at the preceding
    tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
    `lastTickAt` is a **floor rather than the clock**, and because both branches
@@ -1219,9 +1224,9 @@ off its documentation, decide how code here is written.
    call, so a correct room failed.
 3. **TypeScript `private` is erased, and a Durable Object answers RPC for every
    method on its class.** A plain stub's `putGrantIfOwnedTxn` returned
-   `"written"`, and `expireIfDue` took a forged session record naming another
+   `"written"`, and `closeIfAbandoned` took a forged session record naming another
    room's live join code. Use `#private` for a writing method that nothing outside
-   its own class calls: the deliveries, the `*Txn` halves, `expireIfDue`,
+   its own class calls: the deliveries, the `*Txn` halves, `closeIfAbandoned`,
    `writeEvent`, `dropGrant`, `wake`, `AuthDO`'s client count and sweeps, and its
    registry handle.
 
@@ -1309,8 +1314,11 @@ The heartbeat is the safer half of that rule. A stored `due:` row that an older
 build never consumes is the spin above; a derived due time that a build does not
 know is never computed, so there is nothing for it to leave behind. Rolling back
 past #111 strands no row and needs no cleanup, where rolling back past #62 does.
-An alarm already armed for a tick fires once into the older build, which finds
-nothing to run and re-arms for the TTL.
+An alarm already armed for a tick fires once into a build that knows the
+`abandoned` name, which finds nothing to run and re-arms for the abandonment
+time. A build older than #18 does not know that name: for a row #18 rewrote, its
+`reArm()` calls `setAlarm(undefined)`, which workerd rejects, so rolling back
+past #18 is not supported (ADR 0001).
 
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both

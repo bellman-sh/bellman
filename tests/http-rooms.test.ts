@@ -83,13 +83,12 @@ describe("GET /rooms", () => {
     await store.createSession(session({ id: "qs_stranger", members: [peer()] }));
     const res = (await call(DEV_KEY.jesse, "/rooms"))!;
     expect(res.status).toBe(200);
-    const { rooms } = (await res.json()) as { rooms: { id: string; mine: boolean; members: number; status: string; mode: string; expires_at: string }[] };
+    const { rooms } = (await res.json()) as { rooms: { id: string; mine: boolean; members: number; status: string; mode: string }[] };
     const ids = rooms.map((r) => r.id).sort();
     expect(ids).toEqual(["qs_joined", ROOM]);
     expect(rooms.find((r) => r.id === ROOM)).toMatchObject({ mine: true, members: 2, status: "active", mode: "pair" });
     expect(rooms.find((r) => r.id === "qs_joined")).toMatchObject({ mine: false });
-    expect(Date.parse(rooms[0].expires_at)).toBeGreaterThan(Date.now());
-    expect(Object.keys(rooms[0]).sort()).toEqual(["expires_at", "id", "members", "mine", "mode", "room", "status"]);
+    expect(Object.keys(rooms[0]).sort()).toEqual(["id", "members", "mine", "mode", "room", "status"]);
   });
 
   it("lists a closed room with its status, and counts only the members still in", async () => {
@@ -228,7 +227,7 @@ describe("GET /rooms/:id", () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}`))!;
     expect(res.status).toBe(200);
     const body = await bodyOf(res) as {
-      id: string; session_status: string; expires_at: string;
+      id: string; session_status: string;
       preview: { your_role: string; your_verbs: string[]; text: { trust: string } };
       members: { member_id: string; presence: string; active: boolean }[];
       my_handles: { member_id: string; room_role: string; verbs: string[]; active: boolean; removed: boolean }[];

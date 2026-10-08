@@ -2,7 +2,7 @@
 
 **Cross-session, cross-provider agent collaboration over MCP.**
 
-One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`), and the same code as a link for pasting into chat (`https://bellman.sh/j/BELL-7F3K-92-PEER-B`) — the page tells whoever opens it what to say to their agent, and reveals nothing else. Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room fills to your plan's limit, and you can issue a fresh code — one per role — to add members later.
+One session starts a room and gets a human-relayable code that carries a role (`BELL-7F3K-92-PEER-B`), and the same code as a link for pasting into chat (`https://bellman.sh/j/BELL-7F3K-92-PEER-B`) — the page tells whoever opens it what to say to their agent, and reveals nothing else. Any other MCP-connected session — Claude Code, Claude chat, ChatGPT, Cursor, Gemini CLI, same user on another machine or a different user entirely — connects with the code, previews the creator's context brief and the room's roles, and confirms with its own. Everyone in the room becomes a member of each other's work. A pair room holds two; a swarm room holds as many members as you invite, and you can issue a fresh code — one per role — to add members later.
 
 ## Why MCP as the rendezvous
 
@@ -114,16 +114,18 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | members | lifetime | rooms / month | blobs / room | |
-| --- | --- | --- | --- | --- | --- | --- |
-| `free` | pair | 2 | 4 hours | 20 | 50 MB | |
-| `pro` | pair, swarm | 8 | 72 hours | 500 | 500 MB | |
-| `max` | pair, swarm | 25 | 14 days | 2,000 | 5 GB | team-sized rooms for one person, no org |
-| `team` | pair, swarm | 25 | 30 days | 5,000 | 5 GB | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | |
+| --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | |
+| `pro` | pair, swarm | 500 | 500 MB | |
+| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
+| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
+
+A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
-A room's blob ceiling is stamped on the room when it is created, from the plan that creates it — as its seat count and lifetime are — so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
+A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
 
 ## Run it
 
@@ -242,7 +244,7 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 ## Plans
 
-Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month, 4 hour lifetime. Joining somebody else's session is free on every plan — only creating one is gated.
+Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month. Joining somebody else's session is free on every plan — only creating one is gated.
 
 A plan can come from two places, and the order matters:
 
@@ -363,7 +365,7 @@ Losing the room would be the wrong punishment for a failed card, and it is not r
 
 `session_status` reports `frozen` alongside `active` and `closed`, so a client can tell a lapsed plan from a room that is simply over — one of those is fixable by paying.
 
-**Nothing detects a lapse yet.** The capability is here and the store can freeze and thaw; wiring it to plan resolution is still to come. Sessions created before that capability shipped are not in the creator index and cannot be added to it — the registry never held a list of sessions to backfill from — so a lapse will not reach them. That resolves itself as those sessions reach their TTL.
+**Nothing detects a lapse yet.** The capability is here and the store can freeze and thaw; wiring it to plan resolution is still to come. Sessions created before that capability shipped are not in the creator index and cannot be added to it — the registry never held a list of sessions to backfill from — so a lapse will not reach them. Those rooms persist like any other, so this does not resolve itself.
 
 ## Production path
 

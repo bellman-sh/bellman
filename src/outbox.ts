@@ -212,9 +212,9 @@ export class OutboxDriver {
    * @param deliver what one row means for this object; throwing leaves the row
    *                queued and blocks the ones behind it, which is intended
    * @param derivedDue due times the object computes rather than stores, keyed by
-   *                handler name. SessionDO returns its session TTL here so that
-   *                sessions written before named alarms still expire; an object
-   *                with nothing derived returns an empty map.
+   *                handler name. SessionDO returns its abandonment time here so
+   *                that sessions written before named alarms are still swept; an
+   *                object with nothing derived returns an empty map.
    */
   constructor(
     private storage: OutboxStorage,
@@ -251,8 +251,8 @@ export class OutboxDriver {
     // it — probed against workerd.
     //
     // Behind the inline delivery, not with it: see OUTBOX_GRACE_MS. The
-    // earliest due time still wins, so arming for the queue cannot push back a
-    // session TTL that was already closer.
+    // earliest due time still wins, so arming for the queue cannot push back an
+    // abandonment time that was already closer.
     await this.storage.setAlarm(Math.min(at + OUTBOX_GRACE_MS, ...(await this.allDue()).values()));
     return { ...enqueueRows(nextSeq, intents), [dueKey(OUTBOX_HANDLER)]: at };
   }

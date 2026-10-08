@@ -110,7 +110,7 @@ describe("tool surface", () => {
 
     // What each mode holds is what a caller chooses a preset by.
     expect(flat).toContain('"pair" room holds exactly 2 members');
-    expect(flat).toContain("up to your plan's member limit");
+    expect(flat).toContain('a "swarm" room holds as many as you invite, up to 100');
   });
 
   // A joiner's human decides on the verbs a room declares, and since #2 the

@@ -44,7 +44,8 @@ producing bugs. Read it before changing how the pieces fit together.
 ## Writing
 
 **A room holds many members, not two.** A `pair` room holds two because the
-preset says so; a `swarm` room fills to the plan's limit, codes are reissuable to
+preset says so; a `swarm` room holds as many members as its creator invites,
+up to one ceiling for every plan, codes are reissuable to
 add members later, and hub rooms are meant to accumulate members over weeks.
 Never describe Bellman as a thing for "two sessions" or "the other session" — in
 comments, docs, commit messages, PR bodies or issues. Say *members*, *the room*,

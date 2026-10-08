@@ -50,7 +50,8 @@ What each preset expands to:
 | `peer_a` | send, request_actions, respond_actions, invite, revoke, write_surface | creator |
 | `peer_b` | send, request_actions, respond_actions | default |
 
-**`swarm`** — mode `swarm`. Fills to the plan's member limit.
+**`swarm`** — mode `swarm`. Holds as many members as its creator invites, up to
+100, Bellman's ceiling for one room, the same on every plan.
 
 | Role | Can | |
 |---|---|---|
@@ -121,7 +122,8 @@ can gate it. A room ends when its last member leaves, not on anyone's say-so.
 - `default_role` and `creator_role` must each name a role defined in `roles`.
 - No role may list the same verb twice.
 - `mode` is `pair` or `swarm`. `pair` caps the room at two seats regardless of
-  plan; `swarm` fills to the plan's limit (pro 8, team 25).
+  plan; `swarm` holds as many members as its creator invites, up to 100,
+  Bellman's ceiling for one room, the same on every plan.
 
 ### Choosing default_role and creator_role
 

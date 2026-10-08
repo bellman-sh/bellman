@@ -25,8 +25,8 @@
  * lands first, and a single put passes them all.
  *
  * Both ways into an expiry run every case, since a read that finds the room lapsed and
- * the TTL alarm reach `#expireIfDue` separately and a room is expired by whichever
- * comes first.
+ * the abandonment alarm reach `#closeIfAbandoned` separately and a room is expired by
+ * whichever comes first.
  */
 import { it, expect, afterEach } from "vitest";
 import {
@@ -34,6 +34,7 @@ import {
 } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { JOIN_CODE_TTL } from "../src/store.js";
+import type { Member } from "../src/types.js";
 import { session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
@@ -76,9 +77,9 @@ const parkAlarm = async (id: string) => {
 
 /**
  * A room with one message in it, a live code for each of two roles in the registry, and
- * its TTL already behind it. The message makes the expiry's cursor 2 rather than 1, so a
- * stale cursor shows as an event overwritten and not as a coincidence. The codes make
- * the expiry owe the registry two removals. The room stays open: only `#expireIfDue`
+ * its window already behind it. The message makes the expiry's cursor 2 rather than 1, so
+ * a stale cursor shows as an event overwritten and not as a coincidence. The codes make
+ * the expiry owe the registry two removals. The room stays open: only `#closeIfAbandoned`
  * closes it, and that is what is under test.
  */
 const lapsedRoom = async (store: DurableObjectStore, id: string) => {
@@ -91,8 +92,10 @@ const lapsedRoom = async (store: DurableObjectStore, id: string) => {
     fromLabel: "jesse", payload: { text: "before" }, refId: null,
   });
   await runInDurableObject(sessionStub(id), async (_i: SessionDO, ctx) => {
-    const stored = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", { ...stored, expiresAt: Date.now() - 1 });
+    const stored = await ctx.storage.get<{ members: Member[] }>("session");
+    await ctx.storage.put("session", {
+      ...stored, members: stored!.members.map((m) => ({ ...m, lastSeenAt: 1 })),
+    });
   });
 };
 
@@ -141,7 +144,7 @@ const interruptWritesTo = (id: string, prefix: string, outage: { on: boolean; hi
 const WAYS = [
   { way: "a read that finds the room lapsed", expire: (store: DurableObjectStore, id: string) => store.getSession(id) },
   {
-    way: "the TTL alarm",
+    way: "the abandonment alarm",
     expire: (_store: DurableObjectStore, id: string) =>
       runInDurableObject(sessionStub(id), (instance: SessionDO) => instance.alarm()),
   },

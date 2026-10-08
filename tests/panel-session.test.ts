@@ -467,6 +467,16 @@ describe("caller, over a cookie", () => {
     expect(body.user_id).toBe("u_github_4242");
   });
 
+  it("sends a browser with no session to the panel's billing page, and keeps the 401 for an API call", async () => {
+    const browser = await route(new Request(`${ISSUER}/account`, { headers: { accept: "text/html,application/xhtml+xml" } }));
+    expect(browser.status).toBe(302);
+    expect(browser.headers.get("location")).toBe(`${PANEL}/billing`);
+
+    const api = await route(new Request(`${ISSUER}/account`, { headers: { accept: "application/json", origin: PANEL } }));
+    expect(api.status).toBe(401);
+    expect(api.headers.get("www-authenticate")).toContain("resource_metadata");
+  });
+
   it("refuses /account with an unknown cookie", async () => {
     expect((await route(withCookie("/account", "no-such-session"))).status).toBe(401);
   });

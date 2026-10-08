@@ -18,6 +18,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 import { brief, member, roomManifest, session } from "../helpers/fixtures.js";
+import { capacityOf } from "../../src/store.js";
 
 let h: Harness;
 
@@ -475,7 +476,8 @@ describe("bellman_invite — invite and revoke are separate verbs", () => {
     const eventsBefore = await eventCount(p.sessionId);
     // Keeps the setup honest: if the room is ever reshaped until it is full, this
     // fails loudly instead of going quietly vacuous.
-    expect(before.members.length, "the room must have spare capacity").toBeLessThan(before.maxMembers);
+    expect(before.members.length, "the room must have spare capacity")
+      .toBeLessThan(capacityOf(before.manifest));
 
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId,
@@ -649,7 +651,7 @@ describe("platform role and room role are different things", () => {
     expect(left.isError, left.text).toBe(false);
     const before = (await h.store.getSession(p.sessionId))!;
     expect(before.members.filter((m) => m.leftAt === null).length, "the room must have a free seat")
-      .toBeLessThan(before.maxMembers);
+      .toBeLessThan(capacityOf(before.manifest));
 
     const res = await p.joiner.call("bellman_invite", {
       session_id: p.sessionId, member_id: p.joinerMemberId,

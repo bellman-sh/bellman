@@ -8,10 +8,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
-  STALE_AFTER_MS, lastSeen, presenceOf, presentMembers, staleMembers,
+  ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, lastSeen, presenceOf,
+  presentMembers, staleMembers,
 } from "../src/presence.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { MemoryStore, seatVictims } from "../src/store.js";
+import { MemoryStore, seatVictims, stampSeen } from "../src/store.js";
 import type { Identity } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
@@ -661,5 +662,93 @@ describe("the seat comes back", () => {
     expect(room.members.find((m) => m.memberId === joinerMemberId)?.leftAt).toBeNull();
     expect(await h.store.eventsAfter(sessionId, 0))
       .not.toContainEqual(expect.objectContaining({ type: "member_timed_out" }));
+  });
+});
+
+describe("abandonment is derived from the members' presence (#18)", () => {
+  const WINDOW_AGO = NOW - ABANDONED_AFTER_MS;
+
+  it("is 90 days", () => {
+    expect(ABANDONED_AFTER_MS).toBe(90 * 24 * 60 * 60 * 1000);
+  });
+
+  it("falls 90 days after the last time any active member was seen", () => {
+    const s = session({ members: [
+      member({ memberId: "m_a", lastSeenAt: NOW - 5_000 }),
+      member({ memberId: "m_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: NOW - 1_000 }),
+    ] });
+    expect(abandonedAt(s)).toBe(NOW - 1_000 + ABANDONED_AFTER_MS);
+  });
+
+  it("does not count a departed member, however recently it spoke", () => {
+    const s = session({ members: [
+      member({ memberId: "m_quiet", lastSeenAt: 1 }),
+      member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", lastSeenAt: NOW, leftAt: NOW - 1 }),
+    ] });
+    expect(abandonedAt(s)).toBe(1 + ABANDONED_AFTER_MS);
+  });
+
+  it("lifts a member stored before lastSeenAt existed to its joinedAt", () => {
+    const legacy = member({ joinedAt: NOW - 1_000 });
+    delete (legacy as { lastSeenAt?: number }).lastSeenAt;
+    expect(abandonedAt(session({ members: [legacy] }))).toBe(NOW - 1_000 + ABANDONED_AFTER_MS);
+  });
+
+  it("is null for a closed, a frozen, and an empty room", () => {
+    const quiet = member({ lastSeenAt: 1 });
+    expect(abandonedAt(session({ members: [quiet], closed: true }))).toBeNull();
+    expect(abandonedAt(session({ members: [quiet], frozenAt: NOW }))).toBeNull();
+    // Empty is closeSessionIfEmpty's, not the sweep's.
+    expect(abandonedAt(session({ members: [member({ leftAt: 5 })] }))).toBeNull();
+    expect(abandonedAt(session({ members: [] }))).toBeNull();
+  });
+
+  it("is not abandoned at the boundary and is one millisecond past it", () => {
+    const s = session({ members: [member({ lastSeenAt: WINDOW_AGO })] });
+    expect(isAbandoned(s, NOW)).toBe(false);
+    expect(isAbandoned(s, NOW + 1)).toBe(true);
+  });
+
+  it("is never abandoned while a socket vouches for an active member", () => {
+    const s = session({ members: [member({ memberId: "m_socket", lastSeenAt: 1 })] });
+    expect(isAbandoned(s, NOW), "control: with no socket it is").toBe(true);
+    expect(isAbandoned(s, NOW, new Set(["m_socket"]))).toBe(false);
+  });
+
+  it("is abandoned when the only socket belongs to a member who left", () => {
+    const s = session({ members: [
+      member({ memberId: "m_quiet", lastSeenAt: 1 }),
+      member({ memberId: "m_left", userId: "u_left", roomRole: "peer_b", lastSeenAt: NOW, leftAt: NOW - 1 }),
+    ] });
+    expect(isAbandoned(s, NOW, new Set(["m_left"]))).toBe(true);
+  });
+
+  it("is never abandoned when nothing says when it would be", () => {
+    expect(isAbandoned(session({ members: [member({ lastSeenAt: 1 })], frozenAt: NOW }), NOW)).toBe(false);
+  });
+});
+
+describe("stampSeen", () => {
+  it("moves every active member's lastSeenAt and leaves a departed one alone", () => {
+    const stamped = stampSeen([
+      member({ memberId: "m_a", lastSeenAt: 1 }),
+      member({ memberId: "m_gone", lastSeenAt: 1, leftAt: 5 }),
+    ], NOW);
+    expect(stamped.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_a", NOW], ["m_gone", 1]]);
+  });
+
+  it("stamps only the members named, when asked to", () => {
+    const stamped = stampSeen([
+      member({ memberId: "m_a", lastSeenAt: 1 }),
+      member({ memberId: "m_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+    ], NOW, new Set(["m_b"]));
+    expect(stamped.map((m) => m.lastSeenAt)).toEqual([1, NOW]);
+  });
+
+  it("returns new objects and does not write into the roster it was handed", () => {
+    const roster = [member({ memberId: "m_a", lastSeenAt: 1 })];
+    const stamped = stampSeen(roster, NOW);
+    expect(roster[0].lastSeenAt).toBe(1);
+    expect(stamped[0]).not.toBe(roster[0]);
   });
 });

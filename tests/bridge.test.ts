@@ -233,7 +233,7 @@ describe("channel delivery", () => {
     expect(names).toEqual([
       "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
       "bellman_invite", "bellman_leave", "bellman_rooms", "bellman_send", "bellman_start",
-      "bellman_sync", "bellman_upload", "bellman_whoami",
+      "bellman_surface", "bellman_sync", "bellman_upload", "bellman_whoami",
     ]);
   });
 
@@ -357,6 +357,19 @@ describe("channel delivery", () => {
     expect(synced.data.events).toEqual([]);
     expect(synced.data.removed).toBe(true);
     expect(restarted.bridge.watching()).toHaveLength(0);
+  });
+
+  it("does not arm a watcher on a bellman_surface result: reading the surface is not a membership", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId } = await pair(a, b);
+    // A fresh bridge for the creator: it knows no membership, so anything armed is this call's doing.
+    const fresh = await open(DEV_KEY.jesse);
+    expect(fresh.bridge.watching()).toHaveLength(0);
+    const read = await fresh.call("bellman_surface", { session_id: sessionId });
+    expect(read.isError, read.text).toBe(false);
+    expect(read.data.session_id).toBe(sessionId);
+    expect(fresh.bridge.watching()).toHaveLength(0);
   });
 
   it("keeps watching when the member evicted is somebody else", async () => {
@@ -721,7 +734,7 @@ describe("bellman_whoami", () => {
   const remoteToolNames = [
     "bellman_audit", "bellman_confirm", "bellman_connect", "bellman_evict",
     "bellman_invite", "bellman_leave", "bellman_rooms", "bellman_send", "bellman_start",
-    "bellman_sync",
+    "bellman_surface", "bellman_sync",
   ];
 
   it("reports the signed-in identity", async () => {

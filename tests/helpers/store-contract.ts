@@ -19,8 +19,9 @@ import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js
 import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
+import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
-import type { SurfaceItem } from "../../src/types.js";
+import type { Session, SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session } from "./fixtures.js";
 
 /**
@@ -568,7 +569,9 @@ export function describeStoreContract(
         maxMembers: 2,
         joinCodes: doors,
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          // Fresh on the store's clock as well as the call's: a room whose members
+          // were all last seen before the window is abandoned at the first read (#18).
+          member({ memberId: "m_creator", lastSeenAt: Date.now() }),
           member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
         ],
       });
@@ -590,12 +593,15 @@ export function describeStoreContract(
       // leftAt is null reads this room as full and would retire the code, locking out
       // somebody who could have been seated.
       const doors = oneCode("BELL-LIVE-01");
+      // Quiet by the call's reckoning and inside the 90 days a room is kept: a room
+      // whose members are all older than that is abandoned at the first read (#18).
+      const quiet = Date.now() - 60_000;
       const s = session({
         maxMembers: 2,
         joinCodes: doors,
         members: [
-          member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
-          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+          member({ memberId: "m_quiet_a", lastSeenAt: quiet }),
+          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: quiet + 1 }),
         ],
       });
       await store.createSession(s);
@@ -604,7 +610,7 @@ export function describeStoreContract(
       // Both seats are stale, so this joiner reclaims ONE, the longest quiet, and the
       // other stays occupied but reclaimable. Had both members been fresh after the
       // seating, that would be the other case, and it DOES retire the code.
-      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+      const outcome = await store.seatMember(s.id, late(), Date.now() - 1_000, 9_000_000);
 
       expect(outcome.refused).toBeNull();
       expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet_a"]);
@@ -2914,48 +2920,112 @@ export function describeStoreContract(
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
     });
 
-    // ----------------------------------------------------------------- sweep
-    it("sweep expires a session past its TTL and emits session_expired", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    // ------------------------------------------------------- abandonment (#18)
+    /** Last heard from a millisecond past the window: nobody has been in for 90 days. */
+    const AGED = () => Date.now() - ABANDONED_AFTER_MS - 1;
+    const abandonedRoom = (over: Partial<Session> = {}) =>
+      session({ members: [member({ lastSeenAt: AGED() })], ...over });
+
+    it("sweep closes a room nobody has been in for 90 days, retires its codes and says since when", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
 
-      vi.advanceTimersByTime(1_001);
       (await store.sweep(Date.now()));
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(true);
       expect(fresh.joinCodes).toEqual({});
       // Read after getSession, not before it: DurableObjectStore.sweep is a
-      // no-op, so there it is the read above that expires the session and
-      // writes this event. getSession no longer carries history (#25).
-      expect((await store.eventsAfter(s.id, 0)).at(-1)?.type).toBe("session_expired");
+      // no-op, so there it is the read above that closes the room and writes
+      // this event. getSession no longer carries history (#25).
+      const last = (await store.eventsAfter(s.id, 0)).at(-1)!;
+      expect(last.type).toBe("session_expired");
+      // The fact the decision was made on, so a client can say "closed, nobody
+      // since <date>" rather than "closed".
+      expect(last.payload).toEqual({ reason: "abandoned", last_seen_at: new Date(AGED()).toISOString() });
       expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
     });
 
-    it("sweep is idempotent — one expiry event, not one per sweep", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    it("sweep is idempotent — one closing event, not one per sweep", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
 
-      vi.advanceTimersByTime(1_001);
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
 
-      // The read comes first and is not incidental: DurableObjectStore.sweep is a
-      // no-op, so there this read is what expires the session, and the events
-      // below would be empty without it.
       await store.getSession(s.id);
-      const expired = (await store.eventsAfter(s.id, 0)).filter(
-        (e) => e.type === "session_expired",
-      );
+      const expired = (await store.eventsAfter(s.id, 0)).filter((e) => e.type === "session_expired");
       expect(expired).toHaveLength(1);
     });
 
-    it("expires a due session lazily on read, without waiting for a sweep", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    it("closes an abandoned room lazily on read, without waiting for a sweep", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
-      vi.advanceTimersByTime(1_001);
       expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("keeps a room open while one active member was seen inside the window", async () => {
+      const s = session({ members: [
+        member({ lastSeenAt: AGED() }),
+        member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: Date.now() - 1_000 }),
+      ] });
+      (await store.createSession(s));
+      (await store.sweep(Date.now()));
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+    });
+
+    it("keeps a room open at exactly 90 days, and closes it a millisecond later", async () => {
+      const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS })] });
+      (await store.createSession(s));
+      expect((await store.getSession(s.id))?.closed, "at the boundary").toBe(false);
+
+      vi.advanceTimersByTime(1);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("never sweeps a frozen room, however long it has been frozen", async () => {
+      const s = abandonedRoom({ frozenAt: Date.now() - ABANDONED_AFTER_MS });
+      (await store.createSession(s));
+      (await store.sweep(Date.now()));
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.closed).toBe(false);
+      expect(fresh.frozenAt).not.toBeNull();
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+    });
+
+    it("a thaw stamps every active member as seen now, so the room gets a full window back", async () => {
+      // Frozen past the window, with one member who left before the freeze: the
+      // thaw credits the active member and leaves the departed one alone.
+      const s = session({
+        frozenAt: Date.now() - 1_000,
+        members: [
+          member({ lastSeenAt: AGED() }),
+          member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", lastSeenAt: AGED(), leftAt: AGED() }),
+        ],
+      });
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, null));
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.closed).toBe(false);
+      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt]))
+        .toEqual([["m_creator", Date.now()], ["m_gone", AGED()]]);
+      // And the sweep agrees: the window restarted at the thaw.
+      (await store.sweep(Date.now()));
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+    });
+
+    it("a thaw of a room that was not frozen stamps nobody", async () => {
+      // The credit is paid on the transition, as clearSilence's is: a retried
+      // freezeSession(null) must not keep a quiet room alive for good.
+      const s = abandonedRoom();
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, null));
+
+      expect((await store.getSession(s.id))?.closed, "the sweep still sees it as abandoned").toBe(true);
     });
 
     it("sweep drops expired pending connects", async () => {

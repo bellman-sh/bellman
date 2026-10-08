@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/store.js";
+import { abandonedAt } from "../../src/presence.js";
 import { Harness, envelopes } from "../helpers/harness.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 
@@ -87,9 +88,9 @@ describe("session_status after a long poll", () => {
    * carries the event that announces the closing, so a status that says `active` beside
    * it contradicts itself inside one response.
    */
-  it("reports a room that expired while the poll waited as closed, beside the event that says so", async () => {
-    const expiresAt = (await store.getSession(p.sessionId))!.expiresAt;
-    store.onPark = () => { void store.sweep(expiresAt + 1); };
+  it("reports a room abandoned while the poll waited as closed, beside the event that says so", async () => {
+    const room = (await store.getSession(p.sessionId))!;
+    store.onPark = () => { void store.sweep(abandonedAt(room)! + 1); };
 
     const out = await poll(LONG);
 

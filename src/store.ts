@@ -750,8 +750,8 @@ export interface BellmanStore {
    * the index rows read. Both halves are the same fix: the listing applied
    * `limit` to raw rows, so a prolific account's walk filled its window with
    * long-dead rooms and never reached the live ones — a freeze that silently did
-   * nothing for exactly the accounts that use Bellman most (#75, #115). A room
-   * past its TTL counts as closed here whether or not its alarm has fired.
+   * nothing for exactly the accounts that use Bellman most (#75, #115). An
+   * abandoned room counts as closed here whether or not its alarm has fired.
    *
    * A frozen room is still listed. Freezing one twice is harmless, and leaving it
    * out would hide it from the only listing that can find it again.
@@ -984,10 +984,10 @@ export class MemoryStore implements BellmanStore {
   async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
     if (!s) return undefined;
-    this.expireIfDue(s, Date.now());
+    this.closeIfAbandoned(s, Date.now());
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
-    // away. expireIfDue has already run on `s`, so nothing it did is skipped by cloning later.
+    // away. closeIfAbandoned has already run on `s`, so nothing it did is skipped by cloning later.
     const { events: _events, ...rest } = s;
     return detach(rest);
   }
@@ -1245,7 +1245,7 @@ export class MemoryStore implements BellmanStore {
    * without yielding between their guard and their write. The same arrangement,
    * and the same reason, as appendNow.
    *
-   * Agrees with expireIfDue: a closed room's codes stop resolving AND stop
+   * Agrees with closeIfAbandoned: a closed room's codes stop resolving AND stop
    * occupying the index, rather than relying on the `closed` guard alone.
    */
   private closeNow(s: Session): void {
@@ -1270,13 +1270,24 @@ export class MemoryStore implements BellmanStore {
    * idempotent call keeps resetting every member's clock and nobody is ever due
    * again. `wasFrozen` is read before the assignment below, because that
    * assignment is what destroys the answer.
+   *
+   * The thaw also stamps every active member as seen now (#18). `touchMember`
+   * refuses a frozen room, so the window was not moving while it was frozen;
+   * without this stamp a room thawed after 90 days frozen would be swept on the
+   * next read.
    */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     const wasFrozen = s.frozenAt !== null;
     s.frozenAt = frozenAt;
-    if (frozenAt === null && wasFrozen) s.members = clearSilence(s, Date.now());
+    if (frozenAt === null && wasFrozen) {
+      const now = Date.now();
+      // The report credit (#111 D10) and the presence stamp (#18) ride the same
+      // transition: a room coming back from a freeze gets a full window, not the
+      // one the freeze spent.
+      s.members = stampSeen(clearSilence(s, now), now);
+    }
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
@@ -1286,11 +1297,11 @@ export class MemoryStore implements BellmanStore {
     for (const id of mine) {
       if (live.length >= limit) break;
       const s = this.sessions.get(id);
-      // `expireIfDue` first, for the same reason getSession calls it: a room past
-      // its TTL is closed whether or not anything has written that down yet, and
-      // a sweep that read the flag alone would keep every expired room in the
-      // window until something else happened to touch it.
-      if (s) this.expireIfDue(s, Date.now());
+      // `closeIfAbandoned` first, for the same reason getSession calls it: an
+      // abandoned room is closed whether or not anything has written that down
+      // yet, and a sweep that read the flag alone would keep every abandoned room
+      // in the window until something else happened to touch it.
+      if (s) this.closeIfAbandoned(s, Date.now());
       if (s && !s.closed) {
         live.push(id);
         continue;
@@ -1651,7 +1662,7 @@ export class MemoryStore implements BellmanStore {
   }
 
   async sweep(now: number): Promise<void> {
-    for (const s of this.sessions.values()) this.expireIfDue(s, now);
+    for (const s of this.sessions.values()) this.closeIfAbandoned(s, now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }
@@ -1665,19 +1676,31 @@ export class MemoryStore implements BellmanStore {
     for (const w of ws) w.resolve(detach(s.events.filter((ev) => ev.cursor > w.after)));
   }
 
-  /** Operates on the canonical session; callers hold detached copies. */
-  private expireIfDue(s: Session, now: number): void {
-    if (s.closed || now <= s.expiresAt) return;
-    s.closed = true;
-    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    s.joinCodes = {};
+  /**
+   * Operates on the canonical session; callers hold detached copies.
+   *
+   * The abandonment rule is `isAbandoned`'s, shared with SessionDO's alarm and
+   * readers. A socket vouching for an active member is the one way a room past
+   * the window stays open, and it is recorded: those members are stamped as seen
+   * now, which is what `webSocketClose` does on a drop (#152), so the next sweep
+   * finds a fresh window rather than the same question.
+   */
+  private closeIfAbandoned(s: Session, now: number): void {
+    const due = abandonedAt(s);
+    if (due === null || now <= due) return;
+    const connected = connectedAmong(s.members, this.attachedTo(s.id));
+    if (!isAbandoned(s, now, connected)) {
+      s.members = stampSeen(s.members, now, connected);
+      return;
+    }
+    this.closeNow(s);
     const event: SessionEvent = {
       cursor: s.events.length + 1,
       type: "session_expired" as EventType,
       fromMemberId: "system",
       fromUserId: "system",
       fromLabel: "bellman",
-      payload: { reason: "ttl" },
+      payload: { reason: "abandoned", last_seen_at: new Date(due - ABANDONED_AFTER_MS).toISOString() },
       refId: null,
       at: now,
     };

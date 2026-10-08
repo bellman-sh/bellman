@@ -297,10 +297,13 @@ describe("seatMember claims the seat and frees it in one operation", () => {
   it("leaves the join code alone when the reclaim does not fill the room — freeing the seat is the whole point", async () => {
     // Both seats are stale, so the joiner takes one and the other is still
     // reclaimable: a further joiner would get in, and the code is how they would.
+    // Stale, but inside the 90 days a room is kept: members last seen at the epoch
+    // would have the room abandoned at the first read (#18).
+    const quiet = Date.now() - STALE_AFTER_MS - 2;
     await store.createSession(session({
       members: [
-        member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
-        member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+        member({ memberId: "m_quiet_a", lastSeenAt: quiet }),
+        member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: quiet + 1 }),
       ],
     }));
     const planted = (await read()).joinCodes;
@@ -336,10 +339,21 @@ describe("seatMember claims the seat and frees it in one operation", () => {
 
 describe("touchMember", () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(); });
+  // The store reads the clock to decide whether a room is abandoned (#18), so the
+  // clock is NOW: a member seeded at the epoch closes its own room on the first read,
+  // and touchMember then refuses it for being closed, whatever else is under test.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    store = new MemoryStore();
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** Quiet for a whole window: past the half that touchMember waits out, inside the 90 days a room is kept. */
+  const QUIET = NOW - STALE_AFTER_MS;
 
   const seed = async (over: Parameters<typeof member>[0] = {}) => {
-    await store.createSession(session({ members: [member({ lastSeenAt: 1, ...over })] }));
+    await store.createSession(session({ members: [member({ lastSeenAt: QUIET, ...over })] }));
     const s = (await store.getSession("qs_test"))!;
     return { session: s, me: s.members[0] };
   };
@@ -376,7 +390,7 @@ describe("touchMember", () => {
 
     await touchMember(store, s, me, NOW);
 
-    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(1);
+    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(QUIET);
   });
 
   it("writes nothing to a frozen or closed room", async () => {
@@ -387,7 +401,7 @@ describe("touchMember", () => {
 
     // bellman_sync has no closed, frozen or leftAt guard on purpose — reads
     // stay open to all three — so the write needs its own.
-    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(1);
+    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(QUIET);
   });
 
   it("swallows a store failure rather than failing the call it rode in on", async () => {

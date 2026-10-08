@@ -253,4 +253,27 @@ describe("the four places a handler reads presence", () => {
     expect(reaped.refused).toBeNull();
     expect(reaped.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet"]);
   });
+
+  it("a sweep stamps the members a socket vouches for instead of closing the room (#18)", async () => {
+    await store.createSession(session({ members: [
+      creator(), member({ memberId: "m_quiet", userId: "u_quiet", roomRole: "peer_b", lastSeenAt: 1 }),
+    ] }));
+    // Both quiet past any window (1 ms after the epoch); only m_quiet is on a socket.
+    await store.updateMember("qs_test", "m_creator", { lastSeenAt: 1 });
+    store.attached.add("m_quiet");
+    const now = Date.now();
+
+    await store.sweep(now);
+
+    const after = await read();
+    expect(after.closed).toBe(false);
+    expect(after.members.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_creator", 1], ["m_quiet", now]]);
+    expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
+
+    // The same sweep with the socket gone closes it: the stamp was the socket's.
+    store.attached.clear();
+    await store.updateMember("qs_test", "m_quiet", { lastSeenAt: 1 });
+    await store.sweep(now);
+    expect((await read()).closed).toBe(true);
+  });
 });

@@ -5,7 +5,7 @@
  * seat reclaimed below. What it cannot record is a session that simply stopped:
  * a crash, a closed laptop, a killed bridge, a dropped network, a cloud session
  * torn down all leave `leftAt` null forever, and a `pair` room whose peer's
- * laptop closed stayed full and unjoinable for the rest of its TTL (#103). So
+ * laptop closed stayed full and unjoinable for good (#103). So
  * presence needs a second signal, and it is already on the wire:
  * `bellman_sync` long-polls every ~25 seconds, so a watching member announces
  * itself continuously. `lastSeenAt` just stops throwing that away.
@@ -25,6 +25,12 @@
  *   present   not departed, and heard from inside the window or on a live socket
  *   stale     not departed, and neither
  *   departed  `leftAt` set — by a leave, an eviction, or a reaped seat
+ *
+ * Abandonment is the same reading over the whole room (#18). A room has no
+ * clock; it is abandoned when no active member has been seen, by window or by
+ * socket, for `ABANDONED_AFTER_MS`, and `abandonedAt`/`isAbandoned` say when.
+ * They are defined in store.ts beside `lastSeen` for the reason given there and
+ * re-exported here, which is where everything outside the stores reads them.
  *
  * "On a live socket" is the second way to be present, and the reason is who
  * does not poll. A member fed by the local bus or by the room's hibernating
@@ -50,8 +56,11 @@ import type { Member } from "./types.js";
 // `lastSeen` and the socket derivation live in store.ts beside `isActiveMember`,
 // because `seatMember` reads them inside the store and this module imports that
 // one.
-import { NO_SOCKETS, connectedAmong, isActiveMember, lastSeen } from "./store.js";
-export { NO_SOCKETS, connectedAmong, lastSeen };
+import {
+  ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, isActiveMember, lastSeen,
+} from "./store.js";
+export { ABANDONED_AFTER_MS, NO_SOCKETS, abandonedAt, connectedAmong, isAbandoned, lastSeen };
+export type { RoomRoster } from "./store.js";
 
 /**
  * How long a member may go unheard from before its seat is reclaimable.
@@ -60,7 +69,7 @@ export { NO_SOCKETS, connectedAmong, lastSeen };
  * ratio is the whole choice. The window has to be several multiples of the poll
  * interval or a member thinking hard between calls gets reaped out of its own
  * room; it has to be short enough that a bricked `pair` room heals in minutes
- * rather than at the room's TTL, which #18 made long.
+ * rather than never: rooms have no clock (#18).
  *
  * It is generous deliberately. The cost of reaping too late is a seat held a
  * few minutes longer than necessary. The cost of reaping too early is removing

@@ -2,7 +2,7 @@ import type { Member, SessionEvent, SurfaceRow, Verb } from "./types.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
-import { asked, isActiveMember } from "./store.js";
+import { asked, capacityOf, isActiveMember } from "./store.js";
 import { activeMembers, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import type { StoredSession } from "./stored-session.js";
@@ -228,8 +228,7 @@ export function roomSummary(
   return {
     session_id: s.id,
     status: sessionStatus(s),
-    expires_at: iso(s.expiresAt),
-    max_members: s.maxMembers,
+    max_members: capacityOf(s.manifest),
     active_members: activeMembers(s).length,
     your_member_id: me.memberId,
     room: roomPreview(s, me.roomRole),
@@ -269,7 +268,6 @@ export function roomListEntry(s: StoredSession, viewerUserId: string, status: st
       ? s.members.filter((m) => m.leftAt === null).length
       : rosterAsOf(s.members, cutAt).filter((m) => m.active).length,
     mine: s.createdBy === viewerUserId,
-    expires_at: new Date(s.expiresAt).toISOString(),
   };
 }
 

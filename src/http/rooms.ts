@@ -373,7 +373,6 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
   return json(200, {
     id: session.id,
     session_status: sessionStatus(session),
-    expires_at: new Date(session.expiresAt).toISOString(),
     preview: roomPreview(session, viewer.roomRole),
     members,
     my_handles: mine.map((m) => ({

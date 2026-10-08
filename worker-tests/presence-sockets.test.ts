@@ -9,10 +9,11 @@
  * vouching, and that the answer survives the object being evicted and revived,
  * which is when it is hibernating and holding nothing in memory.
  *
- * Every room here is two or three seats with one present member and one or two
- * that have been quiet since 1 ms after the epoch. The identity behind the key
- * vitest.config.ts binds is u_jesse, which is the user a fixture member has by
- * default, so a default member is one this socket's identity owns.
+ * Every room here holds one or two members that have been quiet since the
+ * fixture's instant, past the presence cutoff, and in most of them one present
+ * member besides. The identity behind the key vitest.config.ts binds is u_jesse,
+ * which is the user a fixture member has by default, so a default member is one
+ * this socket's identity owns.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
@@ -34,9 +35,9 @@ const KEY = "qk_ws_test";
 let rooms = 0;
 
 /** A room in the real SessionDO holding these members. */
-async function room(members: Member[], maxMembers: number) {
+async function room(members: Member[]) {
   const store = new DurableObjectStore(env as never);
-  const s = session({ id: `qs_presence_${++rooms}`, members, maxMembers });
+  const s = session({ id: `qs_presence_${++rooms}`, members });
   await store.createSession(s);
   return { id: s.id, store, stub: env.SESSION.get(env.SESSION.idFromName(s.id)) };
 }
@@ -45,8 +46,14 @@ async function room(members: Member[], maxMembers: number) {
 const here = (memberId: string) =>
   member({ memberId, userId: "u_other", lastSeenAt: Date.now() });
 
-/** Quiet for as long as a member can be, and the socket's identity. */
-const quiet = (memberId: string) => member({ memberId, userId: "u_jesse", lastSeenAt: 1 });
+/**
+ * Quiet past the presence cutoff and the socket's identity. Inside the 90-day
+ * window (#18): a roster whose newest sighting is older than that reads as
+ * abandoned on first read, and a room of one quiet member would close before
+ * the case begins.
+ */
+const QUIET_AT = Date.now() - STALE_AFTER_MS - 60_000;
+const quiet = (memberId: string) => member({ memberId, userId: "u_jesse", lastSeenAt: QUIET_AT });
 
 /** The upgrade through the real route: auth, membersOf, then the object. */
 async function open(id: string): Promise<WebSocket> {
@@ -82,7 +89,7 @@ const roster = async (store: DurableObjectStore, id: string) =>
 
 describe("an open socket is liveness", () => {
   it("keeps a quiet member present, and its seat out of a contested confirm's reach", async () => {
-    const { id, store, stub } = await room([here("m_here"), quiet("m_quiet")], 2);
+    const { id, store, stub } = await room([here("m_here"), quiet("m_quiet")]);
     await open(id);
 
     const connected = await store.connectedMembers(id);
@@ -123,11 +130,11 @@ describe("an open socket is liveness", () => {
    * was there a moment ago — rather than predicting one.
    */
   it("stamps the members of a socket that closes, so a drop does not cost the seat", async () => {
-    const { id, store } = await room([here("m_here"), quiet("m_quiet")], 2);
+    const { id, store } = await room([here("m_here"), quiet("m_quiet")]);
     const ws = await open(id);
     const before = (await store.getSession(id))!.members
       .find((m) => m.memberId === "m_quiet")!.lastSeenAt;
-    expect(before).toBe(1); // quiet since 1 ms after the epoch, and nothing has moved it
+    expect(before).toBe(QUIET_AT); // quiet since the fixture's instant, and nothing has moved it
 
     ws.close(1000, "done");
     await vi.waitFor(async () => {
@@ -145,7 +152,7 @@ describe("an open socket is liveness", () => {
   });
 
   it("still reaps a quiet member with no socket, and stops protecting one whose socket closes", async () => {
-    const bare = await room([here("m_here"), quiet("m_quiet")], 2);
+    const bare = await room([here("m_here"), quiet("m_quiet")]);
     expect(await bare.store.connectedMembers(bare.id)).toEqual(new Set());
     const reaped = await seat(bare.store, bare.id);
     expect(reaped.refused).toBeNull();
@@ -153,7 +160,7 @@ describe("an open socket is liveness", () => {
 
     // The same member, vouched for while its socket is open and not after: the
     // object reads the sockets when it decides, and keeps no list of its own.
-    const closing = await room([here("m_here"), quiet("m_quiet")], 2);
+    const closing = await room([here("m_here"), quiet("m_quiet")]);
     const ws = await open(closing.id);
     expect(await seat(closing.store, closing.id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
     ws.close(1000, "done");
@@ -182,24 +189,26 @@ describe("an open socket is liveness", () => {
   });
 
   it("keeps both members of a socket that serves two", async () => {
-    // Two seats held by the socket's identity and one by somebody else, in a
-    // three-seat room. The contested confirm needs one seat: if the socket
-    // protected only one of the two, it would take the other.
-    const { id, store, stub } = await room([here("m_here"), quiet("m_a"), quiet("m_b")], 3);
+    // A pair room with both seats held by the socket's identity. The contested
+    // confirm needs one seat: if the socket protected only one of the two, it
+    // would take the other.
+    const { id, store, stub } = await room([quiet("m_a"), quiet("m_b")]);
     await open(id);
 
     // What the route built: every member the identity owned when it connected.
     expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_a", "m_b"] })]);
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
     expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
-    expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
+    expect(await roster(store, id)).toEqual([["m_a", null], ["m_b", null]]);
   });
 
   it("keeps a member of the identity that joined after the socket did", async () => {
     // The attachment is a snapshot of who the identity owned at upgrade. A
     // member of the identity that joins later is served by the same socket
-    // through the bus, and is not in the snapshot.
-    const { id, store, stub } = await room([here("m_here"), quiet("m_a")], 3);
+    // through the bus, and is not in the snapshot. A pair room with both seats
+    // held by the socket's identity: if the socket protected only the snapshot's
+    // ids, the contested confirm would take the late joiner.
+    const { id, store, stub } = await room([quiet("m_a")]);
     await open(id);
     expect(await attachments(stub)).toEqual([expect.objectContaining({ memberIds: ["m_a"] })]);
 
@@ -207,7 +216,7 @@ describe("an open socket is liveness", () => {
 
     expect([...await store.connectedMembers(id)].sort()).toEqual(["m_a", "m_b"]);
     expect(await seat(store, id)).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
-    expect(await roster(store, id)).toEqual([["m_here", null], ["m_a", null], ["m_b", null]]);
+    expect(await roster(store, id)).toEqual([["m_a", null], ["m_b", null]]);
   });
 
   it("stamps the late joiner too, not just the ids the attachment names", async () => {
@@ -215,7 +224,7 @@ describe("an open socket is liveness", () => {
     // vouching FOR, which `connectedAmong` answers — stamping the attachment's
     // ids directly would leave `m_b` on the `lastSeenAt` it joined with, and the
     // next contested confirm would take ITS seat instead.
-    const { id, store } = await room([here("m_here"), quiet("m_a")], 3);
+    const { id, store } = await room([here("m_here"), quiet("m_a")]);
     const ws = await open(id);
     expect(await store.addMember(id, quiet("m_b"))).toBe(true);
 
@@ -241,8 +250,8 @@ describe("an open socket is liveness", () => {
    * socket is the only difference between them.
    */
   it("retires the codes of a room a quiet member's socket keeps full, and not those of one it does not", async () => {
-    const held = await room([here("m_here"), quiet("m_quiet")], 3);
-    const free = await room([here("m_here"), quiet("m_quiet")], 3);
+    const held = await room([quiet("m_quiet")]);
+    const free = await room([quiet("m_quiet")]);
     // Each room's own record: the fixture stamps an expiry from the clock as it is built,
     // so two rooms made a millisecond apart do not hold equal records.
     const heldDoors = (await held.store.getSession(held.id))!.joinCodes;
@@ -266,7 +275,7 @@ describe("an open socket is liveness", () => {
     // `touchMember`'s rule (src/rooms.ts): a closed room's record is over, and a
     // liveness write must not reopen it. The socket outlives the close of the
     // room it watched, so this is reachable rather than defensive.
-    const { id, store } = await room([here("m_here"), quiet("m_quiet")], 2);
+    const { id, store } = await room([here("m_here"), quiet("m_quiet")]);
     const ws = await open(id);
     await store.closeSession(id);
 
@@ -276,6 +285,6 @@ describe("an open socket is liveness", () => {
     }, { timeout: 3000 });
 
     const m = (await store.getSession(id))!.members.find((x) => x.memberId === "m_quiet")!;
-    expect(m.lastSeenAt).toBe(1); // untouched
+    expect(m.lastSeenAt).toBe(QUIET_AT); // untouched
   });
 });

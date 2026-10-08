@@ -16,7 +16,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
-import { JOIN_CODE_TTL, MemoryStore } from "../../src/store.js";
+import { JOIN_CODE_TTL, MemoryStore, ROOM_MEMBER_CEILING, capacityOf } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import type { Identity } from "../../src/types.js";
 
@@ -315,7 +315,7 @@ describe("INVARIANT 2 — two-phase connect", () => {
       connect_token: String(p1.data.connect_token), brief: brief(),
     });
 
-    // Team swarm allows 25 members, so the code survives the second member.
+    // A swarm room holds the ceiling, so the code survives the second member.
     const p2 = await outsider.call("bellman_connect", { join_code: joinCode });
     expect(p2.isError, p2.text).toBe(false);
   });
@@ -636,9 +636,11 @@ describe("INVARIANT 10 — every room is declared", () => {
       manifest: { room: "r", preset: "swarm" },
     });
     expect(res.isError, res.text).toBe(false);
+    // Rooms persist (#18): nothing on the return says when the room ends.
+    expect(res.data).not.toHaveProperty("session_expires_at");
     const session = await h.store.getSession(String(res.data.session_id));
     expect(session?.manifest.mode).toBe("swarm");
-    expect(session?.maxMembers).toBeGreaterThan(2);
+    expect(capacityOf(session!.manifest)).toBe(ROOM_MEMBER_CEILING);
   });
 
   it("reports the manifest's mode in the connect preview", async () => {
@@ -653,6 +655,17 @@ describe("INVARIANT 10 — every room is declared", () => {
     });
     expect(preview.isError, preview.text).toBe(false);
     expect((preview.data.session as { mode: string }).mode).toBe("swarm");
+    // The number an agent can act on: the room's capacity, not a plan limit.
+    expect((preview.data.session as { max_members: number }).max_members).toBe(100);
+  });
+
+  it("reports a pair room's capacity as two in the connect preview", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", { brief: brief(), manifest: { room: "r", preset: "pair" } });
+    const preview = await peer.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect(preview.isError, preview.text).toBe(false);
+    expect((preview.data.session as { max_members: number }).max_members).toBe(2);
   });
 
   // The other tests here cite a preset. This is the only one that authors roles
@@ -699,7 +712,7 @@ describe("INVARIANT 10 — every room is declared", () => {
       creatorRole: "driver",
       heartbeatOnMs: null,
     });
-    expect(session?.maxMembers).toBe(2);
+    expect(capacityOf(session!.manifest)).toBe(2);
     const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;
     expect(roleOf("u_jesse")).toBe("driver");
     expect(roleOf("u_peer")).toBe("navigator");

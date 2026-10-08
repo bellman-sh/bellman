@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { manifestFixture, member, oneCode, session } from "./helpers/fixtures.js";
+import { manifestFixture, member, oneCode, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
 import type { Identity, Member } from "../src/types.js";
 
@@ -200,7 +200,7 @@ describe("leaveRoom", () => {
   // the code they came in by. A leave that reads the room and then closes it
   // fails this test, because the join lands in the gap between the two.
   it("leaves the room open when a member joins at the last moment before the close", async () => {
-    await store.createSession(session({ maxMembers: 3, members: [member()] }));
+    await store.createSession(session({ members: [member()] }));
     joinJustBeforeClose(member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" }));
 
     const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
@@ -219,7 +219,7 @@ describe("leaveRoom", () => {
   // open. It is a second caller of the same function, and the one a copy of the
   // old shape could hide in, because nothing else on it looks like a race.
   it("leaves the room open when a member joins before the close a retried leave would make", async () => {
-    await store.createSession(session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] }));
+    await store.createSession(session({ members: [member({ leftAt: Date.now() })] }));
     joinJustBeforeClose(member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" }));
 
     const r = await leaveRoom(store, jesse, "qs_test", "m_creator");
@@ -237,7 +237,7 @@ describe("issueInvite", () => {
   it("mints a code for the room's default seat", async () => {
     // The default fixture already holds a live code for this seat, and issuing
     // would retire it. A room with none is what makes `replacedPrevious` false.
-    await store.createSession(session({ maxMembers: 4, joinCodes: {} }));
+    await store.createSession(session({ joinCodes: {} }));
 
     const r = await issueInvite(store, jesse, "qs_test", "m_creator");
 
@@ -249,7 +249,7 @@ describe("issueInvite", () => {
   });
 
   it("refuses a role the manifest does not declare", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
 
     const r = await issueInvite(store, jesse, "qs_test", "m_creator", "scribe");
 
@@ -263,7 +263,6 @@ describe("issueInvite", () => {
 
   it("refuses a full room, because the code could not be used", async () => {
     await store.createSession(session({
-      maxMembers: 2,
       members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
 
@@ -274,8 +273,24 @@ describe("issueInvite", () => {
     expect(r.code).toBe("conflict");
   });
 
+  it("names the ceiling when a swarm room is full", async () => {
+    // Review Focus 4: a creator at 100 is told it is Bellman's ceiling, not their plan's.
+    const seats = Array.from({ length: ROOM_MEMBER_CEILING - 1 }, (_, i) =>
+      member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "peer_b" }));
+    await store.createSession(swarmSession({ members: [member(), ...seats] }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+    expect(r.reason).toMatch(/full/);
+    expect(r.reason).toContain("100 members");
+    expect(r.reason).toContain("ceiling");
+  });
+
   it("refuses a frozen room", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
     await store.freezeSession("qs_test", Date.now());
 
     const r = await issueInvite(store, jesse, "qs_test", "m_creator");
@@ -308,7 +323,7 @@ describe("issueInvite", () => {
   // cases there assert only that an error came back; with the second removed a
   // member who has left mints codes freely, and nothing asks.
   it("refuses a handle that belongs to someone else", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
 
     const r = await issueInvite(store, peer, "qs_test", "m_creator");
 
@@ -319,7 +334,6 @@ describe("issueInvite", () => {
 
   it("refuses a member who has left the room", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [
         member({ leftAt: Date.now() }),
         member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
@@ -336,7 +350,7 @@ describe("issueInvite", () => {
   // Frozen between the gate's read and the write: the store refuses the code, and
   // nothing may be announced or audited for a code that was never set.
   it("announces and audits nothing when the store refuses the code", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
     vi.spyOn(store, "setJoinCode").mockResolvedValueOnce({ ok: false, reason: "frozen" });
 
     const r = await issueInvite(store, jesse, "qs_test", "m_creator");
@@ -355,7 +369,7 @@ describe("issueInvite", () => {
   // event. Tolerated rather than unwound, as an eviction's announcement is, and
   // the tool's description says the event can be absent for this reason.
   it("completes, unannounced, when the room freezes after the code was set", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
     const setJoinCode = store.setJoinCode.bind(store);
     store.setJoinCode = async (sessionId, role, code, expiresAt, guard) => {
       const set = await setJoinCode(sessionId, role, code, expiresAt, guard);
@@ -375,7 +389,7 @@ describe("issueInvite", () => {
 
 describe("revokeInvite", () => {
   it("retires every live code when no role is named", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
 
     const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
 
@@ -387,7 +401,6 @@ describe("revokeInvite", () => {
 
   it("reports nothing retired when the only code had already expired", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: { peer_b: { code: "BELL-OLD-01", expiresAt: Date.now() - 1000 } },
     }));
 
@@ -402,7 +415,7 @@ describe("revokeInvite", () => {
   // which is also the honest answer for a role with no live code. The caller
   // cannot tell them apart, and believes a door is shut that is still open.
   it("refuses a role the manifest does not declare", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
 
     const r = await revokeInvite(store, jesse, "qs_test", "m_creator", "scribe");
 
@@ -418,7 +431,7 @@ describe("revokeInvite", () => {
   // gate's check removed. Retiring a code has no such backstop in either store:
   // only the gate keeps a frozen room's codes where they are.
   it("refuses a frozen room, and retires nothing", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
     await store.freezeSession("qs_test", Date.now());
 
     const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
@@ -432,7 +445,7 @@ describe("revokeInvite", () => {
   // The same gap from the other side: the freeze lands after the code is retired.
   // The door is shut and stays shut, and nobody is told.
   it("completes, unannounced, when the room freezes after the code was retired", async () => {
-    await store.createSession(session({ maxMembers: 4 }));
+    await store.createSession(session());
     const consumeJoinCode = store.consumeJoinCode.bind(store);
     store.consumeJoinCode = async (sessionId, role) => {
       await consumeJoinCode(sessionId, role);
@@ -453,7 +466,6 @@ describe("revokeInvite", () => {
 describe("evictMember", () => {
   /** A room with the creator and one peer, both active. */
   const peopled = () => session({
-    maxMembers: 4,
     members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
   });
 
@@ -467,7 +479,6 @@ describe("evictMember", () => {
     const manifest = resolveManifest(manifestFixture({ preset: "swarm" }));
     return session({
       manifest,
-      maxMembers: 4,
       joinCodes: codes,
       members: [member({ roomRole: manifest.creatorRole }),
                 member({ memberId: "m_watcher", userId: "u_peer", label: "peer@codenerd", roomRole: "observer",
@@ -560,7 +571,6 @@ describe("evictMember", () => {
     };
     /** The creator, and `peer` seated beside them as m_peer. */
     const peopledRoom = () => session({
-      maxMembers: 4,
       members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     });
 
@@ -628,7 +638,6 @@ describe("evictMember", () => {
   /** REVIEW FOCUS 2 — memberId is per connection; the rule is on userId. */
   it("refuses a creator evicting their own second handle", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(), member({ memberId: "m_laptop", userId: "u_jesse", roomRole: "peer_b" })],
     }));
 
@@ -647,7 +656,6 @@ describe("evictMember", () => {
   /** REVIEW FOCUS 3 — authority is on createdBy, not on holding a live seat. */
   it("lets a creator who already left evict someone", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -659,7 +667,7 @@ describe("evictMember", () => {
 
   /** REVIEW FOCUS 4 — one handle out, the room stays in their listing. */
   it("leaves a member's other handle, and their joined listing, intact", async () => {
-    await store.createSession(session({ maxMembers: 4, members: [member()] }));
+    await store.createSession(session({ members: [member()] }));
     await store.addMember("qs_test", member({ memberId: "m_a", userId: "u_peer", roomRole: "peer_b" }));
     await store.addMember("qs_test", member({ memberId: "m_b", userId: "u_peer", roomRole: "peer_b" }));
 
@@ -677,7 +685,6 @@ describe("evictMember", () => {
     // already shut, because the removal shuts it in the same transaction, so there
     // is no code here for the repeat to retire.
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: {},
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
@@ -699,7 +706,6 @@ describe("evictMember", () => {
   // is nothing to retire, and the removal was already said once.
   it("succeeds and writes nothing for a member who already left, when their seat's door is already shut", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: {},
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
@@ -724,7 +730,6 @@ describe("evictMember", () => {
   // the case for rooms that are not full, swarm and hub rooms.
   it("shuts a seat's door that a leave left open, without announcing the removal again", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b",
                         leftAt: Date.now() })],
@@ -755,7 +760,6 @@ describe("evictMember", () => {
   // anyone is worse than none.
   it("audits the door's closing in the room's org and not the departed member's", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", orgId: "org_other", roomRole: "peer_b",
                         leftAt: Date.now() })],
@@ -776,7 +780,6 @@ describe("evictMember", () => {
   // its own around it.
   it("announces and audits nothing when a departed member's door could not be shut, and the retry shuts it", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -803,7 +806,6 @@ describe("evictMember", () => {
   // close in a room the departed member's eviction has emptied.
   it("shuts the door and keeps its record when the close fails, and the retry finishes closing", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -830,7 +832,6 @@ describe("evictMember", () => {
   // work: once the code is gone a second eviction finds nothing to retire.
   it("writes nothing more when a departed member's door has already been shut", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -850,7 +851,6 @@ describe("evictMember", () => {
   // An expired code is not an open door, so there is no closing to announce.
   it("retires nothing for a member who already left when the seat's code had expired", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: { peer_b: { code: "BELL-OLD-01", expiresAt: Date.now() - 1000 } },
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
@@ -940,7 +940,6 @@ describe("evictMember", () => {
 
   it("retires nothing when the seat's code had already expired", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: { peer_b: { code: "BELL-OLD-01", expiresAt: Date.now() - 1000 } },
       members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -958,7 +957,6 @@ describe("evictMember", () => {
   // read-then-close in either would pass the leave's test and fail this one.
   it("leaves the room open when a member joins at the last moment before the eviction would close it", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -979,7 +977,6 @@ describe("evictMember", () => {
   // and the only thing left to do is the closing.
   it("leaves the room open when a member joins before the close a retried eviction would make", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", leftAt: Date.now() })],
     }));
@@ -997,7 +994,6 @@ describe("evictMember", () => {
 
   it("closes the room when the evicted member was the last active one", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -1164,7 +1160,6 @@ describe("evictMember", () => {
   // removed, and nobody who joined a full pair room could be evicted.
   it("evicts a member whose seat holds no code at all", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       joinCodes: {},
       members: [member(), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -1224,7 +1219,6 @@ describe("evictMember", () => {
   // and an event that named the wrong person would otherwise read as right.
   it("names the creator on the eviction's event and the evicted member in its payload", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
     }));
@@ -1239,7 +1233,6 @@ describe("evictMember", () => {
 
   it("announces the door's closing from the system, naming the creator and the seat", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
     }));
@@ -1297,7 +1290,7 @@ describe("evictMember", () => {
   // question, and an org reading its own log needs the second, because the handle
   // means nothing outside the room.
   it("audits which seat went and whose it was when one person holds two", async () => {
-    await store.createSession(session({ maxMembers: 4, members: [member()] }));
+    await store.createSession(session({ members: [member()] }));
     await store.addMember("qs_test", member({ memberId: "m_a", userId: "u_peer", roomRole: "peer_b" }));
     await store.addMember("qs_test", member({ memberId: "m_b", userId: "u_peer", roomRole: "peer_b" }));
 
@@ -1314,7 +1307,6 @@ describe("evictMember", () => {
   // the real close.
   it("keeps the audit row of an eviction that failed at the close, and the retry finishes closing", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member({ leftAt: Date.now() }),
                 member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
     }));
@@ -1363,7 +1355,6 @@ describe("evictMember", () => {
   // gap: the actor there is the member, so their own org is already written.
   it("audits a cross-org eviction in the evicted member's org too", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", orgId: "org_other", roomRole: "peer_b" })],
     }));
@@ -1403,7 +1394,6 @@ describe("evictMember", () => {
   // nothing; the room's row is still written.
   it("writes no extra audit row for an evicted member who belongs to no org", async () => {
     await store.createSession(session({
-      maxMembers: 4,
       members: [member(),
                 member({ memberId: "m_peer", userId: "u_peer", orgId: null, roomRole: "peer_b" })],
     }));

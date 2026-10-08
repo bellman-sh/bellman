@@ -32,7 +32,7 @@ const lead = member({ memberId: "m_lead", userId: "u_lead", label: "lead@a", roo
 const helper = member({ memberId: "m_help", userId: "u_help", label: "help@b", roomRole: "helper", joinedAt: T0, lastSeenAt: T0 });
 
 function stored(over: Partial<StoredSession> = {}): StoredSession {
-  const { events, ...rest } = session({ manifest, maxMembers: 8, members: [lead, helper] });
+  const { events, ...rest } = session({ manifest, members: [lead, helper] });
   return { ...rest, ...over } as StoredSession;
 }
 

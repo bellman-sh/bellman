@@ -6,8 +6,8 @@ import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../pro
 import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
-import { activeMembers, audit, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL } from "../store.js";
+import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
+import { CONNECT_TOKEN_TTL, capacityOf } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -25,6 +25,7 @@ Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
+max_members is the room's capacity: 2 for a pair room, 100 for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
 surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
@@ -69,7 +70,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }
       // Seated, not active: a room held full by a session that died is
-      // previewable rather than refused here and at every retry until its TTL
+      // previewable rather than refused here and at every retry for good
       // (#103). This only counts. The stale seat is reclaimed by the
       // bellman_confirm that follows, so a preview removes nobody — which is the
       // rule whether or not the annotation claims read-only (it no longer does,
@@ -78,8 +79,8 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
       // member on a socket is counted, because the confirm that follows will not
       // reclaim it either.
       const connected = await s.connectedMembers(session.id);
-      if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
-        return fail("session is full.");
+      if (seatedMembers(session, Date.now(), connected).length >= capacityOf(session.manifest)) {
+        return fail(fullMessage(session.manifest));
       }
       const creator = session.members[0];
       const token = generateConnectToken();
@@ -105,7 +106,7 @@ Errors: "join code not found or expired" — codes are single-use and expire 15 
           session: {
             mode: session.manifest.mode,
             active_members: activeMembers(session).length,
-            max_members: session.maxMembers,
+            max_members: capacityOf(session.manifest),
             org_only: session.orgOnly,
           },
           room: roomPreview(session, role),

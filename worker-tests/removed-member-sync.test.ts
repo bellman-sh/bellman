@@ -49,7 +49,7 @@ const boss: Identity = {
 async function room() {
   const store = new DurableObjectStore(env as never);
   const s = session({
-    id: "qs_removed_sync", createdBy: "u_boss", joinCodes: {}, maxMembers: 4,
+    id: "qs_removed_sync", createdBy: "u_boss", joinCodes: {},
     members: [
       member({ memberId: "m_boss", userId: "u_boss", label: "boss@elsewhere", roomRole: "peer_a" }),
       member({ memberId: "m_target", userId: "u_jesse", label: "jesse@codenerd", roomRole: "peer_b" }),

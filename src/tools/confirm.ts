@@ -5,7 +5,7 @@ import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.j
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
 import type { Brief, Capability, Identity, Member } from "../types.js";
-import { FROZEN, announceReclaimed, audit, readSurface } from "../rooms.js";
+import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
 import type { BellmanStore } from "../store.js";
 
@@ -95,7 +95,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           return fail("session no longer exists.");
         }
         if (seated.refused === "frozen") return fail(FROZEN);
-        return fail("session filled while you were confirming.");
+        return fail(`session filled while you were confirming. ${fullMessage(session.manifest)}`);
       }
 
       // Announced from what the store actually did, not from what this handler

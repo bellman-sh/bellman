@@ -10,8 +10,6 @@ import type { Entitlements, Identity, Plan } from "./types.js";
 export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   free: {
     modes: ["pair"],
-    maxMembers: 2,
-    sessionTtlMs: 4 * 60 * 60 * 1000,
     monthlyCreates: 20,
     orgScoping: false,
     audit: false,
@@ -21,19 +19,19 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
   pro: {
     modes: ["pair", "swarm"],
-    maxMembers: 8,
-    sessionTtlMs: 72 * 60 * 60 * 1000,
     monthlyCreates: 500,
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 500 * 1024 * 1024,
   },
-  // Team-sized rooms for one person, without an org. Org scoping, the audit
-  // log and 30-day rooms stay team-only: that is why a company still buys team.
+  // Coming soon. With no room lifetime and no member cap (#18), max differs from
+  // pro by creates and the blob ceiling alone, so nothing sells it: no Stripe price names it and
+  // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404. It
+  // stays here because a hand grant still works and because it is the shape
+  // hosted agents (#188, #189) attach their facet to. tests/auth.test.ts pins
+  // the difference, so a facet landing is a deliberate edit to that line.
   max: {
     modes: ["pair", "swarm"],
-    maxMembers: 25,
-    sessionTtlMs: 14 * 24 * 60 * 60 * 1000,
     monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
@@ -41,8 +39,6 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
   team: {
     modes: ["pair", "swarm"],
-    maxMembers: 25,
-    sessionTtlMs: 30 * 24 * 60 * 60 * 1000,
     monthlyCreates: 5000,
     orgScoping: true,
     audit: true,

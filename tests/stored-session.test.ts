@@ -37,7 +37,7 @@ describe("hydrateStoredSession — legacy join codes", () => {
   });
 
   it("leaves a row that already has joinCodes alone", () => {
-    // One fixture call, not two: session() stamps expiresAt from Date.now(), so
+    // One fixture call, not two: session() stamps its join code's expiresAt from Date.now(), so
     // calling it twice lets expected and actual straddle a clock tick — measured
     // at 0.026% per run, rare enough to be a real CI flake rather than theoretical.
     const fixture = session();
@@ -140,6 +140,26 @@ describe("hydrateStoredSession — a record stored before the surface", () => {
 });
 
 /**
+ * A record stored before rooms persisted (#18): it carries the clock, and from
+ * the same change the plan cap. Both are stripped rather than defaulted,
+ * because a missing clock IS the new state and a stored cap would be the stale
+ * mirror of capacityOf(manifest).
+ */
+describe("hydrateStoredSession — a record stored with a clock", () => {
+  it("strips expiresAt", () => {
+    const { events: _events, ...raw } = session();
+    const row = hydrateStoredSession({ ...raw, expiresAt: 1 })!;
+    expect(row).not.toHaveProperty("expiresAt");
+  });
+
+  it("strips maxMembers, so capacity is the manifest's from the next read", () => {
+    const { events: _events, ...raw } = session();
+    const row = hydrateStoredSession({ ...raw, maxMembers: 8 })!;
+    expect(row).not.toHaveProperty("maxMembers");
+  });
+});
+
+/**
  * A record written before blobs (#183): it has no `blobBytes`. The key is
  * ABSENT, not undefined, which is what Durable Object storage hands back.
  */
@@ -157,7 +177,7 @@ describe("hydrateStoredSession — a record stored before blobs", () => {
     expect(hydrateStoredSession({ ...raw, blobBytes: 4096 })!.blobBytes).toBe(4096);
   });
 
-  /** A room written before the ceiling existed reads the free plan's: conservative, and it expires with the room. */
+  /** A room written before the ceiling existed reads the free plan's: conservative, and it ends with the room. */
   it("reads a missing blobBytesCeiling as the free ceiling, and leaves a stamped one alone", () => {
     const { events: _events, blobBytesCeiling: _ceiling, ...raw } = session();
     expect("blobBytesCeiling" in raw).toBe(false);

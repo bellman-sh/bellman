@@ -88,17 +88,8 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.modes).toContain("swarm");
   });
 
-  /**
-   * max buys team's room size for one person, so members may tie at the top;
-   * lifetime and quota still step up to team.
-   */
-  it("raises member ceilings, TTLs and quotas monotonically by plan", () => {
-    expect(ENTITLEMENTS.free.maxMembers).toBeLessThan(ENTITLEMENTS.pro.maxMembers);
-    expect(ENTITLEMENTS.pro.maxMembers).toBeLessThan(ENTITLEMENTS.max.maxMembers);
-    expect(ENTITLEMENTS.max.maxMembers).toBeLessThanOrEqual(ENTITLEMENTS.team.maxMembers);
-    expect(ENTITLEMENTS.free.sessionTtlMs).toBeLessThan(ENTITLEMENTS.pro.sessionTtlMs);
-    expect(ENTITLEMENTS.pro.sessionTtlMs).toBeLessThan(ENTITLEMENTS.max.sessionTtlMs);
-    expect(ENTITLEMENTS.max.sessionTtlMs).toBeLessThan(ENTITLEMENTS.team.sessionTtlMs);
+  /** max sells creates between pro and team; nothing else steps. */
+  it("raises quotas monotonically by plan", () => {
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
     expect(ENTITLEMENTS.pro.monthlyCreates).toBeLessThan(ENTITLEMENTS.max.monthlyCreates);
     expect(ENTITLEMENTS.max.monthlyCreates).toBeLessThan(ENTITLEMENTS.team.monthlyCreates);
@@ -108,10 +99,19 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
-  it("gives max the team-sized room: 25 members for 14 days, 2,000 a month (#45)", () => {
-    expect(ENTITLEMENTS.max.maxMembers).toBe(25);
-    expect(ENTITLEMENTS.max.sessionTtlMs).toBe(14 * 24 * 60 * 60 * 1000);
-    expect(ENTITLEMENTS.max.monthlyCreates).toBe(2000);
+  /**
+   * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
+   * differs from pro by creates and the blob ceiling alone; hosted agents (#188, #189) are the facet
+   * that will set it apart, and landing one is a deliberate edit to this line.
+   */
+  it("gives max nothing but creates and the blob ceiling over pro, until it has a facet", () => {
+    const { monthlyCreates: maxCreates, blobBytesPerRoom: maxBlobs, ...maxRest } = ENTITLEMENTS.max;
+    const { monthlyCreates: proCreates, blobBytesPerRoom: proBlobs, ...proRest } = ENTITLEMENTS.pro;
+    expect(maxRest).toEqual(proRest);
+    expect(maxCreates).toBe(2000);
+    expect(proCreates).toBe(500);
+    expect(maxBlobs).toBe(5 * 1024 * 1024 * 1024);
+    expect(proBlobs).toBe(500 * 1024 * 1024);
   });
 
   /** The reason a company with several people creating rooms still buys team. */
@@ -140,7 +140,7 @@ describe("plan entitlements", () => {
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "maxMembers", "sessionTtlMs", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
+      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
     ].sort();
 
     for (const plan of plans) {

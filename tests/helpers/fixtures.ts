@@ -68,12 +68,19 @@ export function session(over: Partial<Session> = {}): Session {
     orgId: "org_codenerd",
     orgOnly: false,
     joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
-    expiresAt: now + 4 * 60 * 60 * 1000,
-    maxMembers: 2,
     blobBytesCeiling: ENTITLEMENTS.team.blobBytesPerRoom,
     members: [member()],
     events: [],
     closed: false,
     ...over,
   };
+}
+
+/**
+ * The pair fixture's roles in a room that holds the ceiling. `capacityOf` reads
+ * the mode and nothing else, so this is how a test gets a spare seat beyond two
+ * without changing the seats it already names.
+ */
+export function swarmSession(over: Partial<Session> = {}): Session {
+  return session({ manifest: roomManifest({ mode: "swarm", preset: null }), ...over });
 }

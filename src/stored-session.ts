@@ -75,7 +75,7 @@ export interface StoredSession extends Omit<Session, "events"> {
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Seven changes to the stored shape landed after the sessions now in production
+ * Eight changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -102,14 +102,18 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
+ * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
+ *   clock is the state every row is in now, and capacity is `capacityOf(manifest)`,
+ *   so a stored cap would be the stale mirror the Session type forbids. A swarm
+ *   room created under an 8- or 25-member cap holds the ceiling from its next read.
  * - **blobBytes** (#183) defaults to `0`: a room written before blobs existed
  *   has been charged nothing, which is what 0 says.
  * - **blobBytesCeiling** (#183) defaults to the free plan's ceiling. A room
  *   written before the field was stamped from no plan, so the conservative
- *   number is the honest one, and it expires with the room rather than being
+ *   number is the honest one, and it ends with the room rather than being
  *   migrated.
  *
- * All seven live here, in one gate, rather than in separate functions that could drift.
+ * All eight live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -119,8 +123,10 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
 
   const {
-    joinCode, joinCodeExpiresAt, ...row
-  } = raw as StoredSession & { joinCode?: string | null; joinCodeExpiresAt?: number };
+    joinCode, joinCodeExpiresAt, expiresAt: _clock, maxMembers: _cap, ...row
+  } = raw as StoredSession & {
+    joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number; maxMembers?: number;
+  };
 
   return {
     ...row,

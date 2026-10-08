@@ -3,9 +3,10 @@
  *
  * `/ws` is two invocations of one object: `membersOf`, which authorizes the watch,
  * and then `fetch`, which accepts the socket. The input gate makes each atomic and
- * says nothing about the pair, so a close — or the TTL alarm — lands in the gap, and
- * before this fix `fetch` never looked again. The socket was accepted onto a closed
- * room and stayed, because the close that would have ended it had already happened.
+ * says nothing about the pair, so a close — or the abandonment alarm — lands in the
+ * gap, and before this fix `fetch` never looked again. The socket was accepted onto a
+ * closed room and stayed, because the close that would have ended it had already
+ * happened.
  *
  * The refusal that defeats is deliberate and stricter than the poll path's. A
  * `bellman_sync` onto a closed room is served and lasts 25 seconds; `/ws` refuses,
@@ -34,8 +35,9 @@ import {
   env, SELF, reset, abortAllDurableObjects, runInDurableObject,
 } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import type { Session } from "../src/types.js";
-import { session } from "../tests/helpers/fixtures.js";
+import { member, session } from "../tests/helpers/fixtures.js";
 
 /** The key worker-tests/vitest.config.ts binds. Its identity is the creator fixtures.ts seats. */
 const KEY = "qk_ws_test";
@@ -149,18 +151,18 @@ describe("an upgrade overtaken by a close", () => {
     await expectRefused(await res, stub);
   });
 
-  it("is refused when the room lapses past its TTL while the upgrade waits", async () => {
+  it("is refused when the room's window closes while the upgrade waits", async () => {
     // The window the issue calls the likeliest, and no close is called at all: the
-    // clock simply crosses expiresAt. membersOf read the room before it, the recheck
+    // clock simply crosses abandonedAt. membersOf read the room before it, the recheck
     // runs after. Whether the alarm also got in and wrote closed=true is neither
     // asserted nor needed — either way the room reads closed and the refusal is one.
-    const expiresAt = Date.now() + 500;
-    const { id, stub } = await room({ expiresAt });
+    const due = Date.now() + 500;
+    const { id, stub } = await room({ members: [member({ lastSeenAt: due - ABANDONED_AFTER_MS })] });
     const hold = await holdTheUpgrade(id);
 
     const res = upgrade(id);
     await until(() => hold.held, "the upgrade to reach the object");
-    await until(() => Date.now() > expiresAt, "the room's TTL to pass", 5_000);
+    await until(() => Date.now() > due, "the room's window to close", 5_000);
 
     hold.release();
     await expectRefused(await res, stub);

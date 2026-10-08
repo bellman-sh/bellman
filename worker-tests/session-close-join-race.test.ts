@@ -135,7 +135,7 @@ afterEach(async () => {
 /** An empty room that is still open: the creator has left and nobody has closed it. */
 async function emptyRoom(): Promise<DurableObjectStore> {
   const store = new DurableObjectStore(env as never);
-  await store.createSession(session({ id: ROOM, maxMembers: 3, members: [member({ leftAt: Date.now() })] }));
+  await store.createSession(session({ id: ROOM, members: [member({ leftAt: Date.now() })] }));
   return store;
 }
 

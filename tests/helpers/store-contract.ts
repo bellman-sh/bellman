@@ -16,13 +16,14 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { BellmanStore, EventBody, RemovalRequest } from "../../src/store.js";
-import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL } from "../../src/store.js";
+import { JOIN_CODE_TTL, CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
+import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed } from "../../src/blobs.js";
-import type { SurfaceItem } from "../../src/types.js";
-import { member, oneCode, roomManifest, session } from "./fixtures.js";
+import type { Session, SurfaceItem } from "../../src/types.js";
+import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /**
  * Cases an implementation cannot pass, each mapped to the reason it cannot.
@@ -114,13 +115,13 @@ export function describeStoreContract(
       read.closed = true;
       read.members.push(member({ memberId: "m_smuggled" }));
       read.members[0].brief.goal = "mutated";
-      read.maxMembers = 999;
+      read.orgOnly = true;
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(false);
       expect(fresh.members).toHaveLength(1);
       expect(fresh.members[0].brief.goal).not.toBe("mutated");
-      expect(fresh.maxMembers).toBe(2);
+      expect(fresh.orgOnly).toBe(false);
     });
 
     it("does not let the caller's original object mutate stored state either", async () => {
@@ -401,6 +402,15 @@ export function describeStoreContract(
       expect(connected.size).toBe(0);
     });
 
+    /**
+     * The seatMember cases' clock. `at(n)` is n ms past a base 9,000,000 ms before the
+     * suite's clock, so the rosters keep their arithmetic (stale before 1,000,000,
+     * seated at 9,000,000) and sit inside the 90-day window. Dated from the epoch they
+     * read as abandoned (#18), and a Durable Object's alarm closes an abandoned room as
+     * soon as it is created, before the seat is asked for.
+     */
+    const at = (n: number) => Date.now() - 9_000_000 + n;
+
     it("seatMember seats the joiner, reclaiming the stale seat in one operation", async () => {
       // The production join path. Read-then-write capacity was the bug: two
       // confirms agreeing on one seat overfill the room, and a sync landing in
@@ -408,8 +418,8 @@ export function describeStoreContract(
       // every store has to decide and write without yielding.
       const s = session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: at(1) }),
         ],
       });
       (await store.createSession(s));
@@ -417,31 +427,30 @@ export function describeStoreContract(
       const outcome = await store.seatMember(
         s.id,
         member({ memberId: "m_late", userId: "u_late", roomRole: "peer_b" }),
-        1_000_000,
-        9_000_000,
+        at(1_000_000),
+        at(9_000_000),
       );
 
       expect(outcome.refused).toBeNull();
       expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_peer"]);
       // Reported with leftAt already set, so the caller announces a removal
       // that happened rather than one it predicted.
-      expect(outcome.reclaimed[0].leftAt).toBe(9_000_000);
+      expect(outcome.reclaimed[0].leftAt).toBe(at(9_000_000));
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(at(9_000_000));
       expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
     });
 
     it("seatMember seats into a room with a spare seat, reclaiming nobody", async () => {
       const s = session({
-        maxMembers: 5,
-        members: [member({ memberId: "m_quiet", lastSeenAt: 1 })],
+        members: [member({ memberId: "m_quiet", lastSeenAt: at(1) })],
       });
       (await store.createSession(s));
 
       const outcome = await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       );
 
       expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
@@ -454,14 +463,14 @@ export function describeStoreContract(
     it("seatMember refuses a full room of present members, reclaiming nobody", async () => {
       const s = session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 2_000_000 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: at(2_000_000) }),
         ],
       });
       (await store.createSession(s));
 
       expect(await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members).toHaveLength(2);
     });
@@ -469,8 +478,8 @@ export function describeStoreContract(
     it("seatMember refuses a frozen room, and a closed one, reclaiming nobody", async () => {
       const stale = () => session({
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: 1 }),
+          member({ memberId: "m_creator", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_peer", userId: "u_peer", lastSeenAt: at(1) }),
         ],
       });
       const frozen = stale();
@@ -482,7 +491,7 @@ export function describeStoreContract(
       // appendEvent returns null, so reaping here would remove members
       // permanently AND silently from a state meant to be reversible.
       expect(await store.seatMember(
-        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "frozen", reclaimed: [], codesCleared: false });
       expect((await store.getSession(frozen.id))!.members
         .find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
@@ -490,17 +499,16 @@ export function describeStoreContract(
       (await store.freezeSession(frozen.id, null));
       (await store.closeSession(frozen.id));
       expect((await store.seatMember(
-        frozen.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        frozen.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).refused).toBe("closed");
     });
 
     it("seatMember refuses rather than freeing some of the seats a joiner needs", async () => {
       const s = session({
-        maxMembers: 2,
         members: [
-          member({ memberId: "m_a", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_b", userId: "u_b", lastSeenAt: 2_000_000 }),
-          member({ memberId: "m_c", userId: "u_c", lastSeenAt: 1 }),
+          member({ memberId: "m_a", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_b", userId: "u_b", lastSeenAt: at(2_000_000) }),
+          member({ memberId: "m_c", userId: "u_c", lastSeenAt: at(1) }),
         ],
       });
       (await store.createSession(s));
@@ -509,7 +517,7 @@ export function describeStoreContract(
       // only one is reclaimable. A partial reap would remove a member for
       // somebody who never got in.
       expect(await store.seatMember(
-        s.id, member({ memberId: "m_late", userId: "u_late" }), 1_000_000, 9_000_000
+        s.id, member({ memberId: "m_late", userId: "u_late" }), at(1_000_000), at(9_000_000)
       )).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt !== null))
         .toEqual([]);
@@ -558,7 +566,6 @@ export function describeStoreContract(
       // shut one and leave the other redeemable.
       const doors = { ...oneCode("BELL-LIVE-01", "peer_b"), ...oneCode("BELL-LIVE-02", "peer_a") };
       const s = session({
-        maxMembers: 2,
         joinCodes: doors,
         members: [member({ memberId: "m_creator" })],
       });
@@ -583,10 +590,11 @@ export function describeStoreContract(
       // asked after the seat.
       const doors = oneCode("BELL-LIVE-01");
       const s = session({
-        maxMembers: 2,
         joinCodes: doors,
         members: [
-          member({ memberId: "m_creator", lastSeenAt: 2_000_000 }),
+          // Fresh on the store's clock as well as the call's: a room whose members
+          // were all last seen before the window is abandoned at the first read (#18).
+          member({ memberId: "m_creator", lastSeenAt: Date.now() }),
           member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: 1 }),
         ],
       });
@@ -608,12 +616,14 @@ export function describeStoreContract(
       // leftAt is null reads this room as full and would retire the code, locking out
       // somebody who could have been seated.
       const doors = oneCode("BELL-LIVE-01");
+      // Quiet by the call's reckoning and inside the 90 days a room is kept: a room
+      // whose members are all older than that is abandoned at the first read (#18).
+      const quiet = Date.now() - 60_000;
       const s = session({
-        maxMembers: 2,
         joinCodes: doors,
         members: [
-          member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
-          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+          member({ memberId: "m_quiet_a", lastSeenAt: quiet }),
+          member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: quiet + 1 }),
         ],
       });
       await store.createSession(s);
@@ -622,7 +632,7 @@ export function describeStoreContract(
       // Both seats are stale, so this joiner reclaims ONE, the longest quiet, and the
       // other stays occupied but reclaimable. Had both members been fresh after the
       // seating, that would be the other case, and it DOES retire the code.
-      const outcome = await store.seatMember(s.id, late(), 1_000_000, 9_000_000);
+      const outcome = await store.seatMember(s.id, late(), Date.now() - 1_000, 9_000_000);
 
       expect(outcome.refused).toBeNull();
       expect(outcome.reclaimed.map((m) => m.memberId)).toEqual(["m_quiet_a"]);
@@ -638,8 +648,7 @@ export function describeStoreContract(
 
     it("seatMember leaves the codes alone when a seat is still spare", async () => {
       const doors = oneCode("BELL-LIVE-01");
-      const s = session({
-        maxMembers: 5,
+      const s = swarmSession({
         joinCodes: doors,
         members: [member({ memberId: "m_creator" })],
       });
@@ -654,12 +663,11 @@ export function describeStoreContract(
     });
 
     it("seatMember does not count a member who has left toward a full room", async () => {
-      // Three seats, a creator, one member already gone, and the joiner: three rows
-      // and two undeparted members, so a seat is spare. A store counting rows reads
-      // this room as full.
+      // A creator, one member already gone, and the joiner: three rows and two
+      // undeparted members, in a room that holds the ceiling, so a seat is spare and
+      // the door stays open.
       const doors = oneCode("BELL-LIVE-01");
-      const s = session({
-        maxMembers: 3,
+      const s = swarmSession({
         joinCodes: doors,
         members: [
           member({ memberId: "m_creator" }),
@@ -682,7 +690,6 @@ export function describeStoreContract(
       // nothing to retire: no registry write is owed, and a caller reading
       // `codesCleared` must not conclude that a door was shut.
       const s = session({
-        maxMembers: 2,
         joinCodes: {},
         members: [member({ memberId: "m_creator" })],
       });
@@ -708,7 +715,6 @@ export function describeStoreContract(
       // difference; see removeMember's expired-code cases for the other.
       const stale = { peer_b: { code: "BELL-STALE-1", expiresAt: Date.now() - 1 } };
       const s = session({
-        maxMembers: 2,
         joinCodes: stale,
         members: [member({ memberId: "m_creator" })],
       });
@@ -732,11 +738,18 @@ export function describeStoreContract(
     it.each([
       { refusal: "frozen", over: () => ({ frozenAt: Date.now() }) },
       { refusal: "closed", over: () => ({ closed: true }) },
-      { refusal: "full", over: () => ({ maxMembers: 1 }) },
+      {
+        refusal: "full",
+        over: () => ({
+          members: [
+            member({ memberId: "m_creator", lastSeenAt: Date.now() }),
+            member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: Date.now() }),
+          ],
+        }),
+      },
     ])("seatMember clears no codes when it refuses a $refusal room", async ({ refusal, over }) => {
       const doors = oneCode("BELL-LIVE-01");
       const s = session({
-        maxMembers: 2,
         joinCodes: doors,
         members: [member({ memberId: "m_creator", lastSeenAt: Date.now() })],
         ...over(),
@@ -750,7 +763,21 @@ export function describeStoreContract(
       expect(outcome).toEqual({ refused: refusal, reclaimed: [], codesCleared: false });
       const after = (await store.getSession(s.id))!;
       expect(after.joinCodes, "the door is untouched").toEqual(doors);
-      expect(after.members.map((m) => m.memberId), "nobody was seated").toEqual(["m_creator"]);
+      expect(after.members.map((m) => m.memberId), "nobody was seated").not.toContain("m_late");
+    });
+
+    it("seatMember seats a 100th member into a swarm room and refuses a 101st", async () => {
+      const present = (i: number) =>
+        member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "peer_b", lastSeenAt: Date.now() });
+      const s = swarmSession({ members: Array.from({ length: ROOM_MEMBER_CEILING - 1 }, (_, i) => present(i)) });
+      (await store.createSession(s));
+
+      const hundredth = await store.seatMember(s.id, present(100), 1, Date.now());
+      const beyond = await store.seatMember(s.id, present(101), 1, Date.now());
+
+      expect(hundredth).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      expect(beyond).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
+      expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt === null)).toHaveLength(ROOM_MEMBER_CEILING);
     });
 
     it("updateMember patches lastSeenAt on its own", async () => {
@@ -857,7 +884,6 @@ export function describeStoreContract(
       // One gone and one still in is not an empty room, and the one who stays
       // leaving is what empties it.
       const s = session({
-        maxMembers: 3,
         members: [
           member({ leftAt: Date.now() }),
           member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" }),
@@ -950,7 +976,7 @@ export function describeStoreContract(
       { first: "close", second: "join" },
       { first: "join", second: "close" },
     ])("lets exactly one of a close and a join win when started together, $first first", async ({ first }) => {
-      const s = session({ maxMembers: 3, members: [member({ leftAt: Date.now() })] });
+      const s = session({ members: [member({ leftAt: Date.now() })] });
       (await store.createSession(s));
       const joiner = member({ memberId: "m_late", userId: "u_peer", roomRole: "peer_b" });
       const close = () => store.closeSessionIfEmpty(s.id);
@@ -2074,12 +2100,12 @@ export function describeStoreContract(
         expect(await store.chargeBlobBytes("qs_nobody", 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
       });
 
-      // Against MemoryStore this reaches `expireIfDue`. Against the Durable Object it reaches
-      // `s.closed` and not the TTL read: the alarm has closed a room created already past its
-      // TTL before the charge arrives. The room past its TTL with the alarm still to come, which
-      // is what `readsClosed` answers for, is pinned in worker-tests/blob-charge.test.ts.
-      it("reads a room past its TTL as closed", async () => {
-        const s = session({ expiresAt: Date.now() - 1 });
+      // Against MemoryStore this reaches `closeIfAbandoned`. Against the Durable Object it
+      // reaches `s.closed` and not the abandonment read: the alarm has closed a room created
+      // already abandoned before the charge arrives. The abandoned room with the alarm still to
+      // come, which is what `readsClosed` answers for, is pinned in worker-tests/blob-charge.test.ts.
+      it("reads an abandoned room as closed", async () => {
+        const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 })] });
         await store.createSession(s);
         expect(await store.chargeBlobBytes(s.id, 1)).toMatchObject({ ok: false, reason: "closed" });
       });
@@ -3001,48 +3027,115 @@ export function describeStoreContract(
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
     });
 
-    // ----------------------------------------------------------------- sweep
-    it("sweep expires a session past its TTL and emits session_expired", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    // ------------------------------------------------------- abandonment (#18)
+    /** Last heard from a millisecond past the window: nobody has been in for 90 days. */
+    const AGED = () => Date.now() - ABANDONED_AFTER_MS - 1;
+    const abandonedRoom = (over: Partial<Session> = {}) =>
+      session({ members: [member({ lastSeenAt: AGED() })], ...over });
+
+    it("sweep closes a room nobody has been in for 90 days, retires its codes and says since when", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
 
-      vi.advanceTimersByTime(1_001);
       (await store.sweep(Date.now()));
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(true);
       expect(fresh.joinCodes).toEqual({});
       // Read after getSession, not before it: DurableObjectStore.sweep is a
-      // no-op, so there it is the read above that expires the session and
-      // writes this event. getSession no longer carries history (#25).
-      expect((await store.eventsAfter(s.id, 0)).at(-1)?.type).toBe("session_expired");
+      // no-op, so there it is the read above that closes the room and writes
+      // this event. getSession no longer carries history (#25).
+      const last = (await store.eventsAfter(s.id, 0)).at(-1)!;
+      expect(last.type).toBe("session_expired");
+      // The fact the decision was made on, so a client can say "closed, nobody
+      // since <date>" rather than "closed".
+      expect(last.payload).toEqual({ reason: "abandoned", last_seen_at: new Date(AGED()).toISOString() });
       expect((await store.getSessionByJoinCode("BELL-TEST-01"))).toBeUndefined();
     });
 
-    it("sweep is idempotent — one expiry event, not one per sweep", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    it("sweep is idempotent — one closing event, not one per sweep", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
 
-      vi.advanceTimersByTime(1_001);
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
 
       // The read comes first and is not incidental: DurableObjectStore.sweep is a
-      // no-op, so there this read is what expires the session, and the events
-      // below would be empty without it.
+      // no-op, so there this read is what closes the room, and the events below
+      // would be empty without it.
       await store.getSession(s.id);
-      const expired = (await store.eventsAfter(s.id, 0)).filter(
-        (e) => e.type === "session_expired",
-      );
+      const expired = (await store.eventsAfter(s.id, 0)).filter((e) => e.type === "session_expired");
       expect(expired).toHaveLength(1);
     });
 
-    it("expires a due session lazily on read, without waiting for a sweep", async () => {
-      const s = session({ expiresAt: Date.now() + 1_000 });
+    it("closes an abandoned room lazily on read, without waiting for a sweep", async () => {
+      const s = abandonedRoom();
       (await store.createSession(s));
-      vi.advanceTimersByTime(1_001);
       expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("keeps a room open while one active member was seen inside the window", async () => {
+      const s = session({ members: [
+        member({ lastSeenAt: AGED() }),
+        member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", lastSeenAt: Date.now() - 1_000 }),
+      ] });
+      (await store.createSession(s));
+      (await store.sweep(Date.now()));
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+    });
+
+    it("keeps a room open at exactly 90 days, and closes it a millisecond later", async () => {
+      const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS })] });
+      (await store.createSession(s));
+      expect((await store.getSession(s.id))?.closed, "at the boundary").toBe(false);
+
+      vi.advanceTimersByTime(1);
+      expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("never sweeps a frozen room, however long it has been frozen", async () => {
+      const s = abandonedRoom({ frozenAt: Date.now() - ABANDONED_AFTER_MS });
+      (await store.createSession(s));
+      (await store.sweep(Date.now()));
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.closed).toBe(false);
+      expect(fresh.frozenAt).not.toBeNull();
+      expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+    });
+
+    it("a thaw stamps every active member as seen now, so the room gets a full window back", async () => {
+      // Frozen past the window, with one member who left before the freeze: the
+      // thaw credits the active member and leaves the departed one alone.
+      const s = session({
+        frozenAt: Date.now() - 1_000,
+        members: [
+          member({ lastSeenAt: AGED() }),
+          member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", lastSeenAt: AGED(), leftAt: AGED() }),
+        ],
+      });
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, null));
+
+      const fresh = (await store.getSession(s.id))!;
+      expect(fresh.closed).toBe(false);
+      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt]))
+        .toEqual([["m_creator", Date.now()], ["m_gone", AGED()]]);
+      // And the sweep agrees: the window restarted at the thaw.
+      (await store.sweep(Date.now()));
+      expect((await store.getSession(s.id))?.closed).toBe(false);
+    });
+
+    it("a thaw of a room that was not frozen stamps nobody", async () => {
+      // The credit is paid on the transition, as clearSilence's is: a retried
+      // freezeSession(null) must not keep a quiet room alive for good.
+      const s = abandonedRoom();
+      (await store.createSession(s));
+
+      (await store.freezeSession(s.id, null));
+
+      expect((await store.getSession(s.id))?.closed, "the sweep still sees it as abandoned").toBe(true);
     });
 
     it("sweep drops expired pending connects", async () => {

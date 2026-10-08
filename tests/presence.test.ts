@@ -2,18 +2,20 @@
  * #103: a member whose session died held its seat forever.
  *
  * `leftAt` records a goodbye, and a crash does not say goodbye, so a `pair`
- * room whose peer's laptop closed read as full for the rest of its TTL — and
- * #18 made TTLs long. These tests pin the two halves of the fix: the derived
- * presence reading, and the seat actually coming back.
+ * room whose peer's laptop closed read as full for as long as the room lived,
+ * and #18 made rooms persist: a room now ends when its last member leaves, or
+ * after 90 days in which nobody in it was seen. These tests pin the two halves
+ * of the fix: the derived presence reading, and the seat actually coming back.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
-  STALE_AFTER_MS, lastSeen, presenceOf, presentMembers, staleMembers,
+  ABANDONED_AFTER_MS, STALE_AFTER_MS, abandonedAt, isAbandoned, lastSeen, presenceOf,
+  presentMembers, staleMembers,
 } from "../src/presence.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
-import { MemoryStore, seatVictims } from "../src/store.js";
+import { MemoryStore, ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/store.js";
 import type { Identity } from "../src/types.js";
-import { member, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
 import { brief, manifestFixture } from "./helpers/fixtures.js";
@@ -240,7 +242,7 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     expect(second.refused).toBe("full");
     expect(second.reclaimed).toEqual([]);
     const room = await read();
-    expect(seatedMembers(room)).toHaveLength(room.maxMembers);
+    expect(seatedMembers(room)).toHaveLength(2);
     expect(room.members.filter((m) => m.leftAt !== null)).toHaveLength(1);
   });
 
@@ -281,25 +283,16 @@ describe("seatMember claims the seat and frees it in one operation", () => {
       .toEqual({ refused: "not_found", reclaimed: [], codesCleared: false });
   });
 
-  it("does not close the room when it reclaims its last member", async () => {
-    await store.createSession(session({
-      maxMembers: 1, members: [member({ memberId: "m_only", lastSeenAt: 1 })],
-    }));
-
-    expect((await seat()).reclaimed.map((m) => m.memberId)).toEqual(["m_only"]);
-
-    // The joiner is seated in the same operation, so the room is never empty.
-    expect((await read()).closed).toBe(false);
-    expect(seatedMembers(await read()).map((m) => m.memberId)).toEqual(["m_late"]);
-  });
-
   it("leaves the join code alone when the reclaim does not fill the room — freeing the seat is the whole point", async () => {
     // Both seats are stale, so the joiner takes one and the other is still
     // reclaimable: a further joiner would get in, and the code is how they would.
+    // Stale, but inside the 90 days a room is kept: members last seen at the epoch
+    // would have the room abandoned at the first read (#18).
+    const quiet = Date.now() - STALE_AFTER_MS - 2;
     await store.createSession(session({
       members: [
-        member({ memberId: "m_quiet_a", lastSeenAt: 1 }),
-        member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+        member({ memberId: "m_quiet_a", lastSeenAt: quiet }),
+        member({ memberId: "m_quiet_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: quiet + 1 }),
       ],
     }));
     const planted = (await read()).joinCodes;
@@ -335,10 +328,21 @@ describe("seatMember claims the seat and frees it in one operation", () => {
 
 describe("touchMember", () => {
   let store: MemoryStore;
-  beforeEach(() => { store = new MemoryStore(); });
+  // The store reads the clock to decide whether a room is abandoned (#18), so the
+  // clock is NOW: a member seeded at the epoch closes its own room on the first read,
+  // and touchMember then refuses it for being closed, whatever else is under test.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    store = new MemoryStore();
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** Quiet for a whole window: past the half that touchMember waits out, inside the 90 days a room is kept. */
+  const QUIET = NOW - STALE_AFTER_MS;
 
   const seed = async (over: Parameters<typeof member>[0] = {}) => {
-    await store.createSession(session({ members: [member({ lastSeenAt: 1, ...over })] }));
+    await store.createSession(session({ members: [member({ lastSeenAt: QUIET, ...over })] }));
     const s = (await store.getSession("qs_test"))!;
     return { session: s, me: s.members[0] };
   };
@@ -375,7 +379,7 @@ describe("touchMember", () => {
 
     await touchMember(store, s, me, NOW);
 
-    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(1);
+    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(QUIET);
   });
 
   it("writes nothing to a frozen or closed room", async () => {
@@ -386,7 +390,7 @@ describe("touchMember", () => {
 
     // bellman_sync has no closed, frozen or leftAt guard on purpose — reads
     // stay open to all three — so the write needs its own.
-    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(1);
+    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(QUIET);
   });
 
   it("swallows a store failure rather than failing the call it rode in on", async () => {
@@ -661,5 +665,106 @@ describe("the seat comes back", () => {
     expect(room.members.find((m) => m.memberId === joinerMemberId)?.leftAt).toBeNull();
     expect(await h.store.eventsAfter(sessionId, 0))
       .not.toContainEqual(expect.objectContaining({ type: "member_timed_out" }));
+  });
+});
+
+describe("abandonment is derived from the members' presence (#18)", () => {
+  const WINDOW_AGO = NOW - ABANDONED_AFTER_MS;
+
+  it("is 90 days", () => {
+    expect(ABANDONED_AFTER_MS).toBe(90 * 24 * 60 * 60 * 1000);
+  });
+
+  it("falls 90 days after the last time any active member was seen", () => {
+    const s = session({ members: [
+      member({ memberId: "m_a", lastSeenAt: NOW - 5_000 }),
+      member({ memberId: "m_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: NOW - 1_000 }),
+    ] });
+    expect(abandonedAt(s)).toBe(NOW - 1_000 + ABANDONED_AFTER_MS);
+  });
+
+  it("does not count a departed member, however recently it spoke", () => {
+    const s = session({ members: [
+      member({ memberId: "m_quiet", lastSeenAt: 1 }),
+      member({ memberId: "m_gone", userId: "u_gone", roomRole: "peer_b", lastSeenAt: NOW, leftAt: NOW - 1 }),
+    ] });
+    expect(abandonedAt(s)).toBe(1 + ABANDONED_AFTER_MS);
+  });
+
+  it("lifts a member stored before lastSeenAt existed to its joinedAt", () => {
+    const legacy = member({ joinedAt: NOW - 1_000 });
+    delete (legacy as { lastSeenAt?: number }).lastSeenAt;
+    expect(abandonedAt(session({ members: [legacy] }))).toBe(NOW - 1_000 + ABANDONED_AFTER_MS);
+  });
+
+  it("is null for a closed, a frozen, and an empty room", () => {
+    const quiet = member({ lastSeenAt: 1 });
+    expect(abandonedAt(session({ members: [quiet], closed: true }))).toBeNull();
+    expect(abandonedAt(session({ members: [quiet], frozenAt: NOW }))).toBeNull();
+    // Empty is closeSessionIfEmpty's, not the sweep's.
+    expect(abandonedAt(session({ members: [member({ leftAt: 5 })] }))).toBeNull();
+    expect(abandonedAt(session({ members: [] }))).toBeNull();
+  });
+
+  it("is not abandoned at the boundary and is one millisecond past it", () => {
+    const s = session({ members: [member({ lastSeenAt: WINDOW_AGO })] });
+    expect(isAbandoned(s, NOW)).toBe(false);
+    expect(isAbandoned(s, NOW + 1)).toBe(true);
+  });
+
+  it("is never abandoned while a socket vouches for an active member", () => {
+    const s = session({ members: [member({ memberId: "m_socket", lastSeenAt: 1 })] });
+    expect(isAbandoned(s, NOW), "control: with no socket it is").toBe(true);
+    expect(isAbandoned(s, NOW, new Set(["m_socket"]))).toBe(false);
+  });
+
+  it("is abandoned when the only socket belongs to a member who left", () => {
+    const s = session({ members: [
+      member({ memberId: "m_quiet", lastSeenAt: 1 }),
+      member({ memberId: "m_left", userId: "u_left", roomRole: "peer_b", lastSeenAt: NOW, leftAt: NOW - 1 }),
+    ] });
+    expect(isAbandoned(s, NOW, new Set(["m_left"]))).toBe(true);
+  });
+
+  it("is never abandoned when nothing says when it would be", () => {
+    expect(isAbandoned(session({ members: [member({ lastSeenAt: 1 })], frozenAt: NOW }), NOW)).toBe(false);
+  });
+});
+
+describe("stampSeen", () => {
+  it("moves every active member's lastSeenAt and leaves a departed one alone", () => {
+    const stamped = stampSeen([
+      member({ memberId: "m_a", lastSeenAt: 1 }),
+      member({ memberId: "m_gone", lastSeenAt: 1, leftAt: 5 }),
+    ], NOW);
+    expect(stamped.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_a", NOW], ["m_gone", 1]]);
+  });
+
+  it("stamps only the members named, when asked to", () => {
+    const stamped = stampSeen([
+      member({ memberId: "m_a", lastSeenAt: 1 }),
+      member({ memberId: "m_b", userId: "u_b", roomRole: "peer_b", lastSeenAt: 2 }),
+    ], NOW, new Set(["m_b"]));
+    expect(stamped.map((m) => m.lastSeenAt)).toEqual([1, NOW]);
+  });
+
+  it("returns new objects and does not write into the roster it was handed", () => {
+    const roster = [member({ memberId: "m_a", lastSeenAt: 1 })];
+    const stamped = stampSeen(roster, NOW);
+    expect(roster[0].lastSeenAt).toBe(1);
+    expect(stamped[0]).not.toBe(roster[0]);
+  });
+});
+
+describe("capacity is the manifest's (#18)", () => {
+  it("is two for a pair room and the ceiling for a swarm room", () => {
+    expect(capacityOf(roomManifest())).toBe(2);
+    expect(capacityOf(roomManifest({ mode: "swarm" }))).toBe(ROOM_MEMBER_CEILING);
+  });
+
+  it("puts the ceiling at 100, which a room of maximal briefs keeps under one stored value", () => {
+    // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
+    // of a 2 MB Durable Object value. 250 would be 3.7 MB.
+    expect(ROOM_MEMBER_CEILING).toBe(100);
   });
 });

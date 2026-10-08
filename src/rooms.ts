@@ -14,11 +14,14 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, SessionEvent, Verb } from "./types.js";
+import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
-import { JOIN_CODE_TTL, isActiveMember, type AppendExtras, type BellmanStore, type EventBody } from "./store.js";
+import {
+  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember,
+  type AppendExtras, type BellmanStore, type EventBody,
+} from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
@@ -91,6 +94,18 @@ export function seatedMembers(
   connected: ReadonlySet<string> = NO_SOCKETS,
 ): Member[] {
   return presentMembers(s.members, now, connected);
+}
+
+/**
+ * Why a seat is refused, said for the room's shape. A pair room is two by its
+ * preset; a swarm room is at the ceiling, which is storage and the same on every
+ * plan, so the message says so rather than pointing at an upgrade that would not
+ * help. Every variant keeps the word "full": clients and tests match on it.
+ */
+export function fullMessage(manifest: RoomManifest): string {
+  return manifest.mode === "pair"
+    ? "session is full (2 members — a pair room holds two). Wait for someone to leave, or start a swarm session."
+    : `session is full: this room holds ${ROOM_MEMBER_CEILING} members, Bellman's ceiling for one room, the same on every plan. Wait for someone to leave, or start another room.`;
 }
 
 /**
@@ -526,11 +541,8 @@ export async function issueInvite(
   // to remove anybody. The `invite` verb is not the `evict` authority. Members on
   // a socket are counted for the same reason `seatMember` will not reclaim them.
   const connected = await store.connectedMembers(session.id);
-  if (seatedMembers(session, Date.now(), connected).length >= session.maxMembers) {
-    return refuse(
-      "conflict",
-      `session is full (${session.maxMembers} members) — a new code could not be used. Wait for someone to leave, or start a swarm session.`
-    );
+  if (seatedMembers(session, Date.now(), connected).length >= capacityOf(session.manifest)) {
+    return refuse("conflict", `a new code could not be used: ${fullMessage(session.manifest)}`);
   }
 
   const issuedRole = role ?? session.manifest.defaultRole;
@@ -616,7 +628,7 @@ export async function revokeInvite(
 
   // An expired code is not a live code, and nothing prunes joinCodes when a
   // code merely expires — only setJoinCode, consumeJoinCode, clearJoinCodes and
-  // the session-TTL sweep touch the map. So presence alone is not enough, or a
+  // the abandonment sweep touch the map. So presence alone is not enough, or a
   // bare revoke announces the closing of a door that had already shut by
   // itself: an event, an audit row, and over-reported roles.
   const retired = (role ? [role] : Object.keys(session.joinCodes)).filter((r) => {

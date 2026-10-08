@@ -30,14 +30,15 @@ Args:
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
     invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. revoke is likewise not self-scoped: a seat holding it may retire any role's code, not only its own. Give invite only to a seat you would trust with every seat's authority.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
-    room holds exactly 2 members; a "swarm" room holds up to your plan's member limit.
+    room holds exactly 2 members; a "swarm" room holds as many as you invite, up to
+    100 — Bellman's ceiling for one room, the same on every plan.
     The pair and review presets make pair rooms; the swarm preset makes a swarm room.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)} }
-Keep member_id — every subsequent call needs it. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)} }
+Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
 Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "swarm mode requires..." (plan), "org_only sessions require..." (plan), "org_only was set but..." (no org), "monthly session limit..." (quota).`,
@@ -102,10 +103,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         orgId: identity.orgId,
         orgOnly: org_only,
         joinCodes: { [manifest.defaultRole]: defaultCode },
-        expiresAt: now + ent.sessionTtlMs,
-        maxMembers: manifest.mode === "pair" ? 2 : ent.maxMembers,
-        // The room's own byte ceiling (#183), from the plan creating it, as the
-        // seat count and the TTL are. Nothing downstream asks a plan again.
+        // The room's own byte ceiling (#183), from the plan creating it. Nothing
+        // downstream asks a plan again.
         blobBytesCeiling: ent.blobBytesPerRoom,
         members: [creator],
         events: [],
@@ -125,14 +124,13 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // the URL alone, so sharing the link reveals nothing the code does not.
         join_url: joinUrl(defaultCode.code),
         join_code_expires_at: new Date(defaultCode.expiresAt).toISOString(),
-        session_expires_at: new Date(session.expiresAt).toISOString(),
         plan: identity.plan,
         // What the server recorded, seen from the creator's seat. Without it the
         // author of a manifest, especially one parsed from .bellman/room.yaml,
         // cannot see a preset or role that validated but is not what they meant.
         room: roomPreview(session, manifest.creatorRole),
         share_instructions:
-          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room takes more than one joiner; reissue a code with bellman_invite to add members later.`,
+          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room holds as many members as you invite, up to 100; reissue a code with bellman_invite to add members later.`,
       });
     }
   );

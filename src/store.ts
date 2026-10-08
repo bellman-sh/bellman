@@ -1,5 +1,6 @@
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, Session, SessionEvent, EventType, SurfaceRow,
+  AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
+  SurfaceRow,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import type { StoredSession } from "./stored-session.js";
@@ -84,6 +85,76 @@ export function connectedAmong(
     if (isActiveMember(m) && users.has(m.userId)) connected.add(m.memberId);
   }
   return connected;
+}
+
+/**
+ * How long a room may go with nobody in it before it is abandoned (#18).
+ *
+ * Rooms persist: there is no clock on a room, on any plan. What ends one is its
+ * last member leaving (`closeSessionIfEmpty`) or this: 90 days in which no
+ * active member was heard from or held a socket. An abandoned room costs
+ * storage and nothing else, and the member a hub room would most regret losing
+ * is its quietest one, so the window is long. It is not forever because a room
+ * whose every member died with its laptop should not sit in a Durable Object
+ * for good, and the sweep is also what retires its codes from the registry.
+ *
+ * Here beside `lastSeen`, and re-exported from presence.ts, for the reason
+ * `lastSeen` gives: both stores read these inside their own methods, and
+ * presence.ts imports this module.
+ */
+export const ABANDONED_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** What the abandonment rule reads: a session, or a stored one. */
+export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
+
+/**
+ * When this room becomes abandoned, or null if the question does not apply: a
+ * closed room is over, a frozen one is waiting on a payment and `touchMember`
+ * cannot stamp it, and an empty one is `closeSessionIfEmpty`'s. Departed members
+ * do not count: a goodbye yesterday does not keep open a room that nobody else
+ * has been in for a season.
+ */
+export function abandonedAt(s: RoomRoster): number | null {
+  if (s.closed || s.frozenAt !== null) return null;
+  const active = s.members.filter(isActiveMember);
+  if (active.length === 0) return null;
+  return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
+}
+
+/**
+ * Whether this room is abandoned now. `connected` is the members a live socket
+ * vouches for (`connectedAmong`): a member on a socket is there whatever its
+ * `lastSeenAt` says, so a room with one is never abandoned. Strict `>`, so a
+ * read landing exactly on `abandonedAt` still sees the room open.
+ *
+ * Shared by both stores' sweeps and lazy closes, SessionDO's derived alarm and
+ * every reader that answers "closed" without writing (`readsClosed`), so the
+ * four cannot drift the first time one of them is edited.
+ */
+export function isAbandoned(
+  s: RoomRoster,
+  now: number,
+  connected: ReadonlySet<string> = NO_SOCKETS,
+): boolean {
+  const due = abandonedAt(s);
+  if (due === null || now <= due) return false;
+  return !s.members.some((m) => isActiveMember(m) && connected.has(m.memberId));
+}
+
+/**
+ * The roster with `lastSeenAt` moved to `now` on every active member, or only
+ * on those named. New objects, so a caller's copy is not written into.
+ *
+ * Two callers. A thaw stamps every active member, so a room coming back from a
+ * freeze gets a full window rather than closing on the alarm the thaw re-arms.
+ * The abandonment alarm stamps the members a socket vouches for, which is the
+ * stamp `webSocketClose` makes on a drop (#152), made on a schedule: without it
+ * a room held open on one socket for a season would fire its alarm back to back.
+ */
+export function stampSeen(members: Member[], now: number, only?: ReadonlySet<string>): Member[] {
+  return members.map((m) =>
+    isActiveMember(m) && (only === undefined || only.has(m.memberId)) ? { ...m, lastSeenAt: now } : m,
+  );
 }
 
 /**
@@ -319,12 +390,12 @@ export interface SeatOutcome {
  */
 export function seatVictims(
   members: Member[],
-  maxMembers: number,
+  cap: number,
   staleBefore: number,
   connected: ReadonlySet<string> = NO_SOCKETS,
 ): Member[] | null {
   const active = members.filter(isActiveMember);
-  const needed = active.length - maxMembers + 1;
+  const needed = active.length - cap + 1;
   if (needed <= 0) return [];
   // Longest-quiet first: if only one seat has to go, it is the one whose member
   // has been gone longest.
@@ -424,7 +495,7 @@ export type BlobCharge =
  * The charge rule (#183, D3), applied by both stores and decided nowhere else: the
  * order of the refusals, what `used` says on each, and the one comparison that is
  * the bound. Whether the room reads as closed is the caller's, because that is the
- * one input the stores compute differently (`expireIfDue` in `MemoryStore`,
+ * one input the stores compute differently (`closeIfAbandoned` in `MemoryStore`,
  * `readsClosed` in the room object). Returns the refusal, or the new total for the
  * caller to write.
  */
@@ -705,8 +776,8 @@ export interface BellmanStore {
    * the index rows read. Both halves are the same fix: the listing applied
    * `limit` to raw rows, so a prolific account's walk filled its window with
    * long-dead rooms and never reached the live ones — a freeze that silently did
-   * nothing for exactly the accounts that use Bellman most (#75, #115). A room
-   * past its TTL counts as closed here whether or not its alarm has fired.
+   * nothing for exactly the accounts that use Bellman most (#75, #115). An
+   * abandoned room counts as closed here whether or not its alarm has fired.
    *
    * A frozen room is still listed. Freezing one twice is harmless, and leaving it
    * out would hide it from the only listing that can find it again.
@@ -963,10 +1034,10 @@ export class MemoryStore implements BellmanStore {
   async getSession(id: string): Promise<StoredSession | undefined> {
     const s = this.sessions.get(id);
     if (!s) return undefined;
-    this.expireIfDue(s, Date.now());
+    this.closeIfAbandoned(s, Date.now());
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
-    // away. expireIfDue has already run on `s`, so nothing it did is skipped by cloning later.
+    // away. closeIfAbandoned has already run on `s`, so nothing it did is skipped by cloning later.
     const { events: _events, ...rest } = s;
     return detach(rest);
   }
@@ -1047,7 +1118,7 @@ export class MemoryStore implements BellmanStore {
     if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
-    const victims = seatVictims(s.members, s.maxMembers, staleBefore, connected);
+    const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
     if (victims === null) return { refused: "full", reclaimed: [], codesCleared: false };
 
     const reclaimed: Member[] = [];
@@ -1080,7 +1151,7 @@ export class MemoryStore implements BellmanStore {
     // `codesCleared: true`, which answers this question and does not contradict the
     // other. The contract suite pins this side, and its expired-code cases for
     // removeMember pin the other.
-    const full = seatVictims(s.members, s.maxMembers, staleBefore, connected) === null;
+    const full = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected) === null;
     const codes = full ? Object.values(s.joinCodes) : [];
     if (full) {
       for (const rec of codes) this.byJoinCode.delete(rec.code);
@@ -1224,7 +1295,7 @@ export class MemoryStore implements BellmanStore {
    * without yielding between their guard and their write. The same arrangement,
    * and the same reason, as appendNow.
    *
-   * Agrees with expireIfDue: a closed room's codes stop resolving AND stop
+   * Agrees with closeIfAbandoned: a closed room's codes stop resolving AND stop
    * occupying the index, rather than relying on the `closed` guard alone.
    */
   private closeNow(s: Session): void {
@@ -1249,13 +1320,24 @@ export class MemoryStore implements BellmanStore {
    * idempotent call keeps resetting every member's clock and nobody is ever due
    * again. `wasFrozen` is read before the assignment below, because that
    * assignment is what destroys the answer.
+   *
+   * The thaw also stamps every active member as seen now (#18). `touchMember`
+   * refuses a frozen room, so the window was not moving while it was frozen;
+   * without this stamp a room thawed after 90 days frozen would be swept on the
+   * next read.
    */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     const wasFrozen = s.frozenAt !== null;
     s.frozenAt = frozenAt;
-    if (frozenAt === null && wasFrozen) s.members = clearSilence(s, Date.now());
+    if (frozenAt === null && wasFrozen) {
+      const now = Date.now();
+      // The report credit (#111 D10) and the presence stamp (#18) ride the same
+      // transition: a room coming back from a freeze gets a full window, not the
+      // one the freeze spent.
+      s.members = stampSeen(clearSilence(s, now), now);
+    }
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
@@ -1265,11 +1347,11 @@ export class MemoryStore implements BellmanStore {
     for (const id of mine) {
       if (live.length >= limit) break;
       const s = this.sessions.get(id);
-      // `expireIfDue` first, for the same reason getSession calls it: a room past
-      // its TTL is closed whether or not anything has written that down yet, and
-      // a sweep that read the flag alone would keep every expired room in the
-      // window until something else happened to touch it.
-      if (s) this.expireIfDue(s, Date.now());
+      // `closeIfAbandoned` first, for the same reason getSession calls it: an
+      // abandoned room is closed whether or not anything has written that down
+      // yet, and a sweep that read the flag alone would keep every abandoned room
+      // in the window until something else happened to touch it.
+      if (s) this.closeIfAbandoned(s, Date.now());
       if (s && !s.closed) {
         live.push(id);
         continue;
@@ -1447,11 +1529,11 @@ export class MemoryStore implements BellmanStore {
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
     // No await from the read to the write — the rule, and the reason, seatMember
-    // gives. `expireIfDue` first, as getSession does: a room past its TTL is
+    // gives. `closeIfAbandoned` first, as getSession does: an abandoned room is
     // closed whether or not anything has written that down yet.
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "not_found", used: 0 };
-    this.expireIfDue(s, Date.now());
+    this.closeIfAbandoned(s, Date.now());
     const charge = decideBlobCharge(s, s.closed, bytes);
     if (charge.ok) (s as { blobBytes?: number }).blobBytes = charge.used;
     return charge;
@@ -1648,7 +1730,7 @@ export class MemoryStore implements BellmanStore {
   }
 
   async sweep(now: number): Promise<void> {
-    for (const s of this.sessions.values()) this.expireIfDue(s, now);
+    for (const s of this.sessions.values()) this.closeIfAbandoned(s, now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }
@@ -1662,19 +1744,31 @@ export class MemoryStore implements BellmanStore {
     for (const w of ws) w.resolve(detach(s.events.filter((ev) => ev.cursor > w.after)));
   }
 
-  /** Operates on the canonical session; callers hold detached copies. */
-  private expireIfDue(s: Session, now: number): void {
-    if (s.closed || now <= s.expiresAt) return;
-    s.closed = true;
-    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    s.joinCodes = {};
+  /**
+   * Operates on the canonical session; callers hold detached copies.
+   *
+   * The abandonment rule is `isAbandoned`'s, shared with SessionDO's alarm and
+   * readers. A socket vouching for an active member is the one way a room past
+   * the window stays open, and it is recorded: those members are stamped as seen
+   * now, which is what `webSocketClose` does on a drop (#152), so the next sweep
+   * finds a fresh window rather than the same question.
+   */
+  private closeIfAbandoned(s: Session, now: number): void {
+    const due = abandonedAt(s);
+    if (due === null || now <= due) return;
+    const connected = connectedAmong(s.members, this.attachedTo(s.id));
+    if (!isAbandoned(s, now, connected)) {
+      s.members = stampSeen(s.members, now, connected);
+      return;
+    }
+    this.closeNow(s);
     const event: SessionEvent = {
       cursor: s.events.length + 1,
       type: "session_expired" as EventType,
       fromMemberId: "system",
       fromUserId: "system",
       fromLabel: "bellman",
-      payload: { reason: "ttl" },
+      payload: { reason: "abandoned", last_seen_at: new Date(due - ABANDONED_AFTER_MS).toISOString() },
       refId: null,
       at: now,
     };
@@ -1694,6 +1788,30 @@ export class MemoryStore implements BellmanStore {
  * the budget is reached long before anything is at risk of being refused.
  */
 export const SWEEP_RPC_BUDGET = 300;
+
+/**
+ * How many members one room holds, on every plan that can start a swarm (#18).
+ *
+ * A ceiling, not a plan fact. A room is one value in SQLite-backed Durable Object
+ * storage, members and briefs included (events and surface rows are separate,
+ * #25), and a value holds 2 MB. A brief at the schema's maximum (src/tools/kit.ts:
+ * goal 500, state 2,000, twenty constraints and twenty open questions of 300) is
+ * 14,710 characters; 100 of them are 1.47 MB, under the limit with room for the
+ * manifest and the codes. 250 would be 3.7 MB. Two-byte text at the maximum in
+ * every brief of a full room is the remaining gap, and the transaction turns it
+ * into one failed join rather than a broken room. Reaching this is the trigger
+ * for moving members to rows of their own, which is what lifts it.
+ */
+export const ROOM_MEMBER_CEILING = 100;
+
+/**
+ * How many members this room holds. A `pair` room holds two because the preset
+ * says so; a `swarm` room holds as many as its creator invites, up to the
+ * ceiling. Derived from the manifest and never stored, for the rule written on
+ * the Session type: two fields for one fact could disagree.
+ */
+export const capacityOf = (manifest: RoomManifest): number =>
+  manifest.mode === "pair" ? 2 : ROOM_MEMBER_CEILING;
 
 export const JOIN_CODE_TTL = JOIN_CODE_TTL_MS;
 export const CONNECT_TOKEN_TTL = CONNECT_TOKEN_TTL_MS;

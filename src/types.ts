@@ -121,14 +121,17 @@ export interface Session {
    * gives: two fields for one fact could disagree.
    */
   joinCodes: Record<string, JoinCodeRecord>;
-  expiresAt: number;            // whole-session TTL
-  maxMembers: number;
+  // There is no `expiresAt`: rooms persist (#18). A room ends when its last
+  // member leaves or when nobody has been in it for ABANDONED_AFTER_MS, and
+  // that time is derived from the members (`abandonedAt`), never stored.
+  // There is no `maxMembers` either: capacity is `capacityOf(manifest)`, two
+  // for a pair room and the ceiling for a swarm.
   /**
    * The bytes this room's blob store may hold (#183, D3), stamped at creation
-   * from the creator's plan as `maxMembers` is, and never consulted against a
-   * plan again: a free member in a team room shares the team room's ceiling,
-   * which is what "a room is what a plan rations" means. Rows written before
-   * the field read the free plan's ceiling through `hydrateStoredSession`.
+   * from the creator's plan and never consulted against a plan again: a free
+   * member in a team room shares the team room's ceiling, which is what "a room
+   * is what a plan rations" means. Rows written before the field read the free
+   * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
   members: Member[];
@@ -190,8 +193,6 @@ export interface PlanGrant {
 
 export interface Entitlements {
   modes: SessionMode[];
-  maxMembers: number;
-  sessionTtlMs: number;
   monthlyCreates: number;
   orgScoping: boolean;
   audit: boolean;

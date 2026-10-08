@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt,
+  creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
 } from "../src/retention.js";
 import { member, session } from "./helpers/fixtures.js";
 
@@ -24,6 +24,38 @@ describe("sweepDueAt", () => {
   it("is null once the sweep has run", () => expect(sweepDueAt({ ...unswept, blobsSwept: true })).toBeNull());
   it("is null for an open room", () => expect(sweepDueAt({ ...unswept, closed: false })).toBeNull());
   it("is null for a row closed before the close was dated", () => expect(sweepDueAt({ ...unswept, closedAt: null })).toBeNull());
+});
+
+describe("unnamedObjects", () => {
+  const listed = [{ id: "b_named", bytes: 10 }, { id: "b_orphan", bytes: 30 }, { id: "b_other", bytes: 5 }];
+  const names = (id: string) => ({ blob: { id, bytes: 1, type: "text/plain", name: "x.txt" } });
+
+  it("is every listed object when no item names one", () => expect(unnamedObjects(listed, [])).toEqual(listed));
+
+  it("leaves out the objects an item names, and keeps the rest in the order listed", () => {
+    expect(unnamedObjects(listed, [names("b_named")])).toEqual([listed[1], listed[2]]);
+    expect(unnamedObjects(listed, [names("b_other"), names("b_named")])).toEqual([listed[1]]);
+  });
+
+  it("is nothing when every object is named", () => {
+    expect(unnamedObjects(listed, listed.map((object) => names(object.id)))).toEqual([]);
+  });
+
+  it("learns nothing from an item that names no blob", () => {
+    expect(unnamedObjects(listed, [{ blob: null }])).toEqual(listed);
+  });
+
+  /** A dangling reference: the item keeps it and a download answers 404, and there is no object to remove. */
+  it("does not mind an item that names an object that is not listed", () => {
+    expect(unnamedObjects(listed, [names("b_gone")])).toEqual(listed);
+  });
+});
+
+describe("creditedBlobBytes", () => {
+  it("takes the credit off the charge", () => expect(creditedBlobBytes(45, 35)).toBe(10));
+  it("is the charge when nothing is credited", () => expect(creditedBlobBytes(45, 0)).toBe(45));
+  /** A charge that threw may have been kept without ever landing (#183), so the credit can outrun the total. */
+  it("never goes below zero", () => expect(creditedBlobBytes(10, 35)).toBe(0));
 });
 
 describe("orgsOnRoster", () => {

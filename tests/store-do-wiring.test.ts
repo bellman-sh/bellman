@@ -1960,12 +1960,16 @@ describe("SessionDO.alarm: the abandonment re-arm", () => {
     // removal of it, and that is the outbox's alarm, not the window's: it is armed on
     // purpose and would be counted here. This test is about the window, so the room has
     // nothing for the outbox to do.
+    //
+    // What a closed room does owe is its one sweep (#65), due at the close. The room is armed for
+    // that and for nothing else, and the firing that sweeps arms nothing after it.
     const at = Date.now() + 10_000;
     const storage = fakeStorage({
       session: currentRow({ joinCodes: {}, members: [member({ lastSeenAt: at - ABANDONED_AFTER_MS })] }),
       cursor: 0,
     });
-    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+    const emptyBucket = { list: async () => ({ objects: [], truncated: false }), delete: async () => {} };
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, { BLOBS: emptyBucket } as never);
 
     try {
       vi.setSystemTime(at);
@@ -1978,7 +1982,14 @@ describe("SessionDO.alarm: the abandonment re-arm", () => {
       await doi.alarm();
 
       expect((await storage.get("session")) as { closed: boolean }).toMatchObject({ closed: true });
-      expect(storage.alarms).toEqual([at, at]); // no third
+      // Armed for the sweep, which is due at the close, and for nothing else: no third abandonment re-arm.
+      const armedAtClose = storage.alarms.slice(2);
+      expect(armedAtClose.length).toBeGreaterThan(0);
+      expect(new Set(armedAtClose)).toEqual(new Set([at + 1]));
+
+      await doi.alarm(); // the sweep's firing: it sets blobsSwept, which takes it out of the room's due times
+      expect((await storage.get("session")) as { blobsSwept: boolean }).toMatchObject({ blobsSwept: true });
+      expect(storage.alarms.length, "and the firing that swept arms nothing after it").toBe(2 + armedAtClose.length);
     } finally {
       vi.useRealTimers();
     }

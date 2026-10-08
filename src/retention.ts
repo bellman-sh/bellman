@@ -1,5 +1,5 @@
 import type { StoredSession } from "./stored-session.js";
-import type { AuditEntry } from "./types.js";
+import type { AuditEntry, SurfaceRow } from "./types.js";
 
 // Runtime-free on purpose, for the reason CLAUDE.md gives: both stores and both test
 // programs read these rules, and store-do.ts, which cannot be imported by a root test,
@@ -26,6 +26,27 @@ export function sweepDueAt(s: Pick<StoredSession, "closed" | "closedAt" | "blobs
   if (!s.closed || s.blobsSwept || s.closedAt === null) return null;
   return s.closedAt;
 }
+
+/**
+ * The objects under a room's prefix that no surface item names (#65, D3): what the close-time
+ * sweep removes. A `file` or `image` item names one by `blob.id`; an item of any other kind names
+ * none and protects nothing. An item that names an object that is not listed is a dangling
+ * reference: it keeps it, a download answers 404 as it does today, and there is nothing to remove.
+ */
+export function unnamedObjects<T extends { id: string }>(
+  listed: readonly T[], rows: readonly Pick<SurfaceRow, "blob">[],
+): T[] {
+  const named = new Set(rows.flatMap((row) => (row.blob ? [row.blob.id] : [])));
+  return listed.filter((object) => !named.has(object.id));
+}
+
+/**
+ * `blobBytes` once the sweep has freed `credited` bytes. Never below zero: a charge that threw is
+ * kept in the bucket on purpose (#183) without ever having landed, so what the sweep frees can
+ * outrun what the room was charged.
+ */
+export const creditedBlobBytes = (charged: number, credited: number): number =>
+  Math.max(0, charged - credited);
 
 /**
  * Every org the room involved, once each, in roster order: the orgs a purge or a

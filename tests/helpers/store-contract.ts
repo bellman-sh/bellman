@@ -3224,7 +3224,25 @@ export function describeStoreContract(
       blobs.put(roomId, id, new Uint8Array(bytes).buffer as ArrayBuffer, {
         bytes, type: "text/plain", name: `${id}.txt`, by: "m_creator", at: Date.now(),
       });
-    const peer = (over: Partial<Session["members"][number]> = {}) =>
+    /**
+     * The `appendEvent` a surface write makes for a `file` item naming `blobId` (#183): the event, and the
+     * row the store is asked to commit with it. A `surface` event without the row names nothing. An object
+     * a case wants to survive the close-time sweep is one an item names.
+     */
+    const nameBlob = (roomId: string, blobId: string, bytes: number) => {
+      const item: SurfaceItem = {
+        key: `file_${blobId}`, kind: "file", title: null, body: null, ends: null, placement: null,
+        blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` },
+      };
+      return store.appendEvent(
+        roomId,
+        { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+        { surface: { key: item.key, item } },
+      );
+    };
+    const blobIds = async (roomId: string) => (await blobs.list(roomId)).map((o) => o.id).sort();
+    const bytesUsed = async (roomId: string) => blobBytesUsed((await store.getSession(roomId))!);
+    const peer =(over: Partial<Session["members"][number]> = {}) =>
       member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", orgId: "org_other", ...over });
 
     describe("the purge (#65)", () => {
@@ -3232,6 +3250,7 @@ export function describeStoreContract(
         const s = session({ id: "qs_purge", retainAfterCloseMs: 60_000 });
         await store.createSession(s);
         await putBlob(s.id, "b_one", 3);
+        await nameBlob(s.id, "b_one", 3); // named, so the close-time sweep leaves it for the purge to find
         await store.closeSession(s.id);
         await sweepRoom(s.id);
         expect(await store.getSession(s.id), "inside the window").toBeDefined();
@@ -3348,6 +3367,79 @@ export function describeStoreContract(
         expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
         await expect(store.appendEvent(s.id, { ...body, type: "message", payload: { text: "late" } }))
           .rejects.toThrow(/Unknown session/);
+      });
+    });
+
+    // ------------------------------------------------- the sweep at close (#65)
+    describe("the sweep at close (#65, D3)", () => {
+      it("removes the objects no item names, credits their bytes, and leaves named ones", async () => {
+        const s = session({ id: "qs_sweep", blobBytesCeiling: 1_000, joinCodes: {} });
+        await store.createSession(s);
+        await putBlob(s.id, "b_named", 10);
+        await putBlob(s.id, "b_orphan", 30);
+        await putBlob(s.id, "b_other", 5);
+        await store.chargeBlobBytes(s.id, 45);
+        await nameBlob(s.id, "b_named", 10);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+
+        expect(await blobIds(s.id)).toEqual(["b_named"]);
+        expect(await bytesUsed(s.id)).toBe(10);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+      });
+
+      // Review Focus 4: the item keeps its reference, and a download of it answers 404 as it does today.
+      it("credits nothing for a named object that is already gone, and does not throw", async () => {
+        const s = session({ id: "qs_gone", blobBytesCeiling: 1_000, joinCodes: {} });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 7);
+        await nameBlob(s.id, "b_gone", 7); // the item names it; no object was ever put
+        await store.closeSession(s.id);
+
+        await expect(sweepRoom(s.id)).resolves.toBeUndefined();
+
+        expect(await bytesUsed(s.id)).toBe(7);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+        expect((await store.surfaceOf(s.id)).map((row) => row.blob?.id)).toEqual(["b_gone"]);
+      });
+
+      it("sweeps a room once: an object that turns up afterwards is left for the purge", async () => {
+        const s = session({ id: "qs_once", joinCodes: {} });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+
+        await putBlob(s.id, "b_late", 4);
+        await sweepRoom(s.id);
+
+        expect(await blobIds(s.id), "no second pass").toEqual(["b_late"]);
+      });
+
+      // An open room's unnamed object is an upload between its put and its charge or its item.
+      it("does not touch an open room, and a sweep asked for one removes nothing", async () => {
+        const s = session({ id: "qs_open_sweep", joinCodes: {} });
+        await store.createSession(s);
+        await putBlob(s.id, "b_inflight", 9);
+
+        await sweepRoom(s.id);
+        expect(await store.sweepBlobs(s.id)).toEqual({ removed: 0, credited: 0 });
+        expect(await store.sweepBlobs("qs_nobody")).toEqual({ removed: 0, credited: 0 });
+
+        expect(await blobIds(s.id)).toEqual(["b_inflight"]);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(false);
+      });
+
+      // No close time, nothing to date the sweep from; the purge, or a delete, is what reaches it.
+      it("leaves a room closed before the close was dated alone", async () => {
+        const legacy = session({ id: "qs_legacy_sweep", closed: true, closedAt: null, retainAfterCloseMs: null, joinCodes: {} });
+        await store.createSession(legacy);
+        await putBlob(legacy.id, "b_old", 3);
+
+        await sweepRoom(legacy.id);
+
+        expect(await blobIds(legacy.id)).toEqual(["b_old"]);
+        expect((await store.getSession(legacy.id))!.blobsSwept).toBe(false);
       });
     });
 

@@ -13,7 +13,7 @@ import { R2BlobStore } from "../src/blobs-r2.js";
 import { OUTBOX_HANDLER, OUTBOX_SEQ, dueKey, outboxKey } from "../src/outbox.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
-import type { Session } from "../src/types.js";
+import type { Session, SurfaceItem } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
@@ -33,9 +33,14 @@ const meta = (bytes: number) => ({ bytes, type: "text/plain", name: "a.txt", by:
 const putObject = (room: string, id: string, bytes = 3) =>
   blobs().put(room, id, new Uint8Array(bytes).buffer as ArrayBuffer, meta(bytes));
 
-/** A room with a 60 s window and no join code, so a close queues nothing and arms nothing of its own. */
+/**
+ * A room with a 60 s window and no join code, so a close queues nothing and arms nothing of its own. Its
+ * sweep has already run: these cases are about the purge, and an unswept room owes the close-time sweep
+ * as well, which the pool fires by itself the moment the room closes and which leaves the objects a case
+ * puts in the bucket for the purge to find. The sweep's own cases say `blobsSwept: false`.
+ */
 const room = (id: string, over: Partial<Session> = {}) =>
-  session({ id, joinCodes: {}, retainAfterCloseMs: WINDOW, ...over });
+  session({ id, joinCodes: {}, retainAfterCloseMs: WINDOW, blobsSwept: true, ...over });
 
 /** The object's one alarm, or null when none is scheduled. */
 const armedAlarm = (id: string) => runInDurableObject(stubOf(id), (_i: SessionDO, ctx) => ctx.storage.getAlarm());
@@ -302,4 +307,114 @@ it("holds the purge back while a queued row will not deliver, and purges once it
   await runAlarm("qs_stuck");
 
   expect(await rowCount("qs_stuck")).toBe(0);
+});
+
+// ---------------------------------------------------------------------------
+// The sweep of unnamed objects at close (#65, D3)
+// ---------------------------------------------------------------------------
+
+/** The `appendEvent` a surface write makes for a `file` item naming `blobId`: the event and the row it commits with. */
+function nameBlob(store: DurableObjectStore, roomId: string, blobId: string, bytes: number) {
+  const item: SurfaceItem = {
+    key: `file_${blobId}`, kind: "file", title: null, body: null, ends: null, placement: null,
+    blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` },
+  };
+  return store.appendEvent(
+    roomId,
+    { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+    { surface: { key: item.key, item } },
+  );
+}
+
+/**
+ * Swap a room's env for one whose bucket counts its listings and records its deletes, over the real
+ * bucket: a listing is how the sweep looks, and a delete of one key is the sweep's where a delete of an
+ * array of keys is the purge's (`R2BlobStore.delete` and `deleteAll`).
+ */
+async function watchBucket(id: string) {
+  const seen = { lists: 0, deletes: [] as unknown[] };
+  await runInDurableObject(stubOf(id), (instance: SessionDO) => {
+    const holder = instance as unknown as { env: { BLOBS: R2Bucket } };
+    const real = holder.env.BLOBS;
+    const spy = {
+      list: (...args: Parameters<R2Bucket["list"]>) => { seen.lists++; return real.list(...args); },
+      delete: (...args: Parameters<R2Bucket["delete"]>) => { seen.deletes.push(args[0]); return real.delete(...args); },
+    };
+    holder.env = Object.create(holder.env, { BLOBS: { value: spy } });
+  });
+  return seen;
+}
+
+// Due the moment a room closes, so the pool fires it by itself and the case waits for it: nothing here
+// runs the handler, which makes this the path production takes.
+it("sweeps the objects no item names when a room closes, credits their bytes, and does not look again", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_swept", { blobsSwept: false }));
+  await putObject("qs_swept", "b_named", 10);
+  await putObject("qs_swept", "b_orphan", 30);
+  await putObject("qs_swept", "b_other", 5);
+  await store.chargeBlobBytes("qs_swept", 45);
+  await nameBlob(store, "qs_swept", "b_named", 10);
+  const seen = await watchBucket("qs_swept");
+
+  await store.closeSession("qs_swept");
+  const closedAt = (await store.getSession("qs_swept"))!.closedAt!;
+  await vi.waitFor(async () => expect((await store.getSession("qs_swept"))!.blobsSwept).toBe(true), { timeout: 3_000 });
+
+  expect((await blobs().list("qs_swept")).map((object) => object.id), "the named one is kept").toEqual(["b_named"]);
+  expect((await store.getSession("qs_swept"))!.blobBytes, "and the room is credited the rest").toBe(10);
+  await vi.waitFor(async () => expect(await armedAlarm("qs_swept"), "then only the purge is owed").toBe(closedAt + WINDOW), { timeout: 2_000 });
+
+  const listed = seen.lists;
+  await runAlarm("qs_swept");
+  expect(seen.lists, "a second alarm has nothing to look at").toBe(listed);
+  expect((await store.getSession("qs_swept"))!.blobBytes).toBe(10);
+});
+
+// A room closed with a window of nothing owes both at the same instant. The purge deletes every object
+// and the record, so a sweep before it is work thrown away, and a sweep after it has no room to read: the
+// purge wins. alarm() runs the names in the order the alphabet gives and "purge" sorts before "sweep", but
+// a handler reads what it needs for itself rather than lean on that (see alarm()), so the order is turned
+// round here, which is what a rename would do.
+it("skips the sweep when the purge is due as well, and the purge deletes the objects in one batch", async () => {
+  const store = new DurableObjectStore(env as never);
+  // Closed an hour from now by its own record, so no alarm of the pool's can fire before the clock moves.
+  const closedAt = Date.now() + HOUR;
+  await store.createSession(room("qs_both", { closed: true, closedAt, retainAfterCloseMs: 0, blobsSwept: false }));
+  await putObject("qs_both", "b_orphan", 3);
+  const seen = await watchBucket("qs_both");
+  await runInDurableObject(stubOf("qs_both"), (instance: SessionDO) => {
+    const driver = (instance as unknown as { driver: { dueNow(now?: number): Promise<string[]> } }).driver;
+    const real = driver.dueNow.bind(driver);
+    driver.dueNow = async (now) => (await real(now)).sort().reverse();
+  });
+
+  setClock(closedAt);
+  await runAlarm("qs_both");
+
+  expect(await store.getSession("qs_both")).toBeUndefined();
+  expect(await blobs().list("qs_both")).toEqual([]);
+  expect(
+    seen.deletes.map((keys) => Array.isArray(keys)),
+    "one batch delete, the purge's, and none of a single object, which is the sweep's",
+  ).toEqual([true]);
+});
+
+// Two firings of the sweep that list the same objects both free the same bytes. The room is credited
+// for them once, by whichever commits first.
+it("credits the freed bytes once when two sweeps overlap", async () => {
+  const store = new DurableObjectStore(env as never);
+  const closedAt = Date.now() + HOUR; // out of the pool's reach until the clock moves
+  await store.createSession(room("qs_overlap", { closed: true, closedAt, retainAfterCloseMs: null, blobsSwept: false }));
+  await runInDurableObject(stubOf("qs_overlap"), async (_i: SessionDO, ctx) => {
+    await ctx.storage.put("session", { ...(await ctx.storage.get<object>("session")), blobBytes: 45 });
+  });
+  await putObject("qs_overlap", "b_orphan", 30);
+  await putObject("qs_overlap", "b_other", 5);
+
+  setClock(closedAt);
+  await Promise.all([runAlarm("qs_overlap"), runAlarm("qs_overlap")]);
+
+  expect((await store.getSession("qs_overlap"))!.blobBytes).toBe(10);
+  expect(await blobs().list("qs_overlap")).toEqual([]);
 });

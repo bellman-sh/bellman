@@ -21,7 +21,10 @@ import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
-import { PURGE_HANDLER, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry } from "./retention.js";
+import {
+  PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
+  sweepDueAt, unnamedObjects,
+} from "./retention.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
@@ -245,7 +248,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
-   * are due and points the alarm at the soonest. Four handlers use it.
+   * are due and points the alarm at the soonest. Five handlers use it.
    *
    * "outbox" delivers what a join-code change owes the registry. A code lives in two
    * objects, here and in the registry's index, so the two writes cannot share a
@@ -269,6 +272,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * when a delete asked for it sooner (#65). Derived like the two above, from the
    * record (`purgeDueAt`), so a room closed before it existed is not given a clock it
    * was never promised. See derivedDue() and #purgeIfDue().
+   *
+   * "sweep" deletes the objects no surface item names, once, the moment the room
+   * closes, and credits the room their bytes (#65, D3). Derived from the record too
+   * (`sweepDueAt`): due at `closedAt` until `blobsSwept` says it ran, so it fires one
+   * time and then owes nothing, and a row closed before the close was dated owes
+   * nothing at all. See derivedDue() and #sweepIfDue().
    */
   private driver = new OutboxDriver(
     this.ctx.storage,
@@ -1340,6 +1349,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * The close-time sweep (#65, D3), run now. `BellmanStore.sweepBlobs` is the contract and
+   * this is SessionDO's answer to it; the alarm reaches the same work through #sweepIfDue,
+   * which first asks whether it is owed. Public because the facade calls it, so anything
+   * holding the SESSION binding can ask for a closed room's sweep, which is the work the
+   * alarm does for every closed room anyway.
+   *
+   * An open room, whose unnamed object is an upload between its put and its charge or its
+   * item, and a room that is not there, are left alone.
+   */
+  async sweepBlobs(): Promise<{ removed: number; credited: number }> {
+    const s = await this.stored();
+    if (!s || !s.closed) return { removed: 0, credited: 0 };
+    return this.#sweep(s);
+  }
+
+  /**
    * Freeze the room, or thaw it with null.
    *
    * The reArm() is addMember's rule: a thaw is the write that flips `nextTickAt`
@@ -1792,6 +1817,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * uses. A rename would undo the order and leave the next pair to be discovered,
    * and the handler that reads its own precondition is the one a reader can check.
    *
+   * **"purge" and "sweep" can be due at one firing, and the purge wins** (#65): a room
+   * closed with a window of nothing, or an alarm that ran late past the window. The
+   * purge deletes every object under the prefix and then the record, so a sweep first
+   * is work thrown away, and one after it finds no record to read. "purge" sorts before
+   * "sweep" today, and #sweepIfDue does not lean on that: it returns when the purge is
+   * due, and worker-tests/purge.test.ts runs the names the other way round to hold it.
+   *
    * Each handler reads the session itself, inside the transaction it writes in, so
    * nothing is passed down from here: a record read in this loop and written by a
    * later iteration would be the stale snapshot #tickIfDue's own comment is about.
@@ -1830,33 +1862,39 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       }
       if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
       if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
+      if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
     }
     await this.driver.reArm();
   }
 
   /**
    * Due times this object computes rather than stores. A closed session has nothing
-   * left to enforce but its own end (#65): the purge, at the window's end or when a
-   * delete asked, and for a room kept until deleted or closed before the window
-   * existed, nothing at all. Deriving the abandonment time for it would re-arm the
-   * alarm to a moment already past, and it would fire again for as long as the
-   * session existed; the purge cannot, because a firing that runs it deletes the
-   * record and a derivation from a missing record answers nothing. It has no tick to
-   * send either, which is why the early return covers both. A frozen room derives
-   * neither (both functions answer null for it), and reArm() never clears an alarm,
-   * so a freeze leaves the one already armed to fire once, find nothing due and arm
-   * nothing after it. The thaw re-arms.
+   * left to enforce but its own end (#65): the sweep of its unnamed objects, once, and
+   * the purge, at the window's end or when a delete asked. A room kept until deleted
+   * owes the sweep alone, and one closed before the close was dated owes nothing at
+   * all. Deriving the abandonment time for it would re-arm the alarm to a moment
+   * already past, and it would fire again for as long as the session existed; neither
+   * of these can, because a firing that runs the sweep sets `blobsSwept`, and one that
+   * runs the purge deletes the record and a derivation from a missing record answers
+   * nothing. It has no tick to send either, which is why the early return covers
+   * both. A frozen room derives neither (both functions answer null for it), and
+   * reArm() never clears an alarm, so a freeze leaves the one already armed to fire
+   * once, find nothing due and arm nothing after it. The thaw re-arms.
    *
-   * The close-time sweep of unnamed objects (`sweepDueAt`, SWEEP_HANDLER) is not
-   * derived here yet. A name derived with no branch in alarm() is never consumed, and
-   * the closing reArm() would point the alarm straight back at it for good, so it joins
-   * this map together with the handler that consumes it.
+   * Every name derived here has a branch in alarm() that consumes it, or it is never
+   * consumed and the closing reArm() points the alarm straight back at it for good.
+   * The close-time sweep (`sweepDueAt`) is consumed by setting `blobsSwept`, which
+   * moves it out of this map, so it fires once.
    */
   async #derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
     if (!s) return new Map();
     const due = new Map<string, number>();
     if (s.closed) {
+      // A closed room owes two things and nothing else (#65): the sweep of its unnamed
+      // objects, once, and the purge at its window's end or when a delete asked.
+      const sweep = sweepDueAt(s);
+      if (sweep !== null) due.set(SWEEP_HANDLER, sweep);
       const purge = purgeDueAt(s);
       if (purge !== null) due.set(PURGE_HANDLER, purge);
       return due;
@@ -2059,6 +2097,64 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // and dropping it leaves every test green. It stays so that a purged room arms nothing
     // however the storage behaves, and worker-tests/purge.test.ts asserts that outcome.
     await this.ctx.storage.deleteAlarm();
+  }
+
+  /**
+   * The sweep, when it is owed (#65, D3): the alarm's gate in front of #sweep.
+   *
+   * **The purge wins when it is due as well.** It deletes every object under the prefix and
+   * then the record, so a sweep first is work thrown away. alarm() runs "purge" ahead of
+   * "sweep" because of the alphabet, and this does not lean on that (see alarm()): a room
+   * whose purge is due is not swept, whichever name came first.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #sweepIfDue(now: number): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    const due = sweepDueAt(s);
+    if (due === null || now < due) return;
+    const purge = purgeDueAt(s);
+    if (purge !== null && now >= purge) return;
+    await this.#sweep(s);
+  }
+
+  /**
+   * Delete the objects under this room's prefix that no surface item names, and credit the
+   * room their bytes, once. The bucket is outside any transaction, as the purge's is: a
+   * delete here holds this object for as long as R2 takes if it sits inside one.
+   *
+   * The objects are listed before the rows are read, so an object an item names is listed
+   * first and named after, never the reverse. The record is read again inside the
+   * transaction that writes it, and only a sweep that finds `blobsSwept` still false
+   * credits the room: two that overlap list the same objects and free the same bytes, and
+   * the second would otherwise take them off twice. A purge that got in between leaves no
+   * record to write to, and nothing is.
+   *
+   * A delete that fails throws before the record is touched, so `blobsSwept` stays false
+   * and the next firing starts again. The bytes of the objects removed before the failure
+   * are then not credited, since they cannot be listed twice. The room is closed, so
+   * nothing charges it again, and the purge deletes whatever is left.
+   *
+   * `#private`: it deletes from the bucket on the strength of the record it is handed.
+   */
+  async #sweep(s: StoredSession): Promise<{ removed: number; credited: number }> {
+    const blobs = new R2BlobStore(this.env.BLOBS);
+    const listed = await blobs.list(s.id);
+    const orphans = unnamedObjects(listed, await this.surfaceOf());
+    let credited = 0;
+    for (const object of orphans) {
+      await blobs.delete(s.id, object.id);
+      credited += object.bytes;
+    }
+    await this.ctx.storage.transaction(async (txn) => {
+      const live = await this.stored(txn);
+      if (!live || live.blobsSwept) return;
+      await txn.put("session", {
+        ...live, blobBytes: creditedBlobBytes(live.blobBytes ?? 0, credited), blobsSwept: true,
+      });
+    });
+    return { removed: orphans.length, credited };
   }
 }
 
@@ -2822,6 +2918,10 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).schedulePurge(at, by);
   }
 
+  async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
+    return this.session(sessionId).sweepBlobs();
+  }
+
   /**
    * Rooms this person created that a lapse could still freeze.
    *
@@ -3018,9 +3118,9 @@ export class DurableObjectStore implements BellmanStore {
   /**
    * No-op by design. MemoryStore sweeps on a timer because it can iterate every
    * session cheaply; a DO namespace cannot. Abandonment is enforced by the
-   * per-object alarm set in SessionDO.createSession, the purge of a closed room
-   * (#65) by the same alarm, and connect tokens are checked for expiry when taken.
-   * Nothing is left for a sweep to do.
+   * per-object alarm set in SessionDO.createSession, the sweep and the purge of a
+   * closed room (#65) by the same alarm, and connect tokens are checked for expiry
+   * when taken. Nothing is left for a sweep to do.
    */
   async sweep(_now: number): Promise<void> {}
 }

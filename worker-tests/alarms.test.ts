@@ -3,7 +3,7 @@
  * outbox and the heartbeat, and this file is the proof that sharing did not lose
  * it — for sessions created before named alarms as well as after.
  */
-import { it, expect, afterEach } from "vitest";
+import { it, expect, afterEach, vi } from "vitest";
 import { env, SELF, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { DUE_PREFIX } from "../src/outbox.js";
@@ -89,12 +89,18 @@ it("still closes an abandoned room that has no stored due row, and ignores a leg
 
   // The raw rows, not store.getSession(): a read closes an abandoned room lazily,
   // so it would report this one closed even if alarm() had done nothing.
-  const after = await runInDurableObject(stub, async (_i: SessionDO, ctx) => ({
-    closed: (await ctx.storage.get<{ closed: boolean }>("session"))?.closed,
+  const rawRow = () => runInDurableObject(stub, async (_i: SessionDO, ctx) => ({
+    session: await ctx.storage.get<{ closed: boolean; blobsSwept: boolean }>("session"),
     lastEvent: [...(await ctx.storage.list<{ type: string }>({ prefix: "e:" })).values()].at(-1),
   }));
-  expect(after.closed).toBe(true);
+  const after = await rawRow();
+  expect(after.session!.closed).toBe(true);
   expect(after.lastEvent).toMatchObject({ type: "session_expired" });
+
+  // A closed room owes one thing, its sweep (#65), due at the close, so the pool fires the alarm once
+  // more by itself. Wait for it, and count from there: the sweep sets `blobsSwept`, which takes it out
+  // of the room's due times, and nothing is left.
+  await vi.waitFor(async () => expect((await rawRow()).session!.blobsSwept).toBe(true), { timeout: 3_000 });
 
   // Nothing is left to wait for, so no alarm may fire from here on. A closed session
   // that still derived its abandonment time would re-arm to a time already past, and

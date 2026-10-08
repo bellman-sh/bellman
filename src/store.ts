@@ -4,7 +4,9 @@ import type {
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
-import { orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry } from "./retention.js";
+import {
+  creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
+} from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
@@ -782,6 +784,24 @@ export interface BellmanStore {
    */
   schedulePurge(sessionId: string, at: number, by: string | null): Promise<"scheduled" | "open" | "missing">;
   /**
+   * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
+   * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
+   * uploads that never reached an item: a put whose answer was lost, and a charge that threw and
+   * was kept on purpose (#183). Resolves to how many objects it removed and how many bytes that
+   * freed.
+   *
+   * Nothing happens to a room that is open, whose unnamed object is an upload between its put and
+   * its charge or its item, or to one that is not there: `{ removed: 0, credited: 0 }`.
+   *
+   * The credit lands once. Two sweeps that overlap list the same objects and free the same bytes,
+   * and the first to commit sets `blobsSwept`; the other changes the bucket and nothing else.
+   *
+   * MemoryStore calls this as a room closes, and from `sweep` for a room whose close it did not
+   * see; the Durable Objects store calls it from the room's alarm, due the moment the room closes
+   * and never again.
+   */
+  sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }>;
+  /**
    * Sessions this user created that are not closed — newest first is not
    * promised, only that a lapsed plan can find the rooms it has to freeze. The
    * create *counts* used for quota cannot answer that: they are timestamps, not
@@ -996,8 +1016,9 @@ export interface BellmanStore {
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
-   * and drops expired connect tokens. MemoryStore does all of it here; the Durable Objects store
-   * does none, because each room's alarm does its room's.
+   * sweeps the unnamed objects of a closed room whose close it did not see (#65), and drops
+   * expired connect tokens. MemoryStore does all of it here; the Durable Objects store does
+   * none, because each room's alarm does its room's.
    */
   sweep(now: number): Promise<void>;
 }
@@ -1308,6 +1329,7 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.closeNow(s);
+    await this.sweepAfterClose(sessionId);
   }
 
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
@@ -1316,11 +1338,53 @@ export class MemoryStore implements BellmanStore {
     // No await from here to the write, deliberately. The check and the close are
     // one operation, and a yield between them is the window a join lands in: the
     // same rule, and the same reason, as waitForEvents and the guarded grant
-    // writes. The Durable Objects store gets it from a transaction instead.
+    // writes. The Durable Objects store gets it from a transaction instead. The
+    // sweep that follows is after the close, so it is outside that rule.
     if (s.closed) return true;
     if (s.members.some(isActiveMember)) return false;
     this.closeNow(s);
+    await this.sweepAfterClose(sessionId);
     return true;
+  }
+
+  /**
+   * The sweep as a room closes (#65, D3), for the store that has no alarm to run it. A bucket that
+   * refuses must not turn a close that happened into a failure: the room is closed either way,
+   * `blobsSwept` stays false, and `sweep` finds the room and tries again.
+   */
+  private async sweepAfterClose(sessionId: string): Promise<void> {
+    // Only a sweep that is owed: a second close of a room already swept looks at nothing.
+    const s = this.sessions.get(sessionId);
+    if (!s || sweepDueAt(s) === null) return;
+    try {
+      await this.sweepBlobs(sessionId);
+    } catch (err) {
+      console.error(`sweep of ${sessionId} failed; the next sweep tries again:`, err);
+    }
+  }
+
+  async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
+    const room = this.sessions.get(sessionId);
+    if (!room || !room.closed) return { removed: 0, credited: 0 };
+    // The objects are listed before the rows are read, so an object an item names is listed first
+    // and named after, never the reverse.
+    const listed = await this.blobs.list(sessionId);
+    const orphans = unnamedObjects(listed, await this.surfaceOf(sessionId));
+    let credited = 0;
+    for (const object of orphans) {
+      await this.blobs.delete(sessionId, object.id);
+      credited += object.bytes;
+    }
+    // Read again, because the awaits above are where a purge or another sweep could get in. Only the
+    // sweep that finds `blobsSwept` still false credits the room, so two that listed the same
+    // objects do not free the same bytes twice.
+    const s = this.sessions.get(sessionId);
+    if (s && !s.blobsSwept) {
+      const charged = (s as { blobBytes?: number }).blobBytes ?? 0;
+      (s as { blobBytes?: number }).blobBytes = creditedBlobBytes(charged, credited);
+      s.blobsSwept = true;
+    }
+    return { removed: orphans.length, credited };
   }
 
   /**
@@ -1786,8 +1850,15 @@ export class MemoryStore implements BellmanStore {
     // After the abandonment pass, so a room it has just closed is judged on the same clock. Walked
     // from a copy, because a purge deletes from the map.
     for (const s of [...this.sessions.values()]) {
-      const due = purgeDueAt(s);
-      if (due !== null && now >= due) await this.purgeNow(s, now);
+      const purge = purgeDueAt(s);
+      if (purge !== null && now >= purge) {
+        // The purge wins when the sweep is due as well: it deletes every object and the room, so a
+        // sweep first is work thrown away.
+        await this.purgeNow(s, now);
+        continue;
+      }
+      const sweep = sweepDueAt(s);
+      if (sweep !== null && now >= sweep) await this.sweepBlobs(s.id);
     }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);

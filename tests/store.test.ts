@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { MemoryBlobStore } from "../src/blobs.js";
+import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
+import type { Session } from "../src/types.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
@@ -51,7 +52,8 @@ describe("a purge whose bucket refuses", () => {
   it("leaves the room, its listings and its audit alone, and the next sweep purges it", async () => {
     const blobs = new RefusingBlobStore();
     const store = new MemoryStore({ blobs });
-    const s = session({ id: "qs_refused", retainAfterCloseMs: 60_000, joinCodes: {} });
+    // Its sweep has run already: this case is about the purge, and the sweep at close would take an unnamed object.
+    const s = session({ id: "qs_refused", retainAfterCloseMs: 60_000, joinCodes: {}, blobsSwept: true });
     await store.createSession(s);
     await blobs.put(s.id, "b_one", new Uint8Array(3).buffer as ArrayBuffer, {
       bytes: 3, type: "text/plain", name: "a.txt", by: "m_creator", at: Date.now(),
@@ -71,6 +73,101 @@ describe("a purge whose bucket refuses", () => {
     expect(await store.getSession(s.id)).toBeUndefined();
     expect(await blobs.list(s.id)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
+  });
+});
+
+/**
+ * The close-time sweep (#65, D3) on the store that has no alarm to run it. MemoryStore sweeps at the close
+ * itself, after the room is closed, and `sweep(now)` is what finds a room whose close it did not see: an
+ * abandonment, and a close that could not sweep.
+ */
+describe("the sweep at close, on MemoryStore", () => {
+  const put = (blobs: MemoryBlobStore, room: string, id: string, bytes: number) =>
+    blobs.put(room, id, new Uint8Array(bytes).buffer as ArrayBuffer, {
+      bytes, type: "text/plain", name: `${id}.txt`, by: "m_creator", at: Date.now(),
+    });
+  /** Created closed, so no close of the store's has swept it, and charged 45 bytes: `Session` carries no `blobBytes`, stored rooms do. */
+  const closedAndCharged = (id: string): Session =>
+    ({ ...session({ id, closed: true, closedAt: Date.now(), joinCodes: {} }), blobBytes: 45 }) as Session;
+
+  it("answers what it removed and credited, from a room the close has not swept", async () => {
+    const blobs = new MemoryBlobStore();
+    const store = new MemoryStore({ blobs });
+    await store.createSession(closedAndCharged("qs_counts"));
+    await put(blobs, "qs_counts", "b_orphan", 30);
+    await put(blobs, "qs_counts", "b_other", 5);
+
+    expect(await store.sweepBlobs("qs_counts")).toEqual({ removed: 2, credited: 35 });
+    expect(blobBytesUsed((await store.getSession("qs_counts"))!)).toBe(10);
+    expect(await store.sweepBlobs("qs_counts"), "nothing is left to remove").toEqual({ removed: 0, credited: 0 });
+  });
+
+  // Both list the same objects before either deletes, so both free the same bytes; the room is credited once.
+  it("credits the freed bytes once when two sweeps overlap", async () => {
+    const blobs = new MemoryBlobStore();
+    const store = new MemoryStore({ blobs });
+    await store.createSession(closedAndCharged("qs_overlap"));
+    await put(blobs, "qs_overlap", "b_orphan", 30);
+    await put(blobs, "qs_overlap", "b_other", 5);
+
+    await Promise.all([store.sweepBlobs("qs_overlap"), store.sweepBlobs("qs_overlap")]);
+
+    expect(blobBytesUsed((await store.getSession("qs_overlap"))!)).toBe(10);
+  });
+
+  it("sweeps as either closer closes the room, without waiting for a sweep", async () => {
+    const blobs = new MemoryBlobStore();
+    const store = new MemoryStore({ blobs });
+    await store.createSession(session({ id: "qs_by_close", joinCodes: {} }));
+    await store.createSession(session({ id: "qs_by_empty", joinCodes: {}, members: [member({ leftAt: Date.now() })] }));
+    await put(blobs, "qs_by_close", "b_orphan", 3);
+    await put(blobs, "qs_by_empty", "b_orphan", 3);
+
+    await store.closeSession("qs_by_close");
+    expect(await store.closeSessionIfEmpty("qs_by_empty")).toBe(true);
+
+    expect(await blobs.list("qs_by_close")).toEqual([]);
+    expect(await blobs.list("qs_by_empty")).toEqual([]);
+  });
+
+  it("looks at nothing when a room already swept is closed again", async () => {
+    const blobs = new MemoryBlobStore();
+    const store = new MemoryStore({ blobs });
+    await store.createSession(session({ id: "qs_closed_twice", joinCodes: {} }));
+    await store.closeSession("qs_closed_twice");
+    await put(blobs, "qs_closed_twice", "b_late", 3);
+
+    await store.closeSession("qs_closed_twice");
+
+    expect(await blobs.list("qs_closed_twice")).toHaveLength(1);
+  });
+
+  // The room is closed whether or not its bucket answers, and `blobsSwept` stays false, so a sweep finds it.
+  it("does not turn a close into a failure when the bucket refuses, and the next sweep tries again", async () => {
+    class DeleteRefusingBlobStore extends MemoryBlobStore {
+      refusals = 1;
+      override async delete(sessionId: string, id: string): Promise<void> {
+        if (this.refusals-- > 0) throw new Error("bucket unavailable");
+        return super.delete(sessionId, id);
+      }
+    }
+    const blobs = new DeleteRefusingBlobStore();
+    const store = new MemoryStore({ blobs });
+    await store.createSession(session({ id: "qs_refused_close", joinCodes: {} }));
+    await put(blobs, "qs_refused_close", "b_orphan", 3);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(store.closeSession("qs_refused_close")).resolves.toBeUndefined();
+
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+    expect(await store.getSession("qs_refused_close")).toMatchObject({ closed: true, blobsSwept: false });
+    expect(await blobs.list("qs_refused_close")).toHaveLength(1);
+
+    await store.sweep(Date.now());
+
+    expect(await blobs.list("qs_refused_close")).toEqual([]);
+    expect((await store.getSession("qs_refused_close"))!.blobsSwept).toBe(true);
   });
 });
 

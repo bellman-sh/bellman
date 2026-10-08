@@ -2,9 +2,10 @@
  * #103: a member whose session died held its seat forever.
  *
  * `leftAt` records a goodbye, and a crash does not say goodbye, so a `pair`
- * room whose peer's laptop closed read as full for the rest of its TTL — and
- * #18 made TTLs long. These tests pin the two halves of the fix: the derived
- * presence reading, and the seat actually coming back.
+ * room whose peer's laptop closed read as full for as long as the room lived,
+ * and #18 made rooms persist: a room now ends when its last member leaves, or
+ * after 90 days in which nobody in it was seen. These tests pin the two halves
+ * of the fix: the derived presence reading, and the seat actually coming back.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {

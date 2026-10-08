@@ -304,7 +304,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * a real client. This is the other half: that path runs only when someone is
    * registering AND the table is already full, so with no alarm a table of
    * lapsed records sits there for as long as nobody tries. `SessionDO` has
-   * enforced session TTL with an alarm since it was written; this object had
+   * closed rooms with an alarm since it was written; this object had
    * none at all.
    *
    * Re-arms on both outcomes and at different distances. A pass that reached the

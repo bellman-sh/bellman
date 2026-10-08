@@ -2974,6 +2974,9 @@ export function describeStoreContract(
       (await store.sweep(Date.now()));
       (await store.sweep(Date.now()));
 
+      // The read comes first and is not incidental: DurableObjectStore.sweep is a
+      // no-op, so there this read is what closes the room, and the events below
+      // would be empty without it.
       await store.getSession(s.id);
       const expired = (await store.eventsAfter(s.id, 0)).filter((e) => e.type === "session_expired");
       expect(expired).toHaveLength(1);

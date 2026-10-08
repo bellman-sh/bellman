@@ -36,7 +36,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, session_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.

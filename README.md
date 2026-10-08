@@ -328,8 +328,8 @@ quiet, and `reports: true` on a role says members in that seat must answer it,
 by sending `progress` — so that role must hold `send`, and a manifest that
 asks a verbless seat for reports is refused. With no `heartbeat_on` there is
 no tick and `reports` asks for nothing; no preset sets either key. A joiner sees both before it
-accepts a seat: the connect preview carries `heartbeat_on_seconds` and
-`you_report`.
+accepts a seat: the connect preview carries `heartbeat_on_seconds`,
+`you_report`, and `reports` for every role.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

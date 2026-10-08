@@ -24,6 +24,15 @@ describe("renderJoin", () => {
     expect(node.textContent).toContain("Port Stripe v2 to v3");
   });
 
+  it("shows which roles report, beside what they may do", () => {
+    const r = connectFixture();
+    r.room.heartbeat_on_seconds = 300;
+    r.room.reports = { author: true, reviewer: false };
+    const node = renderJoin(r, () => {}, NOW);
+    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Reports");
+    expect([...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent)).toEqual(["yes", "no"]);
+  });
+
   it("renders creator prose as text, never as markup", () => {
     const r = connectFixture();
     r.room.text.data.room = HOSTILE;
@@ -62,6 +71,8 @@ describe("renderJoin", () => {
     const [confirm] = [...node.querySelectorAll("button")];
     confirm.click();
     expect(node.lastElementChild!.textContent).toMatch(/sending/i);
+    // The status changes after the click, so a screen reader is told (a polite live region).
+    expect(node.lastElementChild!.getAttribute("role")).toBe("status");
     resolveSend();
     await new Promise((r) => setTimeout(r, 0));
     expect(node.lastElementChild!.textContent).toMatch(/^Sent to your agent/);
@@ -79,6 +90,16 @@ describe("renderJoin", () => {
     expect(status).toMatch(/did not accept/i);
     expect(status).toContain(verdictMessage({ kind: "confirm", role: "reviewer", capabilities: ["read_context", "receive_messages"] }));
     expect(confirm.disabled && decline.disabled).toBe(true);
+  });
+
+  // ext-apps hands a refusal back as a result carrying isError, not as a rejection
+  // (McpUiMessageResult), so "sent" must wait on that flag too.
+  it("treats a host answer of isError as a refusal", async () => {
+    const node = renderJoin(connectFixture(), () => Promise.resolve({ isError: true }), NOW);
+    const [confirm] = [...node.querySelectorAll("button")];
+    confirm.click();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(node.lastElementChild!.textContent).toMatch(/did not accept/i);
   });
 
   it("declines with one click", () => {

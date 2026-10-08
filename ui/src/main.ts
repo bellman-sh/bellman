@@ -2,7 +2,7 @@ import { App, applyDocumentTheme } from "@modelcontextprotocol/ext-apps";
 import { renderJoin, verdictMessage } from "./join.js";
 import { renderMonitor } from "./monitor.js";
 import { pickScreen, type ToolOutcome } from "./screen.js";
-import { el } from "./shared.js";
+import { coalesce, el } from "./shared.js";
 
 /** How often the monitor re-reads bellman_rooms while the page is visible. */
 const POLL_MS = 15_000;
@@ -32,15 +32,16 @@ function startPolling(): void {
 /**
  * The monitor's own read. Only ever bellman_rooms (spec D3): through the
  * bridge, a bellman_sync from here would count as the agent having seen the
- * events it returned, and they would never reach it.
+ * events it returned, and they would never reach it. Coalesced, so the timer
+ * and the Refresh button cannot start a second read while one is running.
  */
-async function refresh(): Promise<void> {
+const refresh = coalesce(async (): Promise<void> => {
   try {
     render(await app.callServerTool({ name: "bellman_rooms", arguments: {} }));
   } catch (err) {
     show(el("p", { class: "error" }, `Refresh failed: ${err instanceof Error ? err.message : String(err)}`));
   }
-}
+});
 
 function render(result: ToolOutcome): void {
   const screen = pickScreen(result);
@@ -50,8 +51,9 @@ function render(result: ToolOutcome): void {
       show(renderJoin(screen.data, async (verdict) => {
         // The human's decision, handed to the agent as one user message of
         // identifiers (spec D5, D6). The agent calls bellman_confirm itself.
-        // The screen reports "sent" only once the host has accepted it.
-        await app.sendMessage({ role: "user", content: [{ type: "text", text: verdictMessage(verdict) }] });
+        // The screen reports "sent" only once the host has accepted it: the
+        // answer goes back to the screen, which reads a refusal off isError.
+        return app.sendMessage({ role: "user", content: [{ type: "text", text: verdictMessage(verdict) }] });
       }));
       return;
     case "monitor":

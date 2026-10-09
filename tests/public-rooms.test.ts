@@ -10,7 +10,8 @@ import { roomPreview } from "../src/projections.js";
 import { isPublic } from "../src/rooms.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import type { SavedPreset, Session } from "../src/types.js";
-import { roomManifest, session } from "./helpers/fixtures.js";
+import { brief, roomManifest, session } from "./helpers/fixtures.js";
+import { DEV_KEY, Harness } from "./helpers/harness.js";
 
 const roles = { a: { can: ["send"] }, b: { can: ["send"] } };
 const authored = { room: "r", mode: "pair", roles, default_role: "b", creator_role: "a" };
@@ -85,5 +86,23 @@ describe("the preview", () => {
     expect(view({ manifest: roomManifest({ public: true }), unpublishedAt: 1 }).public).toBe(false);
     expect(view({}).public).toBe(false);
     expect(view({ manifest: roomManifest({ public: true }) }).text.data).not.toHaveProperty("public");
+  });
+});
+
+// Plan B's final review, Important: asked for "the link", an agent holding only join_url shares a seat.
+describe("the creator's public link", () => {
+  it("comes back for a public room as a page to read, apart from the code to join, and not for a private one", async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      const open = await jesse.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
+      expect(open.isError, open.text).toBe(false);
+      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+      expect(open.data.public_url).not.toBe(open.data.join_url);
+      const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "pair" }, brief: brief() });
+      expect("public_url" in shut.data).toBe(false);
+    } finally {
+      await h.close();
+    }
   });
 });

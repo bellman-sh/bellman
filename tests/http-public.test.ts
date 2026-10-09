@@ -76,7 +76,7 @@ describe("GET /public/rooms/:id", () => {
     expect(Object.keys(body).sort()).toEqual(["closed_at", "id", "mode", "status", "text"]);
     expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair" });
     expect(body.text).toEqual({
-      trust: "untrusted", origin: { memberId: "m_creator", label: "jesse@codenerd" }, data: { room: "Open review", purpose: "Read along" },
+      trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });
   });
 
@@ -122,7 +122,7 @@ describe("GET /public/rooms/:id/surface", () => {
     const body = (await res.json()) as { surface_cursor: number; items: { origin: unknown; data: { key: string } }[] };
     expect(tag).toBe(`"${body.surface_cursor}"`);
     expect(body.items.map((i) => i.data.key)).toEqual(["plan"]);
-    expect(body.items[0].origin).toEqual({ memberId: "m_creator", label: "jesse@codenerd" });
+    expect(body.items[0].origin).toEqual({ memberId: "m_creator", label: "member 1" });
     const again = (await read(`/public/rooms/${PUB}/surface`, { "if-none-match": tag }))!;
     expect([again.status, again.headers.get("etag"), again.headers.get("access-control-allow-origin")]).toEqual([304, tag, "*"]);
   });
@@ -138,8 +138,8 @@ describe("GET /public/rooms/:id/events", () => {
     await say(peer(), "brief_update", brief());
     const out = await events();
     expect(out.events.map((e) => e.data.type)).toEqual(["message", "member_joined"]);
-    expect(out.events[0].origin).toEqual({ memberId: "m_creator", label: "jesse@codenerd" });
-    expect(out.events[1].data.payload).toEqual({ member: { member_id: "m_peer", label: "peer@codenerd", room_role: "peer_b" } });
+    expect(out.events[0].origin).toEqual({ memberId: "m_creator", label: "member 1" });
+    expect(out.events[1].data.payload).toEqual({ member: { member_id: "m_peer", label: "member 2", room_role: "peer_b" } });
     expect(JSON.stringify(out)).not.toContain(brief().goal);
   });
 
@@ -212,5 +212,35 @@ describe("the public routes", () => {
     expect(await bodyOf(await read("/public/elsewhere"))).toEqual({ error: "not_found", error_description: "no such route" });
     expect(await read(`/rooms/${PUB}`)).toBeUndefined();
     expect(await read("/publicity")).toBeUndefined();
+  });
+});
+
+// Plan B's final review, Critical: a label is how a member signed in, an email address for most,
+// and a reader with the link is not owed it.
+describe("members' names on a public read", () => {
+  it("names every member by number on every public read, wherever a label sits, and never by label", async () => {
+    const put = (await asCreator(`/rooms/${PUB}/surface/plan?member_id=m_creator`, {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "text", title: "The plan", body: "hello" }),
+    }))!;
+    expect(put.status).toBe(200);
+    await say(member(), "message", { text: "hello" });
+    await say(peer(), "member_joined", { member: storedMember(peer()), brief: brief() });
+    await say(peer(), "member_left", { label: "peer@codenerd" });
+    await store.appendEvent(PUB, {
+      type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+      payload: { members: [{ member_id: "m_peer", label: "peer@codenerd" }], about: { origin: { label: "jesse@codenerd" } } }, refId: null,
+    });
+    for (const sub of ["", "/surface", "/events"]) {
+      expect(JSON.stringify(await bodyOf(await read(`/public/rooms/${PUB}${sub}`))), sub).not.toMatch(/@codenerd/);
+    }
+    const { events } = (await bodyOf(await read(`/public/rooms/${PUB}/events`))) as unknown as {
+      events: { origin: { label: string }; data: { from: { label: string }; payload: unknown } }[];
+    };
+    // The surface write logs a `surface` event of its own, first.
+    expect(events.map((e) => [e.origin.label, e.data.from.label])).toEqual([
+      ["member 1", "member 1"], ["member 1", "member 1"], ["member 2", "member 2"], ["member 2", "member 2"], ["bellman", "bellman"],
+    ]);
+    expect(events[3].data.payload).toEqual({ label: "member 2" });
+    expect(events[4].data.payload).toEqual({ members: [{ member_id: "m_peer", label: "member 2" }], about: { origin: { label: "member 1" } } });
   });
 });

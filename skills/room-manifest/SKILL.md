@@ -216,8 +216,10 @@ Three refusals an author meets:
 
 `public: true` on either arm makes the room readable by anyone with its link:
 its working surface and its log, never a brief. Joining still takes a code,
-and a joiner is shown that the room is public before accepting. It is false
-unless given. The creator can make the room private later, from dash; nothing
+and a joiner is shown that the room is public before accepting. Readers see
+members by number, not by how they signed in. `bellman_start` returns the page
+as `public_url`: share that, never `join_url`, which seats whoever opens it. It
+is false unless given. The creator can make the room private later, from dash; nothing
 makes a room public again.
 
 ## Step 2c — ask for housekeeping (optional)

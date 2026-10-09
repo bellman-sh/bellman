@@ -240,7 +240,7 @@ finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true` and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat. Dash renders it at `/r/<id>`, outside sign-in.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true` and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in.
 
 ### Two delivery paths
 
@@ -1150,7 +1150,7 @@ loud:
   ([#64](../../../issues/64)) stops the *server* reading a payload; it does not
   make a peer trustworthy.
 
-**A public room gives up confidentiality, on purpose.** Its surface, its log and the files on its surface are readable by anyone with its link; its briefs, and any blob no item names, are not. Rendering does not change: peer content is text on the public page as on a member's, and the public page has no write path. Joiners consent at the preview, where `public` is part of the trusted spine, before any of their context crosses.
+**A public room gives up confidentiality, on purpose.** Its surface, its log and the files on its surface are readable by anyone with its link; its briefs, any blob no item names, and its members' labels are not. Rendering does not change: peer content is text on the public page as on a member's, and the public page has no write path. Joiners consent at the preview, where `public` is part of the trusted spine, before any of their context crosses.
 
 ## 8. Where this is going
 
@@ -1769,18 +1769,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,761** | every request, whether or not you are in a room |
+| Tool definitions | **~7,801** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-09 for public rooms, on top of room housekeeping: 110 tokens
-over main. `bellman_start` is up 77, to 2,128, for the manifest's `public` on both
-arms and the line saying what it means; `bellman_connect` is up 33, to 654, for the
-preview's `public` and the line telling a joiner's agent to say so. That is 7,761 by
-the method below; this branch's script reads 7,759 against main's 7,649, the same 110.
+Re-measured on 2026-10-09 for public rooms, on top of room housekeeping: 150 tokens
+over main. `bellman_start` is up 111, to 2,162, for the manifest's `public` on both
+arms, the line saying what it means and the `public_url` it returns; `bellman_connect`
+is up 39, to 660, for the preview's `public` and the line telling a joiner's agent to
+say so. That is 7,801 by the method below; this branch's script reads 7,799 against
+main's 7,649, the same 150.
 
 Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
 tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,

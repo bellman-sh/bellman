@@ -7,7 +7,7 @@ import { roomPreview } from "../projections.js";
 import { hostMember } from "../host.js";
 import type { Brief, Capability, Identity, Member, RoomManifest, Session } from "../types.js";
 import { entitlementsFor } from "../auth.js";
-import { generateSessionId, joinUrl, renderJoinCode } from "../codes.js";
+import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { audit } from "../rooms.js";
@@ -37,12 +37,12 @@ Args:
     100 — Bellman's ceiling for one room, the same on every plan.
     The pair and review presets make pair rooms; the swarm and social presets make swarm rooms.
     A manifest may declare a \`host\`, a seat Bellman runs that asks the room a question on each heartbeat and answers replies; it needs the max or team plan, a \`heartbeat_on\` of at least 1h, and a swarm room. The social preset declares one. The host never keeps a room open.
-    public: true lets anyone with the room's link read its surface and its log, never a brief; joining still takes a code, and joiners are told before they accept. False unless given; a saved preset's is the default for its rooms.
+    public: true lets anyone with the room's public_url read its surface and its log, never a brief, with members named by number; joining still takes a code, and joiners are told before they accept. False unless given; a saved preset's is the default for its rooms. Share public_url for people to read, never join_url, which seats whoever opens it first.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, public, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, public_url (a public room only), plan, room: {preset, mode, public, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
@@ -199,6 +199,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // the URL alone, so sharing the link reveals nothing the code does not.
         join_url: joinUrl(defaultCode.code),
         join_code_expires_at: new Date(defaultCode.expiresAt).toISOString(),
+        // A public room's page to read, apart from the code to join (plan B's final review): asked
+        // for "the link", an agent holding only join_url would hand out a seat.
+        ...(manifest.public === true ? { public_url: publicRoomUrl(session.id) } : {}),
         plan: identity.plan,
         // What the server recorded, seen from the creator's seat. Without it the
         // author of a manifest, especially one parsed from .bellman/room.yaml,

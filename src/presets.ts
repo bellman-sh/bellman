@@ -42,7 +42,6 @@ export function asManifest(
   };
 }
 
-
 /**
  * The block as saved (#66): the keys it sets, durations as written, and null when it sets
  * none, so "no housekeeping" has one spelling in a row as it has in a resolved manifest.

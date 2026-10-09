@@ -745,8 +745,8 @@ describe("housekeeping (#66)", () => {
   });
 
   // The parser is shared and the units are not: a field reads, and prints its bounds in, the units it has
-  // always been written in. A housekeeping threshold's ceiling is a week, so it takes days; heartbeat_on's is
-  // a day (the hosted seat, D3), which it has always written "24h", so days stay out of it.
+  // always been written in. A housekeeping threshold's ceiling is a week, so it takes days; heartbeat_on has
+  // always been written in seconds, minutes and hours, and its ceiling, a day since the hosted seat (D3), prints "24h".
   describe("the parser it shares with heartbeat_on", () => {
     it("leaves heartbeat_on's shape message as it was, without days among the examples", () => {
       expect(refusal(authored({ heartbeat_on: "soon" })))

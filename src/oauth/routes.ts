@@ -576,6 +576,7 @@ async function finishSession(
   await config.store.putSession(id, {
     identity: resolved.identity,
     plan_source: resolved.source,
+    plan_key: resolved.key,
     identity_keys: resolved.keys,
     created_at: now,
     last_used_at: now,
@@ -1100,7 +1101,7 @@ export async function handleOAuth(
         },
       });
     }
-    const { identity, planSource } = who;
+    const { identity, planSource, planKey, subjectKey } = who;
     const limits = entitlementsFor(identity);
     const used = (await config.plans?.countCreatesThisMonth(identity.userId)) ?? 0;
     const account = {
@@ -1110,6 +1111,12 @@ export async function handleOAuth(
       role: identity.role,
       org_id: identity.orgId,
       plan_source: planSource,
+      // A panel session's keys. Both are undefined for a bearer caller, and
+      // plan_key is for a session signed in before it was kept. JSON leaves an
+      // undefined field out, and absent is how the panel tells "not known" from
+      // null, which means nothing matched.
+      subject_key: subjectKey,
+      plan_key: planKey,
       entitlements: limits,
       usage: {
         sessions_created_this_month: used,
@@ -1321,7 +1328,15 @@ export async function handleOAuth(
 export async function caller(
   request: Request,
   config: OAuthConfig
-): Promise<{ identity: Identity; planSource: string; via: "bearer" | "cookie" } | null> {
+): Promise<{
+  identity: Identity;
+  planSource: string;
+  /** The key the plan resolved through. A panel session's only, and absent on one that predates it. */
+  planKey?: string | null;
+  /** The stable `<provider>:<subject>` key. A panel session's only. */
+  subjectKey?: string | null;
+  via: "bearer" | "cookie";
+} | null> {
   const bearer = (request.headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "").trim();
   if (bearer) {
     const claims = await verifyJwt(bearer, config.secret, {
@@ -1357,7 +1372,7 @@ export async function caller(
 async function sessionCaller(
   request: Request,
   config: OAuthConfig
-): Promise<{ identity: Identity; planSource: string; via: "cookie" } | null> {
+): Promise<{ identity: Identity; planSource: string; planKey?: string | null; subjectKey: string | null; via: "cookie" } | null> {
   // The allowlist is what grants browser authentication at all. Without this a
   // deploy that forgot BELLMAN_PANEL_ORIGINS would still accept cookies while
   // serving no CORS — a session usable by anything that is not a browser.
@@ -1370,9 +1385,12 @@ async function sessionCaller(
   const now = Date.now();
   const stored = await config.store.touchSession(id, now);
   if (!stored) return null;
+  // Read from the keys and not from userId, which an operator override may have
+  // set to anything (u_jesse). The subject is the key an admin grants a plan to.
+  const subjectKey = immutableKeys(stored.identity_keys)[0] ?? null;
 
   if (now - replannedAt(stored) <= ACCESS_TOKEN_TTL_SECONDS * 1000) {
-    return { identity: stored.identity, planSource: stored.plan_source, via: "cookie" };
+    return { identity: stored.identity, planSource: stored.plan_source, planKey: stored.plan_key, subjectKey, via: "cookie" };
   }
 
   const current = await replanOnRefresh(stored.identity, stored.identity_keys, config);
@@ -1406,7 +1424,7 @@ async function sessionCaller(
     console.error("could not store a re-resolved panel session:", err);
   }
   if (!merged) return null;
-  return { identity: current.identity, planSource: current.source, via: "cookie" };
+  return { identity: current.identity, planSource: current.source, planKey: current.key, subjectKey, via: "cookie" };
 }
 
 async function issueTokens(

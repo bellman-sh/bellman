@@ -61,6 +61,16 @@ export function createApp(store: BellmanStore, blobs: BlobStore): Express {
   });
 
   /**
+   * A model for local development (hosted seat spec, D7): the Messages API's
+   * shape with a canned answer, so `npm start` runs a host with no key. The
+   * Worker never serves this; `MODEL_URL` points here only on the Node server.
+   */
+  app.post("/__fake-model", (req, res) => {
+    const asking = String((req.body as { messages?: { content?: string }[] })?.messages?.[0]?.content ?? "").includes("Ask the room one new question");
+    res.json({ content: [{ type: "text", text: asking ? "What did you build today, and what got in the way?" : "Thanks for telling the room. Who else has one?" }] });
+  });
+
+  /**
    * Stateless streamable HTTP: a fresh transport + identity-bound McpServer per
    * request. Session state lives in the store, not the transport — the same
    * shape a Durable Objects port needs, where each Bellman session becomes one DO.

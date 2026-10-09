@@ -70,9 +70,9 @@ describe("the preset routes", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 
-  it("list the three built-ins expanded, and the caller's own presets and nobody else's", async () => {
+  it("list the four built-ins expanded, and the caller's own presets and nobody else's", async () => {
     let body = await bodyOf(await call(DEV_KEY.jesse, "/presets"));
-    expect((body.builtin as { name: string }[]).map((p) => p.name)).toEqual(["pair", "swarm", "review"]);
+    expect((body.builtin as { name: string }[]).map((p) => p.name)).toEqual(["pair", "swarm", "review", "social"]);
     expect(body.mine).toEqual([]);
     expect((await put(DEV_KEY.jesse, "my_review"))!.status).toBe(200);
     body = await bodyOf(await call(DEV_KEY.jesse, "/presets"));
@@ -141,6 +141,40 @@ describe("the preset routes", () => {
     expect(await store.getPreset("u_jesse", "my_review")).toBeDefined();
     expect((await call(DEV_KEY.jesse, "/presets/my_review", { method: "DELETE" }))!.status).toBe(204);
     expect((await call(DEV_KEY.jesse, "/presets/my_review", { method: "DELETE" }))!.status).toBe(404);
+  });
+
+  /**
+   * `social` became a built-in after saved presets shipped, so a person may hold a preset
+   * saved under it. It is refused as every built-in's name is from now on, still listed
+   * among theirs, and still theirs to delete.
+   */
+  it("refuse social as a built-in's name, and still list and delete one saved under it before", async () => {
+    const refused = (await put(DEV_KEY.jesse, "social"))!;
+    expect(refused.status).toBe(409);
+    expect(await bodyOf(refused)).toMatchObject({ error: "builtin" });
+    // As one saved before this merge was stored: no `host` key.
+    await store.putPreset("u_jesse", {
+      name: "social", description: null, mode: "pair", heartbeat_on: null,
+      roles: { solo: { can: ["send"], description: null, reports: false } },
+      default_role: "solo", creator_role: "solo", updated_at: "2026-10-09T12:00:00.000Z",
+    }, MAX_PRESETS);
+    expect(((await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string }[]).map((p) => p.name)).toEqual(["social"]);
+    expect((await call(DEV_KEY.jesse, "/presets/social", { method: "DELETE" }))!.status).toBe(204);
+    expect(await store.getPreset("u_jesse", "social")).toBeUndefined();
+  });
+
+  it("save a host block and answer with it as stored", async () => {
+    const res = (await put(DEV_KEY.jesse, "mornings", preset({
+      mode: "swarm",
+      heartbeat_on: "1h",
+      roles: { lead: { can: ["send", "invite"] }, guest: { can: ["send"] }, host: { can: ["send"] } },
+      default_role: "guest",
+      creator_role: "lead",
+      host: { role: "host", model: "sonnet" },
+    })))!;
+    expect(res.status, JSON.stringify(await res.clone().json())).toBe(200);
+    expect((await bodyOf(res)).host).toEqual({ role: "host", model: "sonnet", instructions: null });
+    expect((await store.getPreset("u_jesse", "mornings"))!.host).toEqual({ role: "host", model: "sonnet", instructions: null });
   });
 
   it("answer 404 to a delete whose name is outside the grammar, without asking the store", async () => {

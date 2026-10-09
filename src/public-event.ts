@@ -32,6 +32,6 @@ export function publicEvent(e: SessionEvent) {
     at: new Date(e.at).toISOString(),
     // Only when true. Omission costs nothing for the twelve types that predate
     // #111, and a client that has never heard of `progress` keeps working.
-    ...(isAmbient(e.type) ? { ambient: true as const } : {}),
+    ...(isAmbient(e) ? { ambient: true as const } : {}),
   };
 }

@@ -13,16 +13,25 @@ export type PresetCheck =
   | { ok: true; preset: SavedPreset }
   | { ok: false; status: 400 | 409; error: "invalid_request" | "invalid_manifest" | "builtin"; description: string };
 
-/** A saved preset as the author arm `resolveManifest` reads, for a room called `room` (D6). */
-export function asManifest(p: SavedPreset, room: string, purpose: string | null | undefined): Record<string, unknown> {
+/**
+ * A saved preset as the author arm `resolveManifest` reads, for a room called `room` (D6).
+ * `host` goes with it, so a room started from a preset with a host meets bellman_start's
+ * plan refusal and hosted-room slot exactly as an inline `host` block does. A cite's
+ * `heartbeat_on`, which checkCiteCadence admits only for a preset with a host, replaces
+ * the preset's own; absent or null, the preset's stands, as for a built-in.
+ */
+export function asManifest(
+  p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null,
+): Record<string, unknown> {
   return {
     room,
     purpose: purpose ?? null,
     mode: p.mode,
-    heartbeat_on: p.heartbeat_on,
+    heartbeat_on: heartbeatOn ?? p.heartbeat_on,
     roles: p.roles,
     default_role: p.default_role,
     creator_role: p.creator_role,
+    host: p.host ?? null,
   };
 }
 
@@ -56,6 +65,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     roles,
     default_role: v.default_role,
     creator_role: v.creator_role,
+    host: v.host == null ? null : { role: v.host.role, model: v.host.model, instructions: v.host.instructions ?? null },
     updated_at: new Date(now).toISOString(),
   };
   try {

@@ -53,7 +53,7 @@ describe("presets", () => {
 
   it("names the valid presets when given an unknown one", () => {
     expect(() => resolveManifest({ room: "r", preset: "duo" } as never))
-      .toThrow(/pair, swarm, review/);
+      .toThrow(/pair, swarm, review, social/);
   });
 
   it("records preset as null when roles are authored", () => {
@@ -119,6 +119,11 @@ describe("presets", () => {
     review: {
       author: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
       reviewer: ["send", "respond_actions"],
+    },
+    social: {
+      lead: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+      guest: ["send"],
+      host: ["send"],
     },
   };
   it.each(PRESET_NAMES)("%s holds the verbs the design's table gives it, and no other roles", (name) => {
@@ -524,11 +529,11 @@ describe("heartbeat_on", () => {
 
   it("refuses a duration outside the bounds, naming them", () => {
     expect(() => resolveManifest(authored({ heartbeat_on: "10s" })))
-      .toThrow(/between 30s and 1h/);
-    expect(() => resolveManifest(authored({ heartbeat_on: "2h" })))
-      .toThrow(/between 30s and 1h/);
+      .toThrow(/between 30s and 24h/);
+    expect(() => resolveManifest(authored({ heartbeat_on: "25h" })))
+      .toThrow(/between 30s and 24h/);
     expect(MIN_HEARTBEAT_MS).toBe(30_000);
-    expect(MAX_HEARTBEAT_MS).toBe(3_600_000);
+    expect(MAX_HEARTBEAT_MS).toBe(86_400_000);
   });
 
   /**
@@ -571,5 +576,123 @@ describe("heartbeat_on", () => {
     // 501 characters. Throwing is not enough; what the message carries is the claim.
     expect(message).toMatch(/^heartbeat_on: /);
     expect(message).not.toContain("9999");
+  });
+});
+
+describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
+  const hosted = (over: Record<string, unknown> = {}) => authored({
+    mode: "swarm",
+    heartbeat_on: "1h",
+    roles: {
+      lead: { can: ["send", "invite", "revoke"] },
+      guest: { can: ["send"] },
+      host: { can: ["send"] },
+    },
+    default_role: "guest",
+    creator_role: "lead",
+    host: { role: "host", model: "haiku", instructions: "Ask about the week." },
+    ...over,
+  });
+
+  it("resolves a host block with its model and instructions", () => {
+    const m = resolveManifest(hosted());
+    expect(m.host).toEqual({ role: "host", model: "haiku", instructions: "Ask about the week." });
+  });
+
+  it("defaults the model to haiku and the instructions to null", () => {
+    const m = resolveManifest(hosted({ host: { role: "host" } }));
+    expect(m.host).toEqual({ role: "host", model: "haiku", instructions: null });
+  });
+
+  it("resolves to no host when the block is absent", () => {
+    expect(resolveManifest(hosted({ host: undefined })).host).toBeNull();
+  });
+
+  it("refuses a host role the manifest does not declare, listing the ones it does", () => {
+    expect(() => resolveManifest(hosted({ host: { role: "butler" } })))
+      .toThrow(/host\.role "butler" is not defined in roles \(defined: lead, guest, host\)/);
+  });
+
+  it("refuses a host role that holds any verb but send", () => {
+    expect(() => resolveManifest(hosted({ roles: {
+      lead: { can: ["send", "invite", "revoke"] }, guest: { can: ["send"] }, host: { can: ["send", "invite"] },
+    } }))).toThrow(/host role "host" must hold exactly the verb "send" \(it holds: send, invite\)/);
+    expect(() => resolveManifest(hosted({ roles: {
+      lead: { can: ["send", "invite", "revoke"] }, guest: { can: ["send"] }, host: { can: [] },
+    } }))).toThrow(/host role "host" must hold exactly the verb "send" \(it holds: none\)/);
+  });
+
+  it("refuses a host role that reports", () => {
+    expect(() => resolveManifest(hosted({ roles: {
+      lead: { can: ["send", "invite", "revoke"] }, guest: { can: ["send"] }, host: { can: ["send"], reports: true },
+    } }))).toThrow(/host role "host" must not report/);
+  });
+
+  it("refuses a model it does not know, listing the names", () => {
+    expect(() => resolveManifest(hosted({ host: { role: "host", model: "gpt" } })))
+      .toThrow(/host\.model/);
+  });
+
+  it("refuses a host with no heartbeat, and one faster than an hour", () => {
+    expect(() => resolveManifest(hosted({ heartbeat_on: undefined })))
+      .toThrow(/a room with a host must set heartbeat_on \(at least 1h\)/);
+    expect(() => resolveManifest(hosted({ heartbeat_on: "30m" })))
+      .toThrow(/a room with a host must tick no faster than 1h \(got "30m"\)/);
+  });
+
+  it("refuses a host in a pair room", () => {
+    expect(() => resolveManifest(hosted({ mode: "pair", roles: {
+      lead: { can: ["send"] }, host: { can: ["send"] },
+    }, default_role: "lead" }))).toThrow(/a pair room cannot have a host: its two seats are its members'/);
+  });
+
+  it("bounds the instructions like purpose", () => {
+    expect(() => resolveManifest(hosted({ host: { role: "host", instructions: "x".repeat(301) } })))
+      .toThrow(/host\.instructions/);
+  });
+
+  it("allows a daily beat now that a host can be slow", () => {
+    expect(resolveManifest(hosted({ heartbeat_on: "24h" })).heartbeatOnMs).toBe(86_400_000);
+    expect(() => resolveManifest(authored({ heartbeat_on: "25h" }))).toThrow(/between 30s and 24h/);
+    expect(MAX_HEARTBEAT_MS).toBe(86_400_000);
+  });
+
+  it("expands the social preset with a host, an hourly beat, and guests who can only send", () => {
+    const m = resolveManifest({ room: "the square", purpose: "What people are building this week", preset: "social" });
+    expect(m.mode).toBe("swarm");
+    expect(m.heartbeatOnMs).toBe(3_600_000);
+    expect(m.host).toEqual({ role: "host", model: "haiku", instructions: null });
+    expect(m.roles.host.can).toEqual(["send"]);
+    expect(m.roles.guest.can).toEqual(["send"]);
+    expect(m.defaultRole).toBe("guest");
+    expect(m.creatorRole).toBe("lead");
+  });
+
+  it("lets a social cite slow the beat but not speed it past the floor", () => {
+    expect(resolveManifest({ room: "r", preset: "social", heartbeat_on: "6h" }).heartbeatOnMs).toBe(21_600_000);
+    expect(() => resolveManifest({ room: "r", preset: "social", heartbeat_on: "5m" }))
+      .toThrow(/a room with a host must tick no faster than 1h/);
+  });
+
+  // M8: main's strict cite refused the key; a preset with no host has nothing to tick for.
+  it.each(["pair", "swarm", "review"])("refuses heartbeat_on on a cite of %s, a preset with no host", (preset) => {
+    expect(() => resolveManifest({ room: "r", preset, heartbeat_on: "5m" } as never)).toThrow(/heartbeat_on/);
+    expect(() => resolveManifest({ room: "r", preset, heartbeat_on: null } as never)).toThrow(/heartbeat_on/);
+    expect(resolveManifest({ room: "r", preset } as never).heartbeatOnMs).toBeNull();
+  });
+
+  it("gives the other presets no host and, as before, no beat", () => {
+    expect(resolveManifest({ room: "r", preset: "pair" }).host).toBeNull();
+    expect(resolveManifest({ room: "r", preset: "pair" }).heartbeatOnMs).toBeNull();
+  });
+
+  // `host` is an object in the private catalog, as `roles` is, so it leaves the module cloned too:
+  // an edit to one room's host must not reach the next room cited from the same preset.
+  it("hands each social room its own host, not the catalog's", () => {
+    const first = resolveManifest({ room: "first", preset: "social" });
+    first.host!.model = "opus";
+    first.host!.instructions = "poisoned";
+    expect(resolveManifest({ room: "second", preset: "social" }).host)
+      .toEqual({ role: "host", model: "haiku", instructions: null });
   });
 });

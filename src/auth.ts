@@ -16,6 +16,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
     // A room is what a plan already rations, so nothing here is monthly.
     blobBytesPerRoom: 50 * 1024 * 1024,
+    hostedRooms: 0,
+    hostUnitsPerRoom: 0,
     // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
     // max and team until someone with the right to delete it does.
     retainAfterCloseMs: 7 * 24 * 60 * 60 * 1000,
@@ -26,21 +28,24 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 500 * 1024 * 1024,
+    hostedRooms: 0,
+    hostUnitsPerRoom: 0,
     retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
   },
-  // Coming soon. With no room lifetime and no member cap (#18), max differs from
-  // pro by creates, the blob ceiling and how long a closed room is kept (#65), so
-  // nothing sells it: no Stripe price names it and
-  // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404. It
-  // stays here because a hand grant still works and because it is the shape
-  // hosted agents (#188, #189) attach their facet to. tests/auth.test.ts pins
-  // the difference, so a facet landing is a deliberate edit to that line.
+  // Max sells the hosted seat: three hosted rooms open at once, 3,000 units each a
+  // month (the hosted seat spec, D2 and D3, and ADR 0002), over pro's creates, blob ceiling and how
+  // long a closed room is kept (#65). tests/auth.test.ts pins the five
+  // differences. Not on sale yet: no Stripe price names it and
+  // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404
+  // until the site follow-up adds both (spec D2).
   max: {
     modes: ["pair", "swarm"],
     monthlyCreates: 2000,
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    hostedRooms: 3,
+    hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
   },
   team: {
@@ -49,6 +54,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: true,
     audit: true,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    hostedRooms: 5,
+    hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
   },
 };
@@ -161,4 +168,33 @@ export function resolveIdentity(
 
 export function entitlementsFor(identity: Identity): Entitlements {
   return ENTITLEMENTS[identity.plan];
+}
+
+/**
+ * The plan a key table gives this user, or null when no key in it names them (I7). A hosted
+ * room knows its creator by user id alone, and its seat reads that creator's plan again at
+ * each month turn. The table is the one `resolveIdentity` reads: `keysJson` when given, else
+ * BELLMAN_KEYS, else the dev keys; `null` is no table at all, which is how the Worker asks,
+ * since it never reads the dev keys (`resolveCaller`). Two keys for one user count for the
+ * higher plan, as billing ranks plans: cheapest first in ENTITLEMENTS.
+ */
+export function keyedPlan(userId: string, keysJson?: string | null): Plan | null {
+  if (keysJson === null) return null;
+  const raw = keysJson ?? envKeys();
+  let table: unknown = DEV_KEYS;
+  if (raw) {
+    try {
+      table = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof table !== "object" || table === null) return null;
+  const ranks = Object.keys(ENTITLEMENTS);
+  let best: Plan | null = null;
+  for (const v of Object.values(table)) {
+    if (!isIdentity(v) || v.userId !== userId) continue;
+    if (best === null || ranks.indexOf(v.plan) > ranks.indexOf(best)) best = v.plan;
+  }
+  return best;
 }

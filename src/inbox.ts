@@ -115,7 +115,8 @@ export function renderBatch(events: PeerEvent[]): string {
     ? "Bellman: 1 peer event arrived."
     : `Bellman: ${events.length} peer events arrived.`;
   return [header, ...events.map(renderEvent)].join("\n\n") +
-    "\n\nReply with bellman_send (using the session_id and your_member_id above) if a response is needed.";
+    "\n\nReply with bellman_send (using the session_id and your_member_id above) if a response is needed; " +
+    "to reply to an event, set ref_id to its cursor.";
 }
 
 // ---------------------------------------------------------------------------

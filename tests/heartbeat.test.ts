@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { clearSilence, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf } from "../src/heartbeat.js";
+import {
+  clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickPlan, tickStep,
+} from "../src/heartbeat.js";
+import { hostMember } from "../src/host.js";
+import { MemoryStore, NO_SOCKETS } from "../src/store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { StoredSession } from "../src/stored-session.js";
 
@@ -94,8 +98,9 @@ describe("nextTickAt", () => {
   });
 
   // Review Focus 3's sibling: an empty roster must not arm, or the alarm fires
-  // for as long as the object lives with nobody to ask.
-  it("arms nothing when no member must report", () => {
+  // for as long as the object lives with nobody to ask. A room with a host ticks
+  // on its own cadence instead; see "a hosted room's own tick" below.
+  it("arms nothing in a room without a host when no member must report", () => {
     expect(nextTickAt(stored({ members: [watcher()] }))).toBe(null);
     expect(nextTickAt(stored({ members: [] }))).toBe(null);
     expect(nextTickAt(stored({ members: [lead({ leftAt: T0 })] }))).toBe(null);
@@ -284,6 +289,141 @@ describe("nextTickAt, the two scheduling properties", () => {
       const s = stored({ members, lastTickAt: T0 });
       expect(dueMembers(s, nextTickAt(s)!).length).toBeGreaterThan(0);
     }
+  });
+});
+
+/**
+ * A hosted room ticks on its own cadence, whether or not any role reports (#188):
+ * the seat asks its question on a tick, and no preset's role reports, `social`
+ * included. The cadence is the host's own, anchored on `lastHostTickAt`, which only a
+ * tick that wakes the host moves (I3): a reporter's tick never wakes it. It writes the
+ * tick only while a person is in the room, so an empty hosted room costs one silent
+ * firing a cadence and no log growth.
+ */
+describe("a hosted room's own tick (hosted seat spec, D4)", () => {
+  const HOUR = 3_600_000;
+  const hosted = roomManifest({
+    mode: "swarm", preset: null, heartbeatOnMs: HOUR,
+    roles: {
+      lead: { can: ["send", "invite"], description: null, reports: false },
+      host: { can: ["send"], description: null, reports: false },
+    },
+    defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null },
+  });
+  const person = (over = {}) =>
+    member({ memberId: "m_person", roomRole: "lead", joinedAt: T0, lastSeenAt: T0, ...over });
+  const host = (over = {}) => ({ ...hostMember(hosted, T0), ...over });
+  const room = (over: Partial<StoredSession> = {}): StoredSession => {
+    const { events, ...rest } = session({ manifest: hosted, members: [person(), host()] });
+    return { ...rest, ...over } as StoredSession;
+  };
+
+  it("arms a hosted room a cadence after its host last asked, though no member must report", () => {
+    expect(nextTickAt(room({ lastTickAt: T0, lastHostTickAt: T0 }))).toBe(T0 + HOUR);
+    // A reporter's tick since then does not push the host back.
+    expect(nextTickAt(room({ lastTickAt: T0 + 20 * 60_000, lastHostTickAt: T0 }))).toBe(T0 + HOUR);
+    // A firing at or after the host's time that found nobody to ask tries again a cadence later.
+    expect(nextTickAt(room({ lastTickAt: T0 + HOUR, lastHostTickAt: T0 }))).toBe(T0 + 2 * HOUR);
+    // The control: the same roster with no host arms nothing, as it always has.
+    expect(nextTickAt(room({ lastTickAt: T0, lastHostTickAt: T0, manifest: { ...hosted, host: null } }))).toBe(null);
+    expect(nextTickAt(room({ lastTickAt: T0, lastHostTickAt: T0, frozenAt: T0 }))).toBe(null);
+    expect(nextTickAt(room({ lastTickAt: T0, lastHostTickAt: T0, closed: true }))).toBe(null);
+  });
+
+  // Stored state, not the clock: this is recomputed on every re-arm, and an answer
+  // measured from now would slide a cadence later each time anything re-armed.
+  it("arms a hosted room whose host has never asked a cadence after its first seat", () => {
+    const s = room({ lastTickAt: undefined, members: [person({ joinedAt: T0 + 5_000 }), host({ joinedAt: T0 + 9_000 })] });
+    expect(nextTickAt(s)).toBe(T0 + 5_000 + HOUR);
+    // A reporter's tick does not move that anchor either.
+    expect(nextTickAt({ ...s, lastTickAt: T0 + 30 * 60_000 })).toBe(T0 + 5_000 + HOUR);
+  });
+
+  it("keeps a reporting member's own earlier deadline in a hosted room", () => {
+    const reporting = { ...hosted, roles: { ...hosted.roles, lead: { ...hosted.roles.lead, reports: true } } };
+    const s = room({ manifest: reporting, lastTickAt: T0, members: [person({ lastReportAt: T0 - 1_000 }), host()] });
+    expect(nextTickAt(s)).toBe(T0 - 1_000 + HOUR);
+  });
+
+  it("writes once its cadence has come round and a person has been seen since the host last asked, and not before", () => {
+    const s = room({ lastTickAt: T0, lastHostTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host()] });
+    expect(hostedTickDue(s, T0 + HOUR, NO_SOCKETS)).toBe(true);
+    expect(hostedTickDue(s, T0 + HOUR - 1, NO_SOCKETS)).toBe(false);
+    expect(hostedTickDue({ ...s, manifest: { ...hosted, host: null } }, T0 + HOUR, NO_SOCKETS)).toBe(false);
+  });
+
+  it("writes nothing when no person has been seen since the host last asked: the host and a departed member do not count", () => {
+    const quiet = person({ lastSeenAt: T0 - 1 });
+    expect(hostedTickDue(room({ lastHostTickAt: T0, members: [quiet, host({ lastSeenAt: T0 + 60_000 })] }), T0 + HOUR, NO_SOCKETS)).toBe(false);
+    expect(hostedTickDue(room({ lastHostTickAt: T0, members: [person({ lastSeenAt: T0 + 1, leftAt: T0 + 2 }), host()] }), T0 + HOUR, NO_SOCKETS)).toBe(false);
+    // The control: the same quiet person, but a socket vouches for it.
+    expect(hostedTickDue(room({ lastHostTickAt: T0, members: [quiet, host()] }), T0 + HOUR, new Set(["m_person"]))).toBe(true);
+  });
+
+  // The seat is woken on its own cadence only (I3), and only with a person seen since it
+  // last asked. A reporter's deadline writes a tick for the reporter and wakes no one.
+  it("tickPlan wakes the seat on its own cadence with a person seen since it last asked, and never for a reporter", () => {
+    expect(tickPlan(room({ lastTickAt: T0, lastHostTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host()] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: true });
+    expect(tickPlan(room({ lastTickAt: T0, lastHostTickAt: T0, members: [person({ lastSeenAt: T0 - 1 }), host({ lastSeenAt: T0 + 1 })] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: false, wakeHost: false });
+    // A due reporter, seen since, before the host's cadence: the tick is the reporter's alone.
+    const reporting = { ...hosted, roles: { ...hosted.roles, lead: { ...hosted.roles.lead, reports: true } } };
+    const due = room({ manifest: reporting, lastTickAt: T0, lastHostTickAt: T0, members: [person({ joinedAt: T0 - HOUR, lastSeenAt: T0 + 1 }), host()] });
+    expect(tickPlan(due, T0 + 1, NO_SOCKETS)).toEqual({ write: true, wakeHost: false });
+    // The host's cadence with nobody due to report still writes the tick, for the host.
+    expect(tickPlan({ ...due, manifest: hosted }, T0 + HOUR, NO_SOCKETS)).toEqual({ write: true, wakeHost: true });
+    // Without a host there is no seat to wake, whoever is in the room.
+    expect(tickPlan({ ...due, manifest: { ...reporting, host: null } }, T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: false });
+  });
+
+  /**
+   * The reviewer's reproduction (I3). In a room that declared `1h`, each reporter's
+   * deadline forced a tick, and every tick woke the host, which asked a new question and
+   * reset its three answers: seven questions in three hours. Two people are present
+   * throughout and report on their own schedules, off the host's.
+   */
+  it("asks on its own cadence only: two reporters at a 1h cadence, three hours, at most three host wakes", async () => {
+    const MIN = 60_000;
+    const reporting = { ...hosted, roles: { ...hosted.roles, lead: { ...hosted.roles.lead, reports: true } } };
+    const woken: number[] = [];
+    let now = T0;
+    const store = new MemoryStore({ host: () => { woken.push(now); } });
+    const { events, ...rest } = session({ manifest: reporting, members: [
+      person({ memberId: "m_a", userId: "u_a", joinedAt: T0 - 20 * MIN, lastReportAt: T0 - 20 * MIN }),
+      person({ memberId: "m_b", userId: "u_b", joinedAt: T0 - 40 * MIN, lastReportAt: T0 - 40 * MIN }),
+      host({ joinedAt: T0 - 40 * MIN }),
+    ] });
+    void events;
+    await store.createSession({ ...rest, events: [] });
+    const reportsAt = new Map([[30, "m_b"], [50, "m_a"], [100, "m_b"], [120, "m_a"], [170, "m_b"]]);
+    for (let minute = 0; minute <= 180; minute++) {
+      now = T0 + minute * MIN;
+      for (const id of ["m_a", "m_b"]) await store.updateMember(rest.id, id, { lastSeenAt: now });
+      const reporter = reportsAt.get(minute);
+      if (reporter) await store.updateMember(rest.id, reporter, { lastReportAt: now });
+      store.tick(now, tickStep);
+    }
+    const ticks = (await store.eventsAfter(rest.id, 0)).filter((e) => e.type === "heartbeat");
+    // The premise: the reporters' deadlines did make the room tick off the host's cadence.
+    expect(ticks.length).toBeGreaterThan(3);
+    expect(woken.map((t) => (t - T0) / MIN)).toEqual([20, 80, 140]);
+  });
+
+  // Evicting the host is the creator's off-switch (C1): no tick wakes a host that has left.
+  it("wakes no host that has left the room, and arms no tick for it", () => {
+    const evicted = room({ lastTickAt: T0, lastHostTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host({ leftAt: T0 + 2 })] });
+    expect(tickPlan(evicted, T0 + HOUR, NO_SOCKETS)).toEqual({ write: false, wakeHost: false });
+    expect(nextTickAt(evicted)).toBeNull();
+    // The control: the same room with its host seated.
+    expect(tickPlan(room({ lastTickAt: T0, lastHostTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host()] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: true });
+  });
+
+  it("asks in a hosted room whose host has never asked while a person is in it", () => {
+    expect(hostedTickDue(room({ lastTickAt: undefined }), T0 + HOUR, NO_SOCKETS)).toBe(true);
+    expect(hostedTickDue(room({ lastTickAt: undefined, members: [person({ leftAt: T0 }), host()] }), T0 + HOUR, NO_SOCKETS)).toBe(false);
   });
 });
 

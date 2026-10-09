@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT,
   WAKES_PER_HOUR, hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
   questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake,
-  type HostDriver, type HostRecord,
+  callMessages, type HostDriver, type HostRecord,
 } from "../src/host.js";
 import { decideHostCharge, type HostAppend } from "../src/store.js";
 import { monthKey, type StoredSession } from "../src/stored-session.js";
@@ -290,7 +290,7 @@ describe("the answer", () => {
  * and writes, and what it keeps. The room is a hosted one with ten units a month, a reply
  * wake's open question is at cursor 10, and the model answers "Fine." unless told otherwise.
  */
-function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend } = {}) {
+function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown } } = {}) {
   const { events: _e, ...rest } = session({ manifest: hosted(), members: [member({ lastSeenAt: NOW }), hostMember(hosted(), NOW)],
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 0, wakes: [] } });
   const room = { ...rest, ...over.room } as StoredSession;
@@ -303,7 +303,7 @@ function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord
       events: async (cursor: number, limit?: number) => { seen.reads.push([cursor, limit]); return []; },
       sent: async (key: string) => { seen.keys.push(key); return over.sent; },
     }),
-    callModel: async () => { seen.calls++; return { status: 200, json: { content: [{ type: "text", text: "Fine." }], stop_reason: "end_turn" } }; },
+    callModel: async () => { seen.calls++; return over.model ?? { status: 200, json: { content: [{ type: "text", text: "Fine." }], stop_reason: "end_turn" } }; },
     write: async (_id, e, units, now, key) => {
       seen.writes.push({ payload: e.payload, units, key });
       return over.write ?? { ok: true, event: { ...e, cursor: 900, at: now } };
@@ -395,5 +395,94 @@ describe("the month's notice (I9)", () => {
     expect(landed.record().noticed).toBe(monthKey(NOW));
     await handleWake(landed.driver, tickWake(13), NOW);
     expect(landed.seen.writes, "one notice a month").toHaveLength(1);
+  });
+});
+
+describe("the request each model is sent (I6)", () => {
+  // From the Messages API reference the claude-api skill bundles: Haiku 4.5 thinks only when
+  // asked and rejects effort; Sonnet 5.5 thinks by default, `between_tools` is its lowest
+  // setting (no extended thinking, accepted at effort high or below, nothing else inside
+  // `thinking`); Opus 5.5 always thinks, and effort is the only control.
+  const prompt = { system: "s", user: "u", maxTokens: 200 };
+
+  it("sends haiku the bare request", () => {
+    expect(messagesBody("haiku", prompt)).toEqual({
+      model: HOST_MODELS.haiku.id, max_tokens: 200, system: "s", messages: [{ role: "user", content: "u" }],
+    });
+  });
+
+  it("turns sonnet's thinking off with between_tools, at low effort", () => {
+    expect(messagesBody("sonnet", prompt)).toMatchObject({ thinking: { type: "between_tools" }, output_config: { effort: "low" } });
+  });
+
+  it("asks opus, which cannot stop thinking, for low effort and sends no thinking field", () => {
+    const body = messagesBody("opus", prompt) as Record<string, unknown>;
+    expect(body.output_config).toEqual({ effort: "low" });
+    expect(body).not.toHaveProperty("thinking");
+  });
+});
+
+describe("what the seat says when the model fails it (I5, I6)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+  const logged = (spy: ReturnType<typeof quiet>) => spy.mock.calls.map((c) => c.map(String).join(" "));
+
+  it("logs the status and the API error type of a call it does not retry, and nothing a header, key or prompt holds", async () => {
+    const spy = quiet();
+    const { driver, seen } = seat({ model: { status: 401, json: { type: "error", error: { type: "authentication_error", message: "invalid x-api-key sk-ant-secret" } } } });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen.writes).toEqual([]);
+    const lines = logged(spy);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/401/);
+    expect(lines[0]).toMatch(/authentication_error/);
+    expect(lines[0]).not.toMatch(/sk-ant-secret|invalid x-api-key|What people are building|Ask about what people shipped/);
+  });
+
+  it.each(["max_tokens", "refusal"])("never posts or charges an answer that stopped at %s, and logs it", async (stop) => {
+    const spy = quiet();
+    const { driver, seen, record } = seat({ model: { status: 200, json: { content: [{ type: "text", text: "Half a quest" }], stop_reason: stop } } });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen.writes).toEqual([]);
+    expect(record().lastCause).toBe(12);
+    expect(logged(spy)).toEqual([expect.stringContaining(stop)]);
+  });
+
+  it("logs any other stop reason but end_turn, and still posts what came back", async () => {
+    const spy = quiet();
+    const done = seat();
+    await handleWake(done.driver, tickWake(12), NOW);
+    expect(logged(spy)).toEqual([]);
+    const paused = seat({ model: { status: 200, json: { content: [{ type: "text", text: "A question?" }], stop_reason: "pause_turn" } } });
+    await handleWake(paused.driver, tickWake(12), NOW);
+    expect(paused.seen.writes).toHaveLength(1);
+    expect(logged(spy)).toEqual([expect.stringContaining("pause_turn")]);
+  });
+
+  it("logs a model it gave up on after its retries", async () => {
+    const spy = quiet();
+    const { driver } = seat({ model: { status: 529, json: { type: "error", error: { type: "overloaded_error", message: "Overloaded" } } }, record: { attempts: 3 } });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(logged(spy)).toEqual([expect.stringMatching(/529.*overloaded_error/)]);
+  });
+});
+
+describe("the model call's bound (M10)", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("aborts a call after 30 seconds, and the seat retries a call that timed out as it retries a 5xx", async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const fetcher = (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(init.signal!.reason)));
+    const call = callMessages(fetcher, "http://model.test", "key", {});
+    expect(timeout).toHaveBeenCalledWith(30_000);
+    controller.abort(new DOMException("The operation timed out.", "TimeoutError"));
+    await expect(call).rejects.toThrow(/timed out/);
+
+    const { driver, record } = seat();
+    driver.callModel = () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+    expect(await handleWake(driver, tickWake(12), NOW)).toBe(driver.retryMs[0]);
+    expect(record().attempts).toBe(1);
   });
 });

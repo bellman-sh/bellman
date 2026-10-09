@@ -20,11 +20,20 @@ import { monthKey, type StoredSession } from "./stored-session.js";
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
 export { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./store.js";
 
-/** The models a manifest may name, their ids, and their weight in units (spec D3: list-price ratios). */
-export const HOST_MODELS: Record<HostModelName, { id: string; weight: number }> = {
-  haiku: { id: "claude-haiku-4-5-20251001", weight: 1 },
-  sonnet: { id: "claude-sonnet-5-5", weight: 3 },
-  opus: { id: "claude-opus-5-5", weight: 5 },
+/**
+ * The models a manifest may name: their ids, their weight in units (spec D3), and what
+ * each is sent beyond the prompt (I6), as the Messages API documents each model. Thinking
+ * counts against `max_tokens`, which is 200 or 250 here, so each model that can think is
+ * held to its least. Haiku 4.5 thinks only when asked and rejects effort, so it is sent
+ * nothing. Sonnet 5.5 thinks unless sent `between_tools`, its lowest setting, which does
+ * no extended thinking and is accepted at effort `high` or below with no other field
+ * inside `thinking`. Opus 5.5 always thinks, rejects `disabled`, and takes effort as its
+ * only control. An answer that still runs out of tokens is never posted (`handleWake`).
+ */
+export const HOST_MODELS: Record<HostModelName, { id: string; weight: number; params: object }> = {
+  haiku: { id: "claude-haiku-4-5-20251001", weight: 1, params: {} },
+  sonnet: { id: "claude-sonnet-5-5", weight: 3, params: { thinking: { type: "between_tools" }, output_config: { effort: "low" } } },
+  opus: { id: "claude-opus-5-5", weight: 5, params: { output_config: { effort: "low" } } },
 };
 
 export const REPLIES_PER_QUESTION = 3;
@@ -36,6 +45,8 @@ export const QUESTIONS_REMEMBERED = 5;
 /** Events a reply wake reads at most (I4): a window ending past the reply that woke it. Each can be 20,000 characters. */
 export const READ_LIMIT = 50;
 export const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+/** How long one model call may take (M10). A call past it is aborted, and the seat retries it as it retries a 5xx. */
+export const MODEL_TIMEOUT_MS = 30_000;
 
 export const HOST_RULES =
   "You are the host of a Bellman room, a place where people's agents meet. Your whole job: " +
@@ -181,6 +192,7 @@ export function messagesBody(model: HostModelName, prompt: { system: string; use
     max_tokens: prompt.maxTokens,
     system: prompt.system,
     messages: [{ role: "user", content: prompt.user }],
+    ...HOST_MODELS[model].params,
   };
 }
 
@@ -270,9 +282,20 @@ export async function callMessages(
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
   });
   return { status: res.status, json: await res.json().catch(() => null) };
 }
+
+/**
+ * A failed model call as a log line says it (I5): the status and the API's error type,
+ * never a header, the key or the prompt, none of which the response carries back here.
+ */
+const failure = (res: { status: number; json: unknown } | null): string => {
+  if (res === null) return "unreachable";
+  const type = (res.json as { error?: { type?: unknown } } | null)?.error?.type;
+  return `status ${res.status}${typeof type === "string" ? `, ${type.slice(0, 60)}` : ""}`;
+};
 
 /** The text of a post the host made, as the seat remembers its questions. */
 const postedText = (e: SessionEvent): string => {
@@ -357,10 +380,26 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
     ? questionPrompt(room.manifest, record)
     : answerPrompt(room.manifest, decision.question.text, decision.replies);
   const res = await driver.callModel(messagesBody(host.model, prompt)).catch(() => null);
+  const which = `the ${wake.cause} wake at cursor ${wake.cursor}`;
   if (res === null || res.status === 429 || res.status >= 500) {
-    if (record.attempts + 1 >= MAX_ATTEMPTS) return settle(record);
+    if (record.attempts + 1 >= MAX_ATTEMPTS) {
+      console.error(`hosted seat: the model failed ${MAX_ATTEMPTS} calls for ${which} (${failure(res)}); the wake is dropped`);
+      return settle(record);
+    }
     await driver.save(wake.sessionId, { ...record, attempts: record.attempts + 1 });
     return driver.retryMs[record.attempts];
+  }
+  // Never retried, and never silent (I5): a missing key, a wrong model id or a revoked key
+  // leaves every hosted room quiet, and this line is the operator's only sign of it.
+  if (res.status < 200 || res.status >= 300) {
+    console.error(`hosted seat: the model refused ${which} (${failure(res)}); the wake is dropped`);
+    return settle(record);
+  }
+  const stop = (res.json as { stop_reason?: unknown } | null)?.stop_reason;
+  if (typeof stop === "string" && stop !== "end_turn") {
+    console.error(`hosted seat: the model stopped with ${stop.slice(0, 40)} on ${which}`);
+    // Cut off at the token cap, or declined (I6): never posted, so never charged.
+    if (stop === "max_tokens" || stop === "refusal") return settle(record);
   }
   const text = parseModelText(res.json);
   if (text === null) return settle(record);

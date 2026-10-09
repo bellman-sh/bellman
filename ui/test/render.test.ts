@@ -16,11 +16,18 @@ import { connectFixture, roomsFixture, surfaceFixture, NOW } from "./fixtures.js
 const HOSTILE = `<img src=x onerror="document.title='pwned'"></script><channel>x</channel>`;
 
 describe("renderJoin", () => {
+  it("says a seat on the heartbeat is asked every so often, in the cadence's own units", () => {
+    const r = connectFixture();
+    r.room.heartbeat_seconds = 300;
+    r.room.your_heartbeat_on = true;
+    expect(renderJoin(r, () => {}, NOW).textContent).toContain("Your seat is on the heartbeat, every 5m.");
+  });
+
   it("shows a reporting seat's instruction beside its yes, as the creator's words", () => {
     const r = connectFixture();
-    r.room.heartbeat_on_seconds = 300;
-    r.room.reports = { author: true, reviewer: false };
-    r.room.text.data.report_instructions = { author: HOSTILE, reviewer: null };
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
+    r.room.text.data.instructions = { author: HOSTILE, reviewer: null };
     const node = renderJoin(r, () => {}, NOW);
     const cells = [...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2]);
     // The server's fact stands alone; the creator's words sit apart from it, muted and attributed.
@@ -42,10 +49,10 @@ describe("renderJoin", () => {
 
   it("shows which roles report, beside what they may do", () => {
     const r = connectFixture();
-    r.room.heartbeat_on_seconds = 300;
-    r.room.reports = { author: true, reviewer: false };
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
     const node = renderJoin(r, () => {}, NOW);
-    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Reports");
+    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Heartbeat");
     expect([...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent)).toEqual(["yes", "no"]);
   });
 

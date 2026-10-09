@@ -29,6 +29,7 @@ Args:
   - manifest: the room's declaration. Either cite a preset —
     { room, purpose?, preset: "pair" | "swarm" | "review" | "social", or the name of a preset you saved at dash.bellman.sh/presets } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
+    heartbeat: <duration, 30s to 24h> sets how often the room's heartbeat ticks; a role's heartbeat_on: true puts that seat on it, and heartbeat_on: "<what to report>" does so with your instruction. The older top-level heartbeat_on and a role's reports/report still work.
     Verbs: send, invite, revoke, request_actions, respond_actions, write_surface.
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
     invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. revoke is likewise not self-scoped: a seat holding it may retire any role's code, not only its own. Give invite only to a seat you would trust with every seat's authority.
@@ -36,12 +37,12 @@ Args:
     room holds exactly 2 members; a "swarm" room holds as many as you invite, up to
     100 — Bellman's ceiling for one room, the same on every plan.
     The pair and review presets make pair rooms; the swarm and social presets make swarm rooms.
-    A manifest may declare a \`host\`, a seat Bellman runs that asks the room a question on each heartbeat and answers replies; it needs the max or team plan, a \`heartbeat_on\` of at least 1h, and a swarm room. The social preset declares one. The host never keeps a room open.
+    A manifest may declare a \`host\`, a seat Bellman runs that asks the room a question on each heartbeat and answers replies; it needs the max or team plan, a \`heartbeat\` of at least 1h, and a swarm room. The social preset declares one. The host never keeps a room open.
   - brief: your structured context summary (goal, state, constraints, open_questions, agent). This is what a joiner PREVIEWS before committing — write it for outside eyes.
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.

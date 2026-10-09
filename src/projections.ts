@@ -117,7 +117,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * Or null, for a reader who holds no seat: an org admin reading a closed room
  * their org sat in (#65, D4). The preview is then the one a seat sees with the
  * three fields about the viewer's own seat emptied (`your_role` null,
- * `your_verbs` none, `you_report` false), so the page that renders one renders
+ * `your_verbs` none, `your_heartbeat_on` false), so the page that renders one renders
  * the other, and nothing here promises a seat that does not exist.
  *
  * The creator gets the same block, not a second shape: their own words come back
@@ -155,21 +155,21 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
    */
   const asked = (role: string): boolean => m.heartbeatOnMs !== null && mustReport(m, role);
   const roles: Record<string, Verb[]> = {};
-  const reports: Record<string, boolean> = {};
+  const heartbeat_on: Record<string, boolean> = {};
   const descriptions: Record<string, string | null> = {};
-  const report_instructions: Record<string, string | null> = {};
+  const instructions: Record<string, string | null> = {};
   for (const [key, def] of Object.entries(m.roles)) {
     roles[key] = def.can;
-    reports[key] = asked(key);
+    heartbeat_on[key] = asked(key);
     descriptions[key] = def.description;
-    report_instructions[key] = def.report ?? null;
+    instructions[key] = def.report ?? null;
   }
   return {
     preset: m.preset,
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
-    heartbeat_on_seconds: seconds(m.heartbeatOnMs),
+    heartbeat_seconds: seconds(m.heartbeatOnMs),
     // What the room names its members for (#66): the thresholds past which the server proposes that a
     // member is quiet, a request unanswered or the room idle, in seconds as the cadence is, and null
     // for a room that names nothing. Shown here for the cadence's reason, as this is the consent point:
@@ -183,19 +183,19 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
     },
     // The viewer's own obligation, hoisted as your_verbs is: the fact the
     // joiner's human is deciding on.
-    you_report: viewerRole === null ? false : asked(viewerRole),
+    your_heartbeat_on: viewerRole === null ? false : asked(viewerRole),
     creator_role: m.creatorRole,
     roles,
     // Every seat's obligation, by the same rule, so the roles table a joiner
     // reads can compare seats (spec: "each role's verbs and whether it reports").
-    reports,
+    heartbeat_on,
     // The seat Bellman runs, if the room has one, and the model it calls: shown before
     // a joiner's human accepts a seat, as the roles are. Its instructions are the
     // creator's prose and stay out of the preview.
     host: m.host === null ? null : { role: m.host.role, model: m.host.model },
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
-      { room: m.room, purpose: m.purpose, descriptions, report_instructions },
+      { room: m.room, purpose: m.purpose, descriptions, instructions },
     ),
   };
 }

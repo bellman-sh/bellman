@@ -208,9 +208,9 @@ describe("bellman_start citing a saved preset with a host", () => {
     const creator = await h.connectAs(max);
     const slower = await creator.call("bellman_start", cite("mornings", { heartbeat_on: "6h" }));
     expect(slower.isError, slower.text).toBe(false);
-    expect((slower.data.room as { heartbeat_on_seconds: number }).heartbeat_on_seconds).toBe(21_600);
+    expect((slower.data.room as { heartbeat_seconds: number }).heartbeat_seconds).toBe(21_600);
     const own = await creator.call("bellman_start", cite("mornings", { heartbeat_on: null }));
-    expect((own.data.room as { heartbeat_on_seconds: number }).heartbeat_on_seconds).toBe(7_200);
+    expect((own.data.room as { heartbeat_seconds: number }).heartbeat_seconds).toBe(7_200);
     // Review Focus 5: the cite's new word slows the host as the old one does.
     const slowerNew = await creator.call("bellman_start", cite("mornings", { heartbeat: "6h" }));
     expect(slowerNew.isError, slowerNew.text).toBe(false);

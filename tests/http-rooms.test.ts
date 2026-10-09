@@ -863,7 +863,7 @@ describe("an org admin's read of a closed room (#65)", () => {
     const body = (await bodyOf(res)) as { members: { member_id: string }[] };
     expect(body).toMatchObject({
       id: ORG_ROOM, session_status: "closed", viewer: "admin", my_handles: [],
-      preview: { your_role: null, your_verbs: [], you_report: false },
+      preview: { your_role: null, your_verbs: [], your_heartbeat_on: false },
     });
     expect(body.members.map((m) => m.member_id)).toEqual(["m_peer"]);
   });

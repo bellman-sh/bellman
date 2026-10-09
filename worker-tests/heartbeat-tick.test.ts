@@ -775,9 +775,9 @@ const hostedRoles = (host: boolean, reports = false) => roomManifest({
 
 /**
  * A room of one person (`m_creator`, u_jesse, the identity the test key holds) and,
- * unless `host: false`, its host. Its last firing was `tickAgo` ago and the person
- * was last seen at `seenAt`; the host was seen at creation, after that firing, so a
- * rule that counted the host would tick every room below.
+ * unless `host: false`, its host. Its last firing was `tickAgo` ago, and woke the host
+ * (`lastHostTickAt`, I3), and the person was last seen at `seenAt`; the host was seen at
+ * creation, after that firing, so a rule that counted the host would tick every room below.
  */
 async function hostedRoom(
   id: string,
@@ -795,6 +795,7 @@ async function hostedRoom(
     await ctx.storage.put("session", {
       ...s,
       lastTickAt: Date.now() - tickAgo,
+      ...(host ? { lastHostTickAt: Date.now() - tickAgo } : {}),
       members: s!.members.map((x) => (x.memberId === "m_creator" ? { ...x, joinedAt, lastSeenAt: seenAt } : x)),
     });
   });
@@ -827,6 +828,8 @@ it("ticks a hosted room no role reports in, and queues the seat's wake in the ti
   // Nobody is asked for a report; the tick is the seat's.
   expect(ticks[0].payload).toMatchObject({ members: [] });
   const cursor = ticks[0].cursor;
+  // The host's own clock moved in the tick's own put (I3).
+  expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBe(after.session!.lastTickAt);
   expect(await queued(stub)).toEqual([{
     id: `host:tick:${cursor}`, kind: "host", attempts: 0,
     payload: { sessionId: "qs_hosted_tick", cause: "tick", cursor },
@@ -902,4 +905,6 @@ it("writes a hosted room's tick for a due reporter, and queues no wake when nobo
   expect(ticks).toHaveLength(1);
   expect(ticks[0].payload).toMatchObject({ members: [{ member_id: "m_creator" }] });
   expect(await queued(stub)).toEqual([]);
+  // A reporter's tick leaves the host's own clock where it was (I3).
+  expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBeLessThan(after.session!.lastTickAt!);
 });

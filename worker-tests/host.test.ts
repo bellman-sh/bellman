@@ -73,11 +73,15 @@ async function hostedRoom(id = "qs_hosted") {
   return { store, id, stub: env.SESSION.get(env.SESSION.idFromName(id)), host: env.HOST.get(env.HOST.idFromName(id)) };
 }
 
-/** Fire the room's heartbeat the way the alarm does: a tick lands, and a wake is queued and delivered. */
+/**
+ * Fire the room's heartbeat the way the alarm does: a tick lands, and a wake is queued and
+ * delivered. The host last asked a cadence ago (`lastHostTickAt`, I3), so its tick is due.
+ */
 async function tick(stub: DurableObjectStub<SessionDO>) {
   await runInDurableObject(stub, async (i: SessionDO, ctx) => {
     const s = await ctx.storage.get<{ lastTickAt?: number }>("session");
-    await ctx.storage.put("session", { ...s, lastTickAt: Date.now() - 3_600_000 - 1 });
+    const ago = Date.now() - 3_600_000 - 1;
+    await ctx.storage.put("session", { ...s, lastTickAt: ago, lastHostTickAt: ago });
   });
   await runDurableObjectAlarm(stub);
 }

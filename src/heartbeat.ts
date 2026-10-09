@@ -126,48 +126,52 @@ export function nextTickAt(s: StoredSession): number | null {
 
 /**
  * When a hosted room's own tick falls due (hosted seat spec, D4; #188), or null for a
- * room with no host, no cadence, or no roster to anchor on.
+ * room with no host, a host it has evicted (C1), or no cadence.
  *
- * The seat asks its question on a tick, and no role in a hosted room need report —
- * none in any preset does, `social` included — so a hosted room ticks on its cadence
- * whoever reports: one cadence after its last firing. `nextTickAt` takes the earlier
- * of this and any reporting member's own deadline, so a reporter is still asked on
- * time in a hosted room.
+ * The host asks on its own cadence and on nothing else's (I3): one cadence after the last
+ * tick that woke it, `lastHostTickAt`, which only such a tick moves. A reporter's tick
+ * moves `lastTickAt` and not this, so a reporting seat's deadline neither makes the host
+ * ask early, which spent a room's month two or three times over, nor pushes it back. No
+ * role in a hosted room need report, `social`'s included, and `nextTickAt` takes the
+ * earlier of this and every reporter's own deadline, so a reporter is still asked on time.
  *
- * A room that has never ticked anchors on its first seat, which is stored state like
- * every other anchor here, and not on the clock. `#derivedDue` recomputes this on
+ * A host that has never asked anchors on the room's first seat, which is stored state
+ * like every other anchor here, and not on the clock. `#derivedDue` recomputes this on
  * every re-arm, so an answer measured from now would move a cadence later each time
  * anything re-armed the alarm, and a busy room would never tick at all.
  *
- * P2 holds, as `askAt`'s does: after a firing the answer is a cadence past
- * `lastTickAt`. P1's companion does not: a hosted firing can find nobody to ask, and
- * then `hostedTickDue` writes nothing and the clock moves, which is one silent firing
+ * A firing at or after that time that found nobody to ask (`personSince`) moved
+ * `lastTickAt` and not `lastHostTickAt`, so the answer is then a cadence after that
+ * firing. P2 holds, as `askAt`'s does: every answer is after `lastTickAt`. P1's
+ * companion does not: a hosted firing can find nobody to ask, which is one silent firing
  * a cadence for a room its people have left.
  */
 function hostedTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
-  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing.
+  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. A
+  // seated host is on the roster, so the roster is never empty below.
   if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
-  if (s.lastTickAt !== undefined) return s.lastTickAt + every;
-  if (s.members.length === 0) return null;
-  return Math.min(...s.members.map((m) => m.joinedAt)) + every;
+  const due = (s.lastHostTickAt ?? Math.min(...s.members.map((m) => m.joinedAt))) + every;
+  return s.lastTickAt !== undefined && s.lastTickAt >= due ? s.lastTickAt + every : due;
 }
 
 /**
  * Whether a person — `isActivePerson`, so not the seat and not a member who has left —
- * was seen after the last tick, or is on a socket now (#188). A room that has never
- * ticked counts every person in it. `connected` is the members a live socket vouches
- * for (`connectedAmong`); a store with no sockets passes `NO_SOCKETS`.
+ * was seen after the host last asked, or is on a socket now (#188, I3). A room whose host
+ * has never asked counts every person in it. `connected` is the members a live socket
+ * vouches for (`connectedAmong`); a store with no sockets passes `NO_SOCKETS`.
  */
-const personSince = (s: StoredSession, connected: ReadonlySet<string>): boolean =>
-  s.members.some((m) => isActivePerson(m) &&
-    (s.lastTickAt === undefined || lastSeen(m) > s.lastTickAt || connected.has(m.memberId)));
+const personSince = (s: StoredSession, connected: ReadonlySet<string>): boolean => {
+  const asked = s.lastHostTickAt ?? null;
+  return s.members.some((m) => isActivePerson(m) &&
+    (asked === null || lastSeen(m) > asked || connected.has(m.memberId)));
+};
 
 /**
- * Whether a hosted room's tick, fired at `now`, has anyone to ask (#188): its
- * cadence has come round and `personSince` holds. False means the firing writes
- * nothing and only moves `lastTickAt`, so a hosted room nobody is in costs a silent
- * firing a cadence and no growth in its log. Pure, and the clock is `now`, as for
+ * Whether a hosted room's tick, fired at `now`, wakes its host (#188, I3): the host's own
+ * cadence has come round and `personSince` holds. False means the host's part of the
+ * firing writes nothing and moves no `lastHostTickAt`, so a hosted room nobody is in costs
+ * a silent firing a cadence and no growth in its log. Pure, and the clock is `now`, as for
  * `dueMembers`.
  */
 export function hostedTickDue(s: StoredSession, now: number, connected: ReadonlySet<string>): boolean {
@@ -178,21 +182,24 @@ export function hostedTickDue(s: StoredSession, now: number, connected: Readonly
 /**
  * What a tick fired at `now` does (#188): the rule both stores apply, so they tick alike.
  *
- * `write` — a reporting member is due, or the hosted room's own tick has someone to ask.
- * `wakeHost` — the tick is written in a room with a host, and a person was seen since the
- * previous tick or is on a socket. Both are read off the room as it stands BEFORE the
- * tick's write moves `lastTickAt`, which is why presence is decided here and not by the
- * seat: read after that write, every person reads as unseen since the tick. A hosted
- * room whose tick a reporter's deadline forced, with nobody in it, writes the tick and
- * leaves the seat asleep.
+ * `wakeHost` — the host's own cadence has come round since it last asked, and a person
+ * was seen since then or is on a socket (`hostedTickDue`). A reporter's deadline never
+ * wakes the host (I3): each question resets the three answers and spends units, so a room
+ * that declared `1h` hears from its host hourly however its reporters report.
+ * `write` — `wakeHost`, or a reporting member is due: the tick is written, and when it wakes
+ * the host the store moves `lastHostTickAt` in the same write.
+ *
+ * Both are read off the room as it stands BEFORE the tick's write moves the clocks, which
+ * is why presence is decided here and not by the seat: read after that write, every
+ * person reads as unseen since the host last asked.
  */
 export function tickPlan(
   s: StoredSession,
   now: number,
   connected: ReadonlySet<string>,
 ): { write: boolean; wakeHost: boolean } {
-  const write = dueMembers(s, now).length > 0 || hostedTickDue(s, now, connected);
-  return { write, wakeHost: write && s.manifest.host !== null && hostSeated(s) && personSince(s, connected) };
+  const wakeHost = hostedTickDue(s, now, connected);
+  return { write: wakeHost || dueMembers(s, now).length > 0, wakeHost };
 }
 
 /**

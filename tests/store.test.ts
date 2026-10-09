@@ -265,12 +265,12 @@ describe("MemoryStore ticks its rooms with the step it is handed", () => {
   /**
    * One person (`m_creator`, joined two cadences ago) and, unless `host: false`, the
    * seat, which was seen at T, after the last tick: a rule that counted the host would
-   * tick every room here.
+   * tick every room here. The last tick woke the host (`lastHostTickAt`, I3).
    */
   const room = (id: string, { host = true, reports = false, seenAt = T - 1_000, lastTickAt = T - HOUR - 1 } = {}) => {
     const m = manifest(host, reports);
     const members = [member({ roomRole: "lead", joinedAt: T - 2 * HOUR, lastSeenAt: seenAt }), ...(host ? [hostMember(m, T)] : [])];
-    return { ...session({ id, manifest: m, members, joinCodes: {} }), lastTickAt } as Session;
+    return { ...session({ id, manifest: m, members, joinCodes: {} }), lastTickAt, ...(host ? { lastHostTickAt: lastTickAt } : {}) } as Session;
   };
   const ticked = async (store: MemoryStore, id: string) => ({
     events: await store.eventsAfter(id, 0),
@@ -284,6 +284,8 @@ describe("MemoryStore ticks its rooms with the step it is handed", () => {
     const after = await ticked(store, "qs_tick_a");
     expect(after.events).toMatchObject([{ cursor: 1, type: "heartbeat", fromMemberId: "system", refId: null, at: T, payload: { members: [] } }]);
     expect(after.lastTickAt).toBe(T);
+    // The host's own clock moves with the tick that wakes it (I3).
+    expect((await store.getSession("qs_tick_a"))!.lastHostTickAt).toBe(T);
     expect(store.wakes).toEqual([{ sessionId: "qs_tick_a", cause: "tick", cursor: 1 }]);
   });
 

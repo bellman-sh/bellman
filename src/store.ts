@@ -2119,7 +2119,10 @@ export class MemoryStore implements BellmanStore {
         type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
         payload: r.payload, refId: null,
       }, now);
-      if (r.wakeHost) this.hostWoken({ sessionId: s.id, cause: "tick", cursor: tick.cursor });
+      if (!r.wakeHost) continue;
+      // The host's own clock moves only on a tick that wakes it (I3), in the same step as the tick.
+      (s as { lastHostTickAt?: number | null }).lastHostTickAt = now;
+      this.hostWoken({ sessionId: s.id, cause: "tick", cursor: tick.cursor });
     }
   }
 

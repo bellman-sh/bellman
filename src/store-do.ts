@@ -2183,7 +2183,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ? await this.driver.enqueue(txn, [hostWakeIntent(s.id, "tick", tick.cursor)])
         : {};
       wakesHost = plan.wakeHost;
-      await this.#writeEvent(txn, tick, { session: { ...s, lastTickAt: now }, ...wake });
+      // The host's own clock moves only on a tick that wakes it (I3), in the tick's own put.
+      const clocks = plan.wakeHost ? { lastTickAt: now, lastHostTickAt: now } : { lastTickAt: now };
+      await this.#writeEvent(txn, tick, { session: { ...s, ...clocks }, ...wake });
       return tick;
     });
     if (event) this.#wake(event);

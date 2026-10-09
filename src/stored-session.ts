@@ -31,6 +31,15 @@ export interface StoredSession extends Omit<Session, "events"> {
    */
   lastTickAt?: number;
   /**
+   * When a tick last woke the hosted seat (I3): the anchor of the host's own cadence,
+   * which a tick moves only when it wakes the host, in the same write as `lastTickAt`. A
+   * reporter's tick moves `lastTickAt` alone, so it neither makes the host ask early nor
+   * pushes it back. Null until the host first asks, and on every room without one;
+   * `hydrateStoredSession` lifts a row written before the field to null, and readers go
+   * through `?? null` for the in-memory store, which does not hydrate.
+   */
+  lastHostTickAt?: number | null;
+  /**
    * When the most recent `action_request` was appended (#81).
    *
    * Bookkeeping for one question `bellman_sync` has to answer on every poll:
@@ -78,7 +87,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Eleven changes to the stored shape landed after the sessions now in production
+ * Twelve changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -119,6 +128,9 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   month: a room written before the seat has no host, so it may spend nothing
  *   and has spent nothing. A stamped meter is left alone, so a read never hands
  *   back units the room already spent.
+ * - **lastHostTickAt** (I3) defaults to `null`: a room written before the field has a
+ *   host that has not asked under it, and its cadence anchors on the first seat until
+ *   it does. One extra question at most, the first hour after deploy.
  * - **manifest.host** defaults to `null`, for the reason the cadence does: a
  *   manifest that never mentioned a host declares none, so the default invents
  *   nothing. Left alone it reads as `undefined`, which a guard written
@@ -129,7 +141,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All eleven live here, in one gate, rather than in separate functions that could drift.
+ * All twelve live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -149,6 +161,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     manifest: withHeartbeatDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
     surfaceCursor: row.surfaceCursor ?? 0,
+    lastHostTickAt: row.lastHostTickAt ?? null,
     blobBytes: row.blobBytes ?? 0,
     // Required on the type, absent on a row written before #183: the cast says
     // so where `??` alone would read as redundant.

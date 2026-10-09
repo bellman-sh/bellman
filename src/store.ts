@@ -1,6 +1,6 @@
 import type {
   AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
-  SurfaceRow,
+  SavedPreset, SurfaceRow,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1005,6 +1005,18 @@ export interface BellmanStore {
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
 
+  /** A person's saved presets (designer spec D4), in name order. Keyed by the person: nothing here reads another's. */
+  listPresets(userId: string): Promise<SavedPreset[]>;
+  getPreset(userId: string, name: string): Promise<SavedPreset | undefined>;
+  /**
+   * Save or replace by name. "full" when a new name would pass `cap`; replacing
+   * one never counts against it. The count and the write are one operation, so
+   * two saves racing for the last place cannot both land.
+   */
+  putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full">;
+  /** True when there was one to delete. */
+  deletePreset(userId: string, name: string): Promise<boolean>;
+
   /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
   getGrant(key: string): Promise<PlanGrant | undefined>;
   putGrant(grant: PlanGrant): Promise<void>;
@@ -1081,6 +1093,7 @@ export class MemoryStore implements BellmanStore {
   private byOrg = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
+  private presets = new Map<string, Map<string, SavedPreset>>(); // userId -> name -> preset
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
@@ -1771,6 +1784,30 @@ export class MemoryStore implements BellmanStore {
     const list = this.creates.get(userId) ?? [];
     list.push(Date.now());
     this.creates.set(userId, list);
+  }
+
+  async listPresets(userId: string): Promise<SavedPreset[]> {
+    const mine = this.presets.get(userId);
+    if (!mine) return [];
+    // Code-unit order, which is the registry's key order.
+    return detach([...mine.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
+  }
+
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    const p = this.presets.get(userId)?.get(name);
+    return p && detach(p);
+  }
+
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    const mine = this.presets.get(userId) ?? new Map<string, SavedPreset>();
+    if (!mine.has(preset.name) && mine.size >= cap) return "full";
+    mine.set(preset.name, detach(preset));
+    this.presets.set(userId, mine);
+    return "saved";
+  }
+
+  async deletePreset(userId: string, name: string): Promise<boolean> {
+    return this.presets.get(userId)?.delete(name) ?? false;
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

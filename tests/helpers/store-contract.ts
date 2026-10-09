@@ -22,7 +22,7 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { Session, SurfaceItem } from "../../src/types.js";
+import type { SavedPreset, Session, SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /**
@@ -3035,6 +3035,86 @@ export function describeStoreContract(
       // Roll well into the next month (any timezone) — earlier creates stop counting.
       vi.setSystemTime(new Date("2026-04-15T12:00:00Z"));
       expect((await store.countCreatesThisMonth("u_jesse"))).toBe(0);
+    });
+
+    // --------------------------------------------- saved presets (designer)
+    describe("saved presets", () => {
+      const preset = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
+        name,
+        description: null,
+        mode: "pair",
+        heartbeat_on: null,
+        roles: { lead: { can: ["send"], description: null, reports: false } },
+        default_role: "lead",
+        creator_role: "lead",
+        updated_at: "2026-03-15T12:00:00.000Z",
+        ...over,
+      });
+
+      it("lists a person's presets in name order, and none for a person with none", async () => {
+        expect(await store.listPresets("u_jesse")).toEqual([]);
+        for (const name of ["b", "a_x", "a"]) expect(await store.putPreset("u_jesse", preset(name), 20)).toBe("saved");
+        expect((await store.listPresets("u_jesse")).map((p) => p.name)).toEqual(["a", "a_x", "b"]);
+      });
+
+      it("gets one by name as a copy the caller cannot change in the store, and none for a name not saved", async () => {
+        await store.putPreset("u_jesse", preset("a", { description: "first" }), 20);
+        const got = (await store.getPreset("u_jesse", "a"))!;
+        expect(got).toEqual(preset("a", { description: "first" }));
+        got.roles.lead.can.push("invite");
+        expect((await store.getPreset("u_jesse", "a"))!.roles.lead.can).toEqual(["send"]);
+        expect(await store.getPreset("u_jesse", "b")).toBeUndefined();
+      });
+
+      it("replaces by name", async () => {
+        await store.putPreset("u_jesse", preset("a", { description: "first" }), 20);
+        await store.putPreset("u_jesse", preset("a", { description: "second" }), 20);
+        expect((await store.listPresets("u_jesse")).map((p) => p.description)).toEqual(["second"]);
+      });
+
+      it("refuses a new name at the cap, and still replaces one already saved", async () => {
+        expect(await store.putPreset("u_jesse", preset("a"), 2)).toBe("saved");
+        expect(await store.putPreset("u_jesse", preset("b"), 2)).toBe("saved");
+        expect(await store.putPreset("u_jesse", preset("c"), 2)).toBe("full");
+        expect(await store.putPreset("u_jesse", preset("a", { description: "again" }), 2)).toBe("saved");
+        expect((await store.listPresets("u_jesse")).map((p) => p.name)).toEqual(["a", "b"]);
+      });
+
+      it("lets one of two new names racing for the last place land, never both", async () => {
+        await store.putPreset("u_jesse", preset("a"), 2);
+        const verdicts = await Promise.all([
+          store.putPreset("u_jesse", preset("b"), 2),
+          store.putPreset("u_jesse", preset("c"), 2),
+        ]);
+        expect([...verdicts].sort()).toEqual(["full", "saved"]);
+        expect(await store.listPresets("u_jesse")).toHaveLength(2);
+      });
+
+      it("keeps each person's presets apart", async () => {
+        await store.putPreset("u_jesse", preset("a"), 1);
+        expect(await store.putPreset("u_peer", preset("a", { description: "theirs" }), 1)).toBe("saved");
+        expect((await store.getPreset("u_jesse", "a"))!.description).toBeNull();
+        expect(await store.deletePreset("u_peer", "a")).toBe(true);
+        expect(await store.getPreset("u_jesse", "a")).toBeDefined();
+      });
+
+      // Operator-issued ids may hold a colon, so one person's id can extend another's past
+      // the key's separator. Neither may reach the other's presets through it.
+      it("never reaches another person's presets through an id that extends this one past a colon", async () => {
+        await store.putPreset("u_x:y", preset("n"), 20);
+        expect(await store.listPresets("u_x")).toEqual([]);
+        expect(await store.getPreset("u_x", "y:n")).toBeUndefined();
+        expect(await store.deletePreset("u_x", "y:n")).toBe(false);
+        expect(await store.getPreset("u_x:y", "n")).toBeDefined();
+        expect(await store.putPreset("u_x", preset("a"), 1)).toBe("saved");
+      });
+
+      it("deletes one, and says false for one it does not have", async () => {
+        await store.putPreset("u_jesse", preset("a"), 20);
+        expect(await store.deletePreset("u_jesse", "a")).toBe(true);
+        expect(await store.getPreset("u_jesse", "a")).toBeUndefined();
+        expect(await store.deletePreset("u_jesse", "a")).toBe(false);
+      });
     });
 
     // ----------------------------------------------------------------- audit

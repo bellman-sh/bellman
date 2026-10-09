@@ -99,6 +99,12 @@ describe("what the skill says about verbs", () => {
 });
 
 describe("what the skill says about presets", () => {
+  // Designer spec D8: a repo's file is read by teammates who do not hold your saved presets.
+  it("says a saved preset works only for the person who saved it, and sends a shared shape to Copy room.yaml", () => {
+    expect(SKILL).toContain("works only for the person who saved it");
+    expect(SKILL).toContain("Copy room.yaml");
+  });
+
   it("documents every preset the server offers, and no others", () => {
     const documented = [...SKILL.matchAll(/^\*\*`([a-z]+)`\*\* — mode/gm)].map((m) => m[1]);
     expect(documented.sort()).toEqual([...PRESET_NAMES].sort());

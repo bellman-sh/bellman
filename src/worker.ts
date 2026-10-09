@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { presetRoutes } from "./http/presets.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
@@ -219,6 +220,18 @@ export default {
       const handled = await roomRoutes(request, {
         store,
         blobs,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The saved presets (designer spec D5), on the room routes' rules and behind the same guard.
+    if (url.pathname === "/presets" || url.pathname.startsWith("/presets/")) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await presetRoutes(request, {
+        store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],
       });

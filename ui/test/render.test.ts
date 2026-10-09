@@ -22,8 +22,11 @@ describe("renderJoin", () => {
     r.room.reports = { author: true, reviewer: false };
     r.room.text.data.report_instructions = { author: HOSTILE, reviewer: null };
     const node = renderJoin(r, () => {}, NOW);
-    const cells = [...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent);
-    expect(cells).toEqual([`yes: ${HOSTILE}`, "no"]);
+    const cells = [...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2]);
+    // The server's fact stands alone; the creator's words sit apart from it, muted and attributed.
+    expect(cells.map((c) => c.firstChild?.textContent)).toEqual(["yes", "no"]);
+    expect(cells[0].querySelector(".muted")?.textContent).toBe(`creator asks: ${HOSTILE}`);
+    expect(cells[1].querySelector(".muted")).toBeNull();
     expect(node.querySelector("img")).toBeNull();
   });
 

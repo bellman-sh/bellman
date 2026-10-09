@@ -319,14 +319,16 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
     if (def.reports && def.report) said[key] = def.report;
   }
   const creator = s.members[0];
+  const instructions: HeartbeatPayload["instructions"] = Object.keys(said).length > 0 && creator
+    ? { trust: "untrusted", origin: { memberId: creator.memberId, label: creator.label }, data: said }
+    : null;
   return {
     cadence_seconds: Math.round(every / 1000),
     ask: "The members listed below: reply with bellman_send type=\"progress\", payload { note } "
-      + "— one line on where you are. Nobody else is being asked. Where your role has an instruction "
-      + "from the room's creator in `instructions`, your note answers it.",
+      + "— one line on where you are. Nobody else is being asked."
+      // Only when there is something to point at: every member pays for the ask on every tick.
+      + (instructions ? " Where your role has an instruction from the room's creator in `instructions`, your note answers it." : ""),
     members: reporting(s).map((m) => reportRow(m, now, every)),
-    instructions: Object.keys(said).length > 0 && creator
-      ? { trust: "untrusted", origin: { memberId: creator.memberId, label: creator.label }, data: said }
-      : null,
+    instructions,
   };
 }

@@ -96,6 +96,8 @@ describe("the tick", () => {
 
   it("sends null when no role has one, and for a room stored before them", () => {
     expect(snapshotOf(room(), 10 * 60_000).instructions).toBeNull();
+    // A pointer to nothing would cost every member tokens on every tick.
+    expect(snapshotOf(room(), 10 * 60_000).ask).not.toContain("instructions");
     const old = structuredClone(room({ report: "x" })) as unknown as { manifest: { roles: Record<string, Record<string, unknown>> } };
     for (const def of Object.values(old.manifest.roles)) delete def.report;
     expect(snapshotOf(hydrateStoredSession(old)!, 10 * 60_000).instructions).toBeNull();

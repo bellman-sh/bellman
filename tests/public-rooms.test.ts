@@ -42,8 +42,8 @@ describe("a manifest's public flag", () => {
 
 describe("a saved preset's public flag", () => {
   const saved = (pub?: boolean): SavedPreset => ({
-    name: "open_review", description: null, mode: "pair", heartbeat_on: null,
-    roles: { a: { can: ["send"], description: null, reports: false }, b: { can: ["send"], description: null, reports: false } },
+    name: "open_review", description: null, mode: "pair", heartbeat: null,
+    roles: { a: { can: ["send"], description: null, heartbeat_on: false }, b: { can: ["send"], description: null, heartbeat_on: false } },
     default_role: "b", creator_role: "a", updated_at: null,
     ...(pub === undefined ? {} : { public: pub }),
   });

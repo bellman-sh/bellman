@@ -84,10 +84,10 @@ describe("the preset routes", () => {
     const res = (await put(DEV_KEY.jesse, "my_review"))!;
     expect(res.status).toBe(200);
     const saved = await bodyOf(res);
-    expect(saved).toMatchObject({ name: "my_review", mode: "pair", heartbeat_on: null, default_role: "reviewer", creator_role: "author" });
+    expect(saved).toMatchObject({ name: "my_review", mode: "pair", heartbeat: null, default_role: "reviewer", creator_role: "author" });
     expect(saved.roles).toEqual({
-      author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: false },
-      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false },
+      author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", heartbeat_on: false },
+      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, heartbeat_on: false },
     });
     expect(typeof saved.updated_at).toBe("string");
     expect(await store.getPreset("u_jesse", "my_review")).toEqual(saved);
@@ -108,7 +108,7 @@ describe("the preset routes", () => {
     const res = (await put(DEV_KEY.jesse, "watchful", preset({ heartbeat_on: "5m", housekeeping: { quiet_after: "2h", idle_after: null } })))!;
     expect(res.status).toBe(200);
     const saved = await bodyOf(res);
-    expect(saved).toMatchObject({ heartbeat_on: "5m" });
+    expect(saved).toMatchObject({ heartbeat: "5m" });
     expect(saved.housekeeping).toEqual({ quiet_after: "2h" });
     expect(await store.getPreset("u_jesse", "watchful")).toEqual(saved);
     const mine = (await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string; housekeeping: unknown }[];
@@ -187,7 +187,7 @@ describe("the preset routes", () => {
       name: "social", description: null, mode: "pair", heartbeat_on: null, housekeeping: null,
       roles: { solo: { can: ["send"], description: null, reports: false } },
       default_role: "solo", creator_role: "solo", updated_at: "2026-10-09T12:00:00.000Z",
-    }, MAX_PRESETS);
+    } as never, MAX_PRESETS);
     expect(((await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string }[]).map((p) => p.name)).toEqual(["social"]);
     expect((await call(DEV_KEY.jesse, "/presets/social", { method: "DELETE" }))!.status).toBe(204);
     expect(await store.getPreset("u_jesse", "social")).toBeUndefined();

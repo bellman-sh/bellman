@@ -23,11 +23,11 @@ const saved = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
   name,
   description: null,
   mode: "pair",
-  heartbeat_on: null,
+  heartbeat: null,
   housekeeping: null,
   roles: {
-    author: { can: ["send", "invite", "revoke", "write_surface"], description: "Brought the work.", reports: false },
-    reviewer: { can: ["send", "request_actions"], description: null, reports: false },
+    author: { can: ["send", "invite", "revoke", "write_surface"], description: "Brought the work.", heartbeat_on: false },
+    reviewer: { can: ["send", "request_actions"], description: null, heartbeat_on: false },
   },
   default_role: "reviewer",
   creator_role: "author",
@@ -58,11 +58,48 @@ describe("bellman_start citing a saved preset", () => {
     expect((await h.store.getSession(String(shut.data.session_id)))!.manifest.public).toBe(false);
   });
 
+  it("starts a room whose roles carry the preset's heartbeat instructions", async () => {
+    await h.store.putPreset("u_jesse", saved("my_review", {
+      heartbeat: "5m",
+      roles: {
+        author: { can: ["send", "invite", "revoke", "write_surface"], description: "Brought the work.", heartbeat_on: "What changed" },
+        reviewer: { can: ["send", "request_actions"], description: null, heartbeat_on: false },
+      },
+    }), 20);
+    const out = await start("my_review");
+    expect(out.isError, out.text).toBe(false);
+    expect((await h.store.getSession(String(out.data.session_id)))!.manifest.roles.author.report).toBe("What changed");
+  });
+
+  // Review Focus 2.
+  it("starts a room from a preset saved in the old words, its instruction and frequency kept", async () => {
+    await h.store.putPreset("u_jesse", {
+      ...saved("old_words"), heartbeat: undefined, heartbeat_on: "5m",
+      roles: {
+        author: { can: ["send", "invite", "revoke", "write_surface"], description: null, reports: true, report: "What changed" },
+        reviewer: { can: ["send", "request_actions"], description: null, reports: false },
+      },
+    } as unknown as SavedPreset, 20);
+    const out = await start("old_words");
+    expect(out.isError, out.text).toBe(false);
+    const m = (await h.store.getSession(String(out.data.session_id)))!.manifest;
+    expect([m.heartbeatOnMs, m.roles.author.report]).toEqual([300_000, "What changed"]);
+  });
+
+  // Review Focus 5.
+  it("refuses either spelling of a frequency on a cite of a preset with no host, in the spelling used", async () => {
+    await h.store.putPreset("u_jesse", saved("plain_words"), 20);
+    for (const word of ["heartbeat", "heartbeat_on"]) {
+      const out = await jesse.call("bellman_start", { manifest: { room: "Q", preset: "plain_words", [word]: "6h" }, brief: brief() });
+      expect(out.text).toContain(`invalid manifest — ${word}: the "plain_words" preset has no host`);
+    }
+  });
+
   it("leaves a started room alone when its preset is edited, then deleted", async () => {
     await h.store.putPreset("u_jesse", saved("my_review"), 20);
     const id = String((await start("my_review")).data.session_id);
     await h.store.putPreset("u_jesse", saved("my_review", {
-      roles: { solo: { can: ["send"], description: null, reports: false } }, default_role: "solo", creator_role: "solo",
+      roles: { solo: { can: ["send"], description: null, heartbeat_on: false } }, default_role: "solo", creator_role: "solo",
     }), 20);
     await h.store.deletePreset("u_jesse", "my_review");
     expect(Object.keys((await h.store.getSession(id))!.manifest.roles).sort()).toEqual(["author", "reviewer"]);
@@ -128,11 +165,11 @@ describe("bellman_start citing a saved preset with a host", () => {
   const pro: Identity = { userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" };
   const hosted = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => saved(name, {
     mode: "swarm",
-    heartbeat_on: "2h",
+    heartbeat: "2h",
     roles: {
-      lead: { can: ["send", "invite"], description: null, reports: false },
-      guest: { can: ["send"], description: null, reports: false },
-      emcee: { can: ["send"], description: null, reports: false },
+      lead: { can: ["send", "invite"], description: null, heartbeat_on: false },
+      guest: { can: ["send"], description: null, heartbeat_on: false },
+      emcee: { can: ["send"], description: null, heartbeat_on: false },
     },
     default_role: "guest",
     creator_role: "lead",
@@ -180,9 +217,13 @@ describe("bellman_start citing a saved preset with a host", () => {
     const creator = await h.connectAs(max);
     const slower = await creator.call("bellman_start", cite("mornings", { heartbeat_on: "6h" }));
     expect(slower.isError, slower.text).toBe(false);
-    expect((slower.data.room as { heartbeat_on_seconds: number }).heartbeat_on_seconds).toBe(21_600);
+    expect((slower.data.room as { heartbeat_seconds: number }).heartbeat_seconds).toBe(21_600);
     const own = await creator.call("bellman_start", cite("mornings", { heartbeat_on: null }));
-    expect((own.data.room as { heartbeat_on_seconds: number }).heartbeat_on_seconds).toBe(7_200);
+    expect((own.data.room as { heartbeat_seconds: number }).heartbeat_seconds).toBe(7_200);
+    // Review Focus 5: the cite's new word slows the host as the old one does.
+    const slowerNew = await creator.call("bellman_start", cite("mornings", { heartbeat: "6h" }));
+    expect(slowerNew.isError, slowerNew.text).toBe(false);
+    expect((await h.store.getSession(String(slowerNew.data.session_id)))!.manifest.heartbeatOnMs).toBe(21_600_000);
 
     const refused = await creator.call("bellman_start", cite("plain", { heartbeat_on: "6h" }));
     expect(refused.isError).toBe(true);
@@ -190,7 +231,7 @@ describe("bellman_start citing a saved preset with a host", () => {
     // Faster than a host's floor is the validator's refusal, in its words, whatever path the cite took.
     const tooFast = await creator.call("bellman_start", cite("mornings", { heartbeat_on: "30m" }));
     expect(tooFast.text).toContain('a room with a host must tick no faster than 1h (got "30m")');
-    expect(await h.store.countCreatesThisMonth(max.userId)).toBe(2);
+    expect(await h.store.countCreatesThisMonth(max.userId)).toBe(3);
   });
 });
 
@@ -202,7 +243,7 @@ describe("bellman_start citing a saved preset that carries housekeeping", () => 
     const m = (await h.store.getSession(String(out.data.session_id)))!.manifest;
     return { heartbeatOnMs: m.heartbeatOnMs, housekeeping: m.housekeeping };
   };
-  const WATCHFUL = { heartbeat_on: "5m", housekeeping: { quiet_after: "2h", answer_within: "30m" } } satisfies Partial<SavedPreset>;
+  const WATCHFUL = { heartbeat: "5m", housekeeping: { quiet_after: "2h", answer_within: "30m" } } satisfies Partial<SavedPreset>;
 
   it("starts a room with the preset's thresholds, as it starts one with the preset's cadence", async () => {
     await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);

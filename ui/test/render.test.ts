@@ -23,6 +23,27 @@ describe("renderJoin", () => {
     expect(renderJoin(r, () => {}, NOW).textContent).toContain("Anyone with this room's link can read its surface and its log.");
   });
 
+  it("says a seat on the heartbeat is asked every so often, in the cadence's own units", () => {
+    const r = connectFixture();
+    r.room.heartbeat_seconds = 300;
+    r.room.your_heartbeat_on = true;
+    expect(renderJoin(r, () => {}, NOW).textContent).toContain("Your seat is on the heartbeat, every 5m.");
+  });
+
+  it("shows a reporting seat's instruction beside its yes, as the creator's words", () => {
+    const r = connectFixture();
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
+    r.room.text.data.instructions = { author: HOSTILE, reviewer: null };
+    const node = renderJoin(r, () => {}, NOW);
+    const cells = [...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2]);
+    // The server's fact stands alone; the creator's words sit apart from it, muted and attributed.
+    expect(cells.map((c) => c.firstChild?.textContent)).toEqual(["yes", "no"]);
+    expect(cells[0].querySelector(".muted")?.textContent).toBe(`creator asks: ${HOSTILE}`);
+    expect(cells[1].querySelector(".muted")).toBeNull();
+    expect(node.querySelector("img")).toBeNull();
+  });
+
   it("shows the seat the code grants, its verbs, and every role", () => {
     const node = renderJoin(connectFixture(), () => {}, NOW);
     expect(node.textContent).toContain("Your seat: reviewer");
@@ -35,10 +56,10 @@ describe("renderJoin", () => {
 
   it("shows which roles report, beside what they may do", () => {
     const r = connectFixture();
-    r.room.heartbeat_on_seconds = 300;
-    r.room.reports = { author: true, reviewer: false };
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
     const node = renderJoin(r, () => {}, NOW);
-    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Reports");
+    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Heartbeat");
     expect([...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent)).toEqual(["yes", "no"]);
   });
 

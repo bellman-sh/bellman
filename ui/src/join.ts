@@ -1,4 +1,4 @@
-import { countdown, el } from "./shared.js";
+import { countdown, duration, el } from "./shared.js";
 import type { ConnectResult, RoomBlock } from "./types.js";
 
 /** What a joiner may grant peers. The same three the server's CapabilitiesShape accepts, and its defaults. */
@@ -77,7 +77,13 @@ export function renderJoin(
     el("tr", { class: role === r.room.your_role ? "you" : "" },
       el("td", {}, role),
       el("td", {}, verbs.length > 0 ? verbs.join(", ") : "read only"),
-      el("td", {}, r.room.reports[role] ? "yes" : "no"),
+      // The server's yes or no, then the creator's instruction apart from it, attributed and muted like
+      // the description beside it: a joiner must not read the creator's words as Bellman's.
+      el("td", {},
+        r.room.heartbeat_on[role] ? "yes" : "no",
+        r.room.heartbeat_on[role] && prose.instructions?.[role]
+          ? el("div", { class: "muted" }, `creator asks: ${prose.instructions[role]}`)
+          : null),
       el("td", { class: "muted" }, prose.descriptions[role] ?? "")),
   );
 
@@ -125,8 +131,8 @@ export function renderJoin(
   decline.addEventListener("click", () => settle({ kind: "decline" }));
 
   const seat = `You may: ${r.room.your_verbs.length > 0 ? r.room.your_verbs.join(", ") : "read only"}.` +
-    (r.room.you_report && r.room.heartbeat_on_seconds !== null
-      ? ` You must report every ${r.room.heartbeat_on_seconds}s.`
+    (r.room.your_heartbeat_on && r.room.heartbeat_seconds !== null
+      ? ` Your seat is on the heartbeat, every ${duration(r.room.heartbeat_seconds)}.`
       : "");
 
   const naming = housekeepingLine(r.room.housekeeping);
@@ -152,7 +158,7 @@ export function renderJoin(
     el("p", {}, seat),
     naming ? el("p", {}, naming) : null,
     el("table", {},
-      el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Reports"), el("th", {}, "Description (creator's words)"))),
+      el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Heartbeat"), el("th", {}, "Description (creator's words)"))),
       el("tbody", {}, ...roleRows)),
     el("p", { class: "muted" },
       `${r.session.active_members} of ${r.session.max_members} seats taken, ${r.session.mode} room` +

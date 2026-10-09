@@ -507,7 +507,12 @@ last did and how long it had been silent at the tick's own `at`. It is written
 only when some member is due, never into a frozen or closed room, and a room
 that declares no cadence gets none. Members answer with `progress` events —
 "still working, currently on the migration script" — which exist to reach a peer
-and have no timer of their own.
+and have no timer of their own. A role on the heartbeat may carry its creator's
+instruction for what that note says (its `heartbeat_on` set to the text, at most
+300 characters): a joiner
+sees it in the preview's untrusted text before accepting the seat, and every
+tick carries it in an envelope attributed to the creator (`instructions`), never
+in the server's own `ask`.
 
 `lastSeenAt` and `lastReportAt` are separate on purpose. Any call a member makes
 moves the first; only a deliberate report moves the second. A member can be
@@ -641,8 +646,8 @@ A room may declare one hosted seat (#188, #189): a member Bellman runs, which
 asks the room a question on its own cadence and answers replies in that
 question's thread. The manifest's `host` block names its role, its model and the
 creator's instructions, and `resolveManifest` requires the role to hold exactly
-`send` and not report, the room to be a swarm room, and `heartbeat_on` to be at
-least an hour. A cite may set `heartbeat_on` only for a preset with a host:
+`send` and not be on the heartbeat, the room to be a swarm room, and `heartbeat`
+to be at least an hour. A cite may set `heartbeat` only for a preset with a host:
 `social`, the one built-in with one, or a saved preset that carries a `host`
 block. A cite of any other is refused for it, since nothing there would tick or
 the preset already holds its author's cadence. A saved preset keeps its `host`
@@ -1769,19 +1774,31 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,801** | every request, whether or not you are in a room |
+| Tool definitions | **~7,958** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-09 for public rooms, on top of room housekeeping: 150 tokens
-over main. `bellman_start` is up 111, to 2,162, for the manifest's `public` on both
-arms, the line saying what it means and the `public_url` it returns; `bellman_connect`
-is up 39, to 660, for the preview's `public` and the line telling a joiner's agent to
-say so. That is 7,801 by the method below; this branch's script reads 7,799 against
-main's 7,649, the same 150.
+Re-measured on 2026-10-09 for public rooms, on top of the heartbeat's vocabulary: 150
+tokens over main. `bellman_start` is up 111, to 2,317, for the manifest's `public` on
+both arms, the line saying what it means and the `public_url` it returns;
+`bellman_connect` is up 39, to 662, for the preview's `public` and the line telling a
+joiner's agent to say so. That is 7,958 by the method below; this branch's script reads
+7,956 against main's 7,806, the same 150.
+
+Re-measured on 2026-10-09 for the heartbeat's vocabulary: 138 tokens over main.
+`bellman_start` is up 136, to 2,206: its schema lists both spellings of the room's
+frequency on both arms and both of a role's, and its description gains the line
+that says what `heartbeat` and `heartbeat_on` mean. `bellman_connect` is up 2, to
+623, for the preview's renamed fields. That is 7,808 by the method below; this
+branch's script reads 7,806 against main's 7,668, the same 138.
+
+Re-measured on 2026-10-09 for per-role heartbeat instructions, on top of room
+housekeeping: 19 tokens over main, all of them `bellman_start`'s (now 2,070), for
+the optional `report` a role in its manifest schema gained. That is 7,670 by the
+method below; this branch's script reads 7,668 against main's 7,649, the same 19.
 
 Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
 tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,

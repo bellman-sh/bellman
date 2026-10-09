@@ -69,6 +69,13 @@ export interface PanelSession {
   identity: Identity;
   /** Where the plan came from, for /account. Same field the token path carries. */
   plan_source: string;
+  /**
+   * The identity key the plan resolved through, for /account: null when nothing
+   * matched. Absent on a record written before the field, until its next re-plan
+   * writes it, and absent is not null: one is "not known", the other "nothing
+   * matched".
+   */
+  plan_key?: string | null;
   /** Upstream keys this human resolves under, so the plan can be re-resolved. */
   identity_keys: string[];
   created_at: number;
@@ -470,7 +477,7 @@ export interface AuthStorage {
   /**
    * Record a re-resolved plan on a session that still exists — as ONE operation.
    *
-   * Merges identity and plan_source into the stored record and sets replanned_at
+   * Merges identity, plan_source and plan_key into the stored record and sets replanned_at
    * to `now`, writes nothing else, and does nothing at all when the record is
    * gone. Implementations must not let another call in between the read and the
    * write, in either of the ways admitRegistration names.
@@ -493,7 +500,7 @@ export interface AuthStorage {
    * sessionDead reads: merging into a record that has just died revives nothing,
    * and touchSession remains the only place a session is judged.
    */
-  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<boolean>;
+  replanSession(id: string, identity: Identity, planSource: string, planKey: string | null, now: number): Promise<boolean>;
   /** Sign out. Idempotent: an unknown id is not an error. */
   deleteSession(id: string): Promise<void>;
 }
@@ -682,11 +689,12 @@ export class MemoryAuthStore implements AuthStorage {
     id: string,
     identity: Identity,
     planSource: string,
+    planKey: string | null,
     now: number
   ): Promise<boolean> {
     const stored = this.sessions.get(id);
     if (!stored) return false;
-    this.sessions.set(id, { ...stored, identity, plan_source: planSource, replanned_at: now });
+    this.sessions.set(id, { ...stored, identity, plan_source: planSource, plan_key: planKey, replanned_at: now });
     return true;
   }
 

@@ -311,16 +311,28 @@ describe("MemoryAuthStore sessions", () => {
 const fresh = (): AuthStorage => new MemoryAuthStore();
 
 describe("replanSession", () => {
-  it("merges the identity, plan source and time into the stored record, and nothing else", async () => {
+  it("merges the identity, plan source, plan key and time into the stored record, and nothing else", async () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 5);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 5);
 
     expect(merged).toBe(true);
     expect(await store.touchSession("sid", T0 + 5)).toEqual(
-      panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
+      panelSession({ identity: REPLANNED, plan_source: "grant", plan_key: "github:4242", replanned_at: T0 + 5 })
     );
+  });
+
+  // Null is "nothing matched" and has to land as null over an older key: a merge
+  // that skipped a falsy key would leave the panel warning about a grant that is
+  // already gone.
+  it("writes a null plan key over the one before it", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession({ plan_key: "email:jesse@example.dev" }));
+
+    await store.replanSession("sid", IDENTITY, "default", null, T0 + 5);
+
+    expect((await store.touchSession("sid", T0 + 5))?.plan_key).toBeNull();
   });
 
   // The race this method exists for: a request touches the session, spends a
@@ -328,7 +340,7 @@ describe("replanSession", () => {
   // out in between. An upsert would recreate the session they just ended.
   //
   // The answer is what pins the absence guard in this store. Without the guard it
-  // would write a record holding only the three merged fields and answer true,
+  // would write a record holding only the four merged fields and answer true,
   // and the touch below would still find nothing, because sessionDead reads that
   // record as dead. The workerd twin also reads storage.
   it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
@@ -337,7 +349,7 @@ describe("replanSession", () => {
     await store.touchSession("sid", T0);
     await store.deleteSession("sid");
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1);
 
     expect(merged).toBe(false);
     expect(await store.touchSession("sid", T0 + 1)).toBeUndefined();
@@ -351,7 +363,7 @@ describe("replanSession", () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
 
-    const replanning = store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const replanning = store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1);
     await store.deleteSession("sid");
     await replanning;
 
@@ -370,7 +382,7 @@ describe("replanSession", () => {
     const theirs = mine + SESSION_TOUCH_MS + 1;
     await store.touchSession("sid", theirs); // another request, later
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", mine);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", mine);
 
     expect(merged).toBe(true);
     expect(await store.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
@@ -411,7 +423,7 @@ describe("a method touches only the session it names", () => {
 
     const later = T0 + SESSION_TOUCH_MS + 1; // stale, so this touch writes
     await store.touchSession("mine", later);
-    expect(await store.replanSession("mine", REPLANNED, "grant", later)).toBe(true);
+    expect(await store.replanSession("mine", REPLANNED, "grant", "github:4242", later)).toBe(true);
 
     // Not due at T0, so this hands back what is stored.
     expect(await store.touchSession("yours", T0)).toEqual(yours());

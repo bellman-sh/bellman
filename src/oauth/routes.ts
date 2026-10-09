@@ -1382,7 +1382,7 @@ async function sessionCaller(
   // replanSession, not putSession. Re-resolving can await the registry, so a
   // sign-out can land between the touch above and this write, and putSession
   // would write `stored` back whole and recreate the session the human just
-  // ended. replanSession merges the three fields into what is stored now and
+  // ended. replanSession merges the four fields into what is stored now and
   // does nothing if the record is gone. Merging also leaves alone a
   // last_used_at that another request bumped in the same gap, which a
   // whole-record write would revert.
@@ -1401,7 +1401,7 @@ async function sessionCaller(
   // session is still there, so it must not cost the human their session.
   let merged = true;
   try {
-    merged = await config.store.replanSession(id, current.identity, current.source, now);
+    merged = await config.store.replanSession(id, current.identity, current.source, current.key, now);
   } catch (err) {
     console.error("could not store a re-resolved panel session:", err);
   }

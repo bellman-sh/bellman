@@ -788,7 +788,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "host", "mode", "preset", "reports", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "host", "housekeeping", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
@@ -932,6 +932,38 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     });
     expect(quiet.isError, quiet.text).toBe(false);
     expect(quiet.data.room).toMatchObject({ reports: { driver: false, navigator: false } });
+  });
+
+  // Housekeeping (#66, review m2). A joiner's human decides on a seat from this block, and a member of a room
+  // with `quiet_after: 2h` will be named quiet every two hours while it sends nothing, so the preview says so.
+  // In seconds, as the cadence is, and null where the room names nothing.
+  it("shows the thresholds the room names its members by, to a joiner and to the creator", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: false, navigator: false }, {
+        housekeeping: { quiet_after: "2h", answer_within: "30m", repeat_after: "4h" },
+      }),
+      brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const preview = await peer.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect(preview.isError, preview.text).toBe(false);
+
+    const named = { quiet_after_seconds: 7_200, answer_within_seconds: 1_800, idle_after_seconds: null, repeat_after_seconds: 14_400 };
+    expect((preview.data.room as { housekeeping: unknown }).housekeeping).toEqual(named);
+    expect((started.data.room as { housekeeping: unknown }).housekeeping).toEqual(named);
+  });
+
+  it("says null when the room names no member for anything", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const started = await jesse.call("bellman_start", {
+      manifest: tickingRoom({ driver: false, navigator: false }), brief: brief(),
+    });
+    const preview = await peer.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect((preview.data.room as { housekeeping: unknown }).housekeeping).toBeNull();
+    expect((started.data.room as { housekeeping: unknown }).housekeeping).toBeNull();
   });
 
   it("says so when the room expects no reports", async () => {
@@ -1089,7 +1121,7 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     // the server, so there is no authored string in them to leak and the guard below holds.
     // So is `host` (#188): a role key, as creator_role is, and a model from a fixed list.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "host", "mode", "preset", "reports", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "host", "housekeeping", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
 

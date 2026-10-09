@@ -15,6 +15,13 @@ export interface RoomBlock {
   your_role: string;
   your_verbs: string[];
   heartbeat_on_seconds: number | null;
+  /** What the room names its members for (#66), in seconds; null when it names nothing. */
+  housekeeping: {
+    quiet_after_seconds: number | null;
+    answer_within_seconds: number | null;
+    idle_after_seconds: number | null;
+    repeat_after_seconds: number | null;
+  } | null;
   you_report: boolean;
   creator_role: string;
   roles: Record<string, string[]>;

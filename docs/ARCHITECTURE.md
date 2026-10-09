@@ -200,16 +200,18 @@ Two consequences:
 **The control panel** (`dash.bellman.sh`, #49) reaches a room over HTTP rather
 than MCP: `GET /rooms` for the rooms a person created or holds a handle in,
 `GET /rooms/:id` for a room as their seat sees it, `GET /rooms/:id/surface` for
-the working surface with the surface cursor as its `ETag`, and `PUT`/`DELETE
-/rooms/:id/surface/:key` to write or remove an item (#184), beside the blob
-routes (#183). The routes authenticate through the same composed caller the blob
+the working surface with the surface cursor as its `ETag`, `GET
+/rooms/:id/events` for the room's log, the newest 200 events or the next 200
+past `?after`, in the envelopes `bellman_sync` returns with the caller's own
+included, and `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
+(#184), beside the blob routes (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
 "surface"` calls. Membership is the tenant boundary: a stranger and an unknown
 room are one 404. The one exception is an org admin's read of a *closed* room
 its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id`, the
-surface read and the blob download fall back to it for a caller with no seat,
+surface read, the log read and the blob download fall back to it for a caller with no seat,
 `GET /rooms?as=admin` lists those rooms from the registry's org index, and
 `DELETE /rooms/:id` lets the room's creator or such an admin ask for the purge,
 answered 202 with the time the room is stored to go, because the room's own

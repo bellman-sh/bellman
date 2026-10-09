@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: 6e4d0bb
+last-verified-against-source: badc1bd
 last-updated: 2026-10-08
 ---
 
@@ -1491,14 +1491,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~6,875** | every request, whether or not you are in a room |
+| Tool definitions | **~7,022** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-09, after the canvas landed:
+Tool definitions were re-measured on 2026-10-09 after `room_id` landed as an alias
+of `session_id` on the six tools that take a room: 7,022 tokens in all, 147 over
+the canvas figure, about 24 per tool for the optional property and its one-line
+description. Before that, re-measured the same day after the canvas landed:
 6,875 tokens in all. Measured the same way at `d6a90f9`, main's head before
 the canvas branch, the listing was 6,605, so the branch's share is 270:
 `bellman_surface` 254 and the `_meta.ui` now on `bellman_confirm` 16. The 89

@@ -110,6 +110,13 @@ describe("the panel's room.yaml export", () => {
     expect(m.heartbeatOnMs).toBe(300_000);
   });
 
+  // YAML reads off as text. As an instruction, it would put on the heartbeat the seat it keeps off.
+  it("refuses a seat written heartbeat_on: off rather than put it on the heartbeat", () => {
+    const off = EXPORTED.replace('can: ["send", "request_actions", "respond_actions"]\n', '$&    heartbeat_on: off\n');
+    expect(off).toContain("    heartbeat_on: off\n");
+    expect(() => resolveManifest(load(off))).toThrow('role "reviewer": heartbeat_on: "off" is text, not a yes or no');
+  });
+
   it("reads the old words a room.yaml was exported in before as the same room", () => {
     const load = (text: string) => {
       const dir = mkdtempSync(join(tmpdir(), "bellman-export-"));

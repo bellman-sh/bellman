@@ -31,6 +31,7 @@ import {
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import type { EventType } from "./types.js";
+import { VERSION } from "./version.js";
 
 /**
  * The Bellman bridge for Claude Code.
@@ -66,7 +67,6 @@ import type { EventType } from "./types.js";
 
 export type Delivery = "channel" | "hook";
 
-const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
 /** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
 const START_TOOL = "bellman_start";

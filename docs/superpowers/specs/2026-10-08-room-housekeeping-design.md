@@ -2,7 +2,7 @@
 
 Issue: [#66](https://github.com/bellman-sh/bellman/issues/66)
 Status: approved design, pending implementation plan
-Depends on: [heartbeat events](2026-10-02-heartbeat-events-design.md) (D1 the server ticks, D5 the derived named alarm, D7 a member may not forge a server event, D9 attention on the wire, D10 when an alarm may fire), [the working surface](2026-10-06-working-surface-design.md) (D12: the scribe writes `plan`; housekeeping that acts stays here), [room manifests](2026-09-23-room-manifests-design.md) (where a room declares what it wants)
+Depends on: [heartbeat events](2026-10-02-heartbeat-events-design.md) (D1 the server ticks, D5 the derived named alarm, D7 a member may not forge a server event, D9 attention on the wire, D10 when an alarm may fire), [the working surface](2026-10-06-working-surface-design.md) (D12: the scribe writes `plan`; housekeeping that acts stays here), [room manifests](2026-09-23-room-manifests-design.md) (where a room declares what it wants), [the hosted seat](2026-10-08-hosted-seat-design.md) (D5: who counts as a person)
 Related: #65 (the record after close), #2 (verbs: nothing here is given one), #28 (the monitor, which may show these later)
 Repos: `bellman-sh/bellman` only
 
@@ -43,6 +43,12 @@ the panel's and the monitor's rendering beyond the wire.
   still in the room.
 - `room_idle`: no member event for `idle_after`. Server-authored events (a
   tick, a housekeeping proposal) are not activity.
+
+Housekeeping counts people. The hosted seat (hosted seat D5) is Bellman's, not a person: it speaks
+on its own clock, in answer to its two wake causes, so it is never named quiet, what it says is not
+a member's activity (a room only it speaks in is idle), and a room with only the seat in it has
+nobody to propose to. A proposal is not one of the seat's wake causes either, since waking spends
+the room's host units on the server's initiative.
 
 The stale open question is not here. "Has this thread been dropped" is a
 judgment over `plan`, which is prose, and the agent that reads prose is the

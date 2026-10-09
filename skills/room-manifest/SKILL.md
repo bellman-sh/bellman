@@ -229,9 +229,9 @@ housekeeping:
 
 | Key | The server names |
 |---|---|
-| `quiet_after` | a member who has sent nothing for this long. A member who only reads is quiet. |
+| `quiet_after` | a member who has sent nothing for this long. A member who only reads is quiet; a hosted seat never is. |
 | `answer_within` | an `action_request` with no `action_response` after this long, while the member who sent it is still in the room. |
-| `idle_after` | a room in which no member has sent anything for this long. |
+| `idle_after` | a room in which no member has sent anything for this long. What a hosted seat says does not count. |
 | `repeat_after` | no finding of its own: how long a finding that still holds waits before it is named again. Left out, each finding repeats after its own threshold. |
 
 Each value is a whole number and a unit (`s`, `m`, `h` or `d`),

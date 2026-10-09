@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: 8daaf61
+last-verified-against-source: f53ca48
 last-updated: 2026-10-09
 ---
 
@@ -1350,7 +1350,12 @@ loss is findable, and the sweep at close (#65) is what finds it.
    waiting, so no scan of the log has to find them. The one append that can bring
    the alarm forward, an `action_request` in a room that declares `answer_within`,
    re-arms after its commit. A thaw restarts the clocks (`thawedAt`): nobody can
-   send in a frozen room, so a freeze is never counted as silence.
+   send in a frozen room, so a freeze is never counted as silence. It counts
+   people (`isActivePerson`, hosted seat D5): the hosted seat is never named
+   quiet, what it says moves no clock, a room only it speaks in reads idle, and a
+   proposal never wakes it. `MemoryStore` keeps the same books at every append
+   and raises nothing, because the Node server's tick loop (#188) does not run
+   housekeeping.
 
    `sweep` runs once when a room closes and deletes the objects under its R2
    prefix that no surface item names, crediting the room their bytes (#65, D3).

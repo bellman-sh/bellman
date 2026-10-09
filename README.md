@@ -420,6 +420,12 @@ in a frozen room and a freeze is never counted as silence. The server proposes
 and never acts: nothing is sent, answered, closed or removed, and what to do
 about a finding is a member's call, under the verb that member already holds.
 
+Housekeeping counts people. A hosted seat is never named quiet, what it says is not
+activity (a room only the host speaks in reads idle), and a proposal never wakes it. The Node
+server (`npm start`) keeps the books these findings are read from and raises nothing: its tick
+loop does not run housekeeping, so a housekeeping room shows no proposal there. Run the room
+under `npm run dev:worker` to see one.
+
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it

@@ -14,7 +14,7 @@
  */
 import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
 import type { OutboxIntent } from "./outbox.js";
-import { HOST_MEMBER_ID, HOST_USER_ID, type HostAppend } from "./store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, hostSeated, type HostAppend } from "./store.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
 
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
@@ -95,7 +95,7 @@ const latest = (state: HostState): HostQuestion | undefined => state.questions[s
 export function decide(
   state: HostState,
   wake: HostWake,
-  room: { closed: boolean; frozenAt: number | null; manifest: RoomManifest },
+  room: { closed: boolean; frozenAt: number | null; manifest: RoomManifest; members: Member[] },
   events: SessionEvent[],
   now: number,
 ): HostDecision {
@@ -103,6 +103,8 @@ export function decide(
   if (room.closed) return { kind: "skip", why: "the room is closed" };
   if (room.frozenAt !== null) return { kind: "skip", why: "the room is frozen" };
   if (room.manifest.host === null) return { kind: "skip", why: "the room has no host" };
+  // Evicting the host is the creator's off-switch (C1): a wake queued before it settles here, with no model call.
+  if (!hostSeated(room)) return { kind: "skip", why: "the host has left the room" };
 
   // Presence is the store's (#188): `tickPlan` queues a tick wake only when a person was
   // seen since the previous tick, decided before the tick's own write moves `lastTickAt`.

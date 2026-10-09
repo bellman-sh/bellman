@@ -140,6 +140,15 @@ describe("decide", () => {
     expect(decide(asked, reply(13), room(), read, NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/no replies/) });
   });
 
+  // Evicting the host is the creator's off-switch (C1): a wake that reaches it anyway settles, with no model call.
+  it("skips any wake once the host has left the room", () => {
+    const evicted = room({ members: [member({ lastSeenAt: NOW - 60_000 }), { ...hostMember(hosted(), NOW), leftAt: NOW - 1 }] });
+    expect(decide(emptyHostState(), tick(9), evicted, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/left the room/) });
+    const asked = { ...emptyHostState(), cursor: 10, questions: [{ cursor: 10, text: "q", askedAt: NOW, answers: 0 }] };
+    expect(decide(asked, reply(11), evicted, [ev({ cursor: 11, refId: "10" })], NOW))
+      .toMatchObject({ kind: "skip", why: expect.stringMatching(/left the room/) });
+  });
+
   it("skips any wake in a room that declares no host", () => {
     const bare = { ...room(), manifest: roomManifest() };
     expect(decide(emptyHostState(), tick(9), bare, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/no host/) });

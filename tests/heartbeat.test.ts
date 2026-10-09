@@ -372,6 +372,16 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
       .toEqual({ write: true, wakeHost: false });
   });
 
+  // Evicting the host is the creator's off-switch (C1): no tick wakes a host that has left.
+  it("wakes no host that has left the room, and arms no tick for it", () => {
+    const evicted = room({ lastTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host({ leftAt: T0 + 2 })] });
+    expect(tickPlan(evicted, T0 + HOUR, NO_SOCKETS)).toEqual({ write: false, wakeHost: false });
+    expect(nextTickAt(evicted)).toBeNull();
+    // The control: the same room with its host seated.
+    expect(tickPlan(room({ lastTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host()] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: true });
+  });
+
   it("asks in a hosted room that has never ticked while a person is in it", () => {
     expect(hostedTickDue(room({ lastTickAt: undefined }), T0 + HOUR, NO_SOCKETS)).toBe(true);
     expect(hostedTickDue(room({ lastTickAt: undefined, members: [person({ leftAt: T0 }), host()] }), T0 + HOUR, NO_SOCKETS)).toBe(false);

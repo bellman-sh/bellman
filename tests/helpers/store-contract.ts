@@ -2233,6 +2233,35 @@ export function describeStoreContract(
         const after = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!;
         expect(after.lastSeenAt).toBe(before + 5_000);
       });
+
+      /**
+       * Evicting the host is the creator's one control over it (C1). Whatever wakes a
+       * departed host, the room refuses its write, so it posts nothing and spends nothing.
+       */
+      it("refuses the write of a host the room has evicted, appending and charging nothing", async () => {
+        const s = hostedRoom({ id: "qs_host_gone" });
+        await store.createSession(s);
+        await store.removeMember(s.id, HOST_MEMBER_ID, {
+          now: NOW(), frozen: "refuse", cut: true, byUserId: "u_jesse", audit: [],
+          event: { type: "member_evicted", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+            payload: { member_id: HOST_MEMBER_ID }, refId: null },
+        });
+        const before = await store.eventsAfter(s.id, 0);
+        expect(await store.appendHostEvent(s.id, question("1"), 1, NOW())).toEqual({ ok: false, reason: "removed", used: 0, allowed: 10 });
+        expect(await store.eventsAfter(s.id, 0)).toEqual(before);
+        expect((await store.getSession(s.id))!.hostUnits.used).toBe(0);
+      });
+
+      /** A team org's audit stream records the host's sends as it records every member's (`bellman_send`'s `sent_message` row). */
+      it("records the host's send in the room's audit stream, as a member's send is recorded", async () => {
+        const s = hostedRoom({ id: "qs_host_audit" });
+        await store.createSession(s);
+        expect((await store.appendHostEvent(s.id, question("1"), 1, NOW())).ok).toBe(true);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([
+          expect.objectContaining({ orgId: "org_codenerd", actorUserId: HOST_USER_ID, action: "sent_message",
+            detail: { chars: JSON.stringify(question("1").payload).length, ref_id: "1" } }),
+        ]);
+      });
     });
 
     /**

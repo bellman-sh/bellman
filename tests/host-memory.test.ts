@@ -77,6 +77,35 @@ describe("MemoryHost", () => {
     expect((await store.getSession(id))!.hostUnits.used).toBe(1);
   });
 
+  /**
+   * Evicting the host is the creator's off-switch (C1). The reviewer's reproduction: the
+   * eviction reported success, and the next tick still asked, as the evicted host, and
+   * charged a unit. Now nothing the room does wakes it, and a wake that reaches it anyway
+   * settles with no model call.
+   */
+  it("an evicted host is woken by nothing, and a wake delivered anyway asks nothing and spends nothing", async () => {
+    const { store, host, id, calls, woken } = await hostedStore([{ status: 200, text: "What shipped?" }], { deliver: false });
+    await store.appendEvent(id, heartbeat);
+    await host.wake(woken.shift()!);
+    await host.settled();
+    const [q] = await hostSaid(store, id);
+    await store.removeMember(id, HOST_MEMBER_ID, {
+      now: Date.now(), frozen: "refuse", cut: true, byUserId: "u_jesse", audit: [],
+      event: { type: "member_evicted", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+        payload: { member_id: HOST_MEMBER_ID }, refId: null },
+    });
+
+    await store.appendEvent(id, replyTo(q.cursor));
+    const beat = (await store.appendEvent(id, heartbeat))!;
+    expect(woken, "the room queues no wake for a host it has evicted").toEqual([]);
+
+    await host.wake({ sessionId: id, cause: "tick", cursor: beat.cursor });
+    await host.settled();
+    expect(calls).toHaveLength(1);
+    expect(await hostSaid(store, id, q.cursor)).toEqual([]);
+    expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+  });
+
   it("retries a 429 and gives up after three", async () => {
     const { store, host, id, calls } = await hostedStore([{ status: 429 }, { status: 429 }, { status: 429 }, { status: 429 }]);
     await store.appendEvent(id, { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null });

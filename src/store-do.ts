@@ -12,8 +12,8 @@ import type {
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
-  decideHostCharge, isAbandoned, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost,
-  markRemoved, seatVictims, stampSeen,
+  decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
+  isReplyToHost, markRemoved, seatVictims, stampSeen,
 } from "./store.js";
 import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
@@ -1495,9 +1495,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * The wake a reply to the hosted seat owes it (hosted seat spec, D4), as outbox rows
-   * for the caller to fold into the event's own put: none unless the room has a host
-   * and `event` is a message or progress event whose `refId` names one of the host's
-   * events. The two public appends call it, which are MemoryStore's places too.
+   * for the caller to fold into the event's own put: none unless the room has a host it
+   * has not evicted (`hostSeated`, C1) and `event` is a message or progress event whose
+   * `refId` names one of the host's events. The two public appends call it, which are
+   * MemoryStore's places too.
    * `appendHostEvent` does not: the host's own answer names its question, and a seat
    * must not wake itself.
    *
@@ -1509,7 +1510,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     s: StoredSession,
     event: SessionEvent,
   ): Promise<Record<string, unknown>> {
-    if (s.manifest.host === null || event.refId === null) return {};
+    if (s.manifest.host === null || !hostSeated(s) || event.refId === null) return {};
     const referenced = await txn.get<SessionEvent>(eventKey(Number(event.refId)));
     if (!isReplyToHost(event, referenced)) return {};
     return this.driver.enqueue(txn, [hostWakeIntent(s.id, "reply", event.cursor)]);
@@ -1517,15 +1518,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * The hosted seat's one write (hosted seat spec, D3): the event, the charge of
-   * `units` against the room's month and the host's `lastSeenAt` stamp, in one
-   * transaction. `decideHostCharge` decides, the call MemoryStore makes, so a refusal
-   * writes nothing in either store. A missing row is `not_found`. It queues no wake.
+   * `units` against the room's month, the host's `lastSeenAt` stamp and the send's
+   * audit row (C1), in one transaction. `decideHostCharge` decides, the call
+   * MemoryStore makes, so a refusal writes nothing in either store. A missing row is
+   * `not_found`. It queues no wake.
    */
   async appendHostEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
     units: number,
     now: number,
   ): Promise<HostAppend> {
+    let audited = false;
     const result = await this.ctx.storage.transaction<HostAppend>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
@@ -1533,10 +1536,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!charge.ok) return charge;
       const event: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const stamped = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
-      await this.#writeEvent(txn, event, { session: { ...s, hostUnits: charge.next, members: stamped } });
+      const intents = hostSentEntries(s, e, now).map(auditIntent);
+      audited = intents.length > 0;
+      const rows = audited ? await this.driver.enqueue(txn, intents) : {};
+      await this.#writeEvent(txn, event, { session: { ...s, hostUnits: charge.next, members: stamped }, ...rows });
       return { ok: true, event };
     });
     if (result.ok) this.#wake(result.event);
+    if (result.ok && audited) await this.driver.deliverNow();
     return result;
   }
 

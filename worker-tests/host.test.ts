@@ -168,6 +168,36 @@ it("backs off on a 429 and asks on the retry; a redelivered wake asks nothing tw
   expect((await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toHaveLength(1);
 });
 
+/**
+ * Evicting the host is the creator's off-switch (C1): neither a reply nor a tick queues a
+ * wake for a host the room has evicted, and a wake delivered to it anyway calls no model.
+ * No model reply is queued after the first question, so any call would be a stray one.
+ */
+it("an evicted host is woken by neither a reply nor a tick, and a wake delivered anyway asks nothing", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_evicted");
+  modelAnswers("What did you ship this week?");
+  await tick(stub);
+  await seatIdle(host);
+  const [q] = await hostSaid(store, id);
+  const beat = (await store.eventsAfter(id, 0)).find((e) => e.type === "heartbeat")!;
+  expect((await store.removeMember(id, HOST_MEMBER_ID, {
+    now: Date.now(), frozen: "refuse", cut: true, byUserId: "u_jesse", audit: [],
+    event: { type: "member_evicted", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+      payload: { member_id: HOST_MEMBER_ID }, refId: null },
+  })).removed).toBe(true);
+
+  await store.appendEvent(id, replyTo(q.cursor));
+  await tick(stub);
+  await seatIdle(host);
+  const record = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.get<HostRecord>("state"));
+  expect(record!.lastCause, "no wake reached the seat after the eviction").toBe(beat.cursor);
+
+  await host.wake({ sessionId: id, cause: "tick", cursor: 999 }, "host:tick:999");
+  await seatIdle(host);
+  expect(await hostSaid(store, id, q.cursor)).toEqual([]);
+  expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+});
+
 it("drops a wake for a frozen room without calling the model", async () => {
   const { store, id, stub, host } = await hostedRoom();
   await store.freezeSession(id, Date.now());

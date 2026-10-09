@@ -19,7 +19,7 @@ import type { Member } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 // `asked` and `clearSilence` live in store.ts beside `isActiveMember`, because
 // `freezeSession` applies them inside the store and this module imports that one.
-import { asked, clearSilence, isActivePerson, lastSeen } from "./store.js";
+import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./store.js";
 export { asked, clearSilence };
 
 /**
@@ -146,7 +146,8 @@ export function nextTickAt(s: StoredSession): number | null {
  */
 function hostedTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
-  if (s.manifest.host === null || every === null) return null;
+  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing.
+  if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
   if (s.lastTickAt !== undefined) return s.lastTickAt + every;
   if (s.members.length === 0) return null;
   return Math.min(...s.members.map((m) => m.joinedAt)) + every;
@@ -191,7 +192,7 @@ export function tickPlan(
   connected: ReadonlySet<string>,
 ): { write: boolean; wakeHost: boolean } {
   const write = dueMembers(s, now).length > 0 || hostedTickDue(s, now, connected);
-  return { write, wakeHost: write && s.manifest.host !== null && personSince(s, connected) };
+  return { write, wakeHost: write && s.manifest.host !== null && hostSeated(s) && personSince(s, connected) };
 }
 
 /**

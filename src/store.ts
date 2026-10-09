@@ -74,6 +74,15 @@ export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId ===
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
 
+/**
+ * Whether the room's hosted seat is still in it (C1). Evicting the host is the
+ * creator's one control over it, so once it has left nothing wakes it and the room
+ * refuses its writes: the tick (`tickPlan`), both stores' reply wakes and
+ * `decideHostCharge` all ask this.
+ */
+export const hostSeated = (s: Pick<Session, "members">): boolean =>
+  s.members.some((m) => isHostMember(m) && isActiveMember(m));
+
 /** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
 export const WAKES_PER_HOUR = 8;
 
@@ -565,25 +574,40 @@ export function decideBlobCharge(
  */
 export type HostAppend =
   | { ok: true; event: SessionEvent }
-  | { ok: false; reason: "not_found" | "closed" | "frozen" | "units" | "hourly"; used: number; allowed: number };
+  | { ok: false; reason: "not_found" | "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number };
 
 /**
  * The meter's decision (hosted seat spec, D3), shared by both stores so they
  * cannot charge differently. Returns the refusal, or the units record to write.
+ * A host the room has evicted is refused (`removed`, C1) before the meter is read.
  */
 export function decideHostCharge(
-  s: Pick<StoredSession, "closed" | "frozenAt" | "hostUnitsPerMonth" | "hostUnits">,
+  s: Pick<StoredSession, "closed" | "frozenAt" | "members" | "hostUnitsPerMonth" | "hostUnits">,
   units: number,
   now: number,
-): { ok: false; reason: "closed" | "frozen" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
+): { ok: false; reason: "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
   if (s.closed) return { ok: false, reason: "closed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
   if (s.frozenAt !== null) return { ok: false, reason: "frozen", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (!hostSeated(s)) return { ok: false, reason: "removed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
   const month = monthKey(now);
   const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
   const wakes = current.wakes.filter((t) => t > now - 3_600_000);
   if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
   if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
   return { ok: true, next: { month, used: current.used + units, wakes: [...wakes, now] } };
+}
+
+/**
+ * The audit row a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for
+ * a member, so a team org's stream sees the host as it sees members. The host belongs to
+ * no org, so only the room's own gets it. Both stores queue it in the send's own write.
+ */
+export function hostSentEntries(s: Pick<StoredSession, "id" | "orgId">, e: Omit<SessionEvent, "cursor" | "at">, now: number): AuditEntry[] {
+  if (!s.orgId) return [];
+  return [{
+    at: now, orgId: s.orgId, sessionId: s.id, actorUserId: e.fromUserId, action: `sent_${e.type}`,
+    detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+  }];
 }
 
 /**
@@ -1658,7 +1682,7 @@ export class MemoryStore implements BellmanStore {
   /**
    * Wake the hosted seat if `event` is one of the two causes (spec D4): a
    * `heartbeat`, or a reply to one of the host's events, in a room whose
-   * manifest has a host.
+   * manifest has a host and which has not evicted it (`hostSeated`, C1).
    *
    * Called by the two public appends once the event and its extras have landed,
    * which are `SessionDO`'s places too, and not from `appendNow`: the host's own
@@ -1667,7 +1691,7 @@ export class MemoryStore implements BellmanStore {
    * appendEvent's reason.
    */
   private wakeHost(s: Session, event: SessionEvent): void {
-    if (s.manifest.host === null) return;
+    if (s.manifest.host === null || !hostSeated(s)) return;
     if (event.type === "heartbeat") this.hostWoken({ sessionId: s.id, cause: "tick", cursor: event.cursor });
     else if (event.refId !== null) {
       const referenced = s.events.find((x) => x.cursor === Number(event.refId));
@@ -1680,10 +1704,11 @@ export class MemoryStore implements BellmanStore {
     if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
     const charge = decideHostCharge(s, units, now);
     if (!charge.ok) return charge;
-    // Synchronous from here: the event, the meter and the stamp land together.
+    // Synchronous from here: the event, the meter, the stamp and the audit row land together.
     const event = this.appendNow(s, e);
     s.hostUnits = charge.next;
     s.members = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
+    this.recordAudit(hostSentEntries(s, e, now));
     return { ok: true, event: detach(event) };
   }
 

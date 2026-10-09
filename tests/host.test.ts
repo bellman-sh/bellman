@@ -208,6 +208,11 @@ describe("the prompt", () => {
     expect(p.user.match(/"/g)).toHaveLength(2);
   });
 
+  it("leaves a quote in reply text as it is: only a label lands in an attribute", () => {
+    const p = answerPrompt(hosted(), "q", [ev({ payload: { text: 'she said "hi"' } })]);
+    expect(p.user).toContain('>she said "hi"</reply>');
+  });
+
   it("reads the note of a progress reply", () => {
     const p = answerPrompt(hosted(), "q", [ev({ type: "progress", payload: { note: "halfway there" } })]);
     expect(p.user).toContain("halfway there");

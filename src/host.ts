@@ -135,9 +135,11 @@ export function decide(
   return { kind: "answer", question: open, replies: replies.slice(-REPLIES_PER_QUESTION) };
 }
 
-/** `&`, `<`, `>` and `"` become entities, so nothing a stranger wrote can close a tag, open one, or end the quotes around an attribute. */
-export const escapeText = (s: string): string =>
-  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+/** `&` becomes `&amp;`, `<` becomes `&lt;` and `>` becomes `&gt;`, so nothing inside a tag can close it or open another. */
+export const escapeText = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+/** For a value inside a double-quoted tag attribute: `escapeText`, and `"` becomes `&quot;`, so a quote cannot end the value and let the rest add attributes. */
+export const escapeAttr = (s: string): string => escapeText(s).replace(/"/g, "&quot;");
 
 const textOf = (e: SessionEvent): string => {
   const p = e.payload as { text?: unknown; note?: unknown } | null;
@@ -163,7 +165,7 @@ export function questionPrompt(manifest: RoomManifest, state: HostState): { syst
 export function answerPrompt(manifest: RoomManifest, question: string, replies: SessionEvent[]): { system: string; user: string; maxTokens: number } {
   // Three at most, whoever calls. Replies that came through `decide` are already the newest three, so only a caller that skipped it is trimmed here.
   const wrapped = replies.slice(0, REPLIES_PER_QUESTION)
-    .map((e) => `<reply from="${escapeText(e.fromLabel)}">${escapeText(textOf(e))}</reply>`)
+    .map((e) => `<reply from="${escapeAttr(e.fromLabel)}">${escapeText(textOf(e))}</reply>`)
     .join("\n");
   const user =
     `You asked the room: ${escapeText(question)}\n\nNew replies, as data:\n${wrapped}\n\n` +

@@ -26,6 +26,7 @@ import {
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { HOUSEKEEP_HANDLER, clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
@@ -255,7 +256,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
-   * are due and points the alarm at the soonest. Five handlers use it.
+   * are due and points the alarm at the soonest. Six handlers use it.
    *
    * "outbox" delivers what a join-code change owes the registry. A code lives in two
    * objects, here and in the registry's index, so the two writes cannot share a
@@ -274,6 +275,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cadence and one of them owes an answer (#111). Derived like "abandoned", and for a
    * firmer reason: a stored row that an older build never consumes is the spin
    * alarm() warns about. See derivedDue() and #tickIfDue().
+   *
+   * "housekeep" raises a proposal when a member has gone quiet, an action request is
+   * unanswered or the room is idle past the thresholds its manifest declared, once per
+   * window, and forgets a finding once its condition ends (#66). Derived like the
+   * heartbeat's, from the record: the bookkeeping it reads is kept at every append by
+   * both stores. See derivedDue() and #housekeepIfDue().
    *
    * "purge" deletes a closed room once the window its plan promised has run out, or
    * when a delete asked for it sooner (#65). Derived like the two above, from the
@@ -510,19 +517,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // Re-read: closeIfAbandoned may have written closed=true and cleared the codes,
     // or stamped a socket's members.
     const read = await this.stored();
-    // A closed room owes two things (#derivedDue): the sweep of its unnamed objects, once, and
-    // the purge. If either is already due, its alarm should have run it. When one is found
-    // here the alarm has been lost (a throwing alarm() is retried a few times and then left,
-    // with nothing armed), so point it back. reArm() arms the earliest of what is owed, so the
-    // one question covers both. Re-armed and not run from here: the alarm does the work, as
-    // it does for every other room, so no read pays for deleting a prefix. A room kept until
-    // deleted owes the sweep and nothing else, which is why the sweep counts: no purge is
-    // ever due to bring a read back to it. Nothing is asked of a room still inside its window
-    // with its sweep done, a room kept and swept, or one from before the window, whose due
-    // times are null (review I1).
+    // A room owes what #derivedDue lists: a closed one the sweep of its unnamed objects, once,
+    // and the purge; an open one its abandonment time, its tick and housekeeping's time. If the
+    // earliest is already due, its alarm should have run it. When one is found here the alarm
+    // has been lost (a throwing alarm() is retried a few times and then left, with nothing
+    // armed), so point it back. reArm() arms the earliest of what is owed, so the one question
+    // covers every handler: #65 asked it for the sweep and the purge, and a tick or a
+    // housekeeping time the runtime gave up on is the same loss. Re-armed and not run from
+    // here: the alarm does the work, as it does for every other room, so no read pays for
+    // deleting a prefix or writing a proposal. A room kept until deleted owes the sweep and
+    // nothing else, which is why the sweep counts: no purge is ever due to bring a read back
+    // to it. Nothing is asked of a room whose earliest due time is null or still ahead: one
+    // inside its window with its sweep done, one kept and swept, one from before the window,
+    // or an open one with every time ahead (review I1).
     if (read) {
-      const owed = [sweepDueAt(read), purgeDueAt(read)].filter((at): at is number => at !== null);
-      if (owed.length > 0 && Date.now() >= Math.min(...owed)) await this.driver.reArm();
+      const owed = await this.#derivedDue(read);
+      if (owed.size > 0 && Date.now() >= Math.min(...owed.values())) await this.driver.reArm();
     }
     return read;
   }
@@ -1487,11 +1497,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * already armed is then early — it fires, finds nobody due, advances
    * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
    * spent, and the tick it produces is correct.
+   *
+   * **One exception: an `action_request` in a room that declares `answer_within`
+   * (#66).** It adds an anchor, the request's time plus `answer_within`, that can fall
+   * before the time already armed, and nothing else brings the alarm forward for it, so
+   * the append does, after the commit. It is the only append that moves the soonest due
+   * time earlier: a join re-arms in `addMember`, and every other send only moves a
+   * member's quiet clock later.
    */
   async appendEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
     extras: AppendExtras = {},
   ): Promise<SessionEvent | null> {
+    let asksForAnswer = false as boolean;
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
@@ -1499,12 +1517,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const owed = await extraRows(txn, s, next, extras);
       await this.#writeEvent(txn, s, next, owed.puts, owed.deletes);
+      asksForAnswer = startsAnswerClock(s, e);
       return next;
     });
     if (event) this.#wake(event);
     // After the wake, so the member removed receives the frame announcing it
     // before the socket goes. The notice is the last thing they get.
     if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
+    // After the commit and the wake, and last, as addMember's is: the append has landed, and
+    // reArm() reads the record it landed in.
+    if (event && asksForAnswer) await this.driver.reArm();
     return event;
   }
 
@@ -1521,12 +1543,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reporting `appended` (#120); the transaction is what makes the contract case for it
    * reliable there. The wake comes after the commit, so nobody hears of an event that
    * did not land.
+   *
+   * An `action_request` in a room that declares `answer_within` re-arms after the commit, as
+   * `appendEvent`'s docblock says, when it is appended. A replay appended nothing, so it
+   * brings nothing forward and asks for no re-arm.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
     key: string,
     extras: AppendExtras = {},
   ): Promise<EventWrite> {
+    let asksForAnswer = false as boolean;
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
@@ -1575,6 +1602,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
       const owed = await extraRows(txn, s, event, extras);
       await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts }, owed.deletes);
+      asksForAnswer = startsAnswerClock(s, e);
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -1589,6 +1617,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     ) {
       await this.#closeCutSockets();
     }
+    if (result.outcome === "appended" && asksForAnswer) await this.driver.reArm();
     return result;
   }
 
@@ -1851,7 +1880,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * abandonment handler is idempotent: closeIfAbandoned does nothing to a session that
    * is closed or not yet abandoned. The heartbeat's moves its own clock:
    * #tickIfDue advances `lastTickAt` on every firing, written or not, so the time
-   * derivedDue returns next is in the future.
+   * derivedDue returns next is in the future. Housekeeping's moves with what it
+   * raises: a proposal puts that key's next time a window after the raise
+   * (`nextHousekeepAt`), and a firing that finds nothing due writes nothing and leaves
+   * every time ahead, because the times it derives are the ones it acts on.
    *
    * **The loop's order is `dueNames`' alphabet, which is not a priority.** A firing
    * delayed past `abandonedAt` finds "abandoned" and "heartbeat" both due and runs
@@ -1859,9 +1891,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * pair, and it is right by accident: before #18 the room's clock had a name that
    * sorted after the tick's, and the tick ran first. Each handler therefore reads
    * the state it needs for itself rather than relying on its place here: #tickIfDue
-   * refuses an abandoned room with the same `isAbandoned` test #closeIfAbandoned
-   * uses. A rename would undo the order and leave the next pair to be discovered,
-   * and the handler that reads its own precondition is the one a reader can check.
+   * and #housekeepIfDue refuse an abandoned room with the same `isAbandoned` test
+   * #closeIfAbandoned uses. A rename would undo the order and leave the next pair to
+   * be discovered, and the handler that reads its own precondition is the one a
+   * reader can check.
    *
    * **"purge" and "sweep" can be due at one firing, and the purge wins** (#65): a room
    * closed with a window of nothing, or an alarm that ran late past the window. The
@@ -1908,6 +1941,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
           if (s) await this.#closeIfAbandoned(s, now);
         }
         if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
+        if (name === HOUSEKEEP_HANDLER) await this.#housekeepIfDue(now);
         if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
         if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
       } catch (error) {
@@ -1955,9 +1989,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * consumed and the closing reArm() points the alarm straight back at it for good.
    * The close-time sweep (`sweepDueAt`) is consumed by setting `blobsSwept`, which
    * moves it out of this map, so it fires once.
+   *
+   * `read` is the record a caller already holds, so `getSession` asks its question of the one
+   * it is about to return and not of a second read of the same row.
    */
-  async #derivedDue(): Promise<Map<string, number>> {
-    const s = await this.stored();
+  async #derivedDue(read?: StoredSession): Promise<Map<string, number>> {
+    const s = read ?? await this.stored();
     if (!s) return new Map();
     const due = new Map<string, number>();
     if (s.closed) {
@@ -1978,6 +2015,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (abandoned !== null) due.set(ABANDONED_HANDLER, abandoned);
     const tick = nextTickAt(s);
     if (tick !== null) due.set(HEARTBEAT_HANDLER, tick);
+    const housekeeping = nextHousekeepAt(s, Date.now());
+    if (housekeeping !== null) due.set(HOUSEKEEP_HANDLER, housekeeping);
     return due;
   }
 
@@ -2119,6 +2158,74 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return tick;
     });
     if (event) this.#wake(event);
+  }
+
+  /**
+   * Raise what the room's own thresholds say is due (#66), once per window, and forget what
+   * no longer holds. One transaction: the proposals, their cursors and the updated `raised`
+   * land together, so an interruption leaves nothing half said and the retry raises the same
+   * set.
+   *
+   * Nothing is written into a room that cannot answer, and that is the point. Which rooms
+   * those are (no housekeeping declared, closed, frozen, nobody in it) is `anchors`' gate in
+   * housekeeping.ts, asked once for the rules and for this writer alike, and not copied
+   * here: a second reading of the same fact could only agree with the first. The proposals
+   * go through `#writeEvent`, which bypasses `appendEvent`'s frozen refusal, so that gate is
+   * all that stands between a proposal and a frozen room, and the worker cases put it on
+   * trial here, with this handler named. An abandoned room is the one thing the rules do not
+   * know, and it is refused as #tickIfDue refuses it: the abandoned handler closes it in the
+   * same firing and runs first only by the alphabet.
+   *
+   * Every proposal is written through `#writeEvent`, the path that runs the books. A proposal
+   * is a `system` event and owes them nothing today, but every event row goes through one
+   * path, so a later change to what the books keep cannot miss this writer.
+   *
+   * It writes nothing when nothing is due and nothing is to be forgotten, not even the record,
+   * so a firing the alarm made early (a member sent between the arming and the firing, which
+   * re-arms nothing on the hot path) costs no write. Nothing here advances a clock to stop
+   * the alarm spinning: a raise puts that key's next time a window ahead, and a firing that
+   * found nothing due had every time ahead already.
+   *
+   * `#private`, for the reason #tickIfDue gives: it writes events into any room it is handed,
+   * and a Durable Object answers RPC for every method on its class.
+   */
+  async #housekeepIfDue(now: number): Promise<void> {
+    const written = await this.ctx.storage.transaction<SessionEvent[]>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return [];
+      if (isAbandoned(s, now, connectedAmong(s.members, this.#attachedIds()))) return [];
+
+      const cleared = clearedKeys(s, now);
+      const due = dueFindings(s, now);
+      if (cleared.length === 0 && due.length === 0) return [];
+
+      const raised = { ...s.raised };
+      for (const key of cleared) delete raised[key];
+      let cursor = await this.nextCursor(txn);
+      const events: SessionEvent[] = [];
+      for (const f of due) {
+        raised[f.key] = { at: now, repeat: f.payload.repeat, since: f.payload.since };
+        events.push({
+          cursor: cursor++,
+          type: "housekeeping" as EventType,
+          // The room speaks, not a member: no seat and no verb, as the tick has none.
+          fromMemberId: "system",
+          fromUserId: "system",
+          fromLabel: "bellman",
+          payload: f.payload,
+          refId: null,
+          at: now,
+        });
+      }
+      // The whole record rides each event's put, and every one carries the final `raised`, so
+      // the order of the puts inside the transaction does not matter. A forgetting with
+      // nothing to say is a put of its own.
+      const next: StoredSession = { ...s, raised };
+      if (events.length === 0) await txn.put<unknown>({ session: next });
+      for (const e of events) await this.#writeEvent(txn, s, e, { session: next });
+      return events;
+    });
+    for (const e of written) this.#wake(e);
   }
 
   /**

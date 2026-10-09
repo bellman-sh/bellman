@@ -16,7 +16,7 @@
  * This module must stay importable by both builds: no `cloudflare:workers`, directly or
  * transitively. `SessionDO` imports it, and so do both test programs.
  */
-import type { HousekeepingFinding, HousekeepingPayload, Member } from "./types.js";
+import type { HousekeepingFinding, HousekeepingPayload, Member, SessionEvent } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 // `isActiveMember` and `isRemovedMember` live in store.ts beside the other member rules, and
 // store.ts applies `noteAppend` inside both stores, so this module imports that one and not
@@ -177,6 +177,20 @@ export function clearedKeys(s: StoredSession, now: number): string[] {
   const holding = new Set(all.filter((a) => a.since <= now).map((a) => a.key));
   return Object.keys(s.raised).filter((key) => !holding.has(key));
 }
+
+/**
+ * Whether appending `e` starts a clock the alarm already armed cannot know of: an
+ * `action_request` in a room that declares `answer_within`. Its anchor, the request's time
+ * plus `answer_within`, can fall before the time armed, and no other append can: a send only
+ * moves a member's quiet clock later, a response only removes an anchor, and a join re-arms
+ * where it is written. The room's store asks this after a commit and re-arms if it is true.
+ *
+ * Shared by both appends so the "when" is written once.
+ */
+export const startsAnswerClock = (
+  s: Pick<StoredSession, "manifest">,
+  e: Pick<SessionEvent, "type">,
+): boolean => e.type === "action_request" && (s.manifest.housekeeping?.answerWithinMs ?? null) !== null;
 
 /**
  * The soonest moment a condition is due, or null when nothing can become due: no housekeeping,

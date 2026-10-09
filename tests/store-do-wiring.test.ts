@@ -603,18 +603,17 @@ describe("negative control: the same calls with the guard removed", () => {
    * three read paths, so the undefined above is the guard's doing, and the crash
    * the guard prevents is shown to be real.
    */
-  it("hands the legacy row to every read path, and manifest.mode throws", async () => {
+  it("hands the legacy row to every read path, and its missing manifest throws", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
     const { store, legacy } = await worldOn(unguarded);
 
-    const leaked = [
-      await legacy.getSession(),
-      await store.getSession(LEGACY_ID),
-    ];
-
-    for (const s of leaked) {
-      expect(s).toBeDefined();
-      expect(() => s!.manifest.mode).toThrow(TypeError);
+    // Since #66 (R7) `getSession` asks the row what it owes before it answers, so a read of a
+    // row with no manifest breaks on the read itself and not at the caller's first use of it:
+    // `manifest.heartbeatOnMs`, which `nextTickAt` reads. The harm is the same one and the guard
+    // prevents it the same way; the message pins that it is the manifest and not some other
+    // TypeError from a harness that never reached the row.
+    for (const read of [() => legacy.getSession(), () => store.getSession(LEGACY_ID)]) {
+      await expect(read()).rejects.toThrow(/reading 'heartbeatOnMs'/);
     }
   });
 
@@ -625,11 +624,16 @@ describe("negative control: the same calls with the guard removed", () => {
    * anywhere, a registry that cannot answer included, with the lookup never having reached
    * the row. So the row gets the one field the lookup reads, and the assertion is the effect
    * the guard exists to stop: the lookup resolves the code and serves a pre-manifest room.
+   *
+   * It gets a second, as the alarm's row below does and for the same reason: since #66 (R7) the
+   * lookup reads the room through `getSession`, which asks the row what it owes, and that reads
+   * `manifest.heartbeatOnMs`. A manifest holding only a null cadence gets the read past it. It
+   * has no `roles`, so the real guard still reads the row as gone.
    */
   it("resolves a join code to it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
     const { store } = await worldOn(unguarded, {
-      ...legacyRow(), joinCodes: oneCode(LEGACY_CODE, "peer_b"),
+      ...legacyRow(), joinCodes: oneCode(LEGACY_CODE, "peer_b"), manifest: { heartbeatOnMs: null },
     });
 
     expect(await store.getSessionByJoinCode(LEGACY_CODE)).toMatchObject({

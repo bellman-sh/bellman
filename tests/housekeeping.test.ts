@@ -6,7 +6,7 @@
  * kept its own copy could disagree with the other about them.
  */
 import { describe, expect, it } from "vitest";
-import { clearedKeys, dueFindings, nextHousekeepAt } from "../src/housekeeping.js";
+import { clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "../src/housekeeping.js";
 import { noteAppend } from "../src/store.js";
 import type { StoredSession } from "../src/stored-session.js";
 import type { RoomManifest, SessionEvent } from "../src/types.js";
@@ -560,6 +560,27 @@ describe("a thaw restarts the clocks", () => {
     expect(dueFindings(s, THAW + H2)).toEqual([{
       key, payload: { finding: "member_quiet", about: { member_id: "m_a" }, since: THAW + H2, repeat: 1 },
     }]);
+  });
+});
+
+// R6. The one append that can bring the soonest due time forward; the room's store re-arms after it.
+describe("startsAnswerClock", () => {
+  const declares = (hk: Partial<Thresholds> | null) =>
+    stored({}, hk === null ? null : rules(hk));
+
+  it("is true for an action_request in a room that declares answer_within", () => {
+    expect(startsAnswerClock(declares({}), { type: "action_request" })).toBe(true);
+  });
+
+  it("is false for every other kind of event, however the room is declared", () => {
+    for (const type of ["message", "action_response", "progress", "member_joined", "member_left", "surface"] as const) {
+      expect(startsAnswerClock(declares({}), { type }), type).toBe(false);
+    }
+  });
+
+  it("is false for a request when the room declares no answer_within, or no housekeeping at all", () => {
+    expect(startsAnswerClock(declares({ answerWithinMs: null }), { type: "action_request" })).toBe(false);
+    expect(startsAnswerClock(declares(null), { type: "action_request" })).toBe(false);
   });
 });
 

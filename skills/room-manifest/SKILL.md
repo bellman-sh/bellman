@@ -39,8 +39,9 @@ purpose: Port Stripe v2 to v3   # optional, ≤300 chars
 preset: review                  # pair | swarm | review | social
 ```
 
-That is the entire file. Adding `roles`, `mode`, `default_role` or
-`creator_role` next to `preset` is rejected — the two forms are exclusive.
+That is the entire file, apart from the optional `housekeeping` block (Step 2c).
+Adding `roles`, `mode`, `default_role` or `creator_role` next to `preset` is
+rejected — the two forms are exclusive.
 
 A preset saved in the panel (`dash.bellman.sh/presets`) is cited the same way,
 but it works only for the person who saved it: `bellman_start` looks the name
@@ -210,6 +211,40 @@ Three refusals an author meets:
   plan allows. A hosted room that closes frees its slot.`
 - **The pair room.** A host needs `mode: swarm`. With `mode: pair` the answer is
   `a pair room cannot have a host: its two seats are its members'`.
+
+## Step 2c — ask for housekeeping (optional)
+
+A room can ask the server to notice when it has gone quiet. Add a `housekeeping`
+block to either form, a cited preset or authored roles:
+
+```yaml
+room: payments-migration
+preset: swarm
+housekeeping:
+  quiet_after: 2h       # a member has sent nothing for this long
+  answer_within: 30m    # an action request is still unanswered after this long
+  idle_after: 1d        # no member has sent anything for this long
+  repeat_after: 4h      # optional: wait this long before naming the same finding again
+```
+
+| Key | The server names |
+|---|---|
+| `quiet_after` | a member who has sent nothing for this long. A member who only reads is quiet; a hosted seat never is. |
+| `answer_within` | an `action_request` with no `action_response` after this long, while the member who sent it is still in the room. Of one member's unanswered requests the three oldest are named. |
+| `idle_after` | a room in which no member has sent anything for this long. What a hosted seat says does not count. |
+| `repeat_after` | no finding of its own: how long a finding that still holds waits before it is named again. Left out, each finding repeats after its own threshold. |
+
+Each value is a whole number and a unit (`s`, `m`, `h` or `d`),
+between **5m** and **7d**. A key left out turns that finding off, and a block
+that sets no threshold turns housekeeping off. No built-in preset sets it, so a
+room that wants it says so here. A preset you saved in the panel can carry the
+block, and a block beside the cite replaces the preset's whole; an empty one turns
+it off, and a cite with none keeps the preset's.
+
+A finding is a `housekeeping` event in the room. It names the condition and does
+nothing about it: the server sends no nudge, answers no request, closes no room
+and removes no member. Whether to ping the quiet member, answer the request or
+leave is a member's call.
 
 ## Step 3 — check it
 

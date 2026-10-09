@@ -87,7 +87,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Twelve changes to the stored shape landed after the sessions now in production
+ * Fourteen changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -112,6 +112,17 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   invents nothing. Left alone, both read as `undefined`, which is neither: a
  *   guard written `=== null` misses the cadence and goes on to do arithmetic with
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
+ * - **manifest.housekeeping** (#66) defaults to `null`, for the same reason: a
+ *   manifest that never mentioned housekeeping asks for no finding, so the default
+ *   invents nothing. Left alone it reads as `undefined`, which `=== null` misses,
+ *   and the rules would go on to read thresholds off nothing.
+ * - **raised, openRequests, lastMemberEventAt and thawedAt** (#66) default to `{}`, `{}`,
+ *   `null` and `null`: no finding raised, no waiting request on the books, no member event
+ *   on the books, no thaw to floor a clock at. The books are kept at the write and only for
+ *   a room that declared housekeeping, and a manifest is fixed at creation, so a room
+ *   written before this never declared it and has nothing to lose by the default. A
+ *   member's `lastSentAt` needs none: absent reads as `joinedAt`, which is what
+ *   housekeeping does with a member who has sent nothing.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
  * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
@@ -141,7 +152,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All twelve live here, in one gate, rather than in separate functions that could drift.
+ * All fourteen live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -158,7 +169,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
   return {
     ...row,
-    manifest: withHeartbeatDefaults(row.manifest),
+    manifest: withManifestDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
     surfaceCursor: row.surfaceCursor ?? 0,
     lastHostTickAt: row.lastHostTickAt ?? null,
@@ -174,6 +185,12 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     retainAfterCloseMs: (row as { retainAfterCloseMs?: number | null }).retainAfterCloseMs ?? null,
     purgeAt: row.purgeAt ?? null,
     blobsSwept: row.blobsSwept ?? false,
+    // Required on the type, absent on a row written before #66: the cast says so where `??`
+    // alone would read as redundant.
+    raised: (row as { raised?: Session["raised"] }).raised ?? {},
+    openRequests: (row as { openRequests?: Session["openRequests"] }).openRequests ?? {},
+    lastMemberEventAt: (row as { lastMemberEventAt?: number | null }).lastMemberEventAt ?? null,
+    thawedAt: (row as { thawedAt?: number | null }).thawedAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),
@@ -182,17 +199,19 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
 /**
  * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
- * null, `host` a config or null, and `reports` a boolean on every role.
+ * null, `housekeeping` an object or null, `host` a config or null, and `reports` a boolean
+ * on every role.
  *
- * The types already say so, because every row written since the heartbeat has
- * both. The `??` is for the rows that predate it. New objects all the way down
+ * The types already say so, because every row written since each of them landed
+ * has it. The `??` is for the rows that predate it. New objects all the way down
  * rather than assignments into the row, so the gate stays a pure function of what
  * it was handed.
  */
-function withHeartbeatDefaults(m: RoomManifest): RoomManifest {
+function withManifestDefaults(m: RoomManifest): RoomManifest {
   return {
     ...m,
     heartbeatOnMs: m.heartbeatOnMs ?? null,
+    housekeeping: m.housekeeping ?? null,
     host: m.host ?? null,
     roles: Object.fromEntries(
       Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false }]),

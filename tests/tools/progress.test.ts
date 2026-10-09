@@ -12,6 +12,8 @@ import { Harness, DEV_KEY } from "../helpers/harness.js";
 import { brief } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { snapshotOf } from "../../src/heartbeat.js";
+import { ATTENTION } from "../../src/attention.js";
+import { SEND_KINDS } from "../../src/tools/kit.js";
 
 let h: Harness;
 
@@ -242,5 +244,47 @@ describe("a member alone in a ticking room", () => {
       payload: { note: "doing as the tick asked" },
     });
     expect(sent.isError, sent.text).toBe(false);
+  });
+});
+
+/**
+ * The types only the server writes: the tick (heartbeat D7) and the housekeeping proposal (#66, D2). A member
+ * cannot forge one, because `bellman_send`'s `type` is the closed list `SEND_KINDS`, so the tool's own schema
+ * turns the rest away before any handler runs. A forged tick would name members silent who are not, and a
+ * forged proposal would put a finding in front of the room that no threshold produced.
+ *
+ * Both are named, and so is the class: every event type that is not a send kind, so a type added later is
+ * refused by the same list, and this fails the day one of them is added to it by mistake.
+ */
+describe("bellman_send refuses the types only the server writes", () => {
+  const forged = (p: PairedSession, type: string) =>
+    p.creator.call("bellman_send", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, type,
+      payload: { finding: "member_quiet", about: { member_id: p.creatorMemberId }, since: 1, repeat: 1 },
+    });
+
+  it.each(["heartbeat", "housekeeping"])("refuses %s, names the kinds it does accept, and appends nothing", async (type) => {
+    const p = await pairUp(h);
+    const before = await eventCount(p);
+
+    const out = await forged(p, type);
+
+    expect(out.isError, out.text).toBe(true);
+    for (const kind of SEND_KINDS) expect(out.text, kind).toContain(kind);
+    expect(await eventCount(p)).toBe(before);
+  });
+
+  it("refuses every event type that is not a send kind", async () => {
+    const p = await pairUp(h);
+    const before = await eventCount(p);
+    const serverOnly = Object.keys(ATTENTION).filter((type) => !(SEND_KINDS as readonly string[]).includes(type));
+    // The two named above are among them, and so are the joins, leaves and removals the server writes.
+    expect(serverOnly).toEqual(expect.arrayContaining(["heartbeat", "housekeeping", "member_evicted", "session_expired"]));
+
+    for (const type of serverOnly) {
+      const out = await forged(p, type);
+      expect(out.isError, type).toBe(true);
+    }
+    expect(await eventCount(p)).toBe(before);
   });
 });

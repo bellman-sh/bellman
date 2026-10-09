@@ -14,6 +14,7 @@ export function connectFixture(): ConnectResult {
       your_role: "reviewer",
       your_verbs: ["send", "respond_actions"],
       heartbeat_on_seconds: null,
+      housekeeping: null,
       you_report: false,
       creator_role: "author",
       roles: { author: ["send", "invite", "revoke", "request_actions", "respond_actions"], reviewer: ["send", "respond_actions"] },
@@ -47,7 +48,7 @@ export function roomsFixture(): RoomsResult {
       your_member_id: "m_lead",
       room: {
         preset: null, mode: "swarm", your_role: "lead", your_verbs: ["send", "invite"],
-        heartbeat_on_seconds: 300, you_report: true, creator_role: "lead",
+        heartbeat_on_seconds: 300, housekeeping: null, you_report: true, creator_role: "lead",
         roles: { lead: ["send", "invite"], helper: ["send"] },
         reports: { lead: true, helper: true },
         text: { trust: "untrusted", origin: { memberId: "m_lead", label: "me@here" }, data: { room: "migration-swarm", purpose: null, descriptions: {} } },

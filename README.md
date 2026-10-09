@@ -355,8 +355,9 @@ which the server appends a `heartbeat` tick saying who has reported and who has
 gone quiet, and `reports: true` on a role says members in that seat must answer
 it, by sending `progress` — so that role must hold `send`, and a manifest that
 asks a verbless seat for reports is refused. With no `heartbeat_on` there is
-no tick and `reports` asks for nothing. No preset sets `reports`, and only
-`social` sets `heartbeat_on`, for its host; a cite may set `heartbeat_on` only for
+no tick and `reports` asks for nothing. No built-in preset sets `reports`, and only
+`social` sets `heartbeat_on`, for its host; a saved preset carries either, as an
+authored manifest does. A cite may set `heartbeat_on` only for
 a preset with a host, `social` or a saved preset carrying a `host` block, and a
 cite of any other preset that sets it is refused, since nothing there would tick
 or the preset already holds its author's cadence. A joiner sees both before it
@@ -397,6 +398,42 @@ for the host in its prompt, which ends saying those rules outrank them; they
 cannot give it a tool or a verb, or a name: the host is `host@bellman` whatever
 its role is called.
 
+A room can also ask the server to notice when it has gone quiet. A top-level
+`housekeeping` block, beside authored roles or a cited preset, sets up to three
+thresholds and an optional repeat window:
+
+```yaml
+housekeeping:
+  quiet_after: 2h       # a member has sent nothing for this long
+  answer_within: 30m    # an action request is still unanswered after this long
+  idle_after: 1d        # no member has sent anything for this long
+  repeat_after: 4h      # optional: how long before a finding that still holds is named again
+```
+
+Each value is a whole number of `s`, `m`, `h` or `d`, from 5 minutes to 7 days.
+A threshold left out turns its finding off, a block with no threshold turns
+housekeeping off, and no built-in preset sets it. When a threshold passes the server
+appends a `housekeeping` event naming the member, the request's cursor or the
+room, once per window: `repeat_after` is the window for a finding that still
+holds, and defaults to the threshold that raised it, so a `repeat_after` shorter
+than a threshold repeats that often, by design. Of one member's unanswered
+requests the three oldest are named, and the next once an older one is answered, so
+a member cannot fill every window by asking more. A finding ends with its
+condition: the member sends, the request is answered or its sender leaves, a
+member writes to the room. A thaw restarts the clocks, because nobody can send
+in a frozen room and a freeze is never counted as silence. The server proposes
+and never acts: nothing is sent, answered, closed or removed, and what to do
+about a finding is a member's call, under the verb that member already holds. A
+joiner sees the thresholds before accepting a seat: the connect preview carries
+`housekeeping`, each threshold in seconds (`null` where off, and the whole block
+`null` when the room names no one), and the join page says so in a line.
+
+Housekeeping counts people. A hosted seat is never named quiet, what it says is not
+activity (a room only the host speaks in reads idle), and a proposal never wakes it. The Node
+server (`npm start`) keeps the books these findings are read from and raises nothing: its tick
+loop does not run housekeeping, so a housekeeping room shows no proposal there. Run the room
+under `npm run dev:worker` to see one.
+
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it
@@ -416,7 +453,7 @@ a `default_role` naming no role are all reported by the server, which
 means that request does cross the wire and comes back an error. Only the
 parsed object reaches the server, which has no YAML parser.
 
-**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset may carry a `host` block, as a clone of `social` does; a room started from it meets the plan a hosted seat needs and takes one of your hosted rooms, exactly as a manifest that declares one does. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
+**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. A saved preset can carry a cadence and a `housekeeping` block as an authored manifest does; a `housekeeping` block beside the cite replaces the preset's whole, an empty one turns it off, and a cite with none, or a null one, keeps the preset's own. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset may carry a `host` block, as a clone of `social` does; a room started from it meets the plan a hosted seat needs and takes one of your hosted rooms, exactly as a manifest that declares one does. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
 
 ### When a plan lapses
 

@@ -1167,6 +1167,74 @@ export function describeStoreContract(
     });
 
     /**
+     * **A thaw restarts housekeeping's clocks (#66, R9).** While a room is frozen nobody can
+     * send and no request can be answered, so a finding computed across the freeze would name
+     * a condition the room imposed. Heartbeat refuses the same for the tick, and pays the
+     * credit at the thaw; housekeeping records the moment instead, `thawedAt`, and the rules
+     * floor every base time at it. The member's last send stays the member's last send.
+     *
+     * Interface behaviour and not the alarm's, for `clearSilence`'s reason: the field is read
+     * back through `getSession`, so a store that left it alone would name a room's members
+     * quiet for the length of the outage.
+     */
+    describe("thawedAt, the moment housekeeping's clocks restart", () => {
+      it("is null for a room that was never frozen", async () => {
+        const s = session();
+        await store.createSession(s);
+        expect((await store.getSession(s.id))!.thawedAt).toBeNull();
+      });
+
+      it("is the moment of the thaw, and the freeze does not move it", async () => {
+        const s = session();
+        await store.createSession(s);
+
+        await store.freezeSession(s.id, Date.now());
+        expect((await store.getSession(s.id))!.thawedAt, "a freeze is not a thaw").toBeNull();
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, null);
+
+        expect((await store.getSession(s.id))!.thawedAt).toBe(Date.now());
+      });
+
+      // The transition and not the argument, as the report credit is: `freezeSession(null)` is
+      // idempotent and the obvious thing to retry, and a retry that moved the floor forward
+      // would keep every clock restarting for good.
+      it("is set by a real thaw only, so a retried thaw leaves it where it was", async () => {
+        const s = session();
+        await store.createSession(s);
+
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt, "nothing was frozen").toBeNull();
+
+        await store.freezeSession(s.id, Date.now());
+        await store.freezeSession(s.id, null);
+        const thawed = Date.now();
+        expect((await store.getSession(s.id))!.thawedAt).toBe(thawed);
+
+        vi.advanceTimersByTime(60_000);
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt, "nothing was frozen the second time").toBe(thawed);
+      });
+
+      it("moves forward to the latest thaw, and a freeze in between leaves it", async () => {
+        const s = session();
+        await store.createSession(s);
+        await store.freezeSession(s.id, Date.now());
+        await store.freezeSession(s.id, null);
+        const first = Date.now();
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, Date.now());
+        expect((await store.getSession(s.id))!.thawedAt, "frozen again, the last thaw stands").toBe(first);
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt).toBe(Date.now());
+      });
+    });
+
+    /**
      * The tool reads the session, then writes. A freeze landing in that gap
      * would let a frozen room grow, which is the one thing freezing is for —
      * so the refusal has to come from the write, not only from the read.
@@ -1919,6 +1987,257 @@ export function describeStoreContract(
     });
 
     /**
+     * What housekeeping reads (#66): each member's last send, the room's last member
+     * event, and the requests still waiting. Kept at the write, in the event's own
+     * transaction, so that no scan of the log has to find them later.
+     *
+     * Applied wherever an event joins the log, and only for a room whose manifest
+     * declared housekeeping: a room that did not writes the rows it always did. Like
+     * the report stamp above, these cases pin what a caller can see, which is what has
+     * to be identical across implementations. The single put is pinned where the fake
+     * storage can count puts (tests/store-do-wiring.test.ts).
+     */
+    describe("housekeeping's books (#66)", () => {
+      const HK = {
+        quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null,
+      };
+      /** A creator and one peer, in a room that declared housekeeping: the only kind that keeps books. */
+      const kept = (over: Partial<Session> = {}) =>
+        session({
+          manifest: roomManifest({ housekeeping: HK }),
+          members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          ...over,
+        });
+      const sent = (type: EventBody["type"], by: string, over: Partial<EventBody> = {}): EventBody => ({
+        type, fromMemberId: by, fromUserId: by === "m_creator" ? "u_jesse" : "u_peer", fromLabel: by,
+        payload: {}, refId: null, ...over,
+      });
+      const asked = (by = "m_creator") => sent("action_request", by, { payload: { ask: "deploy" } });
+      const answered = (cursor: number | string, by = "m_peer") =>
+        sent("action_response", by, { refId: String(cursor), payload: { approved: true } });
+      /** A tick as the room writes it: no member handle, so nothing a member did. */
+      const tick = () => sent("heartbeat", "system", { fromUserId: "system", fromLabel: "bellman" });
+      /** The two departures the server authors itself, with the member they are about in the payload. */
+      const evicted = (id: string) =>
+        sent("member_evicted", "system", { fromUserId: "u_jesse", fromLabel: "jesse", payload: { member_id: id } });
+      const timedOut = (id: string) =>
+        sent("member_timed_out", "system", { fromUserId: "u_peer", fromLabel: "peer", payload: { member_id: id } });
+
+      const books = async (id: string) => {
+        const row = (await store.getSession(id))!;
+        return {
+          lastSent: Object.fromEntries(row.members.map((m) => [m.memberId, m.lastSentAt])),
+          openRequests: row.openRequests,
+          lastMemberEventAt: row.lastMemberEventAt,
+        };
+      };
+      const leaving = (id: string, over: Partial<RemovalRequest> = {}): RemovalRequest => ({
+        now: 9_000_000, frozen: "allow", cut: false, event: sent("member_left", id, { payload: { label: id } }),
+        audit: [], ...over,
+      });
+
+      it("stamps the sender and the room at a member event's own time", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const event = (await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } })))!;
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: event.at, m_peer: undefined },
+          openRequests: {},
+          lastMemberEventAt: event.at,
+        });
+      });
+
+      // The design's promise that `lastSentAt` is set at an append and not by a read. A poll stamps `lastSeenAt`
+      // through `updateMember` and a tool reads the room with `getSession`; neither is a send, and a member who
+      // only watches is quiet (D1). The case would pass for a store that kept no such field at all, so it first
+      // shows that the read did stamp what a read stamps.
+      it("leaves the sender's last send where the append put it, however the member is seen or the room is read", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const event = (await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } })))!;
+
+        vi.advanceTimersByTime(60_000);
+        await store.updateMember(s.id, "m_creator", { lastSeenAt: Date.now() });
+        await store.updateMember(s.id, "m_peer", { lastSeenAt: Date.now() });
+        await store.getSession(s.id);
+
+        const row = (await store.getSession(s.id))!;
+        expect(row.members.map((m) => m.lastSeenAt), "setup: the reads did stamp the members as seen")
+          .toEqual([Date.now(), Date.now()]);
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: event.at, m_peer: undefined },
+          openRequests: {},
+          lastMemberEventAt: event.at,
+        });
+      });
+
+      it("keeps the books on the first append of a key, as on a plain append", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const write = await store.appendEventOnce(s.id, sent("message", "m_peer", { payload: { text: "hi" } }), "k-1");
+        if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: undefined, m_peer: write.event.at },
+          openRequests: {},
+          lastMemberEventAt: write.event.at,
+        });
+      });
+
+      it("moves nothing for an event the server wrote", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        await store.appendEvent(s.id, tick());
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+        });
+      });
+
+      it("opens a request at its cursor, and closes it on the response that names it", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const request = (await store.appendEvent(s.id, asked()))!;
+        const open = { [String(request.cursor)]: { at: request.at, fromMemberId: "m_creator" } };
+        expect((await books(s.id)).openRequests).toEqual(open);
+
+        // A response that names no request closes nothing.
+        await store.appendEvent(s.id, answered(request.cursor + 50));
+        expect((await books(s.id)).openRequests).toEqual(open);
+
+        await store.appendEvent(s.id, answered(request.cursor));
+        expect((await books(s.id)).openRequests).toEqual({});
+      });
+
+      // Review Focus 5. The record holds the request, so no read of the log, bounded or
+      // not, has to find it: a thousand events later it is still waiting.
+      it("holds a request through more later events than any bounded read of the log would reach", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const request = (await store.appendEvent(s.id, asked()))!;
+
+        for (let i = 0; i < 1_100; i++) {
+          await store.appendEvent(s.id, sent("message", "m_peer", { payload: { text: `m${i}` } }));
+        }
+
+        expect((await books(s.id)).openRequests)
+          .toEqual({ [String(request.cursor)]: { at: request.at, fromMemberId: "m_creator" } });
+      });
+
+      // A replay is a retry of an append that already landed. Re-applying it would put a
+      // request back after its answer, and move the last send back behind a later one.
+      it("does not apply the books a second time on a replayed key", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const first = await store.appendEventOnce(s.id, asked(), "k-ask");
+        if (first.outcome !== "appended") throw new Error(`send said ${first.outcome}`);
+        vi.advanceTimersByTime(5_000);
+        const response = (await store.appendEvent(s.id, answered(first.event.cursor)))!;
+        expect(response.at, "the response is later, or this case proves nothing").toBeGreaterThan(first.event.at);
+
+        const retry = await store.appendEventOnce(s.id, asked(), "k-ask");
+
+        expect(retry.outcome).toBe("replayed");
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: first.event.at, m_peer: response.at },
+          openRequests: {},
+          lastMemberEventAt: response.at,
+        });
+      });
+
+      describe("closing the requests of a member who is gone", () => {
+        /** The peer asked, and so did the creator: only the leaver's request may close. */
+        const bothAsked = async () => {
+          const s = kept();
+          await store.createSession(s);
+          const theirs = (await store.appendEvent(s.id, asked("m_peer")))!;
+          const mine = (await store.appendEvent(s.id, asked("m_creator")))!;
+          return { s, theirs, mine };
+        };
+        const mineOnly = (mine: { cursor: number; at: number }) =>
+          ({ [String(mine.cursor)]: { at: mine.at, fromMemberId: "m_creator" } });
+
+        it("on a leave, which the leaver authors, and still records the leave", async () => {
+          const { s, mine } = await bothAsked();
+
+          const outcome = await store.removeMember(s.id, "m_peer", leaving("m_peer"));
+
+          expect(outcome.removed).toBe(true);
+          const row = (await store.getSession(s.id))!;
+          // The books replace the roster's member objects, and the leave must land on the
+          // roster that is stored, not on one the append just replaced.
+          expect(row.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          const departure = (await store.eventsAfter(s.id, 0)).at(-1)!;
+          expect(row.lastMemberEventAt, "a member's own leaving is that member's last act").toBe(departure.at);
+        });
+
+        it("on an eviction, which the server authors and names the member in its payload", async () => {
+          const { s, mine } = await bothAsked();
+          const before = (await books(s.id)).lastMemberEventAt;
+
+          const outcome = await store.removeMember(s.id, "m_peer", {
+            ...leaving("m_peer"), frozen: "refuse", cut: true, byUserId: "u_jesse", event: evicted("m_peer"),
+          });
+
+          expect(outcome.removed).toBe(true);
+          const row = (await store.getSession(s.id))!;
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          expect(row.members.find((m) => m.memberId === "m_peer")!.removedAtCursor).toBeDefined();
+          expect(row.lastMemberEventAt, "an eviction is the server's word, not a member's").toBe(before);
+        });
+
+        it("on a timeout, which the server authors and names the member in its payload", async () => {
+          const { s, mine } = await bothAsked();
+          const before = (await books(s.id)).lastMemberEventAt;
+
+          await store.appendEvent(s.id, timedOut("m_peer"));
+
+          const row = (await store.getSession(s.id))!;
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          expect(row.lastMemberEventAt).toBe(before);
+        });
+      });
+
+      describe("in a room that declared no housekeeping", () => {
+        it("keeps no books on a send, a request or a response", async () => {
+          const s = session({
+            members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          });
+          await store.createSession(s);
+
+          await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } }));
+          const request = (await store.appendEvent(s.id, asked()))!;
+          await store.appendEvent(s.id, asked("m_peer"));
+          await store.appendEvent(s.id, answered(request.cursor));
+
+          expect(await books(s.id)).toEqual({
+            lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+          });
+        });
+
+        it("keeps none on a removal either, and still records it", async () => {
+          const s = session({
+            members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          });
+          await store.createSession(s);
+
+          await store.removeMember(s.id, "m_peer", leaving("m_peer"));
+
+          expect(await books(s.id)).toEqual({
+            lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+          });
+          expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+        });
+      });
+    });
+
+    /**
      * The working surface's rows (#129). The store writes the row it is handed
      * in the event's own transaction, under the monotonic rule in surface.ts,
      * and never asks what a `surface` event means.
@@ -2344,6 +2663,70 @@ export function describeStoreContract(
         await store.updateMember(s.id, "m_creator", { leftAt: Date.now() });
         expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
         expect((await store.getSession(s.id))!.closed).toBe(true);
+      });
+    });
+
+    /**
+     * Housekeeping counts people (#66, ruling H3), and every event write runs its books (H2).
+     * The seat's send and a person's reply to it both reach the books through a store's own
+     * appends, so these are the two stores agreeing on what each owes them: a reply is a
+     * person's event, and the seat's word is nobody's activity.
+     */
+    describe("a hosted room's housekeeping books", () => {
+      const watched = () => {
+        const m = { ...hostedManifest(), housekeeping: { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null } };
+        const now = Date.now();
+        return session({ manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(now), used: 0, wakes: [] } });
+      };
+      const asks = (): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+        payload: { kind: "question", text: "What shipped?", tick: 1 }, refId: null,
+      });
+      const replyTo = (cursor: number): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+        payload: { text: "a parser" }, refId: String(cursor),
+      });
+      /** The three books, as they stand. */
+      const booksOf = async (id: string) => {
+        const s = (await store.getSession(id))!;
+        return { room: s.lastMemberEventAt, sent: Object.fromEntries(s.members.map((m) => [m.memberId, m.lastSentAt])), open: s.openRequests };
+      };
+
+      it("keeps no book for the seat's own send: no clock of its own, and none for the room", async () => {
+        const s = watched();
+        await store.createSession(s);
+        expect((await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1")).ok).toBe(true);
+        expect(await booksOf(s.id)).toEqual({ room: null, sent: { m_creator: undefined, m_host: undefined }, open: {} });
+      });
+
+      it("keeps a person's reply to the seat in the books, through appendEvent", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const reply = (await store.appendEvent(s.id, replyTo(q.ok ? q.event.cursor : 0)))!;
+        expect(await booksOf(s.id)).toEqual({ room: reply.at, sent: { m_creator: reply.at, m_host: undefined }, open: {} });
+      });
+
+      it("keeps a person's reply to the seat in the books, through appendEventOnce", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const r = await store.appendEventOnce(s.id, replyTo(q.ok ? q.event.cursor : 0), "reply-1");
+        if (r.outcome !== "appended") throw new Error(`expected an append, got ${r.outcome}`);
+        expect(await booksOf(s.id)).toEqual({ room: r.event.at, sent: { m_creator: r.event.at, m_host: undefined }, open: {} });
+      });
+
+      it("leaves the room's last member event with the person when the seat speaks again", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const reply = (await store.appendEvent(s.id, replyTo(q.ok ? q.event.cursor : 0)))!;
+        // The suite's clock is held, so move it: an answer at the reply's own moment could not tell.
+        vi.setSystemTime(reply.at + 60_000);
+        const answer = { ...asks(), payload: { kind: "answer", text: "Nice." }, refId: String(reply.cursor) };
+        expect((await store.appendHostEvent(s.id, answer, 1, Date.now(), "host:reply:2")).ok).toBe(true);
+        expect((await booksOf(s.id)).room).toBe(reply.at);
       });
     });
 
@@ -3303,6 +3686,7 @@ export function describeStoreContract(
         description: null,
         mode: "pair",
         heartbeat_on: null,
+        housekeeping: null,
         roles: { lead: { can: ["send"], description: null, reports: false } },
         default_role: "lead",
         creator_role: "lead",
@@ -3323,6 +3707,18 @@ export function describeStoreContract(
         got.roles.lead.can.push("invite");
         expect((await store.getPreset("u_jesse", "a"))!.roles.lead.can).toEqual(["send"]);
         expect(await store.getPreset("u_jesse", "b")).toBeUndefined();
+      });
+
+      // Housekeeping (#66), integration ruling M1: the block is part of what a preset is, so a
+      // store keeps it whole through get and list, and hands out a copy of it like the roles.
+      it("keeps a preset's housekeeping through get and list, as a copy the caller cannot change in the store", async () => {
+        const block = { quiet_after: "2h", idle_after: "1d" };
+        await store.putPreset("u_jesse", preset("a", { housekeeping: block }), 20);
+        const got = (await store.getPreset("u_jesse", "a"))!;
+        expect(got.housekeeping).toEqual(block);
+        got.housekeeping!.quiet_after = "5m";
+        expect((await store.getPreset("u_jesse", "a"))!.housekeeping).toEqual(block);
+        expect((await store.listPresets("u_jesse")).map((p) => p.housekeeping)).toEqual([block]);
       });
 
       // A saved preset carries the author arm's host block (#188 beneath the designer); a store

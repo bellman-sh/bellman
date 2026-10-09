@@ -112,6 +112,11 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         closedAt: null,
         purgeAt: null,
         blobsSwept: false,
+        // Housekeeping's books (#66), empty at birth: the stores keep them at the write, for a
+        // room whose manifest declared housekeeping.
+        raised: {},
+        openRequests: {},
+        lastMemberEventAt: null,
         members: [creator],
         events: [],
         closed: false,

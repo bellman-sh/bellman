@@ -75,7 +75,7 @@ export interface StoredSession extends Omit<Session, "events"> {
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Ten changes to the stored shape landed after the sessions now in production
+ * Eleven changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -104,6 +104,12 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   manifest that never mentioned housekeeping asks for no finding, so the default
  *   invents nothing. Left alone it reads as `undefined`, which `=== null` misses,
  *   and the rules would go on to read thresholds off nothing.
+ * - **raised, openRequests and lastMemberEventAt** (#66) default to `{}`, `{}` and `null`:
+ *   no finding raised, no waiting request on the books, no member event on the books. The
+ *   books are kept at the write and only for a room that declared housekeeping, and a
+ *   manifest is fixed at creation, so a room written before this never declared it and has
+ *   nothing to lose by the default. A member's `lastSentAt` needs none: absent reads as
+ *   `joinedAt`, which is what housekeeping does with a member who has sent nothing.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
  * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
@@ -122,7 +128,7 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All ten live here, in one gate, rather than in separate functions that could drift.
+ * All eleven live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -152,6 +158,11 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     retainAfterCloseMs: (row as { retainAfterCloseMs?: number | null }).retainAfterCloseMs ?? null,
     purgeAt: row.purgeAt ?? null,
     blobsSwept: row.blobsSwept ?? false,
+    // Required on the type, absent on a row written before #66: the cast says so where `??`
+    // alone would read as redundant.
+    raised: (row as { raised?: Session["raised"] }).raised ?? {},
+    openRequests: (row as { openRequests?: Session["openRequests"] }).openRequests ?? {},
+    lastMemberEventAt: (row as { lastMemberEventAt?: number | null }).lastMemberEventAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

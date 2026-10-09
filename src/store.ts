@@ -257,6 +257,85 @@ export function markRemoved(
   return next;
 }
 
+/** What an append owes housekeeping (#66): the fields of a session `noteAppend` may move. */
+type Books = Pick<Session, "members" | "openRequests" | "lastMemberEventAt">;
+
+/**
+ * The member a departure event is about, or null when the event is not a departure.
+ *
+ * `member_left` is authored by the member who left. `member_evicted` and
+ * `member_timed_out` are authored by "system" and name the member in their payload,
+ * because no member handle authored either (`evictMember` and `announceReclaimed`
+ * write them so). Reading `fromMemberId` alone would close nobody's requests for
+ * exactly the two removals the server makes.
+ */
+function departedMemberId(e: SessionEvent): string | null {
+  if (e.type === "member_left") return e.fromMemberId;
+  if (e.type === "member_evicted" || e.type === "member_timed_out") {
+    const id = (e.payload as { member_id?: unknown } | null)?.member_id;
+    return typeof id === "string" ? id : null;
+  }
+  return null;
+}
+
+/**
+ * What an append owes housekeeping (#66): the sender's last send, the room's last member
+ * event, and the set of requests still waiting. The books to write, or the very object it
+ * was handed when there is nothing to write, so a caller tells "no change" by identity.
+ *
+ * **Only a room that declared housekeeping keeps books.** Any other returns at once, and
+ * the Durable Objects store then writes exactly the rows it wrote before this existed.
+ *
+ * **A member's event moves the sender and the room; the server's does not.** A tick, a
+ * proposal, an eviction and a timeout are all authored by "system", and none of them is
+ * anybody's activity. Departures still close the departed member's requests whoever
+ * authored them, which is why that comes first.
+ *
+ * Requests are kept here and not derived from the log, because every read of the log is
+ * bounded and a request older than the bound must not be forgotten. An `action_response`
+ * closes the request whose cursor its `refId` names, and `bellman_send` has already
+ * checked that it names a real one. The closing on a departure keeps the record small;
+ * it is not what stops a departed member's request being named, which the rule that
+ * reads the record decides for itself.
+ *
+ * Pure, and applied INSIDE both stores at the write, so the two cannot disagree about
+ * what "open" means. Unlike `creditReport` and `markRemoved` it is not asked for by an
+ * `AppendExtras` flag: the departures that close a request are written by paths no caller
+ * flags (`removeMember`, `announceReclaimed`), and a flag every caller had to remember is
+ * how the books would go stale. Here beside them for their reason otherwise: housekeeping.ts
+ * imports this module, as heartbeat.ts does, so the other direction would be a cycle.
+ *
+ * NOT applied to a replay. The books went in with the first append, and applying the
+ * original event again would put a request back after its answer.
+ */
+export function noteAppend(s: Books & Pick<Session, "manifest">, e: SessionEvent): Books {
+  if (s.manifest.housekeeping === null) return s;
+
+  let openRequests = s.openRequests;
+  const gone = departedMemberId(e);
+  if (gone !== null && Object.values(openRequests).some((r) => r.fromMemberId === gone)) {
+    openRequests = Object.fromEntries(Object.entries(openRequests).filter(([, r]) => r.fromMemberId !== gone));
+  }
+
+  if (e.fromMemberId === "system") {
+    return openRequests === s.openRequests
+      ? s
+      : { members: s.members, openRequests, lastMemberEventAt: s.lastMemberEventAt };
+  }
+
+  if (e.type === "action_request") {
+    openRequests = { ...openRequests, [String(e.cursor)]: { at: e.at, fromMemberId: e.fromMemberId } };
+  } else if (e.type === "action_response" && e.refId !== null && Object.hasOwn(openRequests, e.refId)) {
+    const { [e.refId]: _answered, ...rest } = openRequests;
+    openRequests = rest;
+  }
+  return {
+    members: s.members.map((m) => (m.memberId === e.fromMemberId ? { ...m, lastSentAt: e.at } : m)),
+    openRequests,
+    lastMemberEventAt: e.at,
+  };
+}
+
 /**
  * The roster a thaw writes back: every seat the room asks is credited with a
  * report at `now`.
@@ -475,6 +554,12 @@ export type EventWrite =
  * the verb and validated the payload to get there — so saying so costs it a flag
  * and leaves the store a log that does not interpret what it logs. An eviction is
  * the same: `evictMember` is the one writing the `member_evicted` event.
+ *
+ * One exception, and it is not a flag: housekeeping's books (#66). `noteAppend` reads
+ * an event's type and sender, because the departures that close a member's requests
+ * are written by paths no caller flags (`removeMember`, `announceReclaimed`), and a
+ * flag every caller had to remember is how the books would go stale. Both stores
+ * apply it at the write, for a room that declared housekeeping.
  *
  * It is not an optimisation. The stamp and the event have to commit together or
  * a due tick can read one without the other, and the cut and its event have to
@@ -1332,7 +1417,10 @@ export class MemoryStore implements BellmanStore {
       if (req.cut) {
         s.members = markRemoved(s.members, memberId, departure.cursor, req.now) ?? s.members;
       } else {
-        m.leftAt = req.now;
+        // The roster as it stands now, and not `m`: the departure just written may have
+        // replaced the roster's member objects (housekeeping's books stamp the leaver's
+        // last send), and a `leftAt` set on `m` would land on a member nobody holds.
+        s.members = s.members.map((mm) => (mm.memberId === memberId ? { ...mm, leftAt: req.now } : mm));
       }
     }
     if (retiring) {
@@ -1675,6 +1763,12 @@ export class MemoryStore implements BellmanStore {
       ...detach(e), cursor: s.events.length + 1, at: Date.now(),
     };
     s.events.push(event);
+    // Housekeeping's books (#66), in the same synchronous stretch as the push so the event
+    // and what it owes land together. Here, where every event joins a room's log, because
+    // a departure is written by `removeMember` and not by a send. The roster is replaced,
+    // not edited, so a caller holding a member object across this call holds a stale one.
+    const books = noteAppend(s, event);
+    if (books !== s) Object.assign(s, books);
     this.wake(s);
     return event;
   }

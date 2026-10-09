@@ -948,6 +948,139 @@ describe("SessionDO.appendEventOnce", () => {
 });
 
 /**
+ * Housekeeping's books (#66), inside the real SessionDO. The contract suite proves they are
+ * THERE afterwards, which a put of their own satisfies just as well. Whether they commit with
+ * the event, and whether a room that never asked pays for them, are this object's own, and
+ * only a count of put calls tells them apart.
+ */
+describe("SessionDO keeps housekeeping's books", () => {
+  const HK = { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null };
+  const peers = [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })];
+  /** A room that declared housekeeping, and one that did not: the same room in every other way. */
+  const kept = () => currentRow({ manifest: roomManifest({ housekeeping: HK }), members: peers });
+  const plain = () => currentRow({ members: peers });
+
+  const said = (over: Record<string, unknown> = {}) => ({
+    type: "message" as const, fromMemberId: "m_creator", fromUserId: "u_jesse",
+    fromLabel: "jesse", payload: { text: "hi" }, refId: null, ...over,
+  });
+  const tick = () => said({ type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman" });
+  const asked = (over: Record<string, unknown> = {}) => said({ type: "action_request", payload: { ask: "deploy" }, ...over });
+  const leave = (id: string) => ({
+    now: 9_000_000, frozen: "allow" as const, cut: false,
+    event: said({ type: "member_left", fromMemberId: id, payload: { label: id } }), audit: [],
+  });
+  type Books = {
+    members: Array<Member & { lastSentAt?: number }>;
+    openRequests: Record<string, { at: number; fromMemberId: string }>;
+    lastMemberEventAt: number | null;
+  };
+  const rowOf = (storage: { snapshot: () => Record<string, unknown> }) => storage.snapshot().session as Books;
+
+  it("writes them in the same put as an unkeyed append's event", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, kept());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const event = (await store.appendEvent(LEGACY_ID, said()))!;
+
+    // The event, the cursor and the session record, in ONE call.
+    expect(legacyStorage.writes - before).toBe(3);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+    const row = rowOf(legacyStorage);
+    expect(row.lastMemberEventAt).toBe(event.at);
+    expect(row.members.find((m) => m.memberId === "m_creator")?.lastSentAt).toBe(event.at);
+  });
+
+  it("writes them in the same put as a keyed append's event and its key", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, kept());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const write = await store.appendEventOnce(LEGACY_ID, said(), "send-0001");
+
+    // The event, the cursor, the key row and the session record.
+    expect(legacyStorage.writes - before).toBe(4);
+    expect(legacyStorage.puts - putsBefore).toBe(1);
+    if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+    expect(rowOf(legacyStorage).lastMemberEventAt).toBe(write.event.at);
+  });
+
+  it("merges them into the session row an extra already writes, not over it", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, kept());
+
+    const request = (await store.appendEvent(LEGACY_ID, asked(), { stampActionRequest: true }))!;
+
+    // One row carries both writes: the extra's stamp and the books. Written as two builders
+    // each returning `session`, the second would silently drop the first's field.
+    const row = rowOf(legacyStorage) as Books & { lastActionRequestAt?: number };
+    expect(row.lastActionRequestAt).toBe(request.at);
+    expect(row.openRequests).toEqual({ [String(request.cursor)]: { at: request.at, fromMemberId: "m_creator" } });
+    expect(row.lastMemberEventAt).toBe(request.at);
+  });
+
+  it("writes nothing extra for a room that declared no housekeeping", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, plain());
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    await store.appendEvent(LEGACY_ID, said());
+    await store.appendEvent(LEGACY_ID, asked());
+
+    // The event and the cursor, twice: no session record, so the row it always wrote.
+    expect(legacyStorage.writes - before).toBe(4);
+    expect(legacyStorage.puts - putsBefore).toBe(2);
+  });
+
+  it("writes no session record for an event the server wrote, in a room that declared it", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, kept());
+
+    const before = legacyStorage.writes;
+    await store.appendEvent(LEGACY_ID, tick());
+
+    expect(legacyStorage.writes - before).toBe(2);
+    expect(rowOf(legacyStorage).lastMemberEventAt).toBeNull();
+  });
+
+  it("writes nothing for a replay, whose books went in with the first append", async () => {
+    const { store, legacyStorage } = await worldOn(storeDo, kept());
+    await store.appendEventOnce(LEGACY_ID, said(), "send-0001");
+
+    const before = legacyStorage.writes;
+    const putsBefore = legacyStorage.puts;
+    const again = await store.appendEventOnce(LEGACY_ID, said(), "send-0001");
+
+    expect(again.outcome).toBe("replayed");
+    expect(legacyStorage.puts - putsBefore).toBe(0);
+    expect(legacyStorage.writes - before).toBe(0);
+  });
+
+  // `removeMember` writes its events in a put of its own and never calls `#writeEvent`, so a
+  // books step placed only there would keep nothing for a departure.
+  it("keeps them for a removal too, in the put the removal already makes", async () => {
+    const hk = await worldOn(storeDo, kept());
+    const request = (await hk.store.appendEvent(LEGACY_ID, asked({ fromMemberId: "m_peer", fromUserId: "u_peer" })))!;
+    const hkBefore = { puts: hk.legacyStorage.puts, writes: hk.legacyStorage.writes };
+    await hk.store.removeMember(LEGACY_ID, "m_peer", leave("m_peer"));
+    const hkDelta = { puts: hk.legacyStorage.puts - hkBefore.puts, writes: hk.legacyStorage.writes - hkBefore.writes };
+
+    const none = await worldOn(storeDo, plain());
+    await none.store.appendEvent(LEGACY_ID, asked({ fromMemberId: "m_peer", fromUserId: "u_peer" }));
+    const noneBefore = { puts: none.legacyStorage.puts, writes: none.legacyStorage.writes };
+    await none.store.removeMember(LEGACY_ID, "m_peer", leave("m_peer"));
+    const noneDelta = { puts: none.legacyStorage.puts - noneBefore.puts, writes: none.legacyStorage.writes - noneBefore.writes };
+
+    // The books cost the removal nothing: same calls, same keys.
+    expect(hkDelta).toEqual(noneDelta);
+    const row = rowOf(hk.legacyStorage);
+    expect(row.openRequests, `the leaver's request ${request.cursor} closed`).toEqual({});
+    expect(row.members.find((m) => m.memberId === "m_peer")).toMatchObject({ leftAt: 9_000_000 });
+    expect(row.lastMemberEventAt).toBeGreaterThanOrEqual(request.at);
+    expect(rowOf(none.legacyStorage).lastMemberEventAt ?? null).toBeNull();
+  });
+});
+
+/**
  * What a session read COSTS, inside the real SessionDO. The contract suite
  * proves what getSession returns; it cannot see how many storage operations the
  * read made, and the count is this object's own.

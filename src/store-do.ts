@@ -12,7 +12,7 @@ import type {
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
-  isAbandoned, isActiveMember, isRemovedMember, markRemoved, seatVictims, stampSeen,
+  isAbandoned, isActiveMember, isRemovedMember, markRemoved, noteAppend, seatVictims, stampSeen,
 } from "./store.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
@@ -443,18 +443,28 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * read and this write are one unit. `deletes` are the rows a removal owes, and
    * they commit with the event for the same reason the puts do.
    *
+   * Housekeeping's books (#66) ride in the same put. `s` is the session the caller read
+   * in this transaction, so the books cost no second read, and the base they merge into
+   * is the `session` the caller is already putting when it puts one: a stamp, a cut or a
+   * tick's clock, which a books row built from `s` alone would overwrite. Nothing is added
+   * to the put when the room keeps no books, or the event moves none.
+   *
    * `#private`, because it writes the event and any extra rows its caller supplies, and a
    * Durable Object answers RPC for every method on its class: TypeScript's `private` is
    * erased at compile time.
    */
   async #writeEvent(
     txn: DurableObjectTransaction,
+    s: StoredSession,
     e: SessionEvent,
     extra: Record<string, unknown> = {},
     deletes: readonly string[] = [],
   ): Promise<void> {
+    const base = (extra.session as StoredSession | undefined) ?? s;
+    const books = noteAppend(base, e);
+    const rows = books === base ? extra : { ...extra, session: { ...base, ...books } };
     await txn.put<unknown>({
-      [eventKey(e.cursor)]: e, cursor: e.cursor, ...extra,
+      [eventKey(e.cursor)]: e, cursor: e.cursor, ...rows,
     });
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
@@ -1223,8 +1233,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
       const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
 
+      // Housekeeping's books (#66), for each event this removal wrote. These events go in
+      // the put below and not through `#writeEvent`, so its step does not cover them, and a
+      // departure is the very event that closes the leaver's requests. Applied over the
+      // roster built above, so the stamp is laid on the leave and the cut and never over them.
+      const kept = written.reduce<StoredSession>(
+        (draft, e) => ({ ...draft, ...noteAppend(draft, e) }),
+        { ...s, members, joinCodes },
+      );
       await txn.put<unknown>({
-        session: { ...s, members, joinCodes },
+        session: kept,
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
         // The cursor row ends at the LAST event written, or the next append takes
         // that event's cursor and overwrites it (#120).
@@ -1475,7 +1493,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const owed = await extraRows(txn, s, next, extras);
-      await this.#writeEvent(txn, next, owed.puts, owed.deletes);
+      await this.#writeEvent(txn, s, next, owed.puts, owed.deletes);
       return next;
     });
     if (event) this.#wake(event);
@@ -1551,7 +1569,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
       const owed = await extraRows(txn, s, event, extras);
-      await this.#writeEvent(txn, event, { [storageKey]: stored, ...owed.puts }, owed.deletes);
+      await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts }, owed.deletes);
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -2007,7 +2025,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         refId: null,
         at: now,
       };
-      await this.#writeEvent(txn, expired, {
+      await this.#writeEvent(txn, s, expired, {
         session: { ...s, closed: true, closedAt: s.closedAt ?? now, joinCodes: {} }, ...rows,
       });
       return expired;
@@ -2092,7 +2110,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // The event, its cursor and the advanced clock in one put. Committed
       // separately, an interruption between them leaves a tick stored with the
       // clock unmoved, and the next firing writes the same tick again.
-      await this.#writeEvent(txn, tick, { session: { ...s, lastTickAt: now } });
+      await this.#writeEvent(txn, s, tick, { session: { ...s, lastTickAt: now } });
       return tick;
     });
     if (event) this.#wake(event);

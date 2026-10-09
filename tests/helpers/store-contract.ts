@@ -1898,6 +1898,233 @@ export function describeStoreContract(
     });
 
     /**
+     * What housekeeping reads (#66): each member's last send, the room's last member
+     * event, and the requests still waiting. Kept at the write, in the event's own
+     * transaction, so that no scan of the log has to find them later.
+     *
+     * Applied wherever an event joins the log, and only for a room whose manifest
+     * declared housekeeping: a room that did not writes the rows it always did. Like
+     * the report stamp above, these cases pin what a caller can see, which is what has
+     * to be identical across implementations. The single put is pinned where the fake
+     * storage can count puts (tests/store-do-wiring.test.ts).
+     */
+    describe("housekeeping's books (#66)", () => {
+      const HK = {
+        quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null,
+      };
+      /** A creator and one peer, in a room that declared housekeeping: the only kind that keeps books. */
+      const kept = (over: Partial<Session> = {}) =>
+        session({
+          manifest: roomManifest({ housekeeping: HK }),
+          members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          ...over,
+        });
+      const sent = (type: EventBody["type"], by: string, over: Partial<EventBody> = {}): EventBody => ({
+        type, fromMemberId: by, fromUserId: by === "m_creator" ? "u_jesse" : "u_peer", fromLabel: by,
+        payload: {}, refId: null, ...over,
+      });
+      const asked = (by = "m_creator") => sent("action_request", by, { payload: { ask: "deploy" } });
+      const answered = (cursor: number | string, by = "m_peer") =>
+        sent("action_response", by, { refId: String(cursor), payload: { approved: true } });
+      /** A tick as the room writes it: no member handle, so nothing a member did. */
+      const tick = () => sent("heartbeat", "system", { fromUserId: "system", fromLabel: "bellman" });
+      /** The two departures the server authors itself, with the member they are about in the payload. */
+      const evicted = (id: string) =>
+        sent("member_evicted", "system", { fromUserId: "u_jesse", fromLabel: "jesse", payload: { member_id: id } });
+      const timedOut = (id: string) =>
+        sent("member_timed_out", "system", { fromUserId: "u_peer", fromLabel: "peer", payload: { member_id: id } });
+
+      const books = async (id: string) => {
+        const row = (await store.getSession(id))!;
+        return {
+          lastSent: Object.fromEntries(row.members.map((m) => [m.memberId, m.lastSentAt])),
+          openRequests: row.openRequests,
+          lastMemberEventAt: row.lastMemberEventAt,
+        };
+      };
+      const leaving = (id: string, over: Partial<RemovalRequest> = {}): RemovalRequest => ({
+        now: 9_000_000, frozen: "allow", cut: false, event: sent("member_left", id, { payload: { label: id } }),
+        audit: [], ...over,
+      });
+
+      it("stamps the sender and the room at a member event's own time", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const event = (await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } })))!;
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: event.at, m_peer: undefined },
+          openRequests: {},
+          lastMemberEventAt: event.at,
+        });
+      });
+
+      it("keeps the books on the first append of a key, as on a plain append", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const write = await store.appendEventOnce(s.id, sent("message", "m_peer", { payload: { text: "hi" } }), "k-1");
+        if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: undefined, m_peer: write.event.at },
+          openRequests: {},
+          lastMemberEventAt: write.event.at,
+        });
+      });
+
+      it("moves nothing for an event the server wrote", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        await store.appendEvent(s.id, tick());
+
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+        });
+      });
+
+      it("opens a request at its cursor, and closes it on the response that names it", async () => {
+        const s = kept();
+        await store.createSession(s);
+
+        const request = (await store.appendEvent(s.id, asked()))!;
+        const open = { [String(request.cursor)]: { at: request.at, fromMemberId: "m_creator" } };
+        expect((await books(s.id)).openRequests).toEqual(open);
+
+        // A response that names no request closes nothing.
+        await store.appendEvent(s.id, answered(request.cursor + 50));
+        expect((await books(s.id)).openRequests).toEqual(open);
+
+        await store.appendEvent(s.id, answered(request.cursor));
+        expect((await books(s.id)).openRequests).toEqual({});
+      });
+
+      // Review Focus 5. The record holds the request, so no read of the log, bounded or
+      // not, has to find it: a thousand events later it is still waiting.
+      it("holds a request through more later events than any bounded read of the log would reach", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const request = (await store.appendEvent(s.id, asked()))!;
+
+        for (let i = 0; i < 1_100; i++) {
+          await store.appendEvent(s.id, sent("message", "m_peer", { payload: { text: `m${i}` } }));
+        }
+
+        expect((await books(s.id)).openRequests)
+          .toEqual({ [String(request.cursor)]: { at: request.at, fromMemberId: "m_creator" } });
+      });
+
+      // A replay is a retry of an append that already landed. Re-applying it would put a
+      // request back after its answer, and move the last send back behind a later one.
+      it("does not apply the books a second time on a replayed key", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const first = await store.appendEventOnce(s.id, asked(), "k-ask");
+        if (first.outcome !== "appended") throw new Error(`send said ${first.outcome}`);
+        vi.advanceTimersByTime(5_000);
+        const response = (await store.appendEvent(s.id, answered(first.event.cursor)))!;
+        expect(response.at, "the response is later, or this case proves nothing").toBeGreaterThan(first.event.at);
+
+        const retry = await store.appendEventOnce(s.id, asked(), "k-ask");
+
+        expect(retry.outcome).toBe("replayed");
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: first.event.at, m_peer: response.at },
+          openRequests: {},
+          lastMemberEventAt: response.at,
+        });
+      });
+
+      describe("closing the requests of a member who is gone", () => {
+        /** The peer asked, and so did the creator: only the leaver's request may close. */
+        const bothAsked = async () => {
+          const s = kept();
+          await store.createSession(s);
+          const theirs = (await store.appendEvent(s.id, asked("m_peer")))!;
+          const mine = (await store.appendEvent(s.id, asked("m_creator")))!;
+          return { s, theirs, mine };
+        };
+        const mineOnly = (mine: { cursor: number; at: number }) =>
+          ({ [String(mine.cursor)]: { at: mine.at, fromMemberId: "m_creator" } });
+
+        it("on a leave, which the leaver authors, and still records the leave", async () => {
+          const { s, mine } = await bothAsked();
+
+          const outcome = await store.removeMember(s.id, "m_peer", leaving("m_peer"));
+
+          expect(outcome.removed).toBe(true);
+          const row = (await store.getSession(s.id))!;
+          // The books replace the roster's member objects, and the leave must land on the
+          // roster that is stored, not on one the append just replaced.
+          expect(row.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          const departure = (await store.eventsAfter(s.id, 0)).at(-1)!;
+          expect(row.lastMemberEventAt, "a member's own leaving is that member's last act").toBe(departure.at);
+        });
+
+        it("on an eviction, which the server authors and names the member in its payload", async () => {
+          const { s, mine } = await bothAsked();
+          const before = (await books(s.id)).lastMemberEventAt;
+
+          const outcome = await store.removeMember(s.id, "m_peer", {
+            ...leaving("m_peer"), frozen: "refuse", cut: true, byUserId: "u_jesse", event: evicted("m_peer"),
+          });
+
+          expect(outcome.removed).toBe(true);
+          const row = (await store.getSession(s.id))!;
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          expect(row.members.find((m) => m.memberId === "m_peer")!.removedAtCursor).toBeDefined();
+          expect(row.lastMemberEventAt, "an eviction is the server's word, not a member's").toBe(before);
+        });
+
+        it("on a timeout, which the server authors and names the member in its payload", async () => {
+          const { s, mine } = await bothAsked();
+          const before = (await books(s.id)).lastMemberEventAt;
+
+          await store.appendEvent(s.id, timedOut("m_peer"));
+
+          const row = (await store.getSession(s.id))!;
+          expect(row.openRequests).toEqual(mineOnly(mine));
+          expect(row.lastMemberEventAt).toBe(before);
+        });
+      });
+
+      describe("in a room that declared no housekeeping", () => {
+        it("keeps no books on a send, a request or a response", async () => {
+          const s = session({
+            members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          });
+          await store.createSession(s);
+
+          await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } }));
+          const request = (await store.appendEvent(s.id, asked()))!;
+          await store.appendEvent(s.id, asked("m_peer"));
+          await store.appendEvent(s.id, answered(request.cursor));
+
+          expect(await books(s.id)).toEqual({
+            lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+          });
+        });
+
+        it("keeps none on a removal either, and still records it", async () => {
+          const s = session({
+            members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@elsewhere" })],
+          });
+          await store.createSession(s);
+
+          await store.removeMember(s.id, "m_peer", leaving("m_peer"));
+
+          expect(await books(s.id)).toEqual({
+            lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
+          });
+          expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+        });
+      });
+    });
+
+    /**
      * The working surface's rows (#129). The store writes the row it is handed
      * in the event's own transaction, under the monotonic rule in surface.ts,
      * and never asks what a `surface` event means.

@@ -54,6 +54,13 @@ export const ATTENTION = {
    * is worse than silence. A watcher on a socket or a poll still sees it land.
    */
   surface: "ambient",
+  /**
+   * A proposal interrupts for the tick's reason (#66): a finding nobody reads
+   * produces no action, and naming a quiet member or a request nobody answered is
+   * the whole of what the server contributes. It repeats by time at most, so it
+   * cannot flood a reader.
+   */
+  housekeeping: "interrupt",
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];

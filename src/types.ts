@@ -54,6 +54,14 @@ export interface Member {
    */
   lastReportAt?: number;
   /**
+   * When this member last appended an event (#66), on the server's clock. Housekeeping
+   * names a member quiet from this, so it is a SEND and not a sign of life: a call that
+   * only reads, like a poll, does not move it, and neither does anything the server
+   * wrote about the member. Absent on a member who has sent nothing since joining and on
+   * rows stored before the field existed; housekeeping reads both as `joinedAt`.
+   */
+  lastSentAt?: number;
+  /**
    * The cursor of the `member_evicted` event that removed this member, if a
    * creator removed them.
    *
@@ -85,7 +93,26 @@ export type EventType =
   /** A member's answer to a tick. */
   | "progress"
   /** A write to the room's working surface: an item, or its removal (#129). */
-  | "surface";
+  | "surface"
+  /** A proposal the server raises from the room's own thresholds (#66). Never sent by a member. */
+  | "housekeeping";
+
+/** What a housekeeping proposal is about (#66). */
+export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
+
+/**
+ * The payload of a `housekeeping` event: identifiers and the server's numbers, never prose,
+ * so a proposal carries nothing a reader has to distrust.
+ */
+export interface HousekeepingPayload {
+  finding: HousekeepingFinding;
+  /** Who or what: a member for a quiet one, a request's cursor for an unanswered one, absent for an idle room. */
+  about?: { member_id: string } | { cursor: number };
+  /** When the condition began, ms epoch, the server's clock. */
+  since: number;
+  /** 1 on the first raise of this key, counting up on each repeat. */
+  repeat: number;
+}
 
 export interface SessionEvent {
   cursor: number;
@@ -152,6 +179,27 @@ export interface Session {
    * failed card.
    */
   frozenAt: number | null;
+  /**
+   * The housekeeping findings raised and not yet cleared (#66), by key: when each was last
+   * raised (`at`), how many times (`repeat`), and the `since` of the condition it was raised
+   * for, so a condition that came back is told from one that never left. Written by the
+   * housekeeping firing and nothing else. Empty on rows stored before this.
+   */
+  raised: Record<string, { at: number; repeat: number; since: number }>;
+  /**
+   * The action requests still waiting for an answer (#66), by the request's cursor as a
+   * string, with when it was asked and who asked. Kept at the write by `noteAppend` and not
+   * derived from the log: every read of the log is bounded, and a request older than the
+   * bound must not be forgotten. Kept only for a room that declared housekeeping; `{}`
+   * otherwise, and on rows stored before this.
+   */
+  openRequests: Record<string, { at: number; fromMemberId: string }>;
+  /**
+   * When a member last appended any event (#66), or null before one has. What the server
+   * wrote is not a member event: a tick, a proposal, an eviction and a timeout leave it
+   * alone. Kept like `openRequests`, for a room that declared housekeeping.
+   */
+  lastMemberEventAt: number | null;
 }
 
 export interface PendingConnect {

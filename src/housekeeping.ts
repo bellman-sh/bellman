@@ -71,6 +71,14 @@ interface Anchor {
  * member in it, which is about to close. A member counts while it is in the room and has not
  * been removed from it, and the same question is asked of the sender of a request (the
  * request is named only while someone who could be asked about it is there).
+ *
+ * **A thaw restarts the clocks (R9).** Every base time is floored at `thawedAt`: a member's
+ * last send, a request's `at`, the last member event. While the room was frozen nobody could
+ * send and no request could be answered, so a threshold crossed across the freeze names a
+ * condition the room imposed, and every finding comes back one threshold after the thaw
+ * instead. The book keeps its meaning (`lastSentAt` is still the last send); only the
+ * reading is floored. A raise made before the freeze belongs to a condition whose anchor has
+ * moved, so after the thaw it is a new condition (`continued`) and starts at `repeat: 1`.
  */
 function anchors(s: StoredSession): Anchor[] | null {
   const h = s.manifest.housekeeping;
@@ -78,13 +86,14 @@ function anchors(s: StoredSession): Anchor[] | null {
   const live = s.members.filter((m) => isActiveMember(m) && !isRemovedMember(m));
   if (live.length === 0) return null;
 
+  const from = (base: number): number => Math.max(base, s.thawedAt ?? 0);
   const out: Anchor[] = [];
   if (h.quietAfterMs !== null) {
     const every = h.repeatAfterMs ?? h.quietAfterMs;
     for (const m of live) {
       out.push({
         key: `member_quiet:${m.memberId}`, finding: "member_quiet", about: { member_id: m.memberId },
-        since: lastSent(m) + h.quietAfterMs, every,
+        since: from(lastSent(m)) + h.quietAfterMs, every,
       });
     }
   }
@@ -97,14 +106,14 @@ function anchors(s: StoredSession): Anchor[] | null {
       if (!inRoom.has(r.fromMemberId)) continue;
       out.push({
         key: `request_unanswered:${cursor}`, finding: "request_unanswered", about: { cursor: Number(cursor) },
-        since: r.at + h.answerWithinMs, every,
+        since: from(r.at) + h.answerWithinMs, every,
       });
     }
   }
   if (h.idleAfterMs !== null) {
     const last = s.lastMemberEventAt ?? Math.max(...live.map((m) => m.joinedAt));
     out.push({
-      key: "room_idle", finding: "room_idle", since: last + h.idleAfterMs, every: h.repeatAfterMs ?? h.idleAfterMs,
+      key: "room_idle", finding: "room_idle", since: from(last) + h.idleAfterMs, every: h.repeatAfterMs ?? h.idleAfterMs,
     });
   }
   return out;

@@ -104,12 +104,13 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   manifest that never mentioned housekeeping asks for no finding, so the default
  *   invents nothing. Left alone it reads as `undefined`, which `=== null` misses,
  *   and the rules would go on to read thresholds off nothing.
- * - **raised, openRequests and lastMemberEventAt** (#66) default to `{}`, `{}` and `null`:
- *   no finding raised, no waiting request on the books, no member event on the books. The
- *   books are kept at the write and only for a room that declared housekeeping, and a
- *   manifest is fixed at creation, so a room written before this never declared it and has
- *   nothing to lose by the default. A member's `lastSentAt` needs none: absent reads as
- *   `joinedAt`, which is what housekeeping does with a member who has sent nothing.
+ * - **raised, openRequests, lastMemberEventAt and thawedAt** (#66) default to `{}`, `{}`,
+ *   `null` and `null`: no finding raised, no waiting request on the books, no member event
+ *   on the books, no thaw to floor a clock at. The books are kept at the write and only for
+ *   a room that declared housekeeping, and a manifest is fixed at creation, so a room
+ *   written before this never declared it and has nothing to lose by the default. A
+ *   member's `lastSentAt` needs none: absent reads as `joinedAt`, which is what
+ *   housekeeping does with a member who has sent nothing.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
  * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
@@ -163,6 +164,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     raised: (row as { raised?: Session["raised"] }).raised ?? {},
     openRequests: (row as { openRequests?: Session["openRequests"] }).openRequests ?? {},
     lastMemberEventAt: (row as { lastMemberEventAt?: number | null }).lastMemberEventAt ?? null,
+    thawedAt: (row as { thawedAt?: number | null }).thawedAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

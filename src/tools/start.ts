@@ -117,6 +117,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         raised: {},
         openRequests: {},
         lastMemberEventAt: null,
+        thawedAt: null,
         members: [creator],
         events: [],
         closed: false,

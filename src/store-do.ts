@@ -1436,6 +1436,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * nothing in the log to say why. So the credit is paid only when the record as
    * read was frozen, which pays a freeze-then-thaw once however many thaws follow.
    *
+   * The thaw also records the moment, `thawedAt` (#66, R9), which housekeeping floors
+   * its clocks at: a finding computed across the freeze would name a condition the room
+   * imposed. It rides the same put and needs the same transition, and the `reArm()`
+   * below is what arms housekeeping's time for a room that has just come back.
+   *
    * The reArm() stays unconditional, and the two are not the same question. It
    * costs one derived read and points the alarm where it already was, and it has to
    * run on the thaw that matters; the credit writes member state, so it needs the
@@ -1447,7 +1452,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const thawing = frozenAt === null && s.frozenAt !== null;
     const now = Date.now();
     const members = thawing ? stampSeen(clearSilence(s, now), now) : s.members;
-    await this.ctx.storage.put("session", { ...s, frozenAt, members });
+    await this.ctx.storage.put("session", { ...s, frozenAt, members, thawedAt: thawing ? now : s.thawedAt });
     await this.driver.reArm();
   }
 

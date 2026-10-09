@@ -76,6 +76,7 @@ export function session(over: Partial<Session> = {}): Session {
     raised: {},
     openRequests: {},
     lastMemberEventAt: null,
+    thawedAt: null,
     members: [member()],
     events: [],
     closed: false,

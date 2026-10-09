@@ -483,6 +483,86 @@ describe("nextHousekeepAt", () => {
   });
 });
 
+// R9. While a room is frozen nobody can send and no request can be answered, so a finding
+// computed across the freeze names a condition the room imposed. Heartbeat refuses the same for
+// the tick (`clearSilence` at the thaw, D10); here the thaw is a floor under every base time.
+describe("a thaw restarts the clocks", () => {
+  // Frozen for ten days: every threshold the room declares has long passed by the thaw.
+  const THAW = T0 + 10 * D1;
+
+  it("floors a member's quiet clock at the thaw", () => {
+    const s = stored({ members: [who("m_a", { lastSentAt: T0 })], thawedAt: THAW }, quietOnly());
+    expect(dueFindings(s, THAW)).toEqual([]);
+    expect(dueFindings(s, THAW + H2 - 1)).toEqual([]);
+    expect(dueFindings(s, THAW + H2)).toEqual([{
+      key: "member_quiet:m_a",
+      payload: { finding: "member_quiet", about: { member_id: "m_a" }, since: THAW + H2, repeat: 1 },
+    }]);
+    expect(nextHousekeepAt(s, THAW)).toBe(THAW + H2);
+  });
+
+  it("floors a request at the thaw", () => {
+    const s = stored({
+      members: [who("m_a")], openRequests: { "7": { at: T0, fromMemberId: "m_a" } }, thawedAt: THAW,
+    }, requestsOnly());
+    expect(dueFindings(s, THAW + M30 - 1)).toEqual([]);
+    expect(dueFindings(s, THAW + M30)).toEqual([{
+      key: "request_unanswered:7",
+      payload: { finding: "request_unanswered", about: { cursor: 7 }, since: THAW + M30, repeat: 1 },
+    }]);
+    expect(nextHousekeepAt(s, THAW)).toBe(THAW + M30);
+  });
+
+  it("floors the last member event at the thaw, and a room with none from its latest join", () => {
+    const members = [who("m_a")];
+    const withEvent = stored({ members, lastMemberEventAt: T0, thawedAt: THAW }, idleOnly());
+    expect(dueFindings(withEvent, THAW + D1 - 1)).toEqual([]);
+    expect(dueFindings(withEvent, THAW + D1)[0].payload.since).toBe(THAW + D1);
+
+    const noEvent = stored({ members, lastMemberEventAt: null, thawedAt: THAW }, idleOnly());
+    expect(nextHousekeepAt(noEvent, THAW)).toBe(THAW + D1);
+  });
+
+  it("leaves a time after the thaw where it was", () => {
+    const sentAfter = stored({ members: [who("m_a", { lastSentAt: THAW + 5 })], thawedAt: THAW }, quietOnly());
+    expect(nextHousekeepAt(sentAfter, THAW)).toBe(THAW + 5 + H2);
+
+    // And a thaw older than the base time floors nothing: the room was thawed long before.
+    const thawedBefore = stored({ members: [who("m_a", { lastSentAt: T0 + D1 })], thawedAt: T0 }, quietOnly());
+    expect(nextHousekeepAt(thawedBefore, T0)).toBe(T0 + D1 + H2);
+  });
+
+  it("brings each finding back one threshold after the thaw, and none before", () => {
+    const s = stored({
+      members: [who("m_a", { lastSentAt: T0 })],
+      openRequests: { "7": { at: T0, fromMemberId: "m_a" } },
+      lastMemberEventAt: T0,
+      thawedAt: THAW,
+    });
+    expect(dueFindings(s, THAW + M30 - 1)).toEqual([]);
+    expect(keysOf(dueFindings(s, THAW + M30))).toEqual(["request_unanswered:7"]);
+    expect(keysOf(dueFindings(s, THAW + H2))).toEqual(["member_quiet:m_a", "request_unanswered:7"]);
+    expect(keysOf(dueFindings(s, THAW + D1))).toEqual(["member_quiet:m_a", "request_unanswered:7", "room_idle"]);
+    expect(nextHousekeepAt(s, THAW)).toBe(THAW + M30);
+  });
+
+  // With R8: the raise was made for the condition as it stood before the freeze, and the floor
+  // moves its anchor, so what comes due after the thaw is a new condition at repeat 1.
+  it("treats a key raised before the freeze as a condition that came back", () => {
+    const key = "member_quiet:m_a";
+    const s = stored({
+      members: [who("m_a", { lastSentAt: T0 })],
+      raised: { [key]: { at: T0 + H2, repeat: 3, since: T0 + H2 } },
+      thawedAt: THAW,
+    }, quietOnly());
+
+    expect(clearedKeys(s, THAW + 1)).toEqual([key]);
+    expect(dueFindings(s, THAW + H2)).toEqual([{
+      key, payload: { finding: "member_quiet", about: { member_id: "m_a" }, since: THAW + H2, repeat: 1 },
+    }]);
+  });
+});
+
 describe("the rules", () => {
   it("do not write into the session they read", () => {
     const s = stored({

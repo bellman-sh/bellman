@@ -1574,6 +1574,10 @@ export class MemoryStore implements BellmanStore {
    * refuses a frozen room, so the window was not moving while it was frozen;
    * without this stamp a room thawed after 90 days frozen would be swept on the
    * next read.
+   *
+   * And it records the moment, `thawedAt` (#66, R9), which housekeeping floors its
+   * clocks at: a finding computed across the freeze would name a condition the room
+   * imposed. Paid on the same transition, for the same reason.
    */
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     const s = this.sessions.get(sessionId);
@@ -1586,6 +1590,7 @@ export class MemoryStore implements BellmanStore {
       // transition: a room coming back from a freeze gets a full window, not the
       // one the freeze spent.
       s.members = stampSeen(clearSilence(s, now), now);
+      s.thawedAt = now;
     }
   }
 

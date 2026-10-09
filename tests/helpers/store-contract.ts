@@ -1160,6 +1160,74 @@ export function describeStoreContract(
     });
 
     /**
+     * **A thaw restarts housekeeping's clocks (#66, R9).** While a room is frozen nobody can
+     * send and no request can be answered, so a finding computed across the freeze would name
+     * a condition the room imposed. Heartbeat refuses the same for the tick, and pays the
+     * credit at the thaw; housekeeping records the moment instead, `thawedAt`, and the rules
+     * floor every base time at it. The member's last send stays the member's last send.
+     *
+     * Interface behaviour and not the alarm's, for `clearSilence`'s reason: the field is read
+     * back through `getSession`, so a store that left it alone would name a room's members
+     * quiet for the length of the outage.
+     */
+    describe("thawedAt, the moment housekeeping's clocks restart", () => {
+      it("is null for a room that was never frozen", async () => {
+        const s = session();
+        await store.createSession(s);
+        expect((await store.getSession(s.id))!.thawedAt).toBeNull();
+      });
+
+      it("is the moment of the thaw, and the freeze does not move it", async () => {
+        const s = session();
+        await store.createSession(s);
+
+        await store.freezeSession(s.id, Date.now());
+        expect((await store.getSession(s.id))!.thawedAt, "a freeze is not a thaw").toBeNull();
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, null);
+
+        expect((await store.getSession(s.id))!.thawedAt).toBe(Date.now());
+      });
+
+      // The transition and not the argument, as the report credit is: `freezeSession(null)` is
+      // idempotent and the obvious thing to retry, and a retry that moved the floor forward
+      // would keep every clock restarting for good.
+      it("is set by a real thaw only, so a retried thaw leaves it where it was", async () => {
+        const s = session();
+        await store.createSession(s);
+
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt, "nothing was frozen").toBeNull();
+
+        await store.freezeSession(s.id, Date.now());
+        await store.freezeSession(s.id, null);
+        const thawed = Date.now();
+        expect((await store.getSession(s.id))!.thawedAt).toBe(thawed);
+
+        vi.advanceTimersByTime(60_000);
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt, "nothing was frozen the second time").toBe(thawed);
+      });
+
+      it("moves forward to the latest thaw, and a freeze in between leaves it", async () => {
+        const s = session();
+        await store.createSession(s);
+        await store.freezeSession(s.id, Date.now());
+        await store.freezeSession(s.id, null);
+        const first = Date.now();
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, Date.now());
+        expect((await store.getSession(s.id))!.thawedAt, "frozen again, the last thaw stands").toBe(first);
+
+        vi.advanceTimersByTime(3_600_000);
+        await store.freezeSession(s.id, null);
+        expect((await store.getSession(s.id))!.thawedAt).toBe(Date.now());
+      });
+    });
+
+    /**
      * The tool reads the session, then writes. A freeze landing in that gap
      * would let a frozen room grow, which is the one thing freezing is for —
      * so the refusal has to come from the write, not only from the read.

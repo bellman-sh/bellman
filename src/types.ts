@@ -200,6 +200,18 @@ export interface Session {
    * alone. Kept like `openRequests`, for a room that declared housekeeping.
    */
   lastMemberEventAt: number | null;
+  /**
+   * When the room was last thawed (#66, R9), or null if it never was. Set by the thaw, in the
+   * transition from frozen to not and only there, so a retried thaw leaves it where it was.
+   *
+   * While a room is frozen nobody can send and no request can be answered, so a finding
+   * computed across the freeze would name a condition the room imposed. Heartbeat refuses the
+   * same for the tick by crediting every seat at the thaw (`clearSilence`); housekeeping
+   * records the moment and the rules floor every base time at it: a member's last send, a
+   * request's `at`, the last member event. `Member.lastSentAt` keeps meaning the last send.
+   * Null on rows stored before this.
+   */
+  thawedAt: number | null;
 }
 
 export interface PendingConnect {

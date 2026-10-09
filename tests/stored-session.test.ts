@@ -154,18 +154,21 @@ describe("hydrateStoredSession — a manifest stored before housekeeping", () =>
 });
 
 /**
- * A record written before housekeeping's books (#66): it has no `raised`, `openRequests` or
- * `lastMemberEventAt`. The keys are ABSENT, not undefined, which is what storage hands back.
+ * A record written before housekeeping's books (#66): it has no `raised`, `openRequests`,
+ * `lastMemberEventAt` or `thawedAt` (R9). The keys are ABSENT, not undefined, which is what
+ * storage hands back.
  */
 describe("hydrateStoredSession — a record stored before housekeeping's books", () => {
-  const BOOKS = ["raised", "openRequests", "lastMemberEventAt"];
+  const BOOKS = ["raised", "openRequests", "lastMemberEventAt", "thawedAt"];
   const bare = () => {
-    const { events: _events, raised: _r, openRequests: _o, lastMemberEventAt: _l, ...raw } = session();
+    const {
+      events: _events, raised: _r, openRequests: _o, lastMemberEventAt: _l, thawedAt: _t, ...raw
+    } = session();
     return raw;
   };
 
   /** `=== null` and `Object.keys` are how the rules read them, and undefined fails both. */
-  it("reads no finding raised, no request waiting and no member event", () => {
+  it("reads no finding raised, no request waiting, no member event and no thaw", () => {
     const raw = bare();
     // Without this, a fixture that stopped carrying the keys would pass for the wrong reason.
     for (const key of BOOKS) expect(key in raw, key).toBe(false);
@@ -173,6 +176,7 @@ describe("hydrateStoredSession — a record stored before housekeeping's books",
     expect(row.raised).toEqual({});
     expect(row.openRequests).toEqual({});
     expect(row.lastMemberEventAt).toBeNull();
+    expect(row.thawedAt).toBeNull();
   });
 
   /** A default that clobbered would forget every request a housekeeping room is waiting on. */
@@ -181,6 +185,7 @@ describe("hydrateStoredSession — a record stored before housekeeping's books",
       raised: { room_idle: { at: 5, repeat: 2, since: 3 } },
       openRequests: { "7": { at: 4, fromMemberId: "m_creator" } },
       lastMemberEventAt: 9,
+      thawedAt: 11,
     };
     const { events: _events, ...raw } = session(kept);
     expect(hydrateStoredSession(raw)).toMatchObject(kept);

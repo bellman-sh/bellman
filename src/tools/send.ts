@@ -241,10 +241,11 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
        * an idempotent retry skipped it outright: a stamp the first attempt never
        * landed was lost for good rather than merely late.
        *
-       * A flag rather than the store reading `draft.type`: nothing in either
-       * store branches on an event's kind, and this is the one write that would
-       * have made it. The decision stays here, beside the verb check and the
-       * payload validation that already established what this send is.
+       * A flag rather than the store reading `draft.type`: apart from housekeeping's
+       * books (#66, `noteAppend`), nothing in either store branches on an event's
+       * kind, and this is the one write that would have made it. The decision stays
+       * here, beside the verb check and the payload validation that already
+       * established what this send is.
        */
       // `stampActionRequest` rides the append for `creditReport`'s reason: it is
       // a write on the session record that has to land with the event or not at

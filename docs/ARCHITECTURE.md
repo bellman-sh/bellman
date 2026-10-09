@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: 68f3387
+last-verified-against-source: 87ad161
 last-updated: 2026-10-09
 ---
 
@@ -1168,7 +1168,7 @@ flowchart TB
         B0["#129 the working surface — shipped"]
         B1["#18 long-lived rooms"]
         B2["#65 a record that<br/>outlives the session — shipped:<br/>an org admin's read, retention,<br/>delete on demand"]
-        B3["#66 the scribe as actor"]
+        B3["#66 housekeeping: the server<br/>proposes, never acts — shipped"]
     end
     subgraph C["Surfaces beyond /mcp"]
         C1["#49 HTTP API — room routes<br/>(#184) shipped, the rest pending"]
@@ -1204,6 +1204,14 @@ it current. The record that outlives the session (#65) has shipped: a closed
 room is kept for the window its plan promised and then purged, its orphaned
 objects are swept when it closes, an org admin may read it and list the rooms of
 their org, and its creator or such an admin may delete it.
+
+Housekeeping (#66) has shipped as the noticing half of the scribe. The server
+computes three findings from the record (a member gone quiet, an action request
+unanswered, a room idle), proposes each as an event on the room's own alarm, and
+acts on nothing: no nudge is sent, no request answered, no room closed, no
+member removed. A scribe that reads the `plan` and acts, which needs a trust
+model for acting in a room that holds another person's agent, remains the
+follow-on.
 
 Piece 3 of the working surface (#129) is split: the room routes are here (#184);
 the canvas page is in `bellman-sh/dash` (#13), the first screen that renders
@@ -1333,12 +1341,12 @@ loss is findable, and the sweep at close (#65) is what finds it.
 4. **Named alarms.** An object has one alarm, so handlers share it: each has a
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
-   session record, and a stored row wins. `SessionDO` has five handlers,
-   `outbox`, `abandoned`, `heartbeat`, `sweep` and `purge`, and only `outbox`
-   is stored. The abandonment time is derived from the members' `lastSeenAt`
-   (`abandonedAt`, #18), so a room written before named alarms, or before rooms
-   persisted, is still swept; a socket vouching for a member moves it a window
-   ahead instead of closing the room.
+   session record, and a stored row wins. `SessionDO` has six handlers,
+   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep` and `purge`, and
+   only `outbox` is stored. The abandonment time is derived from the members'
+   `lastSeenAt` (`abandonedAt`, #18), so a room written before named alarms, or
+   before rooms persisted, is still swept; a socket vouching for a member moves it
+   a window ahead instead of closing the room.
    The tick (#111) is derived from `nextTickAt`, which asks each member
    at its own `lastReport + cadence` — except one already due at the preceding
    tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
@@ -1348,6 +1356,34 @@ loss is findable, and the sweep at close (#65) is what finds it.
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.
+
+   `housekeep` (#66) appends a server-authored `housekeeping` event when a
+   member has gone quiet, an action request is unanswered or the room is idle
+   past the thresholds its manifest declares, once per window, and forgets a
+   finding when its condition ends. It holds no seat and no verb, is written with
+   `fromMemberId: "system"` through the path that runs the bookkeeping, and
+   acts on nothing. Its time is derived from `nextHousekeepAt`, which reads the
+   same list of conditions `dueFindings` does, so the alarm is armed for a moment
+   something is due and for none before it, and a raise puts that key's next time
+   a window ahead, so a firing cannot find the same thing due again at once. What
+   it reads is kept at every append by both stores (`noteAppend` in `store.ts`):
+   each member's last send, the room's last member event and the requests still
+   waiting, so no scan of the log has to find them. Of one sender's open requests
+   the three oldest are named (`MAX_REQUESTS_PER_SENDER`), so a member cannot fill
+   every window by asking more; the record keeps them all. Every append compares
+   the soonest housekeeping time of the record it wrote with the record it read,
+   inside its transaction, and re-arms after its commit when the first is earlier (a
+   null before counts as later). An `action_request` can bring it forward, by adding
+   an anchor. So can a send or a response that ends a raised finding, because the
+   member's new condition is due at its own anchor and not at the old raise's
+   window, and the anchor is the earlier whenever `repeat_after` is the longer; a
+   member event does the same to a raised `room_idle`. A thaw restarts the clocks
+   (`thawedAt`): nobody can send in a frozen room, so a freeze is never counted as
+   silence. It counts people (`isActivePerson`, hosted seat D5): the hosted seat is never named
+   quiet, what it says moves no clock, a room only it speaks in reads idle, and a
+   proposal never wakes it. `MemoryStore` keeps the same books at every append
+   and raises nothing, because the Node server's tick loop (#188) does not run
+   housekeeping.
 
    `sweep` runs once when a room closes and deletes the objects under its R2
    prefix that no surface item names, crediting the room their bytes (#65, D3).
@@ -1377,9 +1413,12 @@ loss is findable, and the sweep at close (#65) is what finds it.
    entry queued in the storage the last step deletes would go with it. And every
    place a room closes re-arms the alarm, since a close that queues nothing
    would otherwise leave it pointing at an abandonment time months off;
-   `SessionDO.getSession` re-arms it too when it reads a closed room whose sweep
-   or purge is due, for work the runtime gave up on, and leaves the work itself
-   to the alarm. A dropped alarm is recovered by the next read of the room and by
+   `SessionDO.getSession` re-arms it too when the earliest of what the room owes
+   is already past, whichever handler owes it (a closed room's sweep or purge, an
+   open room's tick or housekeeping time), for work the runtime gave up on, and
+   leaves the work itself to the alarm. A derivation or a re-arm that throws there
+   is logged the way `alarm()` logs a handler's, and the read still returns the
+   record. A dropped alarm is recovered by the next read of the room and by
    nothing else: a room nobody reads again keeps what it owes until someone does.
    The runtime retries a throwing alarm a few times and then says nothing of
    which object it gave up on, so `alarm()` writes the room id and the handler
@@ -1630,12 +1669,19 @@ know is never computed, so there is nothing for it to leave behind. Rolling back
 past #111 strands no row and needs no cleanup, where rolling back past #62 does.
 The sweep and the purge (#65) are derived the same way, so rolling back past them
 strands nothing either: an older build never computes the names, and a room it
-finds closed is kept. What a rollback cannot undo is a purge that has already run.
-An alarm already armed for a tick fires once into a build that knows the
-`abandoned` name, which finds nothing to run and re-arms for the abandonment
-time. A build older than #18 does not know that name: for a row #18 rewrote, its
-`reArm()` calls `setAlarm(undefined)`, which workerd rejects, so rolling back
-past #18 is not supported (ADR 0001).
+finds closed is kept. Housekeeping (#66) is derived too, and the fields it adds to
+the record are read with defaults, so rolling back past it strands nothing. What a
+rollback leaves behind is the books those fields hold: a build older than #66 keeps
+them on the record and moves none of them, so after rolling forward a request
+answered in the meantime is still open and is named unanswered every window until
+its sender leaves, since nobody may answer a request twice, and a member who sent
+in the meantime is named quiet until it next sends. What a rollback cannot undo is
+a purge that has already run.
+An alarm already armed for a tick, or for housekeeping, fires once into a build
+that knows the `abandoned` name, which finds nothing to run and re-arms for the
+abandonment time. A build older than #18 does not know that name: for a row #18
+rewrote, its `reArm()` calls `setAlarm(undefined)`, which workerd rejects, so
+rolling back past #18 is not supported (ADR 0001).
 
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both
@@ -1723,18 +1769,31 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,485** | every request, whether or not you are in a room |
+| Tool definitions | **~7,761** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-09 for public rooms: 7,485 tokens, 110 over the merge base
-measured the same way (7,375, what this method gives for the 7,377 below).
-`bellman_start` is up 77, to 1,887, for the manifest's `public` on both arms and
-the line saying what it means; `bellman_connect` is up 33, to 621, for the
-preview's `public` and the line telling a joiner's agent to say so.
+Re-measured on 2026-10-09 for public rooms, on top of room housekeeping: 110 tokens
+over main. `bellman_start` is up 77, to 2,128, for the manifest's `public` on both
+arms and the line saying what it means; `bellman_connect` is up 33, to 654, for the
+preview's `public` and the line telling a joiner's agent to say so. That is 7,761 by
+the method below; this branch's script reads 7,759 against main's 7,649, the same 110.
+
+Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
+tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,
+the figure the next paragraph records. All 274 are `bellman_start`'s and
+`bellman_connect`'s. The branch put the `housekeeping` field in the manifest schema
+inside `bellman_start`, on both arms of it: 208, measured at `1bcbf11`
+(`bellman_start` 1,810 to 2,018). The review's fix wave then named the connect
+preview's new `housekeeping` key in the `Returns:` line of `bellman_start` and of
+`bellman_connect`: 33 each (`bellman_start` 2,051, `bellman_connect` 588 to 621).
+Per tool, now: `bellman_start` 2,051, `bellman_send` 1,294, `bellman_confirm` 776,
+`bellman_sync` 740, `bellman_invite` 728, `bellman_connect` 621, `bellman_evict`
+513, `bellman_surface` 281, `bellman_rooms` 255, `bellman_audit` 213 and
+`bellman_leave` 179.
 
 Re-measured on 2026-10-09 once main's saved presets (#224) merged beneath the
 hosted seat: 7,377 tokens, 23 over the 7,354 below, all of them

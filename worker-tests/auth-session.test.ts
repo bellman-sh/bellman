@@ -330,7 +330,7 @@ describe("AuthDO: a method touches only the session it names", () => {
 
     // Two hours stale, so this touch writes.
     expect((await o.touchSession("mine", now))?.identity.userId).toBe("u_github_4242");
-    expect(await o.replanSession("mine", REPLANNED, "grant", now)).toBe(true);
+    expect(await o.replanSession("mine", REPLANNED, "grant", "github:4242", now)).toBe(true);
 
     expect(await storedSession(name, "yours")).toEqual(yours);
     // And each id answers with its own record.
@@ -446,15 +446,15 @@ describe("AuthDO session sweep", () => {
 });
 
 describe("AuthDO replanSession", () => {
-  it("merges the identity, plan source and time into the stored record, and nothing else", async () => {
+  it("merges the identity, plan source, plan key and time into the stored record, and nothing else", async () => {
     const o = auth("s-replan");
     await o.putSession("sid", panelSession());
 
-    const merged = await o.replanSession("sid", REPLANNED, "grant", T0 + 5);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 5);
 
     expect(merged).toBe(true);
     expect(await o.touchSession("sid", T0 + 5)).toEqual(
-      panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
+      panelSession({ identity: REPLANNED, plan_source: "grant", plan_key: "github:4242", replanned_at: T0 + 5 })
     );
   });
 
@@ -466,14 +466,14 @@ describe("AuthDO replanSession", () => {
   // guard. Storage is read before the touch, which would clear away what it was
   // meant to find, and the touch is there for the behaviour that matters: on its
   // own it cannot catch an upsert, because the record that would be written holds
-  // only the three merged fields, which sessionDead reads as dead.
+  // only the four merged fields, which sessionDead reads as dead.
   it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
     const o = auth("s-replan-delete");
     await o.putSession("sid", panelSession());
     await o.touchSession("sid", T0);
     await o.deleteSession("sid");
 
-    const merged = await o.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1);
 
     expect(merged).toBe(false);
     expect(await storedIds("s-replan-delete")).toEqual([]);
@@ -490,7 +490,7 @@ describe("AuthDO replanSession", () => {
     await o.putSession("sid", panelSession());
 
     await Promise.all([
-      o.replanSession("sid", REPLANNED, "grant", T0 + 1),
+      o.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1),
       o.deleteSession("sid"),
     ]);
 
@@ -509,7 +509,7 @@ describe("AuthDO replanSession", () => {
     const theirs = mine + SESSION_TOUCH_MS + 1;
     await o.touchSession("sid", theirs); // another request, later
 
-    const merged = await o.replanSession("sid", REPLANNED, "grant", mine);
+    const merged = await o.replanSession("sid", REPLANNED, "grant", "github:4242", mine);
 
     expect(merged).toBe(true);
     expect(await o.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();

@@ -247,6 +247,23 @@ describe("MemoryStore wakes the host (hosted seat spec, D4)", () => {
     expect(a.ok).toBe(true);
     expect(store.wakes).toEqual([]);
   });
+
+  // Housekeeping (#66, ruling H1): a proposal is a third thing the server writes into a room,
+  // and it is not a cause. Waking spends the room's host units on the server's initiative,
+  // which the proposal's own design rules out, so the wake's two causes stay two.
+  it("queues no wake for a housekeeping proposal in a hosted room, and still wakes for a heartbeat after it", async () => {
+    const store = new Recording();
+    const m = hosted();
+    const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)] });
+    await store.createSession(s);
+    const server = { fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null };
+    await store.appendEvent(s.id, { type: "housekeeping", ...server, payload: { finding: "room_idle", since: NOW, repeat: 1 } });
+    await store.appendEvent(s.id, { type: "housekeeping", ...server, payload: { finding: "member_quiet", about: { member_id: "m_creator" }, since: NOW, repeat: 1 } });
+    expect(store.wakes).toEqual([]);
+    // The fixture is wired: the same room wakes the seat for a tick, so the silence above is the rule.
+    await store.appendEvent(s.id, { type: "heartbeat", ...server, payload: {} });
+    expect(store.wakes).toEqual([{ sessionId: s.id, cause: "tick", cursor: 3 }]);
+  });
 });
 
 /**

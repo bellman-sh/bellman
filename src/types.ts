@@ -54,6 +54,14 @@ export interface Member {
    */
   lastReportAt?: number;
   /**
+   * When this member last appended an event (#66), on the server's clock. Housekeeping
+   * names a member quiet from this, so it is a SEND and not a sign of life: a call that
+   * only reads, like a poll, does not move it, and neither does anything the server
+   * wrote about the member. Absent on a member who has sent nothing since joining and on
+   * rows stored before the field existed; housekeeping reads both as `joinedAt`.
+   */
+  lastSentAt?: number;
+  /**
    * The cursor of the `member_evicted` event that removed this member, if a
    * creator removed them.
    *
@@ -85,7 +93,26 @@ export type EventType =
   /** A member's answer to a tick. */
   | "progress"
   /** A write to the room's working surface: an item, or its removal (#129). */
-  | "surface";
+  | "surface"
+  /** A proposal the server raises from the room's own thresholds (#66). Never sent by a member. */
+  | "housekeeping";
+
+/** What a housekeeping proposal is about (#66). */
+export type HousekeepingFinding = "member_quiet" | "request_unanswered" | "room_idle";
+
+/**
+ * The payload of a `housekeeping` event: identifiers and the server's numbers, never prose,
+ * so a proposal carries nothing a reader has to distrust.
+ */
+export interface HousekeepingPayload {
+  finding: HousekeepingFinding;
+  /** Who or what: a member for a quiet one, a request's cursor for an unanswered one, absent for an idle room. */
+  about?: { member_id: string } | { cursor: number };
+  /** When the condition began, ms epoch, the server's clock. */
+  since: number;
+  /** 1 on the first raise of this key, counting up on each repeat. */
+  repeat: number;
+}
 
 export interface SessionEvent {
   cursor: number;
@@ -165,6 +192,39 @@ export interface Session {
    * failed card.
    */
   frozenAt: number | null;
+  /**
+   * The housekeeping findings raised and not yet cleared (#66), by key: when each was last
+   * raised (`at`), how many times (`repeat`), and the `since` of the condition it was raised
+   * for, so a condition that came back is told from one that never left. Written by the
+   * housekeeping firing and nothing else. Empty on rows stored before this.
+   */
+  raised: Record<string, { at: number; repeat: number; since: number }>;
+  /**
+   * The action requests still waiting for an answer (#66), by the request's cursor as a
+   * string, with when it was asked and who asked. Kept at the write by `noteAppend` and not
+   * derived from the log: every read of the log is bounded, and a request older than the
+   * bound must not be forgotten. Kept only for a room that declared housekeeping; `{}`
+   * otherwise, and on rows stored before this.
+   */
+  openRequests: Record<string, { at: number; fromMemberId: string }>;
+  /**
+   * When a member last appended any event (#66), or null before one has. What the server
+   * wrote is not a member event: a tick, a proposal, an eviction and a timeout leave it
+   * alone. Kept like `openRequests`, for a room that declared housekeeping.
+   */
+  lastMemberEventAt: number | null;
+  /**
+   * When the room was last thawed (#66, R9), or null if it never was. Set by the thaw, in the
+   * transition from frozen to not and only there, so a retried thaw leaves it where it was.
+   *
+   * While a room is frozen nobody can send and no request can be answered, so a finding
+   * computed across the freeze would name a condition the room imposed. Heartbeat refuses the
+   * same for the tick by crediting every seat at the thaw (`clearSilence`); housekeeping
+   * records the moment and the rules floor every base time at it: a member's last send, a
+   * request's `at`, the last member event. `Member.lastSentAt` keeps meaning the last send.
+   * Null on rows stored before this.
+   */
+  thawedAt: number | null;
 }
 
 export interface PendingConnect {
@@ -307,6 +367,21 @@ export interface RoomManifest {
    * reading silence reads it against the same number every member was given.
    */
   heartbeatOnMs: number | null;
+  /**
+   * The thresholds past which the server proposes a housekeeping finding (#66), or
+   * null for a room that asked for none. Each is a duration in ms, or null where its
+   * finding is off; `repeatAfterMs` null means each finding repeats after its own
+   * threshold. Never an object of three null thresholds: `resolveManifest` makes
+   * that null, so "off" has one representation. Immutable with the rest of the
+   * manifest, and absent on rows written before this, which `hydrateStoredSession`
+   * reads as null.
+   */
+  housekeeping: {
+    quietAfterMs: number | null;
+    answerWithinMs: number | null;
+    idleAfterMs: number | null;
+    repeatAfterMs: number | null;
+  } | null;
   /** The hosted seat, or null for a room with none. Immutable with the rest. */
   host: HostConfig | null;
   /**
@@ -330,6 +405,13 @@ export interface SavedPreset {
   description: string | null;
   mode: SessionMode;
   heartbeat_on: string | null;
+  /**
+   * The housekeeping thresholds (#66) in the author arm's own keys, durations as
+   * written, and only the keys the preset sets. Null when it sets none, which is
+   * what every built-in holds (D5). Absent from a preset saved before the field
+   * existed, and read as null: none, as `host` is read.
+   */
+  housekeeping?: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
   roles: Record<string, { can: Verb[]; description: string | null; reports: boolean }>;
   default_role: string;
   creator_role: string;

@@ -32,7 +32,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { retentionOf, roomPreview } from "../src/projections.js";
-import { session } from "./helpers/fixtures.js";
+import { roomManifest, session } from "./helpers/fixtures.js";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 
@@ -169,6 +169,33 @@ describe("roomPreview for a viewer with no seat", () => {
     // Control: the three fields really are the ones a seat fills in.
     expect(roomPreview(room, "peer_a")).toMatchObject({ your_role: "peer_a" });
     expect(roomPreview(room, "peer_a").your_verbs.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * What the room will name its members for (#66, review m2). The preview is the consent point: a joiner's human decides
+ * on a seat before taking it, and a seat in a room with `quiet_after: 2h` will be named quiet every two hours while it
+ * sends nothing. It is carried as the cadence is, in seconds the server computed, and null where the room names nothing.
+ */
+describe("roomPreview and housekeeping", () => {
+  const declaring = (housekeeping: NonNullable<ReturnType<typeof roomManifest>["housekeeping"]> | null) =>
+    session({ manifest: roomManifest({ housekeeping }) });
+
+  it("is null for a room that declared none", () => {
+    expect(roomPreview(declaring(null), "peer_a").housekeeping).toBeNull();
+  });
+
+  it("carries each threshold in seconds, and null for each one the room leaves off", () => {
+    const room = declaring({ quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: null, repeatAfterMs: 14_400_000 });
+    expect(roomPreview(room, "peer_a").housekeeping).toEqual({
+      quiet_after_seconds: 7_200, answer_within_seconds: 1_800, idle_after_seconds: null, repeat_after_seconds: 14_400,
+    });
+  });
+
+  it("carries the whole block for a room with no seat's viewer too: it is the room's, not the seat's", () => {
+    const room = declaring({ quietAfterMs: null, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null });
+    expect(roomPreview(room, null).housekeeping).toEqual(roomPreview(room, "peer_a").housekeeping);
+    expect(roomPreview(room, null).housekeeping).toMatchObject({ idle_after_seconds: 86_400 });
   });
 });
 

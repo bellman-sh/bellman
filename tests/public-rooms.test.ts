@@ -56,8 +56,8 @@ describe("a saved preset's public flag", () => {
 
   it("is the default for a room started from it, and the cite's own wins", () => {
     expect(resolveManifest(asManifest(saved(true), "r", null)).public).toBe(true);
-    expect(resolveManifest(asManifest(saved(true), "r", null, undefined, false)).public).toBe(false);
-    expect(resolveManifest(asManifest(saved(false), "r", null, undefined, true)).public).toBe(true);
+    expect(resolveManifest(asManifest(saved(true), "r", null, undefined, undefined, false)).public).toBe(false);
+    expect(resolveManifest(asManifest(saved(false), "r", null, undefined, undefined, true)).public).toBe(true);
     expect(resolveManifest(asManifest(saved(), "r", null)).public).toBe(false);
   });
 });

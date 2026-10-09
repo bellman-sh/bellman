@@ -119,6 +119,86 @@ describe("hydrateStoredSession — a manifest stored before the heartbeat", () =
 });
 
 /**
+ * A manifest written before housekeeping (#66): the key is ABSENT, not null, which is
+ * what Durable Object storage hands back for a row that never had it.
+ */
+function preHousekeepingRow(fixture = session()) {
+  const { events: _events, ...rest } = fixture;
+  const { housekeeping: _housekeeping, ...manifest } = rest.manifest;
+  return { ...rest, manifest };
+}
+
+describe("hydrateStoredSession — a manifest stored before housekeeping", () => {
+  /** `=== null` is how every rule downstream asks "no housekeeping", and undefined fails it. */
+  it("reads a missing housekeeping as null", () => {
+    const raw = preHousekeepingRow();
+    // Without this, a fixture that stopped carrying the key would pass for the wrong reason.
+    expect("housekeeping" in raw.manifest).toBe(false);
+    expect(hydrateStoredSession(raw)!.manifest.housekeeping).toBeNull();
+  });
+
+  /** A default that clobbered would switch off every room that did declare thresholds. */
+  it("leaves declared thresholds alone", () => {
+    const declared = roomManifest({
+      housekeeping: { quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null },
+    });
+    const { events: _events, ...raw } = session({ manifest: declared });
+    expect(hydrateStoredSession(raw)!.manifest.housekeeping).toEqual(declared.housekeeping);
+  });
+
+  it("does not rewrite the row it was handed", () => {
+    const raw = preHousekeepingRow();
+    hydrateStoredSession(raw);
+    expect("housekeeping" in raw.manifest).toBe(false);
+  });
+});
+
+/**
+ * A record written before housekeeping's books (#66): it has no `raised`, `openRequests`,
+ * `lastMemberEventAt` or `thawedAt` (R9). The keys are ABSENT, not undefined, which is what
+ * storage hands back.
+ */
+describe("hydrateStoredSession — a record stored before housekeeping's books", () => {
+  const BOOKS = ["raised", "openRequests", "lastMemberEventAt", "thawedAt"];
+  const bare = () => {
+    const {
+      events: _events, raised: _r, openRequests: _o, lastMemberEventAt: _l, thawedAt: _t, ...raw
+    } = session();
+    return raw;
+  };
+
+  /** `=== null` and `Object.keys` are how the rules read them, and undefined fails both. */
+  it("reads no finding raised, no request waiting, no member event and no thaw", () => {
+    const raw = bare();
+    // Without this, a fixture that stopped carrying the keys would pass for the wrong reason.
+    for (const key of BOOKS) expect(key in raw, key).toBe(false);
+    const row = hydrateStoredSession(raw)!;
+    expect(row.raised).toEqual({});
+    expect(row.openRequests).toEqual({});
+    expect(row.lastMemberEventAt).toBeNull();
+    expect(row.thawedAt).toBeNull();
+  });
+
+  /** A default that clobbered would forget every request a housekeeping room is waiting on. */
+  it("leaves books already kept alone", () => {
+    const kept = {
+      raised: { room_idle: { at: 5, repeat: 2, since: 3 } },
+      openRequests: { "7": { at: 4, fromMemberId: "m_creator" } },
+      lastMemberEventAt: 9,
+      thawedAt: 11,
+    };
+    const { events: _events, ...raw } = session(kept);
+    expect(hydrateStoredSession(raw)).toMatchObject(kept);
+  });
+
+  it("does not rewrite the row it was handed", () => {
+    const raw = bare();
+    hydrateStoredSession(raw);
+    for (const key of BOOKS) expect(key in raw, key).toBe(false);
+  });
+});
+
+/**
  * A record written before the working surface (#129): it has no `surfaceCursor`.
  * The key is ABSENT, not undefined, which is what Durable Object storage hands
  * back for a row that never had it.

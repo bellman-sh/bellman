@@ -1,5 +1,5 @@
 import { countdown, el } from "./shared.js";
-import type { ConnectResult } from "./types.js";
+import type { ConnectResult, RoomBlock } from "./types.js";
 
 /** What a joiner may grant peers. The same three the server's CapabilitiesShape accepts, and its defaults. */
 export const CAPABILITIES = [
@@ -24,6 +24,35 @@ export function verdictMessage(v: Verdict): string {
   }
   return `Confirm joining the room previewed by bellman_connect as role ${v.role}, with capabilities ${v.capabilities.join(", ")}. ` +
     "Call bellman_confirm with the connect_token from that preview and a brief about this session.";
+}
+
+/**
+ * A span of seconds as the largest whole unit that holds it exactly, so "90m" stays "90m". Not
+ * `duration`, which rounds for a relative time: this is the number the human is agreeing to.
+ */
+function exact(seconds: number): string {
+  for (const [unit, size] of [["d", 86_400], ["h", 3_600], ["m", 60]] as const) {
+    if (seconds % size === 0) return `${seconds / size}${unit}`;
+  }
+  return `${seconds}s`;
+}
+
+/**
+ * What the room will name its members for (#66), as the one line this screen adds: the consent point has
+ * to say that a member of this room is named quiet while it sends nothing, and after how long. Null when
+ * the room names nothing, including a block whose every threshold is off.
+ */
+function housekeepingLine(h: RoomBlock["housekeeping"]): string | null {
+  if (!h) return null;
+  const named = [
+    h.quiet_after_seconds !== null ? `a member quiet after ${exact(h.quiet_after_seconds)} without a send` : null,
+    h.answer_within_seconds !== null ? `a request unanswered after ${exact(h.answer_within_seconds)}` : null,
+    h.idle_after_seconds !== null ? `the room idle after ${exact(h.idle_after_seconds)}` : null,
+  ].filter((part): part is string => part !== null);
+  if (named.length === 0) return null;
+  const list = named.length > 1 ? `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}` : named[0];
+  const again = h.repeat_after_seconds !== null ? `every ${exact(h.repeat_after_seconds)}` : "after the same time";
+  return `Bellman names ${list}, and names each again ${again} while it holds.`;
 }
 
 /** What the host answers ui/message with: ext-apps reports a refusal as `isError`, not as a rejection. */
@@ -100,6 +129,8 @@ export function renderJoin(
       ? ` You must report every ${r.room.heartbeat_on_seconds}s.`
       : "");
 
+  const naming = housekeepingLine(r.room.housekeeping);
+
   return el("section", { class: "join" },
     el("h1", {}, "Join a Bellman room"),
     // The server's fact, not the creator's words: outside the untrusted box, before the seat is chosen (public rooms spec D5).
@@ -119,6 +150,7 @@ export function renderJoin(
     ),
     el("h2", {}, `Your seat: ${r.room.your_role}`),
     el("p", {}, seat),
+    naming ? el("p", {}, naming) : null,
     el("table", {},
       el("thead", {}, el("tr", {}, el("th", {}, "Role"), el("th", {}, "May"), el("th", {}, "Reports"), el("th", {}, "Description (creator's words)"))),
       el("tbody", {}, ...roleRows)),

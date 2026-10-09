@@ -4,6 +4,7 @@
  * manifest.ts, so the routes, the tool and both test programs import it.
  */
 import { ManifestError, PRESET_NAMES, PresetNameShape, PresetShape, describeIssue, resolveManifest } from "./manifest.js";
+import type { HousekeepingInput } from "./manifest.js";
 import type { SavedPreset } from "./types.js";
 
 // ponytail: twenty a person, not tuned. The first person past it wants a reason, not a bigger number.
@@ -19,10 +20,15 @@ export type PresetCheck =
  * plan refusal and hosted-room slot exactly as an inline `host` block does. A cite's
  * `heartbeat_on`, which checkCiteCadence admits only for a preset with a host, replaces
  * the preset's own; absent or null, the preset's stands, as for a built-in. A cite's
+ * `housekeeping` (#66, D5) follows the same rule, so null means one thing on a cite
+ * whichever field it is on: absent or null, the preset's own block stands, and a block
+ * replaces it whole. An empty one says none, as it does in an authored manifest. A
+ * preset saved before the field existed has no such key, which reads as none. A cite's
  * `public`, when it gives one, replaces the preset's.
  */
 export function asManifest(
-  p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null, citedPublic?: boolean | null,
+  p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null,
+  housekeeping?: HousekeepingInput | null, citedPublic?: boolean | null,
 ): Record<string, unknown> {
   return {
     room,
@@ -31,11 +37,23 @@ export function asManifest(
     public: citedPublic ?? p.public ?? false,
     mode: p.mode,
     heartbeat_on: heartbeatOn ?? p.heartbeat_on,
+    housekeeping: housekeeping ?? p.housekeeping,
     roles: p.roles,
     default_role: p.default_role,
     creator_role: p.creator_role,
     host: p.host ?? null,
   };
+}
+
+/**
+ * The block as saved (#66): the keys it sets, durations as written, and null when it sets
+ * none, so "no housekeeping" has one spelling in a row as it has in a resolved manifest.
+ * A bound is not checked here. checkPreset resolves the preset the way a room would, and the
+ * validator refuses what is out of range, in its own words.
+ */
+function savedHousekeeping(h: HousekeepingInput | null | undefined): SavedPreset["housekeeping"] {
+  const set = Object.entries(h ?? {}).filter(([, duration]) => duration != null);
+  return set.length > 0 ? (Object.fromEntries(set) as NonNullable<SavedPreset["housekeeping"]>) : null;
 }
 
 /**
@@ -65,6 +83,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     description: v.description ?? null,
     mode: v.mode,
     heartbeat_on: v.heartbeat_on ?? null,
+    housekeeping: savedHousekeeping(v.housekeeping),
     roles,
     default_role: v.default_role,
     creator_role: v.creator_role,

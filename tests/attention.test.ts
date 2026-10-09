@@ -33,6 +33,12 @@ describe("attention", () => {
     expect(isAmbient({ type: "message", payload: { members: [] } })).toBe(false);
   });
 
+  // A finding nobody reads produces no action, which is the tick's reason too.
+  it("makes a housekeeping proposal an interrupt (#66)", () => {
+    expect(attentionOf("housekeeping")).toBe("interrupt");
+    expect(isAmbient({ type: "housekeeping", payload: { finding: "room_idle", since: 1, repeat: 1 } })).toBe(false);
+  });
+
   /**
    * The compiler enforces this table in both directions: `satisfies` rejects a
    * type with no posture (TS2741) and a key that names no type (TS2353). This
@@ -41,6 +47,6 @@ describe("attention", () => {
    */
   it("declares a posture for exactly the known types and no others", () => {
     expect(new Set(Object.keys(ATTENTION)))
-      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface"]));
+      .toEqual(new Set([...PRE_EXISTING, "heartbeat", "progress", "surface", "housekeeping"]));
   });
 });

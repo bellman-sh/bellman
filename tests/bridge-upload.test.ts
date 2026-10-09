@@ -41,7 +41,7 @@ let client: Client;
 
 /** The real tool handlers over the fake's own stores, so the placement heads the blob the route stored. */
 async function remoteFor(): Promise<Remote> {
-  const server = buildServer(jesse, fake.store, fake.blobs);
+  const server = buildServer(jesse, fake.store, fake.blobs, { hostedSeat: true });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const upstream = new Client({ name: "bridge-remote", version: "0.0.1" });
   await Promise.all([server.connect(serverSide), upstream.connect(clientSide)]);

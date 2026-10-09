@@ -39,11 +39,17 @@ const SERVER_VERSION = "0.1.0";
  * `image` and blob-backed `html` items read it; it has no default, so a deploy
  * that forgets the binding does not compile rather than serving a store that
  * forgets.
+ *
+ * `features.hostedSeat` is BELLMAN_HOSTED_SEAT (`hostedSeatOn`), handed only to
+ * `bellman_start`, which refuses a room that declares a host while it is false.
+ * It has no default for the same reason `blobs` has none: a caller that forgets
+ * it does not compile, and so no server is built that decides the seat's switch
+ * by accident.
  */
-export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore): McpServer {
+export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore, features: { hostedSeat: boolean }): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
-  registerStart(server, identity, s);
+  registerStart(server, identity, s, features);
   registerConnect(server, identity, s);
   registerConfirm(server, identity, s);
   registerInvite(server, identity, s);

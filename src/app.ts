@@ -17,8 +17,12 @@ import type { BellmanStore } from "./store.js";
  * the routing without Node's listener. The room routes (#183) are the one piece
  * shared as a module rather than re-typed: `src/http/rooms.ts` serves both, and
  * this file only translates.
+ *
+ * `features` is what the process bootstrap read from its environment (src/index.ts reads
+ * BELLMAN_HOSTED_SEAT once and hands the same answer to the seat itself), passed on to
+ * `buildServer`. Nothing here reads `process.env`, so a test mounts an app with either answer.
  */
-export function createApp(store: BellmanStore, blobs: BlobStore): Express {
+export function createApp(store: BellmanStore, blobs: BlobStore, features: { hostedSeat: boolean }): Express {
   const app = express();
 
   /**
@@ -86,7 +90,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore): Express {
       return;
     }
     try {
-      const server = buildServer(identity, store, blobs);
+      const server = buildServer(identity, store, blobs, features);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

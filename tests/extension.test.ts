@@ -67,7 +67,7 @@ async function bundleTools(): Promise<string[]> {
     delivery: "hook",
     inboxDir,
     remote: async (): Promise<Remote> => {
-      const server = buildServer(identity, store, new MemoryBlobStore());
+      const server = buildServer(identity, store, new MemoryBlobStore(), { hostedSeat: true });
       const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
       const client = new Client({ name: "bridge-remote", version: "0.0.1" });
       await Promise.all([server.connect(serverSide), client.connect(clientSide)]);

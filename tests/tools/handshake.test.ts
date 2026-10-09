@@ -705,8 +705,8 @@ describe("INVARIANT 10 — every room is declared", () => {
       preset: null,
       mode: "pair",
       roles: {
-        driver: { can: ["send", "invite"], description: "Drives.", reports: false },
-        navigator: { can: ["send"], description: null, reports: false },
+        driver: { can: ["send", "invite"], description: "Drives.", reports: false, report: null },
+        navigator: { can: ["send"], description: null, reports: false, report: null },
       },
       defaultRole: "navigator",
       creatorRole: "driver",

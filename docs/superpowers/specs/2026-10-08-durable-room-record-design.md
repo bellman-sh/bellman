@@ -52,9 +52,10 @@ closed before this shipped has neither a window nor a `closedAt`, and is kept:
 deletion is the one irreversible act here, and no plan promised those rooms a
 clock. Delete on demand (D6) reaches them.
 
-When it fires: list and delete the room's R2 prefix in batches; enqueue, on
-the outbox, `forget(sessionId)` to the registry and `room_purged` to the audit
-log of every org on the roster; then `deleteAll()` the object's storage. The
+When it fires: list and delete the room's R2 prefix in batches; drop the room
+from the registry's indexes and file `room_purged` on the audit log of every
+org on the roster, by direct calls rather than the outbox, since `deleteAll()`
+would take the outbox's rows with it; then `deleteAll()` the object's storage. The
 order is the atomicity rule this codebase keeps: the side the prefix can find
 loses nothing it cannot recover, so the bytes go first and the record last,
 and a crash between leaves a record whose next wake purges again. A purged
@@ -97,9 +98,9 @@ says to an admin exactly what it says to a stranger.
 ### D5 — A registry index of rooms per org, so the read is findable.
 
 `RegistryDO` keeps `sessionsForOrg(orgId)` beside `sessionsCreatedBy` and
-`sessionsJoinedBy`, written on the same outbox messages: at creation for the
-creator's org, at each seating for the member's org when it has one, and
-removed by `forget` at purge. `GET /rooms?as=admin` lists them for a caller
+`sessionsJoinedBy`, written where `sessionsJoinedBy` is written: at creation
+for every org on the roster, at each seating for the member's org when it has
+one, and dropped at purge by a direct call (`dropOrgIndex`). `GET /rooms?as=admin` lists them for a caller
 D4 admits, closed rooms only, with the same `{ rooms, truncated }` shape. The
 list holds the newest 50 closes, as the member list holds 50, but the index is
 read wider than that (`JOINED_SCAN`, the bound the monitor's joined history is
@@ -178,8 +179,8 @@ an infinite window is never purged; `schedulePurge` on an open room is
 refused; `sweepBlobs` removes exactly the unnamed objects and credits their
 bytes; `closedAt` is set with `closed`. `worker-tests`: the derived `purge`
 alarm fires once and the object's storage is empty; a record closed before
-this shipped gets its window from first sight; the outbox carries `forget`
-and `room_purged`. `tests/http-rooms.test.ts`: the admin read admits only the
+this shipped has no window and is kept; the purge drops the registry's rows
+and files `room_purged` for every org on the roster by direct calls. `tests/http-rooms.test.ts`: the admin read admits only the
 four conditions together (each one missing is 404), reads a closed room and
 not an open one, `my_handles` empty, PUT refused 403; `?as=admin` lists only
 that org's closed rooms; `DELETE` by the creator and by an admin answers 202
@@ -191,7 +192,7 @@ Every test is run once against the broken implementation before it counts.
 `src/auth.ts` (the entitlement), `src/types.ts` (`closedAt`,
 `retainAfterCloseMs`, `purgeAt`, the audit kinds), `src/store.ts` and
 `src/store-do.ts` (the purge handler, the sweep, `sessionsForOrg`,
-`schedulePurge`), `src/registry-do.ts` (the org index, `forget`),
+`schedulePurge`, the registry's org index and its drops),
 `src/blobs.ts` and `src/blobs-r2.ts` (`list`, `deleteAll`), `src/http/rooms.ts`
 (the admin fallback, `?as=admin`, `DELETE`), `src/projections.ts` (`viewer`,
 the preview with no seat), `docs/ARCHITECTURE.md` (§4 the fourth alarm, §8

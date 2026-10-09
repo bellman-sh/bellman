@@ -812,6 +812,23 @@ itself at `POST /__fake-model`, sent no key. It prints which at startup
 (`nodeModel`). Production needs the `HOST` binding, migration `v3` and the
 `ANTHROPIC_API_KEY` secret.
 
+**It ships switched off.** `BELLMAN_HOSTED_SEAT` is a var in `wrangler.toml`, read
+by `hostedSeatOn` (`src/host.ts`): `on` switches the seat on, and unset, empty or
+anything else is off, the last logged. It is checked in two places because each
+stops what the other does not. `bellman_start` refuses a room whose resolved
+manifest has a `host`, ahead of the plan's own refusal and before a slot is taken
+or anything is written, so `social`, a saved preset and an inline block meet it
+alike: no new hosted room. `handleWake` returns first, before it loads the record,
+reads the room or meters anything, when its driver is not `enabled`, and that
+quiets the hosted rooms that exist already. The refusal alone leaves those rooms
+asking questions on the key; the guard alone lets rooms be made that never speak,
+each holding one of its creator's slots. The switch is a required argument at each
+seam (`buildServer`'s `features.hostedSeat`, `createApp`'s, `MemoryHost`'s
+`enabled`), so a caller that omits it does not compile; the Worker and `HostDO`
+read the var off their own env, and the Node server reads it once in
+`src/index.ts` for both. The Workers test config sets it `on`, so the `HostDO`
+tests run the seat; ADR 0002 records when production does.
+
 ### The working surface
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally

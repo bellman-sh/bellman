@@ -66,11 +66,18 @@ export const DEV_KEY = {
 export class Harness {
   readonly store: BellmanStore;
   readonly blobs: BlobStore;
+  /** The hosted seat's switch (BELLMAN_HOSTED_SEAT) as the servers this builds see it. On, so the tests that start hosted rooms are unchanged. */
+  private readonly hostedSeat: boolean;
   private readonly peers: Peer[] = [];
 
-  constructor(store: BellmanStore = new MemoryStore(), blobs: BlobStore = new MemoryBlobStore()) {
+  constructor(
+    store: BellmanStore = new MemoryStore(),
+    blobs: BlobStore = new MemoryBlobStore(),
+    opts: { hostedSeat?: boolean } = {},
+  ) {
     this.store = store;
     this.blobs = blobs;
+    this.hostedSeat = opts.hostedSeat ?? true;
   }
 
   /** Connect a new client bound to a dev bearer key. */
@@ -82,7 +89,7 @@ export class Harness {
 
   /** Connect a client bound to an arbitrary identity (for plan-matrix tests). */
   async connectAs(identity: Identity): Promise<Peer> {
-    const server = buildServer(identity, this.store, this.blobs);
+    const server = buildServer(identity, this.store, this.blobs, { hostedSeat: this.hostedSeat });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: `test-${identity.userId}`, version: "0.0.1" });
     await Promise.all([

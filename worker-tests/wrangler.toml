@@ -32,3 +32,8 @@ bucket_name = "bellman-blobs"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO", "AuthDO", "HostDO"]
+
+# The real wrangler.toml ships the hosted seat off. These tests are about the seat, so it is
+# on here, and hostedSeatOn's own tests (tests/host.test.ts) cover the off direction.
+[vars]
+BELLMAN_HOSTED_SEAT = "on"

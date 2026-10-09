@@ -49,6 +49,7 @@ class_name = "AuthDO"
 # (src/host-do.ts). ANTHROPIC_API_KEY is a secret, never a var:
 #   npx wrangler secret put ANTHROPIC_API_KEY
 # MODEL_URL, unset here, defaults to Anthropic's Messages API.
+# The seat is off until BELLMAN_HOSTED_SEAT, under [vars] below, says on.
 [[durable_objects.bindings]]
 name = "HOST"
 class_name = "HostDO"
@@ -93,6 +94,15 @@ persist = true
 #   npx wrangler secret put STRIPE_PAYMENT_LINKS
 [vars]
 BELLMAN_BILLING = "on"
+
+# The hosted seat: off | on (hostedSeatOn in src/host.ts). While it is off,
+# bellman_start refuses a room that declares a host, and a hosted room that
+# already exists never reaches the model: its wakes settle with no read, no
+# charge and no call. A var, not a secret, so turning it on is a reviewed
+# commit, as BELLMAN_BILLING is. Unset, empty or anything but "on" is off.
+# It also needs the model key before the first hosted room:
+#   npx wrangler secret put ANTHROPIC_API_KEY
+BELLMAN_HOSTED_SEAT = "off"
 
 # Where the control panel is served from. Comma-separated; bare origins, no
 # trailing slash — the Origin header carries neither, and parsePanelOrigins

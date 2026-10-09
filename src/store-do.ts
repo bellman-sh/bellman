@@ -3223,6 +3223,11 @@ export interface BellmanEnv {
   /** The room blob store (#183): a room's objects are deleted from it when the room is purged (#65). */
   BLOBS: R2Bucket;
   BELLMAN_KEYS?: string;
+  /**
+   * on | off, a var in wrangler.toml. The Worker reads it for `bellman_start` and `HostDO` for
+   * its wakes (`hostedSeatOn`, src/host.ts); unset, empty or anything but "on" is off.
+   */
+  BELLMAN_HOSTED_SEAT?: string;
   /** A Worker secret. Absent, the seat's model calls go out unauthenticated and are refused. */
   ANTHROPIC_API_KEY?: string;
   /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */

@@ -20,7 +20,7 @@ import { entitlementsFor } from "../auth.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
-  sanitizeName, storedType, type BlobStore,
+  sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
@@ -82,6 +82,22 @@ const DOWNLOAD_HEADERS = {
   "x-content-type-options": "nosniff",
   "content-security-policy": "sandbox",
 } as const;
+
+/**
+ * A blob's answer once a door has read it (D4): the download headers on a 304 and a 200 alike, the
+ * bytes as stored for an image on the allowlist, served inline, and everything else (a PDF,
+ * markdown, an SVG, an HTML artifact) an octet-stream download under its label. Nothing from here
+ * is ever text/html. The member download and the public one (public rooms spec D3) both answer here.
+ */
+export function blobResponse(read: Exclude<BlobRead, null>, cors: Record<string, string>): Response {
+  const headers: Record<string, string> = { ...DOWNLOAD_HEADERS, ...cors, etag: read.etag };
+  if ("unchanged" in read) return new Response(null, { status: 304, headers });
+  const image = isImageType(read.type);
+  headers["content-type"] = image ? read.type : OCTET_STREAM;
+  headers["content-length"] = String(read.bytes);
+  if (!image) headers["content-disposition"] = attachmentDisposition(read.name);
+  return new Response(read.body, { status: 200, headers });
+}
 
 export const json = (status: number, body: unknown, origin: string | undefined) =>
   new Response(JSON.stringify(body), {
@@ -314,17 +330,7 @@ async function downloadBlob(
 
   const read = await deps.blobs.get(sessionId, blobId, request.headers.get("if-none-match") ?? undefined);
   if (read === null) return notFound();
-  const headers: Record<string, string> = { ...DOWNLOAD_HEADERS, ...corsHeaders(origin), etag: read.etag };
-  if ("unchanged" in read) return new Response(null, { status: 304, headers });
-
-  // As stored only for an image on the allowlist, served inline. Everything
-  // else — a PDF, markdown, an SVG, an HTML artifact (piece 4) — is an
-  // octet-stream download under its label. Nothing from here is ever text/html.
-  const image = isImageType(read.type);
-  headers["content-type"] = image ? read.type : OCTET_STREAM;
-  headers["content-length"] = String(read.bytes);
-  if (!image) headers["content-disposition"] = attachmentDisposition(read.name);
-  return new Response(read.body, { status: 200, headers });
+  return blobResponse(read, corsHeaders(origin));
 }
 
 /**
@@ -609,14 +615,14 @@ async function unpublishRoom(request: Request, sessionId: string, origin: string
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
-const surfaceTag = (cursor: number): string => `"${cursor}"`;
+export const surfaceTag = (cursor: number): string => `"${cursor}"`;
 
 /**
  * Whether an If-None-Match header names `tag`. A list, a weak validator and `*`
  * all count; anything else is a miss, so a garbled header costs a body and
  * never a 500.
  */
-const etagMatches = (header: string | null, tag: string): boolean =>
+export const etagMatches = (header: string | null, tag: string): boolean =>
   header !== null && header.split(",").some((v) => {
     const t = v.trim().replace(/^W\//, "");
     return t === "*" || t === tag;

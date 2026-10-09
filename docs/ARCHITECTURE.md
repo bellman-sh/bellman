@@ -1413,10 +1413,13 @@ treat these as plus or minus ten percent:
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-08 once more, after the canvas
-landed: 6,875 tokens in all, of which `bellman_surface` is 254 and the
-`_meta.ui` now on `bellman_confirm` 105. The figure before it was 6,516, from the
-same day after #185; the next paragraph accounts for that one.
+Tool definitions were re-measured on 2026-10-09, after the canvas landed:
+6,875 tokens in all. Measured the same way at `d6a90f9`, main's head before
+the canvas branch, the listing was 6,605, so the branch's share is 270:
+`bellman_surface` 254 and the `_meta.ui` now on `bellman_confirm` 16. The 89
+between 6,605 and the 6,516 recorded next were there before the branch: that
+measurement was taken before #18's changes to `bellman_start`'s text landed,
+as #206 noted when it recorded it.
 
 Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,516
 tokens in all, of which `bellman_rooms` (#28) is 255 and the `_meta.ui` on

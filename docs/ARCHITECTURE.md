@@ -207,12 +207,29 @@ routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
 "surface"` calls. Membership is the tenant boundary: a stranger and an unknown
-room are one 404. A member a creator removed (#113) is served the room as it
-stood at its removal and nothing after: the surface to the rows it was shown,
-and the roster and the member count as of the removal, with no `presence`. The
+room are one 404. The one exception is an org admin's read of a *closed* room
+its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id`, the
+surface read and the blob download fall back to it for a caller with no seat,
+`GET /rooms?as=admin` lists those rooms from the registry's org index, and
+`DELETE /rooms/:id` lets the room's creator or such an admin ask for the purge,
+answered 202 with the time the room is stored to go, because the room's own
+alarm does it. The detail carries `closed_at` and `purge_at` as ISO times, null
+where the record has none, so a member of a closed room can see how long it
+has. A member a creator removed
+(#113) is served the room as it stood at its removal and nothing after: the
+surface to the rows it was shown, and the roster and the member count as of the
+removal, with no `presence`. The one exception is the org's admin: once the room
+has closed, a removed member who is also an admin of an org in it reads it
+whole, because the cut is a seat's and they no longer hold one. The
 list is bounded at 50 rooms and says when it was (`truncated`), because neither
 registry index orders by recency; the newest 50 of a larger set is #49's summary
-index. A poll that finds nothing new costs one record read, because the ETag is
+index. The admin's list reads the org index wider than it answers, `JOINED_SCAN`
+ids (`src/store.ts`, the bound the monitor's joined history is read with),
+because that index holds the org's open rooms among its closed ones in no
+promised order; it keeps the closed rooms of what it finds and lists the newest
+50 by close, and `truncated` says either bound was hit. The scan costs up to that
+many room reads for one request, which #49's summary index removes. A poll that
+finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
@@ -418,8 +435,8 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, abandonment alarm,<br/>freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
     end
@@ -632,10 +649,12 @@ rows for the cap and a connector's ends, the append, the audit row — and
 join preview gets an index with no prose, and everything else gets the whole
 item inside an untrusted envelope with its writer as origin (invariant 3).
 
-Nothing deletes a closed room's storage, and reads stay open to a closed
-room, so a surface written here outlives the session's active life already.
-What #65 still has to settle is who may read it who was never a member, and
-for how long it is kept.
+A closed room's storage is kept for the window the creator's plan promised and
+then purged (#65, [section 9](#9-nothing-spans-two-objects)), and until then
+reads stay open to a closed room, so a surface written here outlives the
+session's active life. Who may read it who was never a member is settled too: an
+admin of an org that sat in the room, under the audit log's conditions
+([section 7](#7-trust-boundaries)).
 
 ### Blobs
 
@@ -666,7 +685,12 @@ can be dropped.
 The download is membership: a member a creator removed is refused, as `/ws`
 refuses it, while one who left or timed out is served, and so is a closed or a
 frozen room. An unknown room, a room the caller is no member of, and an unknown
-or malformed blob id are one 404, so a stranger learns nothing. The type is the
+or malformed blob id are one 404, so a stranger learns nothing. The one other
+door is the org admin's (#65): the admin of an org that sat in a *closed* room,
+with no handle in it or none but removed ones, is served what a member is, by
+the predicate the detail and the surface read ask, so the page never shows a
+file item it cannot fetch. An open room's bytes stay its members', and a removed
+member who is no such admin stays refused after the close. The type is the
 server's word: an image claim is read against the four signatures and a
 mismatch is stored as `application/octet-stream`; the download serves an image
 on the allowlist inline and everything else as an octet-stream attachment, with
@@ -676,7 +700,9 @@ the allowlist: it is scriptable, and a type on the list is served inline. When
 the item is placed, `writeSurface` `head`s the object and copies its metadata
 onto the item: what readers see is the bucket's record, never the writer's
 claim. Removing or replacing the item leaves the blob where it is; the event
-that placed it still names it, and deletion is #65's.
+that placed it still names it, and deletion is the purge's (#65): the room's
+whole prefix goes with it, after a sweep at close has taken the objects no item
+names.
 
 A body that is not its declared length is refused by the store itself, with
 `BlobLengthError`, and nothing stays behind. `exactLength` (`src/blobs.ts`) is
@@ -878,6 +904,24 @@ loud:
   control characters and format characters (all but the two zero-width joiners
   and the soft hyphen, which names are spelled with, and a name left with
   nothing else is refused as a blank), and never derives a key.
+- **An org admin reads a closed room its org sat in, and only that** (#65, D4).
+  The conditions are the ones `bellman_audit` asks of a reader of an org's log
+  (the team plan, the admin role, an org), plus the org tie on the roster, which
+  keeps a member who left or was removed: an org whose only member was cut still
+  sat in the room, and the cut a creator's removal records is a seat's, so an
+  admin, which holds none, reads past it. It never reaches an open room: that is
+  its members', and the audit log is an admin's window into it while it runs, so
+  a 404 for an open room says to an admin what it says to a stranger. Membership
+  is tried first, so an admin who sits in the room reads it as the member it is.
+  An admin every one of whose handles a creator removed holds no seat that is
+  still a seat, and reads as the admin, whole: one predicate (`readsAsAdmin`)
+  answers for the detail, the surface read and the download, so the page never
+  shows a file it cannot fetch, and `my_handles` still lists the removed handles
+  so the page can say so. The read is a read: a write to the surface or an upload
+  from an admin is a 403, one status for the one fact that it holds no seat, and
+  a file item's bytes come down through the download route under the headers a
+  member's do. The delete is the one write, and the room's creator may ask for it
+  as well.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -909,7 +953,7 @@ flowchart TB
     subgraph B["Durability"]
         B0["#129 the working surface — shipped"]
         B1["#18 long-lived rooms"]
-        B2["#65 a record that<br/>outlives the session — now:<br/>a read for non-members, and retention"]
+        B2["#65 a record that<br/>outlives the session — shipped:<br/>an org admin's read, retention,<br/>delete on demand"]
         B3["#66 the scribe as actor"]
     end
     subgraph C["Surfaces beyond /mcp"]
@@ -942,10 +986,14 @@ flowchart TB
 
 The working surface (#129) landed first in this track and reframed the two below
 it: the record exists while the room is alive, and the scribe's job is to keep
-it current. Piece 3 of the working surface (#129) is split: the room routes are
-here (#184); the canvas page is in `bellman-sh/dash` (#13), the first screen
-that renders peer content and the one that brings the panel its content
-security policy.
+it current. The record that outlives the session (#65) has shipped: a closed
+room is kept for the window its plan promised and then purged, its orphaned
+objects are swept when it closes, an org admin may read it and list the rooms of
+their org, and its creator or such an admin may delete it.
+
+Piece 3 of the working surface (#129) is split: the room routes are here (#184);
+the canvas page is in `bellman-sh/dash` (#13), the first screen that renders
+peer content and the one that brings the panel its content security policy.
 
 The ordering that mattered: **[#2](../../../issues/2) gated a lot**, and it has
 shipped. Permission verbs are declared in a manifest and enforced by the server,
@@ -1050,7 +1098,7 @@ charge reserved before an upload that never completes — the client dies
 mid-body — is a phantom that locks quota with nothing anywhere to list, while
 an object nobody charged for costs storage only and `list({ prefix })` finds
 it. Both are this section's window; put-then-charge is the side on which the
-loss is findable, and retention (#65) is what sweeps it.
+loss is findable, and the sweep at close (#65) is what finds it.
 
 **A lost write: durable delivery.** `src/outbox.ts`:
 
@@ -1071,12 +1119,12 @@ loss is findable, and retention (#65) is what sweeps it.
 4. **Named alarms.** An object has one alarm, so handlers share it: each has a
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
-   session record, and a stored row wins. `SessionDO` has three handlers,
-   `outbox`, `abandoned` and `heartbeat`, and only `outbox` is stored. The
-   abandonment time is derived from the members' `lastSeenAt` (`abandonedAt`,
-   #18), so a room written before named alarms, or before rooms persisted, is
-   still swept; a socket vouching for a member moves it a window ahead instead
-   of closing the room.
+   session record, and a stored row wins. `SessionDO` has five handlers,
+   `outbox`, `abandoned`, `heartbeat`, `sweep` and `purge`, and only `outbox`
+   is stored. The abandonment time is derived from the members' `lastSeenAt`
+   (`abandonedAt`, #18), so a room written before named alarms, or before rooms
+   persisted, is still swept; a socket vouching for a member moves it a window
+   ahead instead of closing the room.
    The tick (#111) is derived from `nextTickAt`, which asks each member
    at its own `lastReport + cadence` — except one already due at the preceding
    tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
@@ -1086,6 +1134,40 @@ loss is findable, and retention (#65) is what sweeps it.
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.
+
+   `sweep` runs once when a room closes and deletes the objects under its R2
+   prefix that no surface item names, crediting the room their bytes (#65, D3).
+   `purge` fires at `closedAt + retainAfterCloseMs`, the window the creator's plan
+   stamped on the room, or at `purgeAt` when a delete asked for it sooner: bytes
+   first, then the registry's rows and an audit entry per org, then the record,
+   and last the room's watchers, whose polls are settled with nothing and whose
+   sockets are closed with 1000 "room purged". A crash between leaves a record
+   whose next wake purges again. What the order guarantees is never bytes that no
+   record can find, the orphan the sweep exists for. It does not keep a record
+   from naming bytes that are gone: between the bucket's delete and the wipe, and
+   after a crash between them until the next wake, the record exists and its
+   objects do not, and a download of one answers 404, as it does for any
+   reference that dangles. Both are derived from the record, like `abandoned`,
+   and a closed row from before #65 carries no window and is kept.
+
+   Four things keep the pair from spinning or losing anything. A name derived
+   with no branch in `alarm()` is never consumed, so the sweep sets `blobsSwept`,
+   which takes it out of the derived times, and the purge deletes the record,
+   which takes everything out. When both are due the purge wins and the sweep is
+   skipped. The purge delivers what the outbox still owes before it empties the
+   object, and a row that will not deliver holds the purge back, because an audit
+   entry queued in the storage the last step deletes would go with it. And every
+   place a room closes re-arms the alarm, since a close that queues nothing
+   would otherwise leave it pointing at an abandonment time months off;
+   `SessionDO.getSession` re-arms it too when it reads a closed room whose sweep
+   or purge is due, for work the runtime gave up on, and leaves the work itself
+   to the alarm. A dropped alarm is recovered by the next read of the room and by
+   nothing else: a room nobody reads again keeps what it owes until someone does.
+   The runtime retries a throwing alarm a few times and then says nothing of
+   which object it gave up on, so `alarm()` writes the room id and the handler
+   name to the log before it rethrows, and that line is the only record. The
+   audit entry carries `purge:<room>:<org>` as its intent id, which
+   `AuditDO.append` dedupes on, so a purge run twice files one entry per org.
 
 It is used three times:
 
@@ -1315,6 +1397,9 @@ The heartbeat is the safer half of that rule. A stored `due:` row that an older
 build never consumes is the spin above; a derived due time that a build does not
 know is never computed, so there is nothing for it to leave behind. Rolling back
 past #111 strands no row and needs no cleanup, where rolling back past #62 does.
+The sweep and the purge (#65) are derived the same way, so rolling back past them
+strands nothing either: an older build never computes the names, and a room it
+finds closed is kept. What a rollback cannot undo is a purge that has already run.
 An alarm already armed for a tick fires once into a build that knows the
 `abandoned` name, which finds nothing to run and re-arms for the abandonment
 time. A build older than #18 does not know that name: for a row #18 rewrote, its

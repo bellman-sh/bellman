@@ -16,6 +16,9 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
     // A room is what a plan already rations, so nothing here is monthly.
     blobBytesPerRoom: 50 * 1024 * 1024,
+    // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
+    // max and team until someone with the right to delete it does.
+    retainAfterCloseMs: 7 * 24 * 60 * 60 * 1000,
   },
   pro: {
     modes: ["pair", "swarm"],
@@ -23,9 +26,11 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 500 * 1024 * 1024,
+    retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
   },
   // Coming soon. With no room lifetime and no member cap (#18), max differs from
-  // pro by creates and the blob ceiling alone, so nothing sells it: no Stripe price names it and
+  // pro by creates, the blob ceiling and how long a closed room is kept (#65), so
+  // nothing sells it: no Stripe price names it and
   // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404. It
   // stays here because a hand grant still works and because it is the shape
   // hosted agents (#188, #189) attach their facet to. tests/auth.test.ts pins
@@ -36,6 +41,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    retainAfterCloseMs: null,
   },
   team: {
     modes: ["pair", "swarm"],
@@ -43,6 +49,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: true,
     audit: true,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
+    retainAfterCloseMs: null,
   },
 };
 

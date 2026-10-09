@@ -119,18 +119,24 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | blobs / room | |
-| --- | --- | --- | --- | --- |
-| `free` | pair | 20 | 50 MB | |
-| `pro` | pair, swarm | 500 | 500 MB | |
-| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
-| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | kept after close | |
+| --- | --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | 7 days | |
+| `pro` | pair, swarm | 500 | 500 MB | 1 year | |
+| `max` | pair, swarm | 2,000 | 5 GB | until deleted | *coming soon*: hosted agents will be what sets it apart |
+| `team` | pair, swarm | 5,000 | 5 GB | until deleted | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
 A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
+
+**What happens after a room closes.** Its record and its files are kept for the window its creator's plan promised, stamped on the room at creation like the blob ceiling (the *kept after close* column), and then deleted for good, files first. A plan change later never shortens a room that was already promised a window. Until then a closed room reads as it always has, and any file nobody placed on its surface is cleared out the moment it closes, with its bytes credited back. The window is set when a room is created, so a room created before this existed has none and is kept until someone deletes it, whatever its plan, even when it closes after the deploy.
+
+- `DELETE /rooms/:id` deletes a closed room now, for its creator or an admin of an org that sat in it. It answers `202` with `{ id, purge_at }`, `purge_at` being the time the room is stored to go (a repeated delete is told the first one's), and the purge follows within moments; a room that has not closed answers `409`, because a room is deleted after it closes, never before.
+- `GET /rooms/:id` carries `closed_at` and `purge_at` as ISO times, to a member as to an admin: when the room closed and when it goes. Each is `null` where the record has none, so an open room has neither and a room kept until it is deleted has no `purge_at`.
+- On the team plan an org's admin can read any closed room one of that org's people sat in, though they never held a seat: `GET /rooms/:id` answers with `viewer: "admin"`, `GET /rooms/:id/surface` returns the whole surface, a file on it downloads through `GET /rooms/:id/blobs/:blobId` as it does for a member, and `GET /rooms?as=admin` lists those rooms, newest close first. An admin the room's creator removed reads the closed room the same way, since what a removal cuts is a seat's reading and they no longer hold one; their removed handles are still listed in `my_handles`. It is a read: an admin writes nothing to the room, so a surface write or an upload from one is a `403`, and an open room stays its members' alone. The list reads up to 500 rooms from the org's index, open ones among them, keeps the closed ones and returns the newest 50 by close; `truncated: true` says the index held that many, or more than 50 were closed. That scan costs up to 500 room reads for one request, which the summary index of #49 removes. A room created before this deploy is not in the index, though reading that room by its id still works.
 
 ## Run it
 

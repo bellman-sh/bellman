@@ -122,5 +122,44 @@ export function describeBlobStoreContract(name: string, makeStore: () => BlobSto
       await store.put(sid, "44".repeat(16), stream(text("two!")), meta(4, { name: "two.txt" }));
       expect(await store.head(sid, "44".repeat(16))).toMatchObject({ bytes: 4, name: "two.txt" });
     });
+
+    // The listing and the purge (#65) work on a room's prefix and on nothing else: D1 again, for the
+    // calls that reach many objects at once. The foreign room's id is `${sid}_other`, which shares every
+    // character of the prefix up to the slash, so a prefix that forgot its terminator would take it too.
+    it("lists a room's objects with their sizes and deletes exactly those, leaving another room's", async () => {
+      const mine = ["a1", "a2", "a3"].map((p) => p.repeat(16));
+      for (const [i, id] of mine.entries()) await store.put(sid, id, stream(text("x".repeat(i + 3))), meta(i + 3));
+      await store.put(`${sid}_other`, "b1".repeat(16), stream(text("keep")), meta(4));
+
+      const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : 1);
+      expect((await store.list(sid)).sort(byId)).toEqual(mine.map((id, i) => ({ id, bytes: i + 3 })));
+      expect(await store.list(`${sid}_other`)).toEqual([{ id: "b1".repeat(16), bytes: 4 }]);
+
+      expect(await store.deleteAll(sid)).toBe(3);
+      expect(await store.list(sid)).toEqual([]);
+      for (const id of mine) expect(await store.head(sid, id), id).toBeNull();
+      expect(await store.head(`${sid}_other`, "b1".repeat(16)), "another room's object is left").not.toBeNull();
+      expect(await store.deleteAll(sid), "a second call finds nothing").toBe(0);
+    });
+
+    it("lists nothing and deletes nothing for a room that never held an object", async () => {
+      expect(await store.list(sid)).toEqual([]);
+      expect(await store.deleteAll(sid)).toBe(0);
+    });
+
+    // R2 answers at most 1,000 keys a page, so a room one object past that is the smallest one whose
+    // listing and deletion have to follow a cursor. A store that read the first page only would answer
+    // 1,000 and leave the last object behind.
+    it("lists and deletes a room that holds more objects than one page of a listing", async () => {
+      const ids = Array.from({ length: 1_001 }, (_, i) => i.toString(16).padStart(32, "0"));
+      for (let from = 0; from < ids.length; from += 100) {
+        await Promise.all(ids.slice(from, from + 100).map((id) =>
+          store.put(sid, id, new Uint8Array([1]).buffer as ArrayBuffer, meta(1))));
+      }
+
+      expect((await store.list(sid)).map((o) => o.id).sort()).toEqual(ids);
+      expect(await store.deleteAll(sid)).toBe(ids.length);
+      expect(await store.list(sid)).toEqual([]);
+    });
   });
 }

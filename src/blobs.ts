@@ -171,6 +171,10 @@ export interface BlobStore {
   get(sessionId: string, id: string, ifNoneMatch?: string): Promise<BlobRead>;
   /** Idempotent: deleting nothing is not an error. */
   delete(sessionId: string, id: string): Promise<void>;
+  /** Every object under this room's prefix, ids and sizes, for the sweep and the purge (#65). */
+  list(sessionId: string): Promise<{ id: string; bytes: number }[]>;
+  /** Delete every object under this room's prefix; the count removed. Idempotent. */
+  deleteAll(sessionId: string): Promise<number>;
 }
 
 /** A body whose length is not the one declared. The route answers 400 from it. */
@@ -324,5 +328,19 @@ export class MemoryBlobStore implements BlobStore {
 
   async delete(sessionId: string, id: string): Promise<void> {
     this.objects.delete(blobKey(sessionId, id));
+  }
+
+  async list(sessionId: string): Promise<{ id: string; bytes: number }[]> {
+    const prefix = blobKey(sessionId, "");
+    return [...this.objects]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, object]) => ({ id: key.slice(prefix.length), bytes: object.meta.bytes }));
+  }
+
+  async deleteAll(sessionId: string): Promise<number> {
+    const prefix = blobKey(sessionId, "");
+    const keys = [...this.objects.keys()].filter((key) => key.startsWith(prefix));
+    for (const key of keys) this.objects.delete(key);
+    return keys.length;
   }
 }

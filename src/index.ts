@@ -2,8 +2,10 @@ import { createApp } from "./app.js";
 import { MemoryBlobStore } from "./blobs.js";
 import { MemoryStore, type BellmanStore } from "./store.js";
 
-const store: BellmanStore = new MemoryStore();
-const app = createApp(store, new MemoryBlobStore());
+// One blob store for the routes, the tools and the store: the purge deletes from the same bucket they serve.
+const blobs = new MemoryBlobStore();
+const store: BellmanStore = new MemoryStore({ blobs });
+const app = createApp(store, blobs);
 
 // Periodic expiry of sessions and pending connect tokens.
 setInterval(() => {

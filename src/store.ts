@@ -2,7 +2,11 @@ import type {
   AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
   SurfaceRow,
 } from "./types.js";
+import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
+import {
+  creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
+} from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
@@ -511,6 +515,32 @@ export function decideBlobCharge(
   return { ok: true, used: used + bytes };
 }
 
+/**
+ * What a delete on demand was told (#65, D6). `purgeAt` is the time the room is stored with: the first
+ * request's, whatever time a repeated one asked for. A client that asks again is told when the room goes,
+ * and that is the record's word and not the clock of the request that is answering.
+ */
+export type PurgeSchedule =
+  | { ok: true; purgeAt: number }
+  | { ok: false; reason: "open" | "missing" };
+
+/**
+ * How many ids an index is read for, per call, when its rows are resolved and filtered before the answer
+ * is full. The joined index lists every room a person ever held a handle in, closed ones included, in no
+ * promised order, and is never pruned (`BellmanStore.sessionsJoinedBy`), so a window the size of the
+ * answer, taken before the closed filter, cut live rooms for anyone past 50 memberships, and the cut was
+ * permanent. The org index is the same shape (`sessionsForOrg`): open and closed rooms together, in no
+ * promised order, so the admin's list asks it for this many and keeps the closed rooms of what it finds,
+ * and the monitor's listing asks the joined index for the same. The created index needs no such room:
+ * `sessionsCreatedBy` drops closed rows as it meets them.
+ *
+ * Each id the filter drops costs one `getSession`, so this is also the bound on that spend.
+ * ponytail: a person whose live rooms sit past 500 dead memberships loses them from the monitor's
+ * listing, and an org whose closed rooms sit past 500 index rows loses them from the admin's list; the
+ * upgrade is a status-aware or pruned index, or a summary of the org's closed rooms (#49).
+ */
+export const JOINED_SCAN = 500;
+
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -767,6 +797,40 @@ export interface BellmanStore {
   /** Freeze or thaw a session. null thaws. */
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
+   * Ask for a closed room to be purged at `at` rather than at the end of its window (#65, D6):
+   * the delete on demand. Resolves to `{ ok: true, purgeAt }` for a closed room, `reason: "open"`
+   * for a room that has not closed, which a delete never closes, and `reason: "missing"` for a room
+   * that is not there, a purged one included. The purge itself is the store's own to carry out, by
+   * `sweep` for MemoryStore and by the room's alarm for the Durable Objects store, so `ok` means
+   * asked, not done.
+   *
+   * Asking again changes nothing and files nothing: the first request stands. A client that
+   * retries a delete it never heard the answer to is the case, and the audit log owes one
+   * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
+   * `purgeAt` says the same of the time: it is the one the room is stored with, the first
+   * request's, and a repeat is told that and not the `at` it asked for. `by` is null when the
+   * caller is not a person.
+   */
+  schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
+  /**
+   * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
+   * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
+   * uploads that never reached an item: a put whose answer was lost, and a charge that threw and
+   * was kept on purpose (#183). Resolves to how many objects it removed and how many bytes that
+   * freed.
+   *
+   * Nothing happens to a room that is open, whose unnamed object is an upload between its put and
+   * its charge or its item, or to one that is not there: `{ removed: 0, credited: 0 }`.
+   *
+   * The credit lands once. Two sweeps that overlap list the same objects and free the same bytes,
+   * and the first to commit sets `blobsSwept`; the other changes the bucket and nothing else.
+   *
+   * MemoryStore calls this as a room closes, and from `sweep` for a room whose close it did not
+   * see; the Durable Objects store calls it from the room's alarm, due the moment the room closes
+   * and never again.
+   */
+  sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }>;
+  /**
    * Sessions this user created that are not closed — newest first is not
    * promised, only that a lapsed plan can find the rooms it has to freeze. The
    * create *counts* used for quota cannot answer that: they are timestamps, not
@@ -834,12 +898,30 @@ export interface BellmanStore {
    * This answers which rooms a person HELD a handle in, so a closed one is the
    * history being asked for rather than a tombstone, and a row whose room has
    * closed is still a true answer. The growth is the cost of that promise.
+   * The one thing that prunes it is the purge (#65): a room that has been deleted
+   * is no room at all, and its rows go with it.
    *
    * Order is not promised, and it differs between the stores — insertion order
    * in MemoryStore, key order in the Durable Objects store — so which rooms
    * survive `limit` is unspecified too.
    */
   sessionsJoinedBy(userId: string, limit: number): Promise<string[]>;
+  /**
+   * Rooms an org sat in, closed ones included (#65, D5): the ids the admin's list resolves. A room
+   * is listed for the org of everyone it is created with, and for the org of each member who joins
+   * it afterwards, so a person from another org joining adds the room to their org's list as well.
+   * A member with no org adds it to none. The one thing that removes a row is the purge.
+   *
+   * Ids only, as `sessionsJoinedBy` answers them, and for the same reasons: no status parameter,
+   * because the admin's list wants the closed rooms and a freeze sweep would want others; the
+   * caller resolves each id and checks the record, since an index row names a room and only the
+   * roster says whether the org is in it; and no order is promised, so which rooms survive `limit`
+   * is unspecified.
+   *
+   * The Durable Objects store starts at its deploy, as its other indexes do: a room created
+   * before then is not listed, and the admin's read of it by id works all the same.
+   */
+  sessionsForOrg(orgId: string, limit: number): Promise<string[]>;
 
   /**
    * Append an event. Null means the session is frozen, for the same reason.
@@ -976,6 +1058,13 @@ export interface BellmanStore {
   appendAudit(a: AuditEntry): Promise<void>;
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
 
+  /**
+   * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
+   * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
+   * sweeps the unnamed objects of a closed room whose close it did not see (#65), and drops
+   * expired connect tokens. MemoryStore does all of it here; the Durable Objects store does
+   * none, because each room's alarm does its room's.
+   */
   sweep(now: number): Promise<void>;
 }
 
@@ -988,6 +1077,8 @@ export class MemoryStore implements BellmanStore {
   private byJoinCode = new Map<string, string>();
   private byCreator = new Map<string, Set<string>>();
   private byMember = new Map<string, Set<string>>();
+  /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
+  private byOrg = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private grants = new Map<string, PlanGrant>();
@@ -1006,6 +1097,16 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /**
+   * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
+   * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
+   * store holds one of its own, which has nothing in it unless the caller put it there.
+   */
+  private readonly blobs: BlobStore;
+
+  constructor(options: { blobs?: BlobStore } = {}) {
+    this.blobs = options.blobs ?? new MemoryBlobStore();
+  }
 
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
@@ -1018,6 +1119,7 @@ export class MemoryStore implements BellmanStore {
     // hands over the creator in `members` and never calls addMember — so they
     // are indexed here. addMember indexes everyone who joins afterwards.
     for (const m of stored.members) this.indexMember(m.userId, stored.id);
+    for (const orgId of orgsOnRoster(stored)) this.indexOrg(orgId, stored.id);
   }
 
   /**
@@ -1029,6 +1131,14 @@ export class MemoryStore implements BellmanStore {
     const joined = this.byMember.get(userId) ?? new Set<string>();
     joined.add(sessionId);
     this.byMember.set(userId, joined);
+  }
+
+  /** The org index's one writer (#65, D5), for the same reason: a member with no org writes nothing. */
+  private indexOrg(orgId: string | null, sessionId: string): void {
+    if (!orgId) return;
+    const rooms = this.byOrg.get(orgId) ?? new Set<string>();
+    rooms.add(sessionId);
+    this.byOrg.set(orgId, rooms);
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
@@ -1100,6 +1210,7 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused add leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
+    this.indexOrg(member.orgId, sessionId);
     return true;
   }
 
@@ -1130,6 +1241,7 @@ export class MemoryStore implements BellmanStore {
     s.members.push(detach(member));
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
+    this.indexOrg(member.orgId, sessionId);
 
     // A full room has no seat for ANY role, so every code goes — decided and
     // written here rather than by the caller afterwards. As a second call made
@@ -1275,6 +1387,7 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s) return;
     this.closeNow(s);
+    await this.sweepAfterClose(sessionId);
   }
 
   async closeSessionIfEmpty(sessionId: string): Promise<boolean> {
@@ -1283,11 +1396,53 @@ export class MemoryStore implements BellmanStore {
     // No await from here to the write, deliberately. The check and the close are
     // one operation, and a yield between them is the window a join lands in: the
     // same rule, and the same reason, as waitForEvents and the guarded grant
-    // writes. The Durable Objects store gets it from a transaction instead.
+    // writes. The Durable Objects store gets it from a transaction instead. The
+    // sweep that follows is after the close, so it is outside that rule.
     if (s.closed) return true;
     if (s.members.some(isActiveMember)) return false;
     this.closeNow(s);
+    await this.sweepAfterClose(sessionId);
     return true;
+  }
+
+  /**
+   * The sweep as a room closes (#65, D3), for the store that has no alarm to run it. A bucket that
+   * refuses must not turn a close that happened into a failure: the room is closed either way,
+   * `blobsSwept` stays false, and `sweep` finds the room and tries again.
+   */
+  private async sweepAfterClose(sessionId: string): Promise<void> {
+    // Only a sweep that is owed: a second close of a room already swept looks at nothing.
+    const s = this.sessions.get(sessionId);
+    if (!s || sweepDueAt(s) === null) return;
+    try {
+      await this.sweepBlobs(sessionId);
+    } catch (err) {
+      console.error(`sweep of ${sessionId} failed; the next sweep tries again:`, err);
+    }
+  }
+
+  async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
+    const room = this.sessions.get(sessionId);
+    if (!room || !room.closed) return { removed: 0, credited: 0 };
+    // The objects are listed before the rows are read, so an object an item names is listed first
+    // and named after, never the reverse.
+    const listed = await this.blobs.list(sessionId);
+    const orphans = unnamedObjects(listed, await this.surfaceOf(sessionId));
+    let credited = 0;
+    for (const object of orphans) {
+      await this.blobs.delete(sessionId, object.id);
+      credited += object.bytes;
+    }
+    // Read again, because the awaits above are where a purge or another sweep could get in. Only the
+    // sweep that finds `blobsSwept` still false credits the room, so two that listed the same
+    // objects do not free the same bytes twice.
+    const s = this.sessions.get(sessionId);
+    if (s && !s.blobsSwept) {
+      const charged = (s as { blobBytes?: number }).blobBytes ?? 0;
+      (s as { blobBytes?: number }).blobBytes = creditedBlobBytes(charged, credited);
+      s.blobsSwept = true;
+    }
+    return { removed: orphans.length, credited };
   }
 
   /**
@@ -1297,9 +1452,15 @@ export class MemoryStore implements BellmanStore {
    *
    * Agrees with closeIfAbandoned: a closed room's codes stop resolving AND stop
    * occupying the index, rather than relying on the `closed` guard alone.
+   *
+   * Dates the close once (#65): `closedAt` is where the retention window starts, so a
+   * second close, or a read that finds the room closed again, must not move it. `at` is
+   * the clock of the caller that has one, so an abandonment is dated as its
+   * `session_expired` event is.
    */
-  private closeNow(s: Session): void {
+  private closeNow(s: Session, at = Date.now()): void {
     s.closed = true;
+    s.closedAt ??= at;
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     s.joinCodes = {};
   }
@@ -1340,6 +1501,17 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
+  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "missing" };
+    if (!s.closed) return { ok: false, reason: "open" };
+    // Asked already: the first request stands, is on the record once, and is the time the answer gives.
+    if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
+    s.purgeAt = at;
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    return { ok: true, purgeAt: at };
+  }
+
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const mine = this.byCreator.get(userId);
     if (!mine) return [];
@@ -1366,6 +1538,10 @@ export class MemoryStore implements BellmanStore {
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
     return [...(this.byMember.get(userId) ?? [])].slice(0, limit);
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    return [...(this.byOrg.get(orgId) ?? [])].slice(0, limit);
   }
 
   async appendEvent(
@@ -1731,9 +1907,48 @@ export class MemoryStore implements BellmanStore {
 
   async sweep(now: number): Promise<void> {
     for (const s of this.sessions.values()) this.closeIfAbandoned(s, now);
+    // After the abandonment pass, so a room it has just closed is judged on the same clock. Walked
+    // from a copy, because a purge deletes from the map.
+    for (const s of [...this.sessions.values()]) {
+      const purge = purgeDueAt(s);
+      if (purge !== null && now >= purge) {
+        // The purge wins when the sweep is due as well: it deletes every object and the room, so a
+        // sweep first is work thrown away.
+        await this.purgeNow(s, now);
+        continue;
+      }
+      const sweep = sweepDueAt(s);
+      if (sweep !== null && now >= sweep) await this.sweepBlobs(s.id);
+    }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
     }
+  }
+
+  /**
+   * The purge (#65, D2), in the order the Durable Objects store keeps: the bytes first, then what
+   * the rest of the store holds about the room, then the room. The first step is the only one that
+   * can fail, and it fails before anything is forgotten, so a failed purge leaves a room the next
+   * sweep tries again. What the order guarantees is never bytes that no record can find. It does not
+   * keep a room from naming bytes that are gone: from the bucket's delete to the forgetting the room
+   * is there and its objects are not, and a download of one answers 404, as it does for any
+   * reference that dangles.
+   *
+   * A poll still waiting on the room is answered with nothing rather than dropped: it registered a
+   * promise, and its own timer would find no waiter to settle.
+   */
+  private async purgeNow(s: Session, now: number): Promise<void> {
+    await this.blobs.deleteAll(s.id);
+    this.byCreator.get(s.createdBy)?.delete(s.id);
+    for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
+    for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
+    for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, now)));
+    for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
+    this.waiters.delete(s.id);
+    this.keys.delete(s.id);
+    this.surfaces.delete(s.id);
+    this.sessions.delete(s.id);
   }
 
   /** Resolve every waiter on a session from its own cursor. */
@@ -1761,7 +1976,7 @@ export class MemoryStore implements BellmanStore {
       s.members = stampSeen(s.members, now, connected);
       return;
     }
-    this.closeNow(s);
+    this.closeNow(s, now);
     const event: SessionEvent = {
       cursor: s.events.length + 1,
       type: "session_expired" as EventType,

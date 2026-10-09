@@ -283,7 +283,7 @@ describe("the room routes over the Node server (#183)", () => {
     const res = await fetch(`${base}/rooms`, { headers: { authorization: "Bearer qk_dev_outsider" } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    expect(await res.json()).toEqual({ rooms: [], truncated: false });
+    expect(await res.json()).toEqual({ rooms: [], truncated: false, viewer: "member" });
   });
 
   // A handler that throws is answered by the route module, in JSON. Left to Express, a rejected async handler

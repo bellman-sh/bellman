@@ -34,9 +34,10 @@ const SERVER_VERSION = "0.1.0";
  * `tests/extension.test.ts` asserts the two against each other. The resource is
  * registered last; it is not a tool, and the manifest does not list it.
  *
- * `blobs` is the blob seam (#183), handed only to `bellman_send`, whose `file`
- * and `image` items read it; it has no default, so a deploy that forgets the
- * binding does not compile rather than serving a store that forgets.
+ * `blobs` is the blob seam (#183), handed only to `bellman_send`, whose `file`,
+ * `image` and blob-backed `html` items read it; it has no default, so a deploy
+ * that forgets the binding does not compile rather than serving a store that
+ * forgets.
  */
 export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });

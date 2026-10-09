@@ -15,7 +15,7 @@ import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
 
-export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image"] as const satisfies readonly SurfaceKind[];
+export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html"] as const satisfies readonly SurfaceKind[];
 
 // ponytail: ceilings, not tuned. 64 keeps a full read inside one tool response;
 // the first room past it wants pagination, not a bigger number. 8,000 is the
@@ -76,7 +76,7 @@ const PlacementShape = z.strictObject({
 const EndsShape = z.strictObject({ from: SurfaceKeyShape, to: SurfaceKeyShape });
 
 /**
- * The blob a `file` or `image` names (#183, D5): the id and nothing else.
+ * The blob a `file`, an `image` or an `html` item names (#183, D5): the id and nothing else.
  * `bytes`, `type` and `name` are the server's to set from the object, so an item
  * sent back as it was read is refused for them until the sender takes them off,
  * as it is for `cursor` and `at`.
@@ -159,7 +159,8 @@ export function normalizeSurfaceWrite(
   const refuse = (reason: string) => ({ ok: false as const, reason: `surface ${v.kind} "${v.key}": ${reason}` });
 
   // A file or an image is blob-backed (#183): its bytes are the object's, so it
-  // names a blob and carries no body. Nothing else may name one.
+  // names a blob and carries no body. Nothing else may name one but an html item,
+  // which carries its page in body or names a blob, never both (#185).
   const blobBacked = v.kind === "file" || v.kind === "image";
   if (v.kind === "connector") {
     if (!v.ends) return refuse("a connector needs ends { from, to } naming two items");
@@ -170,11 +171,16 @@ export function normalizeSurfaceWrite(
     if (blobBacked) {
       if (!v.blob) return refuse("a file or an image needs blob { id } naming a blob uploaded to this room");
       if (v.body) return refuse("a file or an image has no body; its bytes are the blob's");
+    } else if (v.kind === "html") {
+      // An artifact is inline or a blob, never both (#185, D1): a hosted connector with no
+      // bridge still has a way onto the surface, and anything larger is an upload.
+      if (v.body && v.blob) return refuse("an html item is inline (body) or a blob (blob: { id }), not both");
+      if (!v.body && !v.blob) return refuse("an html item needs a body (the page, inline) or blob { id } naming a blob stored as text/html");
     } else if (!v.body) {
       return refuse("needs a body");
     }
   }
-  if (v.blob && !blobBacked) return refuse("only a file or an image names a blob");
+  if (v.blob && !blobBacked && v.kind !== "html") return refuse("only a file, an image or an html item names a blob");
 
   if (v.kind === "link") {
     if (v.body!.length > MAX_SURFACE_LINK_CHARS) {

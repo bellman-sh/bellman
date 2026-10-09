@@ -362,6 +362,21 @@ describe("GET /rooms/:id/blobs/:blobId", () => {
       .toBe("attachment; filename*=UTF-8''r%C3%A9sum%C3%A9%20%281%29.md");
   });
 
+  // An html item names a blob stored as text/html (#185). What a panel fetches for it is the bytes the
+  // writer uploaded, labelled as the upload labelled them, and this origin never serves them as a page.
+  it("serves a page uploaded as text/html; charset=utf-8 as an octet-stream download with its bytes intact", async () => {
+    const page = "<!doctype html><title>demo</title><script>document.cookie</script>";
+    const { blob_id, type } = await stored(page, { name: "demo.html", type: "text/html; charset=utf-8" });
+    expect(type, "the upload stores the bare type, which is the one an html item accepts").toBe("text/html");
+    const res = (await download(DEV_KEY.jesse, blob_id))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/octet-stream");
+    expect(res.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''demo.html");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("content-security-policy")).toBe("sandbox");
+    expect(await res.text()).toBe(page);
+  });
+
   it("answers 304 to a matching If-None-Match, with the ETag, the download headers, CORS and no body", async () => {
     const { blob_id } = await stored("cached", { name: "c.txt" });
     const etag = (await download(DEV_KEY.jesse, blob_id))!.headers.get("etag")!;

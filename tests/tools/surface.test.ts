@@ -10,6 +10,7 @@ import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
+import { SURFACE_KINDS } from "../../src/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
@@ -273,6 +274,24 @@ describe("tool surface", () => {
     // in the text, so that slip passes here.
     for (const kind of kinds!) {
       expect(send.description, `${kind} missing from the description`).toContain(kind);
+    }
+  });
+
+  // The loop above reads the send kinds, so a kind added to SURFACE_KINDS with no clause in the `surface` line
+  // would pass it (#185 is the case this closes). This one reads the Kinds sentence alone, from `Kinds:` to the
+  // `placement is` after it, so a kind whose name appears elsewhere in the description (`code` is in "code/doc/data
+  // payload") still has to be named in that sentence. It is still a substring of the sentence: `text` is satisfied
+  // by `text/html` inside it, so this catches a kind added without a clause, not the removal of `text`'s.
+  it("names every surface kind in the Kinds sentence of bellman_send's description", async () => {
+    const { tools } = await jesse.listTools();
+    const description = tools.find((t) => t.name === "bellman_send")!.description!;
+    const from = description.indexOf("Kinds:");
+    const to = description.indexOf("placement is", from);
+    expect(from, "the surface line has a Kinds: sentence").toBeGreaterThanOrEqual(0);
+    expect(to, "and it ends where `placement is` begins").toBeGreaterThan(from);
+    const sentence = description.slice(from, to);
+    for (const kind of SURFACE_KINDS) {
+      expect(sentence, `${kind} missing from the Kinds sentence`).toContain(kind);
     }
   });
 });

@@ -249,10 +249,10 @@ export interface RoomManifest {
 /**
  * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
  * client is shown maps to a shape the server validates, and a kind lands with
- * its validator. `file` and `image` (#183) reference a blob; `html` arrives
- * with piece 4.
+ * its validator. `file` and `image` (#183) reference a blob; `html` (#185) is
+ * a page inline in body or a blob, never both.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html";
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -278,8 +278,9 @@ export interface BlobRef {
  * An item as written, normalised: every optional field present as null, so a
  * reader never tells "absent" from "null". `ends` is a connector's two keys;
  * every other kind has none. `body` is markdown for `text`, a URL for `link`,
- * mermaid source for `diagram`, a label for `connector`, and absent for `file`
- * and `image`, whose bytes are the blob's.
+ * mermaid source for `diagram`, a label for `connector`, the page for `html`
+ * unless it names a blob, and absent for `file` and `image`, whose bytes are the
+ * blob's.
  */
 export interface SurfaceItem {
   key: string;
@@ -288,7 +289,7 @@ export interface SurfaceItem {
   body: string | null;
   ends: { from: string; to: string } | null;
   placement: Placement | null;
-  /** The blob a `file` or `image` names; null for every other kind. */
+  /** The blob a `file`, an `image` or a blob-backed `html` item names; null for every other. */
   blob: BlobRef | null;
 }
 

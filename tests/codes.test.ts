@@ -20,9 +20,14 @@ describe("join codes", () => {
     expect(seen.size).toBeGreaterThan(20); // the generator is actually varying
   });
 
-  it("does not repeat itself across a large sample", () => {
-    const codes = new Set(Array.from({ length: 2_000 }, () => renderJoinCode("reviewer")));
-    expect(codes.size).toBe(2_000);
+  // A large sample is the point, so it stays 2,000 draws. They are six random characters from a 31-letter alphabet
+  // (887,503,681 codes, and `byte % 31` is slightly biased), and the birthday arithmetic says at least one repeat
+  // turns up in about 1 run in 440 (0.229%; 17 of 8,000 simulated runs, 0.21%) but two or more only in about 1 in
+  // 380,000. Asking for none failed one CI run in 440 on any branch; asking for at most one means a red here is
+  // the generator, not the dice.
+  it("repeats at most one code across a large sample", () => {
+    const codes = Array.from({ length: 2_000 }, () => renderJoinCode("reviewer"));
+    expect(new Set(codes).size).toBeGreaterThanOrEqual(codes.length - 1);
   });
 
   it("normalizes case and whitespace from a relayed code", () => {

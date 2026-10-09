@@ -86,8 +86,8 @@ describe("the preset routes", () => {
     const saved = await bodyOf(res);
     expect(saved).toMatchObject({ name: "my_review", mode: "pair", heartbeat_on: null, default_role: "reviewer", creator_role: "author" });
     expect(saved.roles).toEqual({
-      author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: false },
-      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false },
+      author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: false, report: null },
+      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false, report: null },
     });
     expect(typeof saved.updated_at).toBe("string");
     expect(await store.getPreset("u_jesse", "my_review")).toEqual(saved);

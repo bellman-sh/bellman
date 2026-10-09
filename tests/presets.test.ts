@@ -31,8 +31,8 @@ describe("checkPreset", () => {
         mode: "pair",
         heartbeat_on: "5m",
         roles: {
-          author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: true },
-          reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false },
+          author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: true, report: null },
+          reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false, report: null },
         },
         default_role: "reviewer",
         creator_role: "author",

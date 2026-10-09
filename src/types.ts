@@ -286,6 +286,13 @@ export interface RoleDef {
    * silent for behaving exactly as its role describes.
    */
   reports: boolean;
+  /**
+   * What this seat reports when the heartbeat ticks: the room creator's words, at
+   * most 300 characters, only on a seat that answers it (heartbeat instructions
+   * spec D1, D2). Optional in the type because a row written before it has none,
+   * and read as null on every row (`withHeartbeatDefaults`): plan ruling R1.
+   */
+  report?: string | null;
 }
 
 export interface RoomManifest {
@@ -317,7 +324,7 @@ export interface SavedPreset {
   description: string | null;
   mode: SessionMode;
   heartbeat_on: string | null;
-  roles: Record<string, { can: Verb[]; description: string | null; reports: boolean }>;
+  roles: Record<string, { can: Verb[]; description: string | null; reports: boolean; report?: string | null }>;
   default_role: string;
   creator_role: string;
   /**

@@ -3,9 +3,9 @@
  *
  * Everything a wake does is decided here and only here, so `HostDO` (Workers) and
  * `MemoryHost` (Node) cannot drift: what a wake means, what the model is asked, how
- * the answer is read, how the seat's own state moves. Both drivers do three things
- * this module cannot — read the room, call the model, write the event — and nothing
- * else.
+ * the answer is read, how the seat's own state moves, when a failed call is tried
+ * again. Both drivers (`HostDriver`) do what this module cannot — read the room, call
+ * the model, write the event, keep the seat's record, set a timer — and nothing else.
  *
  * Imports `store.ts` and never the reverse at runtime: `store.ts` seats, meters and
  * wakes the host with the few facts it defines itself (the seat's ids,
@@ -14,7 +14,8 @@
  */
 import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
 import type { OutboxIntent } from "./outbox.js";
-import { HOST_MEMBER_ID, HOST_USER_ID } from "./store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, type HostAppend } from "./store.js";
+import { monthKey, type StoredSession } from "./stored-session.js";
 
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
 export { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./store.js";
@@ -191,4 +192,113 @@ export function applyDecision(state: HostState, decision: HostDecision, sent: { 
     return { cursor: sent.cursor, lastCause: last.cursor, questions };
   }
   return state;
+}
+
+/** When each retry of a failed model call goes (spec D6): 1, 5 and 15 minutes after the call before it. */
+export const RETRY_MS: readonly number[] = [60_000, 300_000, 900_000];
+
+/** Model calls one wake may have, in either driver: the first and three retries, so 4. The spec's "three attempts" are the retries. */
+export const MAX_ATTEMPTS = 1 + RETRY_MS.length;
+
+/** What a seat keeps between wakes (spec D4): its loop state, the wake it is retrying, the failed calls that wake has had, and the month of its last notice. */
+export interface HostRecord extends HostState { pending: HostWake | null; attempts: number; noticed: string | null }
+
+export const emptyHostRecord = (): HostRecord => ({ ...emptyHostState(), pending: null, attempts: 0, noticed: null });
+
+/**
+ * What a runtime does for `handleWake` (spec D7). `HostDO` reads and writes the room by
+ * RPC and keeps the record in its own storage, under its own alarm; `MemoryHost` does the
+ * same over a `MemoryStore`, a map and a timer. Every decision is `handleWake`'s.
+ */
+export interface HostDriver {
+  /** The delay before each retry, in order: `RETRY_MS`, or shorter in a test. */
+  readonly retryMs: readonly number[];
+  read(sessionId: string): Promise<{ room: StoredSession | undefined; events: (cursor: number) => Promise<SessionEvent[]> }>;
+  /** One Messages API call, `callMessages`. Throws when the model cannot be reached. */
+  callModel(body: object): Promise<{ status: number; json: unknown }>;
+  write(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend>;
+  load(sessionId: string): Promise<HostRecord>;
+  save(sessionId: string, record: HostRecord): Promise<void>;
+  /** Run the record's pending wake again in `inMs`. */
+  schedule(sessionId: string, inMs: number): Promise<void>;
+}
+
+/** One Messages API call, as both drivers make it. `fetcher` is the runtime's `fetch`, so a network failure throws. */
+export async function callMessages(
+  fetcher: (url: string, init: RequestInit) => Promise<Response>,
+  url: string,
+  apiKey: string | undefined,
+  body: object,
+): Promise<{ status: number; json: unknown }> {
+  const res = await fetcher(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": apiKey ?? "", "anthropic-version": "2023-06-01" },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, json: await res.json().catch(() => null) };
+}
+
+/**
+ * One wake, start to finish (spec D4–D6), whichever driver runs it.
+ *
+ * Settled, meaning `lastCause` raised to the wake's cursor and nothing pending, when the
+ * room is gone, `decide` skips, the month cannot pay, the model's answer is unreadable,
+ * or the room refuses the write. The meter is read before the model is called, so a wake
+ * the month cannot pay for costs no call; the room charges again in the write's own
+ * transaction, and that charge is the one that counts. A 429, a 5xx or a model that
+ * cannot be reached is the model's failure: the wake is kept as pending and run again
+ * after the next of `driver.retryMs`, up to MAX_ATTEMPTS calls, then settled. Anything
+ * else that throws (the room, the record) propagates, and the room's outbox delivers the
+ * wake again, which `lastCause` makes safe.
+ */
+export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<void> {
+  const record = await driver.load(wake.sessionId);
+  const settle = (r: HostRecord) =>
+    driver.save(wake.sessionId, { ...r, lastCause: Math.max(r.lastCause, wake.cursor), pending: null, attempts: 0 });
+
+  const { room, events } = await driver.read(wake.sessionId);
+  if (!room) return settle(record);
+  const read = wake.cause === "reply" ? await events(record.cursor) : [];
+  const decision = decide(record, wake, room, read, now);
+  if (decision.kind === "skip") return settle(record);
+
+  const host = room.manifest.host!; // decide skips a room without one
+  const units = unitsFor(host.model);
+  const label = `${host.role}@bellman`;
+  /** One notice a month, outside the meter: written with zero units, so the spent month it reports cannot refuse it. */
+  const notice = async (used: number, allowed: number): Promise<HostRecord> => {
+    const month = monthKey(now);
+    if (record.noticed === month) return record;
+    await driver.write(wake.sessionId, {
+      type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: label,
+      payload: { kind: "notice", text: `The host has used its ${allowed} units this month (${used} spent; a ${host.model} wake costs ${units}). It is quiet until the month turns.` },
+      refId: null,
+    }, 0, now);
+    return { ...record, noticed: month };
+  };
+
+  if (room.hostUnits.month === monthKey(now) && room.hostUnits.used + units > room.hostUnitsPerMonth) {
+    return settle(await notice(room.hostUnits.used, room.hostUnitsPerMonth));
+  }
+
+  const prompt = decision.kind === "question"
+    ? questionPrompt(room.manifest, record)
+    : answerPrompt(room.manifest, decision.question.text, decision.replies);
+  const res = await driver.callModel(messagesBody(host.model, prompt)).catch(() => null);
+  if (res === null || res.status === 429 || res.status >= 500) {
+    if (record.attempts + 1 >= MAX_ATTEMPTS) return settle(record);
+    await driver.save(wake.sessionId, { ...record, pending: wake, attempts: record.attempts + 1 });
+    return driver.schedule(wake.sessionId, driver.retryMs[record.attempts]);
+  }
+  const text = parseModelText(res.json);
+  if (text === null) return settle(record);
+
+  const refId = decision.kind === "question" ? String(decision.refId) : String(decision.question.cursor);
+  const written = await driver.write(wake.sessionId, {
+    type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: label,
+    payload: { kind: decision.kind, text }, refId,
+  }, units, now);
+  if (!written.ok) return settle(written.reason === "units" ? await notice(written.used, written.allowed) : record);
+  const next = applyDecision(record, decision, { cursor: written.event.cursor, text }, now);
+  await driver.save(wake.sessionId, { ...record, ...next, pending: null, attempts: 0 });
 }

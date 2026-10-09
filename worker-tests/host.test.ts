@@ -14,17 +14,22 @@ const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 
  * The model, stubbed at `fetch`. `fetchMock` left `cloudflare:test` at pool 0.22.0; the
  * pool runs this Worker's objects in the test's own isolate, so `HostDO` calls this.
  * Only a POST to the Messages API matches, one queued reply each, in order. Anything
- * else throws, as `disableNetConnect` did, and a reply left unread fails the test in
- * `afterEach`, as `assertNoPendingInterceptors` did.
+ * else throws, as `disableNetConnect` did, and is recorded: the seat retries a model it
+ * cannot reach, so the throw alone would not fail a case. A stray call or a reply left
+ * unread fails the test in `afterEach`, as `assertNoPendingInterceptors` did.
  */
 const replies: { status: number; text: string }[] = [];
+const stray: string[] = [];
 const modelAnswers = (text: string, status = 200) => { replies.push({ status, text }); };
 
 beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const req = new Request(input, init);
     const reply = req.method === "POST" && req.url === ANTHROPIC_MESSAGES_URL ? replies.shift() : undefined;
-    if (!reply) throw new Error(`the model stub has no reply for ${req.method} ${req.url}`);
+    if (!reply) {
+      stray.push(`${req.method} ${req.url}`);
+      throw new Error(`the model stub has no reply for ${req.method} ${req.url}`);
+    }
     return Response.json(reply.status === 200 ? { content: [{ type: "text", text: reply.text }] } : { error: { type: "rate_limit" } },
       { status: reply.status });
   });
@@ -32,8 +37,10 @@ beforeEach(() => {
 afterEach(async () => {
   vi.restoreAllMocks();
   const unread = replies.splice(0);
+  const calls = stray.splice(0);
   await reset();
   await abortAllDurableObjects();
+  expect(calls, "model calls no case queued a reply for").toEqual([]);
   expect(unread, "model replies queued and never read").toEqual([]);
 });
 
@@ -110,7 +117,7 @@ it("a spent month gets one notice outside the meter, then silence", async () => 
     const s = await ctx.storage.get<Record<string, unknown>>("session");
     await ctx.storage.put("session", { ...s, hostUnits: { month: monthKey(Date.now()), used: 10, wakes: [] } });
   });
-  // No reply queued: the meter refuses before the model is called, and a call would throw in the stub.
+  // No reply queued: the meter refuses before the model is called, and a call would be a stray one.
   await host.wake({ sessionId: id, cause: "tick", cursor: 1 }, "host:tick:1");
   const notices = (await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID);
   expect(notices).toHaveLength(1);

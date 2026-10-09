@@ -1090,6 +1090,9 @@ export class MemoryStore implements BellmanStore {
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
 
+  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`. */
+  constructor(private readonly options: { host?: (wake: HostWake) => void } = {}) {}
+
   async createSession(s: Session): Promise<void> {
     const stored = detach(s);
     this.sessions.set(stored.id, stored);
@@ -1470,11 +1473,13 @@ export class MemoryStore implements BellmanStore {
 
   /**
    * Called synchronously once an append has landed that wakes the hosted seat
-   * (hosted seat spec, D4). Nothing here: a subclass, or the Node server's seat,
-   * says what a wake does. `SessionDO` queues the same wakes as outbox rows, in
-   * the event's own transaction.
+   * (hosted seat spec, D4): hands the wake to `options.host`, the Node server's
+   * `MemoryHost`, or to nothing when none was given. `SessionDO` queues the same
+   * wakes as outbox rows, in the event's own transaction.
    */
-  protected hostWoken(_wake: HostWake): void {}
+  protected hostWoken(wake: HostWake): void {
+    this.options.host?.(wake);
+  }
 
   /**
    * Wake the hosted seat if `event` is one of the two causes (spec D4): a

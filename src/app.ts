@@ -1,9 +1,10 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import express, { type Express, type Request as ExpressRequest } from "express";
+import express, { type Express, type Request as ExpressRequest, type Response as ExpressResponse } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./blobs.js";
+import { presetRoutes } from "./http/presets.js";
 import { roomRoutes } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
@@ -21,7 +22,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore): Express {
   const app = express();
 
   /**
-   * The room routes (#183), mounted ahead of the JSON body parser so an
+   * The room routes (#183) and the preset routes, mounted ahead of the JSON body parser so an
    * upload's body reaches the route as the stream it was sent as. Express
    * speaks Node's req/res and the module speaks Request/Response, so this
    * translates: the headers and the body in (streamed, duplex half), the
@@ -30,28 +31,28 @@ export function createApp(store: BellmanStore, blobs: BlobStore): Express {
    * open here too — over the same MemoryBlobStore `buildServer` heads, with
    * the static key map as the only caller (there is no OAuth and no panel here).
    */
-  app.use("/rooms", async (req, res) => {
-    const answer = await roomRoutes(toRequest(req), {
-      store,
-      blobs,
-      caller: async (request) => {
-        const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
-        return identity ? { identity, via: "bearer" } : null;
-      },
-      panelOrigins: [],
-    });
-    if (!answer) {
-      res.status(404).send("Not found");
-      return;
-    }
-    res.status(answer.status);
-    answer.headers.forEach((value, name) => res.setHeader(name, value));
-    if (!answer.body) {
-      res.end();
-      return;
-    }
-    Readable.fromWeb(answer.body as unknown as NodeReadableStream).pipe(res);
-  });
+  /** One shared route module, translated: Node's request in as the web one it reads, its Response out. */
+  const serve = (routes: (request: Request) => Promise<Response | undefined>) =>
+    async (req: ExpressRequest, res: ExpressResponse) => {
+      const answer = await routes(toRequest(req));
+      if (!answer) {
+        res.status(404).send("Not found");
+        return;
+      }
+      res.status(answer.status);
+      answer.headers.forEach((value, name) => res.setHeader(name, value));
+      if (!answer.body) {
+        res.end();
+        return;
+      }
+      Readable.fromWeb(answer.body as unknown as NodeReadableStream).pipe(res);
+    };
+  const caller = async (request: Request) => {
+    const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
+    return identity ? { identity, via: "bearer" as const } : null;
+  };
+  app.use("/rooms", serve((request) => roomRoutes(request, { store, blobs, caller, panelOrigins: [] })));
+  app.use("/presets", serve((request) => presetRoutes(request, { store, caller, panelOrigins: [] })));
 
   app.use(express.json({ limit: "1mb" }));
 

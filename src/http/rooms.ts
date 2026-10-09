@@ -76,14 +76,14 @@ const DOWNLOAD_HEADERS = {
   "content-security-policy": "sandbox",
 } as const;
 
-const json = (status: number, body: unknown, origin: string | undefined) =>
+export const json = (status: number, body: unknown, origin: string | undefined) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store", ...corsHeaders(origin) },
   });
 
 /** The shape the OAuth routes answer errors in, so the panel reads one error form. */
-const problem = (status: number, error: string, description: string, origin: string | undefined) =>
+export const problem = (status: number, error: string, description: string, origin: string | undefined) =>
   json(status, { error, error_description: description }, origin);
 
 const overQuota = (used: number, ceiling: number, bytes: number, origin: string | undefined) =>
@@ -94,7 +94,7 @@ const overQuota = (used: number, ceiling: number, bytes: number, origin: string 
     ceiling,
   }, origin);
 
-const methodNotAllowed = (allow: string, origin: string | undefined) =>
+export const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
 
 /**

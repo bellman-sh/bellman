@@ -74,7 +74,7 @@ function item(over: Partial<SurfaceItemWire> & { key: string; kind: string }, au
   return {
     trust: "untrusted",
     origin: by(author),
-    data: { title: null, body: null, ends: null, placement: null, blob: null, cursor: 1, at: iso(T0 - 120_000), ...over },
+    data: { title: null, body: null, ends: null, placement: null, blob: null, shape: null, cursor: 1, at: iso(T0 - 120_000), ...over },
   };
 }
 

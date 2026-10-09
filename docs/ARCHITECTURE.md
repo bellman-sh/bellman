@@ -882,8 +882,9 @@ loud:
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
   kinds only inside a frame served from a cross-site origin with no credential,
-  no network and an opaque document origin (the dash repo's sandbox, #185 and
-  its spec's D2 to D4). The server's part of that boundary is the download rule
+  an opaque document origin and no network through anything its policy governs
+  (the dash repo's sandbox, #185 and its spec's D2 to D4; WebRTC is outside
+  CSP in Chromium, which the spec's D5 and the kind's contract say). The server's part of that boundary is the download rule
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
@@ -1420,6 +1421,10 @@ the canvas branch, the listing was 6,605, so the branch's share is 270:
 between 6,605 and the 6,516 recorded next were there before the branch: that
 measurement was taken before #18's changes to `bellman_start`'s text landed,
 as #206 noted when it recorded it.
+
+The `html` line gained a WebRTC clause after the sandbox review (2026-10-09,
+with the spec's D5): about 35 tokens more by an approximate count, on top of
+the 6,875; the listing was not re-measured in full.
 
 Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,516
 tokens in all, of which `bellman_rooms` (#28) is 255 and the `_meta.ui` on

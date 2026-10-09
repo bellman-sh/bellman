@@ -1,4 +1,4 @@
-import type { RoomManifest, Session } from "./types.js";
+import type { HostUnits, RoomManifest, Session } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
@@ -72,10 +72,13 @@ export interface StoredSession extends Omit<Session, "events"> {
   blobBytes?: number;
 }
 
+/** The UTC calendar month a time falls in, as the hosted-seat meter keys it. */
+export const monthKey = (now: number): string => new Date(now).toISOString().slice(0, 7);
+
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Eight changes to the stored shape landed after the sessions now in production
+ * Ten changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -112,8 +115,16 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   written before the field was stamped from no plan, so the conservative
  *   number is the honest one, and it ends with the room rather than being
  *   migrated.
+ * - **hostUnitsPerMonth / hostUnits** (hosted seat) default to `0` and an empty
+ *   month: a room written before the seat has no host, so it may spend nothing
+ *   and has spent nothing. A stamped meter is left alone, so a read never hands
+ *   back units the room already spent.
+ * - **manifest.host** defaults to `null`, for the reason the cadence does: a
+ *   manifest that never mentioned a host declares none, so the default invents
+ *   nothing. Left alone it reads as `undefined`, which a guard written
+ *   `=== null` takes for a host.
  *
- * All eight live here, in one gate, rather than in separate functions that could drift.
+ * All ten live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -137,6 +148,8 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     // Required on the type, absent on a row written before #183: the cast says
     // so where `??` alone would read as redundant.
     blobBytesCeiling: (row as { blobBytesCeiling?: number }).blobBytesCeiling ?? ENTITLEMENTS.free.blobBytesPerRoom,
+    hostUnitsPerMonth: (row as { hostUnitsPerMonth?: number }).hostUnitsPerMonth ?? 0,
+    hostUnits: (row as { hostUnits?: HostUnits }).hostUnits ?? { month: monthKey(Date.now()), used: 0, wakes: [] },
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),
@@ -145,7 +158,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
 /**
  * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
- * null, and `reports` a boolean on every role.
+ * null, `host` a config or null, and `reports` a boolean on every role.
  *
  * The types already say so, because every row written since the heartbeat has
  * both. The `??` is for the rows that predate it. New objects all the way down
@@ -156,6 +169,7 @@ function withHeartbeatDefaults(m: RoomManifest): RoomManifest {
   return {
     ...m,
     heartbeatOnMs: m.heartbeatOnMs ?? null,
+    host: m.host ?? null,
     roles: Object.fromEntries(
       Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false }]),
     ),

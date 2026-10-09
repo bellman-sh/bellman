@@ -11,6 +11,7 @@ import { ManifestError, ManifestShape, resolveManifest } from "../manifest.js";
 import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL } from "../store.js";
 import type { BellmanStore } from "../store.js";
+import { monthKey } from "../stored-session.js";
 
 export function registerStart(server: McpServer, identity: Identity, s: BellmanStore): void {
   // -------------------------------------------------------------- bellman_start
@@ -106,6 +107,11 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // The room's own byte ceiling (#183), from the plan creating it. Nothing
         // downstream asks a plan again.
         blobBytesCeiling: ent.blobBytesPerRoom,
+        // The hosted seat's allowance and meter (hosted seat spec, D3). 0 until this
+        // handler stamps the plan's `hostUnitsPerRoom`, so a room created here cannot
+        // spend a unit yet; the meter starts empty in this month.
+        hostUnitsPerMonth: 0,
+        hostUnits: { month: monthKey(now), used: 0, wakes: [] },
         members: [creator],
         events: [],
         closed: false,

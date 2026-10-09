@@ -711,6 +711,7 @@ describe("INVARIANT 10 — every room is declared", () => {
       defaultRole: "navigator",
       creatorRole: "driver",
       heartbeatOnMs: null,
+      host: null,
     });
     expect(capacityOf(session!.manifest)).toBe(2);
     const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;

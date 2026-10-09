@@ -25,6 +25,7 @@ roles are yours to maintain.
 | Two members, equal footing | `preset: pair` |
 | Several members, one runs the room | `preset: swarm` |
 | Someone brings work, someone else critiques it | `preset: review` |
+| Several members, and Bellman asks the room a question each tick | `preset: social` |
 | A role that holds a combination no preset offers | author roles |
 
 Reach for authored roles when you can name the seat and the reason: "the CI
@@ -35,7 +36,7 @@ agent may send but must never invite", "auditors read and nothing else".
 ```yaml
 room: payments-migration
 purpose: Port Stripe v2 to v3   # optional, ≤300 chars
-preset: review                  # pair | swarm | review
+preset: review                  # pair | swarm | review | social
 ```
 
 That is the entire file. Adding `roles`, `mode`, `default_role` or
@@ -68,6 +69,16 @@ What each preset expands to:
 
 `reviewer` answers action requests but cannot start one. That asymmetry is the
 point of the preset: review flows one way.
+
+**`social`** — mode `swarm`. A room with a hosted seat: Bellman runs `host`, which
+asks the room a question each tick and answers in the thread. The beat is hourly;
+`heartbeat_on` next to `preset` slows it, up to `24h`, and never speeds it.
+
+| Role | Can | |
+|---|---|---|
+| `lead` | send, invite, revoke, request_actions, respond_actions, write_surface | creator |
+| `guest` | send | default |
+| `host` | send | Bellman runs it |
 
 ## Step 2b — author roles
 

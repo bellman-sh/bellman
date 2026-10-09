@@ -134,6 +134,10 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /** Units the hosted seat may spend a calendar month: the plan's `hostUnitsPerRoom`, or 0 for a room with no host. */
+  hostUnitsPerMonth: number;
+  /** The meter. See `HostUnits`. */
+  hostUnits: HostUnits;
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
@@ -202,6 +206,10 @@ export interface Entitlements {
    * a plan already rations.
    */
   blobBytesPerRoom: number;
+  /** Rooms with a hosted seat a person may create a month (spec D2). */
+  hostedRoomsPerMonth: number;
+  /** Units a hosted room may spend a month, stamped on the room at creation (spec D3). */
+  hostUnitsPerRoom: number;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
@@ -213,7 +221,32 @@ export type Verb =
   | "respond_actions"
   | "write_surface";
 
-export type PresetName = "pair" | "swarm" | "review";
+export type PresetName = "pair" | "swarm" | "review" | "social";
+
+/** The names a manifest may give `host.model`. The ids and weights live in src/host.ts. */
+export type HostModelName = "haiku" | "sonnet" | "opus";
+
+/**
+ * The one hosted seat a room may declare (hosted seat spec, D1). `role` names a
+ * declared role holding exactly `send`; `instructions` is creator prose bounded
+ * like `purpose`, and null means Bellman's defaults alone.
+ */
+export interface HostConfig {
+  role: string;
+  model: HostModelName;
+  instructions: string | null;
+}
+
+/**
+ * The room's hosted-seat meter (spec D3): `month` is the UTC calendar month the
+ * count is for, `used` the units spent in it, `wakes` the epoch ms of the wakes
+ * in the last hour, for the burst cap.
+ */
+export interface HostUnits {
+  month: string;
+  used: number;
+  wakes: number[];
+}
 
 export interface RoleDef {
   can: Verb[];
@@ -244,6 +277,8 @@ export interface RoomManifest {
    * reading silence reads it against the same number every member was given.
    */
   heartbeatOnMs: number | null;
+  /** The hosted seat, or null for a room with none. Immutable with the rest. */
+  host: HostConfig | null;
 }
 
 /**

@@ -145,17 +145,24 @@ describe("plan entitlements", () => {
 
   /**
    * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
-   * differs from pro by creates and the blob ceiling alone; hosted agents (#188, #189) are the facet
-   * that will set it apart, and landing one is a deliberate edit to this line.
+   * differs from pro by creates, the blob ceiling and the hosted seat (#188);
+   * landing another facet is a deliberate edit to this line.
    */
-  it("gives max nothing but creates and the blob ceiling over pro, until it has a facet", () => {
-    const { monthlyCreates: maxCreates, blobBytesPerRoom: maxBlobs, ...maxRest } = ENTITLEMENTS.max;
-    const { monthlyCreates: proCreates, blobBytesPerRoom: proBlobs, ...proRest } = ENTITLEMENTS.pro;
+  it("gives max creates, the blob ceiling and the hosted seat over pro, and nothing else", () => {
+    const { monthlyCreates: mc, blobBytesPerRoom: mb, hostedRoomsPerMonth: mh, hostUnitsPerRoom: mu, ...maxRest } = ENTITLEMENTS.max;
+    const { monthlyCreates: pc, blobBytesPerRoom: pb, hostedRoomsPerMonth: ph, hostUnitsPerRoom: pu, ...proRest } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
-    expect(maxCreates).toBe(2000);
-    expect(proCreates).toBe(500);
-    expect(maxBlobs).toBe(5 * 1024 * 1024 * 1024);
-    expect(proBlobs).toBe(500 * 1024 * 1024);
+    expect([mc, pc]).toEqual([2000, 500]);
+    expect([mb, pb]).toEqual([5 * 1024 * 1024 * 1024, 500 * 1024 * 1024]);
+    expect([mh, ph]).toEqual([3, 0]);
+    expect([mu, pu]).toEqual([3000, 0]);
+  });
+
+  it("gives the hosted seat to max and team only", () => {
+    expect(ENTITLEMENTS.free.hostedRoomsPerMonth).toBe(0);
+    expect(ENTITLEMENTS.pro.hostedRoomsPerMonth).toBe(0);
+    expect(ENTITLEMENTS.team.hostedRoomsPerMonth).toBe(5);
+    expect(ENTITLEMENTS.team.hostUnitsPerRoom).toBe(3000);
   });
 
   /** The reason a company with several people creating rooms still buys team. */
@@ -180,11 +187,14 @@ describe("plan entitlements", () => {
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
-   * bounds what a room stores, not who may join it.
+   * bounds what a room stores, not who may join it; `hostedRoomsPerMonth` and
+   * `hostUnitsPerRoom` (#188) bound what a person creates and what a hosted
+   * room spends, not who may join it either.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
       "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
+      "hostedRoomsPerMonth", "hostUnitsPerRoom",
     ].sort();
 
     for (const plan of plans) {

@@ -1008,6 +1008,13 @@ export interface BellmanStore {
    */
   schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
   /**
+   * Make a public room private for good (public rooms spec D2): set `unpublishedAt` to `at`, once.
+   * The first time stands, so a retry changes nothing, and a room that is not there is left not
+   * there: nothing is written for it. Who may ask is the route's to decide, as for `schedulePurge`.
+   * An open room and a closed one alike: a closed public room is readable until its purge (D7).
+   */
+  unpublishSession(sessionId: string, at: number): Promise<void>;
+  /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
    * uploads that never reached an item: a put whose answer was lost, and a charge that threw and
@@ -1766,6 +1773,12 @@ export class MemoryStore implements BellmanStore {
     s.purgeAt = at;
     this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
     return { ok: true, purgeAt: at };
+  }
+
+  async unpublishSession(sessionId: string, at: number): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.unpublishedAt != null) return;
+    s.unpublishedAt = at;
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

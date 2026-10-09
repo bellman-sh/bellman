@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./blobs.js";
 import { presetRoutes } from "./http/presets.js";
+import { publicRoutes } from "./http/public.js";
 import { roomRoutes } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
@@ -57,6 +58,7 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   };
   app.use("/rooms", serve((request) => roomRoutes(request, { store, blobs, caller, panelOrigins: [] })));
   app.use("/presets", serve((request) => presetRoutes(request, { store, caller, panelOrigins: [] })));
+  app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
 
   app.use(express.json({ limit: "1mb" }));
 

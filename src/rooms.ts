@@ -252,6 +252,14 @@ export function findMember(s: StoredSession, memberId: string, identity: Identit
 export const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
+/**
+ * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
+ * started, and not made private since. `=== true` and `== null` because the in-memory store does
+ * not hydrate, so a record there may carry neither field.
+ */
+export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
+  s.manifest.public === true && s.unpublishedAt == null;
+
 /** Every handle this person holds in the room, in roster order. Empty means a stranger. Structural, so a test can hand it a fixture. */
 export const handlesOf = (session: Pick<StoredSession, "members">, identity: Pick<Identity, "userId">): Member[] =>
   session.members.filter((m) => m.userId === identity.userId);

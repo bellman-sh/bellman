@@ -10,9 +10,10 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
+import { isPublic } from "../src/rooms.js";
 import { JOINED_SCAN, MemoryStore } from "../src/store.js";
 import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";
-import { member, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -1463,5 +1464,61 @@ describe("GET /rooms/:id/events", () => {
     await store.closeSession(ORG_ROOM);
     const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
     expect(texts(r)).toEqual(["said in the org's room"]);
+  });
+});
+
+describe("POST /rooms/:id/unpublish (public rooms)", () => {
+  const PUB = "qs_unpub";
+  const publicRoom = () => session({ id: PUB, manifest: roomManifest({ public: true }), members: [member(), peer()] });
+  const unpublish = (key: string | null, room = PUB, over: CallOptions = {}) =>
+    call(key, `/rooms/${room}/unpublish`, { method: "POST", ...over });
+  const stillPublic = async () => isPublic((await store.getSession(PUB))!);
+
+  beforeEach(async () => {
+    await store.createSession(publicRoom());
+  });
+
+  it("lets the creator make the room private: 204, and 204 again, and the first time stands", async () => {
+    expect((await unpublish(DEV_KEY.jesse))!.status).toBe(204);
+    const at = (await store.getSession(PUB))!.unpublishedAt;
+    expect(at).not.toBeNull();
+    expect(await stillPublic()).toBe(false);
+    expect((await unpublish(DEV_KEY.jesse))!.status).toBe(204);
+    expect((await store.getSession(PUB))!.unpublishedAt).toBe(at);
+  });
+
+  it("refuses a member who is not the creator with 403, and the room stays public", async () => {
+    const res = (await unpublish(DEV_KEY.peer))!;
+    expect(res.status).toBe(403);
+    expect(await bodyOf(res)).toMatchObject({ error: "forbidden", error_description: "only the room's creator may make it private" });
+    expect(await stillPublic()).toBe(true);
+  });
+
+  it("answers a stranger and an unknown room with one 404", async () => {
+    const stranger = (await unpublish(DEV_KEY.outsider))!;
+    const unknown = (await unpublish(DEV_KEY.jesse, "qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+    expect(await stillPublic()).toBe(true);
+  });
+
+  it("refuses no credential, and a cookie with no Origin; takes the panel's", async () => {
+    expect((await unpublish(null))!.status).toBe(401);
+    expect((await unpublish(null, PUB, { cookie: DEV_KEY.jesse }))!.status).toBe(403);
+    expect(await stillPublic()).toBe(true);
+    const real = (await unpublish(null, PUB, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect([real.status, real.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+  });
+
+  it("takes POST alone", async () => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${PUB}/unpublish`))!;
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "POST"]);
+  });
+});
+
+describe("GET /rooms/:id says whose room it is", () => {
+  it("marks the creator's room mine, and nobody else's", async () => {
+    expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`))).toMatchObject({ mine: true });
+    expect(await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`))).toMatchObject({ mine: false });
   });
 });

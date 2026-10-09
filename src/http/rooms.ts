@@ -20,7 +20,7 @@ import { entitlementsFor } from "../auth.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
-  sanitizeName, storedType, type BlobStore,
+  sanitizeName, storedType, type BlobRead, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
@@ -66,6 +66,7 @@ const EVENTS = /^\/rooms\/([^/]+)\/events$/;
 const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
+const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 const STATUS: Record<RoomFailure, number> = {
@@ -81,6 +82,22 @@ const DOWNLOAD_HEADERS = {
   "x-content-type-options": "nosniff",
   "content-security-policy": "sandbox",
 } as const;
+
+/**
+ * A blob's answer once a door has read it (D4): the download headers on a 304 and a 200 alike, the
+ * bytes as stored for an image on the allowlist, served inline, and everything else (a PDF,
+ * markdown, an SVG, an HTML artifact) an octet-stream download under its label. Nothing from here
+ * is ever text/html. The member download and the public one (public rooms spec D3) both answer here.
+ */
+export function blobResponse(read: Exclude<BlobRead, null>, cors: Record<string, string>): Response {
+  const headers: Record<string, string> = { ...DOWNLOAD_HEADERS, ...cors, etag: read.etag };
+  if ("unchanged" in read) return new Response(null, { status: 304, headers });
+  const image = isImageType(read.type);
+  headers["content-type"] = image ? read.type : OCTET_STREAM;
+  headers["content-length"] = String(read.bytes);
+  if (!image) headers["content-disposition"] = attachmentDisposition(read.name);
+  return new Response(read.body, { status: 200, headers });
+}
 
 export const json = (status: number, body: unknown, origin: string | undefined) =>
   new Response(JSON.stringify(body), {
@@ -158,6 +175,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (download) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await downloadBlob(request, download[1], download[2], origin, deps);
+    }
+    const unpublish = UNPUBLISH.exec(path);
+    if (unpublish) {
+      if (request.method !== "POST") return methodNotAllowed("POST", origin);
+      return await unpublishRoom(request, unpublish[1], origin, deps);
     }
     return problem(404, "not_found", "no such route", origin);
   } catch (err) {
@@ -308,17 +330,7 @@ async function downloadBlob(
 
   const read = await deps.blobs.get(sessionId, blobId, request.headers.get("if-none-match") ?? undefined);
   if (read === null) return notFound();
-  const headers: Record<string, string> = { ...DOWNLOAD_HEADERS, ...corsHeaders(origin), etag: read.etag };
-  if ("unchanged" in read) return new Response(null, { status: 304, headers });
-
-  // As stored only for an image on the allowlist, served inline. Everything
-  // else — a PDF, markdown, an SVG, an HTML artifact (piece 4) — is an
-  // octet-stream download under its label. Nothing from here is ever text/html.
-  const image = isImageType(read.type);
-  headers["content-type"] = image ? read.type : OCTET_STREAM;
-  headers["content-length"] = String(read.bytes);
-  if (!image) headers["content-disposition"] = attachmentDisposition(read.name);
-  return new Response(read.body, { status: 200, headers });
+  return blobResponse(read, corsHeaders(origin));
 }
 
 /**
@@ -492,7 +504,8 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  *
  * Both envelopes carry `closed_at` and `purge_at` (`retentionOf`, review M8): when the room closed
  * and when it goes, so a member of a closed room can learn how long it has, and null where the
- * record has none.
+ * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
+ * R3): the creator alone may make a public room private.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -507,6 +520,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       id: session.id,
       session_status: sessionStatus(session),
       viewer: "admin",
+      mine: session.createdBy === who.identity.userId,
       ...retentionOf(session),
       preview: roomPreview(session, null),
       members: await liveRoster(deps.store, session),
@@ -525,6 +539,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     id: session.id,
     session_status: sessionStatus(session),
     viewer: "member",
+    mine: session.createdBy === who.identity.userId,
     ...retentionOf(session),
     preview: roomPreview(session, viewer.roomRole),
     members,
@@ -573,15 +588,41 @@ async function deleteRoom(request: Request, sessionId: string, origin: string | 
   return json(202, { id: sessionId, purge_at: new Date(scheduled.purgeAt).toISOString() }, origin);
 }
 
+/**
+ * Make a public room private (public rooms spec D2): its creator's alone, and for good, since its
+ * members joined on the preview's word and nothing makes a room public again. 204, and 204 again,
+ * since the store keeps the first time; a room that was never public is answered the same, as it is
+ * already what was asked.
+ *
+ * The delete's order of refusals: the CSRF check first for a cookie, one 404 for a person with no
+ * handle in the room and for a room that is not there, then a 403 for a member who is not the
+ * creator, who knows the room is there.
+ */
+async function unpublishRoom(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || handlesOf(session, who.identity).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  if (session.createdBy !== who.identity.userId) {
+    return problem(403, "forbidden", "only the room's creator may make it private", origin);
+  }
+  await deps.store.unpublishSession(sessionId, Date.now());
+  return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
+
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
-const surfaceTag = (cursor: number): string => `"${cursor}"`;
+export const surfaceTag = (cursor: number): string => `"${cursor}"`;
 
 /**
  * Whether an If-None-Match header names `tag`. A list, a weak validator and `*`
  * all count; anything else is a miss, so a garbled header costs a body and
  * never a 500.
  */
-const etagMatches = (header: string | null, tag: string): boolean =>
+export const etagMatches = (header: string | null, tag: string): boolean =>
   header !== null && header.split(",").some((v) => {
     const t = v.trim().replace(/^W\//, "");
     return t === "*" || t === tag;

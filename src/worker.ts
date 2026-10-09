@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { presetRoutes } from "./http/presets.js";
+import { publicRoutes } from "./http/public.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
@@ -225,6 +226,16 @@ export default {
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],
       });
+      if (handled) return handled;
+    }
+
+    // The public reads (public rooms spec D3): no credential, so no caller is composed. Behind the
+    // fail-closed guard the room routes share (plan ruling R7): a deploy that serves no room serves
+    // none in public either.
+    if (url.pathname === "/public" || url.pathname.startsWith("/public/")) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await publicRoutes(request, { store, blobs });
       if (handled) return handled;
     }
 

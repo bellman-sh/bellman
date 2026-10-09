@@ -13,6 +13,7 @@ import { resolveManifest } from "../src/manifest.js";
 
 const OLD_WORDS = `room: "my_review"
 purpose: "Review where the reviewer may ask too"
+public: true
 mode: "pair"
 heartbeat_on: "5m"
 housekeeping:
@@ -35,6 +36,7 @@ creator_role: "author"
 
 const EXPORTED = `room: "my_review"
 purpose: "Review where the reviewer may ask too"
+public: true
 mode: "pair"
 heartbeat: "5m"
 housekeeping:
@@ -72,7 +74,7 @@ describe("the panel's room.yaml export", () => {
     const m = resolveManifest(load(EXPORTED));
     expect(m).toMatchObject({
       room: "my_review", purpose: "Review where the reviewer may ask too", mode: "pair", preset: null,
-      defaultRole: "reviewer", creatorRole: "author", heartbeatOnMs: 300_000,
+      defaultRole: "reviewer", creatorRole: "author", heartbeatOnMs: 300_000, public: true,
     });
     expect(m.roles).toEqual({
       author: {

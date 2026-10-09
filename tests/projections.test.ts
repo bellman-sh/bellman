@@ -106,6 +106,7 @@ describe("the projection layer stays importable from both transports", () => {
     ["rooms.ts", resolve(SRC, "rooms.ts")],
     ["blobs.ts", resolve(SRC, "blobs.ts")],
     ["http/rooms.ts", resolve(SRC, "http/rooms.ts")],
+    ["http/public.ts", resolve(SRC, "http/public.ts")],
   ])("%s pulls in no runtime, transitively", (_name, entry) => {
     expect(offenders(entry)).toEqual([]);
   });
@@ -137,6 +138,7 @@ describe("the projection layer stays importable from both transports", () => {
     reachable(resolve(SRC, "rooms.ts"));
     reachable(resolve(SRC, "blobs.ts"));
     reachable(resolve(SRC, "http/rooms.ts"));
+    reachable(resolve(SRC, "http/public.ts"));
     expect(unresolved).toEqual([]);
   });
 

@@ -35,3 +35,22 @@ export function publicEvent(e: SessionEvent) {
     ...(isAmbient(e) ? { ambient: true as const } : {}),
   };
 }
+
+/**
+ * An event as anyone with a public room's link is shown it (public rooms spec D4): what a member
+ * is shown, less every brief. A `brief_update` is left out, null here. A `member_joined` keeps its
+ * joiner's member id, label and seat, each a string or null, and nothing else: the stored payload
+ * carries the brief, the org, the agent and the capabilities, and naming the three fields means a
+ * field a payload gains later is not shown by default (plan ruling R4).
+ */
+export function publicReadEvent(e: SessionEvent) {
+  if (e.type === "brief_update") return null;
+  const shown = publicEvent(e);
+  if (e.type !== "member_joined") return shown;
+  const joiner = (e.payload as { member?: Record<string, unknown> | null } | null)?.member;
+  const text = (key: string) => {
+    const v = joiner?.[key];
+    return typeof v === "string" ? v : null;
+  };
+  return { ...shown, payload: { member: { member_id: text("member_id"), label: text("label"), room_role: text("room_role") } } };
+}

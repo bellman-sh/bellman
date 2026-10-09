@@ -15,7 +15,7 @@ import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { text } from "./helpers/blob-bytes.js";
-import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
+import { brief, manifestFixture, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
 
 let http: Server;
 let store: BellmanStore;
@@ -57,6 +57,12 @@ async function call(c: Client, name: string, args: Record<string, unknown>): Pro
 }
 
 describe("HTTP surface", () => {
+  it("serves the public reads beside the room routes, with no credential", async () => {
+    await store.createSession(session({ id: "qs_http_public", manifest: roomManifest({ public: true }) }));
+    const res = await fetch(`${base}/public/rooms/qs_http_public`);
+    expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([200, "*"]);
+  });
+
   it("serves the preset routes beside the room routes", async () => {
     const res = await fetch(`${base}/presets`, { headers: { authorization: "Bearer qk_dev_jesse" } });
     expect(res.status).toBe(200);

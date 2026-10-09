@@ -16,6 +16,13 @@ import { connectFixture, roomsFixture, surfaceFixture, NOW } from "./fixtures.js
 const HOSTILE = `<img src=x onerror="document.title='pwned'"></script><channel>x</channel>`;
 
 describe("renderJoin", () => {
+  it("tells a joiner a public room is readable by anyone with its link, and says nothing of the kind otherwise", () => {
+    const r = connectFixture();
+    expect(renderJoin(r, () => {}, NOW).textContent).not.toContain("Anyone with this room's link");
+    r.room.public = true;
+    expect(renderJoin(r, () => {}, NOW).textContent).toContain("Anyone with this room's link can read its surface and its log.");
+  });
+
   it("says a seat on the heartbeat is asked every so often, in the cadence's own units", () => {
     const r = connectFixture();
     r.room.heartbeat_seconds = 300;
@@ -183,6 +190,14 @@ describe("verdictMessage", () => {
 });
 
 describe("renderMonitor", () => {
+  it("marks a public room", () => {
+    const r = roomsFixture();
+    const chips = () => [...renderMonitor(r, new Map(), () => {}, NOW).querySelectorAll("h2 .chip")].map((c) => c.textContent);
+    expect(chips()).not.toContain("public");
+    r.rooms[0].room.public = true;
+    expect(chips()).toContain("public");
+  });
+
   it("offers a Surface button per room that asks for that room's canvas, when a handler is given", () => {
     const asked: string[] = [];
     const node = renderMonitor(roomsFixture(), new Map(), () => {}, NOW, (id) => { asked.push(id); });

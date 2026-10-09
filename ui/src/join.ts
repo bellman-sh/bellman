@@ -139,6 +139,10 @@ export function renderJoin(
 
   return el("section", { class: "join" },
     el("h1", {}, "Join a Bellman room"),
+    // The server's fact, not the creator's words: outside the untrusted box, before the seat is chosen (public rooms spec D5).
+    r.room.public
+      ? el("p", {}, el("strong", {}, "Public room."), " Anyone with this room's link can read its surface and its log.")
+      : null,
     el("div", { class: "untrusted" },
       el("p", { class: "caption" }, byline),
       el("h2", {}, prose.room),

@@ -126,6 +126,23 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.manifest).toEqual(s.manifest);
     });
 
+    // ------------------------------------------------------------- public rooms
+    it("makes a room private once, open or closed: the first time stands, and a room that is not there stays not there", async () => {
+      const open = session({ id: "qs_pub_open", manifest: roomManifest({ public: true }) });
+      const closed = session({ id: "qs_pub_closed", manifest: roomManifest({ public: true }), closed: true, closedAt: Date.now(), joinCodes: {} });
+      for (const s of [open, closed]) await store.createSession(s);
+      expect((await store.getSession(open.id))?.unpublishedAt).toBeNull();
+
+      const first = Date.now();
+      for (const s of [open, closed]) {
+        await store.unpublishSession(s.id, first);
+        await store.unpublishSession(s.id, first + 60_000);
+        expect((await store.getSession(s.id))?.unpublishedAt, s.id).toBe(first);
+      }
+      await store.unpublishSession("qs_nope", first);
+      expect(await store.getSession("qs_nope")).toBeUndefined();
+    });
+
     it("returns undefined for an unknown session", async () => {
       expect((await store.getSession("qs_nope"))).toBeUndefined();
     });

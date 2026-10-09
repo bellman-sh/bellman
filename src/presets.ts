@@ -23,15 +23,18 @@ export type PresetCheck =
  * `housekeeping` (#66, D5) follows the same rule, so null means one thing on a cite
  * whichever field it is on: absent or null, the preset's own block stands, and a block
  * replaces it whole. An empty one says none, as it does in an authored manifest. A
- * preset saved before the field existed has no such key, which reads as none.
+ * preset saved before the field existed has no such key, which reads as none. A cite's
+ * `public`, when it gives one, replaces the preset's.
  */
 export function asManifest(
   p: SavedPreset, room: string, purpose: string | null | undefined, heartbeat?: string | null,
-  housekeeping?: HousekeepingInput | null,
+  housekeeping?: HousekeepingInput | null, citedPublic?: boolean | null,
 ): Record<string, unknown> {
   return {
     room,
     purpose: purpose ?? null,
+    // The preset's is the default and a cite's own wins (public rooms spec D1).
+    public: citedPublic ?? p.public ?? false,
     mode: p.mode,
     heartbeat: heartbeat ?? p.heartbeat,
     housekeeping: housekeeping ?? p.housekeeping,
@@ -120,6 +123,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     default_role: v.default_role,
     creator_role: v.creator_role,
     host: v.host == null ? null : { role: v.host.role, model: v.host.model, instructions: v.host.instructions ?? null },
+    public: v.public ?? false,
     updated_at: new Date(now).toISOString(),
   };
   return { ok: true, preset };

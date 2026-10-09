@@ -89,7 +89,9 @@ that way; the surface is where things stand.
 - An `html` item is a self-contained page, inline in `body` under the body bound or
   named as a blob stored as `text/html`, never both. The server stores and serves
   it as bytes; the panel renders it only in a sandboxed frame on another origin,
-  where it gets no network and no cookies (the frame is the dash repo's).
+  where it gets no cookies and no network through anything the frame's policy
+  governs; WebRTC is outside that policy, and the `html` line in `bellman_send`
+  says so (the frame is the dash repo's).
 - The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
   to the creator's seat alone; a manifest may give it to any seat. Reading is
   never gated.

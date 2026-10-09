@@ -455,10 +455,12 @@ export function builtinPresets(): SavedPreset[] {
       name,
       description: BUILTIN_DESCRIPTIONS[name],
       mode: body.mode,
-      heartbeat_on: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs, BEAT_UNITS),
+      heartbeat: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs, BEAT_UNITS),
       // No built-in sets housekeeping, `social` included (D5), and PresetBody cannot say it does.
       housekeeping: null,
-      roles: structuredClone(body.roles),
+      roles: Object.fromEntries(Object.entries(body.roles).map(([key, def]) => [
+        key, { can: [...def.can], description: def.description, heartbeat_on: def.report ?? def.reports },
+      ])),
       default_role: body.defaultRole,
       creator_role: body.creatorRole,
       host: structuredClone(body.host),

@@ -398,7 +398,8 @@ export interface SavedPreset {
   name: string;
   description: string | null;
   mode: SessionMode;
-  heartbeat_on: string | null;
+  /** How often the room ticks, as written (vocabulary spec D6); null for no heartbeat. */
+  heartbeat: string | null;
   /**
    * The housekeeping thresholds (#66) in the author arm's own keys, durations as
    * written, and only the keys the preset sets. Null when it sets none, which is
@@ -406,7 +407,8 @@ export interface SavedPreset {
    * existed, and read as null: none, as `host` is read.
    */
   housekeeping?: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
-  roles: Record<string, { can: Verb[]; description: string | null; reports: boolean; report?: string | null }>;
+  /** Each role's place on the heartbeat (vocabulary spec D6): false, true, or what it reports. */
+  roles: Record<string, { can: Verb[]; description: string | null; heartbeat_on: boolean | string }>;
   default_role: string;
   creator_role: string;
   /**

@@ -54,8 +54,8 @@ describe("a role's report instruction", () => {
   it("is saved with a preset and given back", () => {
     const body = { mode: "swarm", heartbeat_on: "5m", roles: authored({ report: "What you shipped" }).roles, default_role: "observer", creator_role: "lead" };
     const check = checkPreset("my_review", body, 0);
-    expect(check.ok && check.preset.roles.lead.report).toBe("What you shipped");
-    expect(check.ok && check.preset.roles.observer.report).toBeNull();
+    expect(check.ok && check.preset.roles.lead.heartbeat_on).toBe("What you shipped");
+    expect(check.ok && check.preset.roles.observer.heartbeat_on).toBe(false);
   });
 });
 

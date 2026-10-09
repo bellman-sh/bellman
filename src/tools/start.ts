@@ -8,7 +8,7 @@ import { hostMember } from "../host.js";
 import type { Brief, Capability, Identity, Member, RoomManifest, Session } from "../types.js";
 import { entitlementsFor } from "../auth.js";
 import { generateSessionId, joinUrl, renderJoinCode } from "../codes.js";
-import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest } from "../manifest.js";
+import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL } from "../store.js";
@@ -77,11 +77,11 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
             );
           }
           // The rule resolveManifest holds a built-in cite to, held here for a saved one.
-          checkCiteCadence(manifestInput.preset, saved.host != null, manifestInput.heartbeat_on);
+          // Either spelling of a cite's frequency (vocabulary spec D3), refused in the one it used (D5).
+          const beat = roomBeat(manifestInput);
+          checkCiteCadence(manifestInput.preset, saved.host != null, beat.raw, beat.word ?? "heartbeat_on");
           // A block the cite carries (#66, D5) replaces the preset's whole; asManifest says how.
-          input = asManifest(
-            saved, manifestInput.room, manifestInput.purpose, manifestInput.heartbeat_on, manifestInput.housekeeping,
-          );
+          input = asManifest(saved, manifestInput.room, manifestInput.purpose, beat.raw, manifestInput.housekeeping);
         }
         manifest = resolveManifest(input);
       } catch (e) {

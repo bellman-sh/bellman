@@ -14,6 +14,7 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
+import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -2135,12 +2136,12 @@ export class MemoryStore implements BellmanStore {
     const mine = this.presets.get(userId);
     if (!mine) return [];
     // Code-unit order, which is the registry's key order.
-    return detach([...mine.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
+    return detach([...mine.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))).map(presetInNewWords);
   }
 
   async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
     const p = this.presets.get(userId)?.get(name);
-    return p && detach(p);
+    return p && presetInNewWords(detach(p));
   }
 
   async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {

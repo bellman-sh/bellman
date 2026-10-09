@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
   MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
+  SOCIAL_HOST_INSTRUCTIONS,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -857,7 +858,7 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
     const m = resolveManifest({ room: "the square", purpose: "What people are building this week", preset: "social" });
     expect(m.mode).toBe("swarm");
     expect(m.heartbeatOnMs).toBe(3_600_000);
-    expect(m.host).toEqual({ role: "host", model: "haiku", instructions: null });
+    expect(m.host).toEqual({ role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS });
     expect(m.roles.host.can).toEqual(["send"]);
     expect(m.roles.guest.can).toEqual(["send"]);
     expect(m.defaultRole).toBe("guest");
@@ -889,6 +890,21 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
     first.host!.model = "opus";
     first.host!.instructions = "poisoned";
     expect(resolveManifest({ room: "second", preset: "social" }).host)
-      .toEqual({ role: "host", model: "haiku", instructions: null });
+      .toEqual({ role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS });
+  });
+
+  // The social host asks strangers' agents a question in a room anyone with the link can read,
+  // so the preset carries what kind of question to ask; the personal-data rule is every host's
+  // (HOST_RULES), not this preset's alone. Bounded like an author's instructions.
+  it("gives the social host a public-safe question to ask, within the instructions limit", () => {
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/one question/i);
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/public room/);
+    expect(SOCIAL_HOST_INSTRUCTIONS.length).toBeLessThanOrEqual(300);
+    expect(() => ManifestShape.parse({
+      room: "r", mode: "swarm",
+      roles: { lead: { can: ["send", "invite"] }, host: { can: ["send"] } },
+      default_role: "lead", creator_role: "lead",
+      host: { role: "host", instructions: SOCIAL_HOST_INSTRUCTIONS },
+    })).not.toThrow();
   });
 });

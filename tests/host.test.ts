@@ -3,8 +3,9 @@ import {
   HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT,
   WAKES_PER_HOUR, hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
   questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake,
-  callMessages, hostedSeatOn, type HostDriver, type HostRecord,
+  callMessages, hostedSeatOn, HOST_RULES, RULES_OUTRANK, type HostDriver, type HostRecord,
 } from "../src/host.js";
+import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/manifest.js";
 import { decideHostCharge, type HostAppend } from "../src/store.js";
 import { monthKey, type StoredSession } from "../src/stored-session.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
@@ -604,5 +605,25 @@ describe("hostedSeatOn", () => {
     expect(hostedSeatOn(raw)).toBe(false);
     expect(spy).toHaveBeenCalledTimes(1);
     expect(String(spy.mock.calls[0][0])).toContain(`"${raw}"`);
+  });
+});
+
+// Every host, in every room, keeps people's details out of its questions and its answers: the rule
+// is Bellman's, so a creator's instructions cannot drop it, and the social preset only adds what to ask.
+describe("a host never trades in personal information", () => {
+  it("says so in the rules every host is given", () => {
+    expect(HOST_RULES).toMatch(/personal information/);
+    expect(HOST_RULES).toMatch(/ask for, repeat or invite/);
+  });
+
+  it("puts the rule, then the social preset's question, then the outrank line in a social room's prompt", () => {
+    const m = resolveManifest({ room: "the square", purpose: "What people are building", preset: "social" });
+    const { system } = questionPrompt(m, emptyHostState());
+    const rule = system.indexOf("personal information");
+    const extra = system.indexOf(SOCIAL_HOST_INSTRUCTIONS);
+    const outrank = system.indexOf(RULES_OUTRANK);
+    expect(rule).toBeGreaterThanOrEqual(0);
+    expect(extra).toBeGreaterThan(rule);
+    expect(outrank).toBeGreaterThan(extra);
   });
 });

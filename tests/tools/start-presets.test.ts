@@ -47,6 +47,15 @@ describe("bellman_start citing a saved preset", () => {
     expect(room.roles).toEqual({ author: ["send", "invite", "revoke", "write_surface"], reviewer: ["send", "request_actions"] });
   });
 
+  it("starts a public room from a public preset, and a private one when the cite says so", async () => {
+    await h.store.putPreset("u_jesse", saved("open_review", { public: true }), 20);
+    const open = await jesse.call("bellman_start", { manifest: { room: "Open", preset: "open_review" }, brief: brief() });
+    const shut = await jesse.call("bellman_start", { manifest: { room: "Shut", preset: "open_review", public: false }, brief: brief() });
+    expect([open.isError, shut.isError], `${open.text} ${shut.text}`).toEqual([false, false]);
+    expect((await h.store.getSession(String(open.data.session_id)))!.manifest.public).toBe(true);
+    expect((await h.store.getSession(String(shut.data.session_id)))!.manifest.public).toBe(false);
+  });
+
   it("leaves a started room alone when its preset is edited, then deleted", async () => {
     await h.store.putPreset("u_jesse", saved("my_review"), 20);
     const id = String((await start("my_review")).data.session_id);

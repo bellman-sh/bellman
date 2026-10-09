@@ -18,14 +18,17 @@ export type PresetCheck =
  * `host` goes with it, so a room started from a preset with a host meets bellman_start's
  * plan refusal and hosted-room slot exactly as an inline `host` block does. A cite's
  * `heartbeat_on`, which checkCiteCadence admits only for a preset with a host, replaces
- * the preset's own; absent or null, the preset's stands, as for a built-in.
+ * the preset's own; absent or null, the preset's stands, as for a built-in. A cite's
+ * `public`, when it gives one, replaces the preset's.
  */
 export function asManifest(
-  p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null,
+  p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null, citedPublic?: boolean | null,
 ): Record<string, unknown> {
   return {
     room,
     purpose: purpose ?? null,
+    // The preset's is the default and a cite's own wins (public rooms spec D1).
+    public: citedPublic ?? p.public ?? false,
     mode: p.mode,
     heartbeat_on: heartbeatOn ?? p.heartbeat_on,
     roles: p.roles,
@@ -66,6 +69,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     default_role: v.default_role,
     creator_role: v.creator_role,
     host: v.host == null ? null : { role: v.host.role, model: v.host.model, instructions: v.host.instructions ?? null },
+    public: v.public ?? false,
     updated_at: new Date(now).toISOString(),
   };
   try {

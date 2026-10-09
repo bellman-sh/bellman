@@ -182,7 +182,8 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
 /**
  * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
- * null, `host` a config or null, and `reports` a boolean on every role.
+ * null, `host` a config or null, `reports` a boolean on every role, and `public` a boolean
+ * (public rooms; a room stored before it is private).
  *
  * The types already say so, because every row written since the heartbeat has
  * both. The `??` is for the rows that predate it. New objects all the way down
@@ -194,6 +195,7 @@ function withHeartbeatDefaults(m: RoomManifest): RoomManifest {
     ...m,
     heartbeatOnMs: m.heartbeatOnMs ?? null,
     host: m.host ?? null,
+    public: m.public ?? false,
     roles: Object.fromEntries(
       Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false }]),
     ),

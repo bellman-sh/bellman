@@ -191,6 +191,8 @@ const HostShape = z.strictObject({
 const CiteShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
+  // Who may read the room (public rooms spec D1): on both arms, like `room` and `purpose`.
+  public: z.boolean().nullish(),
   preset: PresetNameShape,
   // A cite may set the beat of a preset with a host, built-in or saved (checkCiteCadence); for
   // `social` that is how a room has its host ask less often than hourly.
@@ -200,6 +202,8 @@ const CiteShape = z.strictObject({
 const AuthorShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
+  // Who may read the room (public rooms spec D1): on both arms, like `room` and `purpose`.
+  public: z.boolean().nullish(),
   mode: z.enum(["pair", "swarm"]),
   heartbeat_on: HeartbeatOnShape.nullish(),
   roles: RolesShape,
@@ -363,6 +367,7 @@ export function builtinPresets(): SavedPreset[] {
       default_role: body.defaultRole,
       creator_role: body.creatorRole,
       host: structuredClone(body.host),
+      public: false,
       updated_at: null,
     };
   });
@@ -410,6 +415,7 @@ export function resolveManifest(input: unknown): RoomManifest {
     const manifest: RoomManifest = {
       room: v.room,
       purpose: v.purpose ?? null,
+      public: v.public ?? false,
       preset: v.preset as PresetName,
       mode: body.mode,
       roles: structuredClone(body.roles),
@@ -478,6 +484,7 @@ export function resolveManifest(input: unknown): RoomManifest {
   const manifest: RoomManifest = {
     room: v.room,
     purpose: v.purpose ?? null,
+    public: v.public ?? false,
     preset: null,
     mode: v.mode,
     roles,

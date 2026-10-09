@@ -37,6 +37,7 @@ describe("checkPreset", () => {
         default_role: "reviewer",
         creator_role: "author",
         host: null,
+        public: false,
         updated_at: "2026-10-09T12:00:00.000Z",
       },
     });

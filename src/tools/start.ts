@@ -78,7 +78,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
           }
           // The rule resolveManifest holds a built-in cite to, held here for a saved one.
           checkCiteCadence(manifestInput.preset, saved.host != null, manifestInput.heartbeat_on);
-          input = asManifest(saved, manifestInput.room, manifestInput.purpose, manifestInput.heartbeat_on);
+          input = asManifest(saved, manifestInput.room, manifestInput.purpose, manifestInput.heartbeat_on, manifestInput.public);
         }
         manifest = resolveManifest(input);
       } catch (e) {

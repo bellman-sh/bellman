@@ -211,6 +211,14 @@ Three refusals an author meets:
 - **The pair room.** A host needs `mode: swarm`. With `mode: pair` the answer is
   `a pair room cannot have a host: its two seats are its members'`.
 
+### A public room
+
+`public: true` on either arm makes the room readable by anyone with its link:
+its working surface and its log, never a brief. Joining still takes a code,
+and a joiner is shown that the room is public before accepting. It is false
+unless given. The creator can make the room private later, from dash; nothing
+makes a room public again.
+
 ## Step 3 — check it
 
 The bridge does not know the manifest schema; the server owns the only copy.

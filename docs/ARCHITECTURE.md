@@ -240,6 +240,8 @@ finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true` and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat. Dash renders it at `/r/<id>`, outside sign-in.
+
 ### Two delivery paths
 
 A room can be watched two ways, and one function serves both: **`wake()` in
@@ -1148,6 +1150,8 @@ loud:
   ([#64](../../../issues/64)) stops the *server* reading a payload; it does not
   make a peer trustworthy.
 
+**A public room gives up confidentiality, on purpose.** Its surface, its log and the files on its surface are readable by anyone with its link; its briefs, and any blob no item names, are not. Rendering does not change: peer content is text on the public page as on a member's, and the public page has no write path. Joiners consent at the preview, where `public` is part of the trusted spine, before any of their context crosses.
+
 ## 8. Where this is going
 
 The roadmap groups into five tracks. Each is architecture rather than features.
@@ -1719,12 +1723,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,377** | every request, whether or not you are in a room |
+| Tool definitions | **~7,485** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 for public rooms: 7,485 tokens, 110 over the merge base
+measured the same way (7,375, what this method gives for the 7,377 below).
+`bellman_start` is up 77, to 1,887, for the manifest's `public` on both arms and
+the line saying what it means; `bellman_connect` is up 33, to 621, for the
+preview's `public` and the line telling a joiner's agent to say so.
 
 Re-measured on 2026-10-09 once main's saved presets (#224) merged beneath the
 hosted seat: 7,377 tokens, 23 over the 7,354 below, all of them

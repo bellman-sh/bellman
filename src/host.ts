@@ -14,7 +14,7 @@
  */
 import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
 import type { OutboxIntent } from "./outbox.js";
-import { HOST_MEMBER_ID, HOST_USER_ID, isActiveMember, isHostMember, lastSeen } from "./store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID } from "./store.js";
 
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
 export { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./store.js";
@@ -94,7 +94,7 @@ const latest = (state: HostState): HostQuestion | undefined => state.questions[s
 export function decide(
   state: HostState,
   wake: HostWake,
-  room: { closed: boolean; frozenAt: number | null; members: Member[]; manifest: RoomManifest; lastTickAt?: number },
+  room: { closed: boolean; frozenAt: number | null; manifest: RoomManifest },
   events: SessionEvent[],
   now: number,
 ): HostDecision {
@@ -103,12 +103,10 @@ export function decide(
   if (room.frozenAt !== null) return { kind: "skip", why: "the room is frozen" };
   if (room.manifest.host === null) return { kind: "skip", why: "the room has no host" };
 
-  if (wake.cause === "tick") {
-    const since = room.lastTickAt ?? 0;
-    const anyone = room.members.some((m) => isActiveMember(m) && !isHostMember(m) && lastSeen(m) >= since);
-    if (!anyone) return { kind: "skip", why: "nobody has been in the room since the last tick" };
-    return { kind: "question", refId: wake.cursor };
-  }
+  // Presence is the store's (#188): `tickPlan` queues a tick wake only when a person was
+  // seen since the previous tick, decided before the tick's own write moves `lastTickAt`.
+  // Asked again here, after that write, it would refuse every tick.
+  if (wake.cause === "tick") return { kind: "question", refId: wake.cursor };
 
   const open = latest(state);
   if (open === undefined) return { kind: "skip", why: "no question is open" };

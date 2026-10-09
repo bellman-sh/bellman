@@ -22,7 +22,7 @@ import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { clearSilence, dueMembers, hostedTickDue, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
@@ -1969,10 +1969,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * The closure makes no cross-object call, so it stays within ARCHITECTURE.md §9
    * runtime fact 2: everything awaited in it is this object's storage. A room with a
-   * host ticks on its own cadence whether or not anyone reports, and writes the tick
-   * only while a person is in it (`hostedTickDue`, #188). The seat's wake (hosted seat
-   * spec, D4) is queued as an outbox row in the tick's own put, and delivered after
-   * the commit.
+   * host ticks on its own cadence whether or not anyone reports, and `tickPlan` decides
+   * both whether the tick is written and whether the seat is woken (#188). The seat's
+   * wake (hosted seat spec, D4) is queued as an outbox row in the tick's own put, and
+   * delivered after the commit.
    *
    * `lastTickAt` advances whether or not an event is written, which is what
    * stops the alarm spinning: the clock has to move even on a firing that found
@@ -1989,10 +1989,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (isAbandoned(s, now, connected)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
-      // A reporting member that is due, or a hosted room's own tick with a person in
-      // the room to ask (#188). A hosted room nobody has been in since the last firing
-      // takes the branch below: no event, and the clock moves.
-      if (dueMembers(s, now).length === 0 && !hostedTickDue(s, now, connected)) {
+      // Read before the write below moves `lastTickAt`, as `tickPlan` requires.
+      const plan = tickPlan(s, now, connected);
+      if (!plan.write) {
         // Nothing to ask, but the clock still moves. See the comment above.
         await txn.put<unknown>({ session: { ...s, lastTickAt: now } });
         return null;
@@ -2011,12 +2010,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       };
       // The event, its cursor and the advanced clock in one put. Committed
       // separately, an interruption between them leaves a tick stored with the
-      // clock unmoved, and the next firing writes the same tick again. The host's
-      // wake rides the same put, so a tick that landed always owes its wake.
-      const wake = s.manifest.host === null
-        ? {}
-        : await this.driver.enqueue(txn, [hostWakeIntent(s.id, "tick", tick.cursor)]);
-      wakesHost = s.manifest.host !== null;
+      // clock unmoved, and the next firing writes the same tick again. The seat's
+      // wake rides the same put, so a tick that owes one cannot land without it.
+      const wake = plan.wakeHost
+        ? await this.driver.enqueue(txn, [hostWakeIntent(s.id, "tick", tick.cursor)])
+        : {};
+      wakesHost = plan.wakeHost;
       await this.#writeEvent(txn, tick, { session: { ...s, lastTickAt: now }, ...wake });
       return tick;
     });

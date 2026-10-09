@@ -153,22 +153,45 @@ function hostedTickAt(s: StoredSession): number | null {
 }
 
 /**
+ * Whether a person — `isActivePerson`, so not the seat and not a member who has left —
+ * was seen after the last tick, or is on a socket now (#188). A room that has never
+ * ticked counts every person in it. `connected` is the members a live socket vouches
+ * for (`connectedAmong`); a store with no sockets passes `NO_SOCKETS`.
+ */
+const personSince = (s: StoredSession, connected: ReadonlySet<string>): boolean =>
+  s.members.some((m) => isActivePerson(m) &&
+    (s.lastTickAt === undefined || lastSeen(m) > s.lastTickAt || connected.has(m.memberId)));
+
+/**
  * Whether a hosted room's tick, fired at `now`, has anyone to ask (#188): its
- * cadence has come round, and a person — `isActivePerson`, so not the seat and not a
- * member who has left — was seen after the last firing or is on a socket now. A room
- * that has never ticked counts every person in it.
- *
- * False means the firing writes nothing and only moves `lastTickAt`, so a hosted room
- * nobody is in costs a silent firing a cadence and no growth in its log. `connected`
- * is the members a live socket vouches for (`connectedAmong`); a store with no
- * sockets passes `NO_SOCKETS`. Pure, and the clock is `now`, as for `dueMembers`.
+ * cadence has come round and `personSince` holds. False means the firing writes
+ * nothing and only moves `lastTickAt`, so a hosted room nobody is in costs a silent
+ * firing a cadence and no growth in its log. Pure, and the clock is `now`, as for
+ * `dueMembers`.
  */
 export function hostedTickDue(s: StoredSession, now: number, connected: ReadonlySet<string>): boolean {
   const at = hostedTickAt(s);
-  if (at === null || at > now) return false;
-  const since = s.lastTickAt;
-  return s.members.some((m) =>
-    isActivePerson(m) && (since === undefined || lastSeen(m) > since || connected.has(m.memberId)));
+  return at !== null && at <= now && personSince(s, connected);
+}
+
+/**
+ * What a tick fired at `now` does (#188): the rule both stores apply, so they tick alike.
+ *
+ * `write` — a reporting member is due, or the hosted room's own tick has someone to ask.
+ * `wakeHost` — the tick is written in a room with a host, and a person was seen since the
+ * previous tick or is on a socket. Both are read off the room as it stands BEFORE the
+ * tick's write moves `lastTickAt`, which is why presence is decided here and not by the
+ * seat: read after that write, every person reads as unseen since the tick. A hosted
+ * room whose tick a reporter's deadline forced, with nobody in it, writes the tick and
+ * leaves the seat asleep.
+ */
+export function tickPlan(
+  s: StoredSession,
+  now: number,
+  connected: ReadonlySet<string>,
+): { write: boolean; wakeHost: boolean } {
+  const write = dueMembers(s, now).length > 0 || hostedTickDue(s, now, connected);
+  return { write, wakeHost: write && s.manifest.host !== null && personSince(s, connected) };
 }
 
 /** Members that have gone a full cadence without reporting. The tick asks these. */

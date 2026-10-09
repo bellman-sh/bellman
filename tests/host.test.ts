@@ -76,9 +76,15 @@ describe("decide", () => {
     expect(d).toEqual({ kind: "question", refId: 9 });
   });
 
-  it("skips a tick nobody has been there for", () => {
+  // Presence is the store's (#188): `tickPlan` queues a tick wake only when a person was
+  // seen since the previous tick, decided before the tick's own write moves `lastTickAt`.
+  // Read after that write, as the seat reads the room, the same test would refuse every
+  // tick, so the seat asks on whatever wake reaches it.
+  it("asks on a tick however long since anyone was seen, because the store guards presence", () => {
     const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), hostMember(hosted(), NOW)] });
-    expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/nobody/) });
+    expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toEqual({ kind: "question", refId: 9 });
+    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), hostMember(hosted(), NOW)] });
+    expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toEqual({ kind: "question", refId: 9 });
   });
 
   it("drops a wake it has already answered, and one for a closed or frozen room", () => {
@@ -134,9 +140,7 @@ describe("decide", () => {
     expect(decide(asked, reply(13), room(), read, NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/no replies/) });
   });
 
-  it("skips a tick for a member who has left, and any wake in a room that declares no host", () => {
-    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), hostMember(hosted(), NOW)] });
-    expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/nobody/) });
+  it("skips any wake in a room that declares no host", () => {
     const bare = { ...room(), manifest: roomManifest() };
     expect(decide(emptyHostState(), tick(9), bare, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/no host/) });
   });

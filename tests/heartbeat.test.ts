@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
-  clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf,
+  clearSilence, hostedTickDue, lastReport, nextTickAt, dueMembers, reportRow, snapshotOf, tickPlan,
 } from "../src/heartbeat.js";
 import { hostMember } from "../src/host.js";
 import { NO_SOCKETS } from "../src/store.js";
@@ -350,6 +350,26 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
     expect(hostedTickDue(room({ lastTickAt: T0, members: [person({ lastSeenAt: T0 + 1, leftAt: T0 + 2 }), host()] }), T0 + HOUR, NO_SOCKETS)).toBe(false);
     // The control: the same quiet person, but a socket vouches for it.
     expect(hostedTickDue(room({ lastTickAt: T0, members: [quiet, host()] }), T0 + HOUR, new Set(["m_person"]))).toBe(true);
+  });
+
+  // The seat is woken only when a person was seen since the previous tick, whatever
+  // made the tick due: a reporter's deadline can write a tick into a room nobody is in.
+  it("tickPlan writes for a due reporter or the hosted cadence, and wakes the seat only with a person seen since the last tick", () => {
+    expect(tickPlan(room({ lastTickAt: T0, members: [person({ lastSeenAt: T0 + 1 }), host()] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: true });
+    expect(tickPlan(room({ lastTickAt: T0, members: [person({ lastSeenAt: T0 - 1 }), host({ lastSeenAt: T0 + 1 })] }), T0 + HOUR, NO_SOCKETS))
+      .toEqual({ write: false, wakeHost: false });
+    // A due reporter, nobody seen since the last tick: the tick is the reporter's alone.
+    const reporting = { ...hosted, roles: { ...hosted.roles, lead: { ...hosted.roles.lead, reports: true } } };
+    const due = room({ manifest: reporting, lastTickAt: T0, members: [person({ joinedAt: T0 - HOUR, lastSeenAt: T0 - 1 }), host()] });
+    expect(tickPlan(due, T0 + 1, NO_SOCKETS)).toEqual({ write: true, wakeHost: false });
+    // The same tick with the reporter seen since wakes the seat, cadence or not.
+    expect(tickPlan({ ...due, members: [person({ joinedAt: T0 - HOUR, lastSeenAt: T0 + 1 }), host()] }, T0 + 1, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: true });
+    // Without a host there is no seat to wake, whoever is in the room.
+    const present = [person({ joinedAt: T0 - HOUR, lastSeenAt: T0 + 1 })];
+    expect(tickPlan({ ...due, manifest: { ...reporting, host: null }, members: present }, T0 + 1, NO_SOCKETS))
+      .toEqual({ write: true, wakeHost: false });
   });
 
   it("asks in a hosted room that has never ticked while a person is in it", () => {

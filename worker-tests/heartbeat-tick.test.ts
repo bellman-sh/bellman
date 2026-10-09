@@ -763,10 +763,10 @@ it("gives a thawed room a fresh cadence before it asks again", async () => {
 
 const HOUR = 3_600_000;
 
-const hostedRoles = (host: boolean) => roomManifest({
+const hostedRoles = (host: boolean, reports = false) => roomManifest({
   mode: "swarm", preset: null, heartbeatOnMs: HOUR,
   roles: {
-    lead: { can: ["send", "invite"], description: null, reports: false },
+    lead: { can: ["send", "invite"], description: null, reports },
     host: { can: ["send"], description: null, reports: false },
   },
   defaultRole: "lead", creatorRole: "lead",
@@ -779,9 +779,12 @@ const hostedRoles = (host: boolean) => roomManifest({
  * was last seen at `seenAt`; the host was seen at creation, after that firing, so a
  * rule that counted the host would tick every room below.
  */
-async function hostedRoom(id: string, { host = true, seenAt = Date.now(), tickAgo = HOUR + 1 } = {}) {
+async function hostedRoom(
+  id: string,
+  { host = true, reports = false, seenAt = Date.now(), joinedAt = Date.now(), tickAgo = HOUR + 1 } = {},
+) {
   const store = new DurableObjectStore(env as never);
-  const m = hostedRoles(host);
+  const m = hostedRoles(host, reports);
   await store.createSession(session({
     id, manifest: m, joinCodes: {},
     members: [member({ roomRole: "lead" }), ...(host ? [hostMember(m, Date.now())] : [])],
@@ -792,7 +795,7 @@ async function hostedRoom(id: string, { host = true, seenAt = Date.now(), tickAg
     await ctx.storage.put("session", {
       ...s,
       lastTickAt: Date.now() - tickAgo,
-      members: s!.members.map((x) => (x.memberId === "m_creator" ? { ...x, lastSeenAt: seenAt } : x)),
+      members: s!.members.map((x) => (x.memberId === "m_creator" ? { ...x, joinedAt, lastSeenAt: seenAt } : x)),
     });
   });
   return stub;
@@ -881,4 +884,22 @@ it("still never ticks a room without a host whose roles ask for no reports", asy
   await fireHeld(stub, { named: true });
   after = await rows(stub);
   expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+});
+
+/**
+ * A reporter's deadline can make a hosted room's tick due with nobody in the room: the
+ * tick is written for the reporter, and the seat, which only asks people who are there,
+ * is not woken (`tickPlan`).
+ */
+it("writes a hosted room's tick for a due reporter, and queues no wake when nobody has been seen since the last tick", async () => {
+  const stub = await hostedRoom("qs_hosted_reporter", {
+    reports: true, joinedAt: Date.now() - HOUR - 1_000, seenAt: Date.now() - HOUR - 1_000,
+  });
+  await fireHeld(stub);
+
+  const after = await rows(stub);
+  const ticks = after.events.filter((e) => e.type === "heartbeat");
+  expect(ticks).toHaveLength(1);
+  expect(ticks[0].payload).toMatchObject({ members: [{ member_id: "m_creator" }] });
+  expect(await queued(stub)).toEqual([]);
 });

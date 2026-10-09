@@ -42,6 +42,12 @@ That is the entire file, apart from the optional `housekeeping` block (Step 2c).
 Adding `roles`, `mode`, `default_role` or `creator_role` next to `preset` is
 rejected — the two forms are exclusive.
 
+A preset saved in the panel (`dash.bellman.sh/presets`) is cited the same way,
+but it works only for the person who saved it: `bellman_start` looks the name
+up among the caller's own presets, so a teammate gets `unknown preset`. For a
+shape the repo shares, use the panel's Copy room.yaml, which writes the roles
+out in full.
+
 What each preset expands to:
 
 **`pair`** — mode `pair`. Holds two members because the preset says so.

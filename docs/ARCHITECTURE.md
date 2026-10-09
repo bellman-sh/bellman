@@ -203,8 +203,9 @@ than MCP: `GET /rooms` for the rooms a person created or holds a handle in,
 the working surface with the surface cursor as its `ETag`, `GET
 /rooms/:id/events` for the room's log, the newest 200 events or the next 200
 past `?after`, in the envelopes `bellman_sync` returns with the caller's own
-included, and `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
-(#184), beside the blob routes (#183). The routes authenticate through the same composed caller the blob
+included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
+(#184), and `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
+saved presets, beside the blob routes (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
@@ -438,7 +439,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
     end
@@ -1522,12 +1523,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,022** | every request, whether or not you are in a room |
+| Tool definitions | **~7,118** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Tool definitions were re-measured on 2026-10-09 again after saved presets landed:
+7,118 tokens in all. Measured the same way at `93e7c1d`, main's head before that
+branch, the listing was 7,093, so the branch's share is 25, all of it
+`bellman_start`'s: its `preset` is now any name rather than three, and its
+description names the panel. The 71 between the 7,022 recorded next and that
+7,093 were there before the branch.
 
 Tool definitions were re-measured on 2026-10-09 after `room_id` landed as an alias
 of `session_id` on the six tools that take a room: 7,022 tokens in all, 147 over

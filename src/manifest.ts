@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PresetName, RoleDef, RoomManifest, Verb } from "./types.js";
+import type { PresetName, RoleDef, RoomManifest, SavedPreset, Verb } from "./types.js";
 
 /**
  * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
@@ -145,6 +145,9 @@ export function slugShape(noun: string) {
  */
 export const RoleKeyShape = slugShape("role keys");
 
+/** A saved preset's name (designer spec D2): the role-key grammar, refused with its own noun. */
+export const PresetNameShape = slugShape("preset names");
+
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),
   description: z.string().max(300).nullish(),
@@ -203,7 +206,7 @@ export type HousekeepingInput = z.input<typeof HousekeepingShape>;
 const CiteShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
-  preset: z.enum(PRESET_NAMES),
+  preset: PresetNameShape,
   // Housekeeping is not part of what a preset is (D5), so a citation may add it.
   housekeeping: HousekeepingShape.nullish(),
 });
@@ -222,7 +225,7 @@ const AuthorShape = z.strictObject({
 });
 
 /** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */
-function describeIssue(i: { path: PropertyKey[]; message: string }): string {
+export function describeIssue(i: { path: PropertyKey[]; message: string }): string {
   const path = i.path.map(String).join(".");
   return path ? `${path}: ${i.message}` : i.message;
 }
@@ -244,6 +247,20 @@ export const ManifestShape = z.union([CiteShape, AuthorShape], {
   },
 });
 export type ManifestInput = z.input<typeof ManifestShape>;
+
+/**
+ * A preset a person saves (designer spec D2): the author arm without `room` and
+ * `purpose`, which stay per room, plus an optional description. `name` is
+ * optional because the route's path names the preset; a body naming another is
+ * refused there. Built as a fresh strict object, so a key the author arm does not
+ * have is refused as the arms refuse one.
+ */
+export const PresetShape = z.strictObject({
+  ...AuthorShape.omit({ room: true, purpose: true }).shape,
+  name: z.string().max(MAX_ROLE_KEY_LENGTH).optional(),
+  description: z.string().max(300).nullish(),
+});
+export type PresetInput = z.input<typeof PresetShape>;
 
 // ---------------------------------------------------------------------------
 // Preset catalog
@@ -315,6 +332,34 @@ const PRESETS: Record<PresetName, PresetBody> = {
   },
 };
 
+/** What each built-in is for, in a line, for the panel's list (designer spec D5, plan ruling R3). */
+const BUILTIN_DESCRIPTIONS: Record<PresetName, string> = {
+  pair: "Two peers. The creator controls who joins and writes the surface.",
+  swarm: "A lead who runs the room, helpers who work it, and observers who read it.",
+  review: "An author who brought the work, and a reviewer who answers but does not ask.",
+};
+
+/**
+ * The built-ins in a saved preset's form, fresh copies on every call, for the
+ * panel to show and clone (designer spec D5). PRESETS itself stays unexported:
+ * its `can` arrays are mutable.
+ */
+export function builtinPresets(): SavedPreset[] {
+  return PRESET_NAMES.map((name) => {
+    const body = PRESETS[name];
+    return {
+      name,
+      description: BUILTIN_DESCRIPTIONS[name],
+      mode: body.mode,
+      heartbeat_on: null,
+      roles: structuredClone(body.roles),
+      default_role: body.defaultRole,
+      creator_role: body.creatorRole,
+      updated_at: null,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Resolution
 // ---------------------------------------------------------------------------
@@ -352,11 +397,11 @@ export function resolveManifest(input: unknown): RoomManifest {
   const v = parsed.data;
 
   if ("preset" in v) {
-    const body = PRESETS[v.preset];
+    const body = PRESETS[v.preset as PresetName];
     return {
       room: v.room,
       purpose: v.purpose ?? null,
-      preset: v.preset,
+      preset: v.preset as PresetName,
       mode: body.mode,
       roles: structuredClone(body.roles),
       defaultRole: body.defaultRole,

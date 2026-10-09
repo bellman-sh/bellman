@@ -154,6 +154,11 @@ export interface Session {
   /** Whether the close-time sweep of unnamed objects has run (#65, D3). */
   blobsSwept: boolean;
   /**
+   * When the creator made a public room private (public rooms spec D2), or null. Set once:
+   * nothing makes a room public again. Read as null for a row written before it.
+   */
+  unpublishedAt: number | null;
+  /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
    * the plan is restored. Losing the room would be the wrong punishment for a

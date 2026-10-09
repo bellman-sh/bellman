@@ -161,6 +161,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         closedAt: null,
         purgeAt: null,
         blobsSwept: false,
+        // Public or not is the manifest's; this is set only when the creator makes a public room private (public rooms spec D2).
+        unpublishedAt: null,
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

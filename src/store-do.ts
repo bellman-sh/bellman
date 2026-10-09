@@ -1400,6 +1400,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
+   * `BellmanStore.unpublishSession`, for this room. One transaction, so two requests cannot both
+   * find the room public: the first time is the one kept. An empty object is left empty.
+   */
+  async unpublishSession(at: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.unpublishedAt != null) return;
+      await txn.put("session", { ...s, unpublishedAt: at });
+    });
+  }
+
+  /**
    * The close-time sweep (#65, D3), run now. `BellmanStore.sweepBlobs` is the contract and
    * this is SessionDO's answer to it; the alarm reaches the same work through #sweepIfDue,
    * which first asks whether it is owed. Public because the facade calls it, so anything
@@ -3293,6 +3305,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
+  }
+
+  async unpublishSession(sessionId: string, at: number): Promise<void> {
+    await this.session(sessionId).unpublishSession(at);
   }
 
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {

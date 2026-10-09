@@ -76,6 +76,7 @@ export function session(over: Partial<Session> = {}): Session {
     retainAfterCloseMs: null,
     purgeAt: null,
     blobsSwept: false,
+    unpublishedAt: null,
     members: [member()],
     events: [],
     closed: false,

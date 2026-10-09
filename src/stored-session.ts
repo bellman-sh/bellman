@@ -141,7 +141,11 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All twelve live here, in one gate, rather than in separate functions that could drift.
+ * - **unpublishedAt** (public rooms) defaults to `null`: a room written before it was never
+ *   made private. Whether it is public at all is the manifest's `public`, read false for such
+ *   a row.
+ *
+ * All thirteen live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -174,6 +178,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     retainAfterCloseMs: (row as { retainAfterCloseMs?: number | null }).retainAfterCloseMs ?? null,
     purgeAt: row.purgeAt ?? null,
     blobsSwept: row.blobsSwept ?? false,
+    unpublishedAt: (row as { unpublishedAt?: number | null }).unpublishedAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

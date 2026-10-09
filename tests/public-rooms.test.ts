@@ -6,9 +6,10 @@
 import { describe, expect, it } from "vitest";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
+import { isPublic } from "../src/rooms.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import type { SavedPreset } from "../src/types.js";
-import { session } from "./helpers/fixtures.js";
+import { roomManifest, session } from "./helpers/fixtures.js";
 
 const roles = { a: { can: ["send"] }, b: { can: ["send"] } };
 const authored = { room: "r", mode: "pair", roles, default_role: "b", creator_role: "a" };
@@ -57,5 +58,21 @@ describe("a saved preset's public flag", () => {
     expect(resolveManifest(asManifest(saved(true), "r", null, undefined, false)).public).toBe(false);
     expect(resolveManifest(asManifest(saved(false), "r", null, undefined, true)).public).toBe(true);
     expect(resolveManifest(asManifest(saved(), "r", null)).public).toBe(false);
+  });
+});
+
+describe("whether a room is publicly readable", () => {
+  it("is public when marked so at the start and not made private since", () => {
+    expect(isPublic(session({ manifest: roomManifest({ public: true }) }))).toBe(true);
+    expect(isPublic(session({ manifest: roomManifest({ public: true }), unpublishedAt: 1 }))).toBe(false);
+    expect(isPublic(session())).toBe(false);
+  });
+
+  it("reads a room stored before unpublishing existed as never made private", () => {
+    const old = structuredClone(session({ manifest: roomManifest({ public: true }) })) as unknown as Record<string, unknown>;
+    delete old.unpublishedAt;
+    const hydrated = hydrateStoredSession(old)!;
+    expect(hydrated.unpublishedAt).toBeNull();
+    expect(isPublic(hydrated)).toBe(true);
   });
 });

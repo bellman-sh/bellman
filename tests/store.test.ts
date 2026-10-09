@@ -223,7 +223,7 @@ describe("MemoryStore wakes the host (hosted seat spec, D4)", () => {
     // Units to spend: the fixture's default is 0, and the meter refuses the question without them.
     const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)], hostUnitsPerMonth: 10 });
     await store.createSession(s);
-    const q = await store.appendHostEvent(s.id, { type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman", payload: { kind: "question", text: "q" }, refId: null }, 1, NOW);
+    const q = await store.appendHostEvent(s.id, { type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman", payload: { kind: "question", text: "q" }, refId: null }, 1, NOW, "host:tick:1");
     expect(q.ok).toBe(true);
     const qc = q.ok ? q.event.cursor : 0;
     await store.appendEvent(s.id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "a" }, refId: String(qc) });
@@ -241,9 +241,9 @@ describe("MemoryStore wakes the host (hosted seat spec, D4)", () => {
     const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)], hostUnitsPerMonth: 10 });
     await store.createSession(s);
     const host = { type: "message" as const, fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman" };
-    const q = await store.appendHostEvent(s.id, { ...host, payload: { kind: "question", text: "q" }, refId: null }, 1, NOW);
+    const q = await store.appendHostEvent(s.id, { ...host, payload: { kind: "question", text: "q" }, refId: null }, 1, NOW, "host:tick:1");
     const qc = q.ok ? q.event.cursor : 0;
-    const a = await store.appendHostEvent(s.id, { ...host, payload: { kind: "answer", text: "a" }, refId: String(qc) }, 1, NOW);
+    const a = await store.appendHostEvent(s.id, { ...host, payload: { kind: "answer", text: "a" }, refId: String(qc) }, 1, NOW, "host:reply:2");
     expect(a.ok).toBe(true);
     expect(store.wakes).toEqual([]);
   });

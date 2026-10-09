@@ -14,7 +14,7 @@
  */
 import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
 import type { OutboxIntent } from "./outbox.js";
-import { HOST_MEMBER_ID, HOST_USER_ID, hostSeated, type HostAppend } from "./store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./store.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
 
 // Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
@@ -33,6 +33,8 @@ export const ANSWER_MAX_TOKENS = 200;
 export const MAX_REPLY_CHARS = 600;
 export const MAX_ANSWER_CHARS = 1000;
 export const QUESTIONS_REMEMBERED = 5;
+/** Events a reply wake reads at most (I4): a window ending past the reply that woke it. Each can be 20,000 characters. */
+export const READ_LIMIT = 50;
 export const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 
 export const HOST_RULES =
@@ -92,13 +94,17 @@ export function hostWakeIntent(sessionId: string, cause: "tick" | "reply", curso
 
 const latest = (state: HostState): HostQuestion | undefined => state.questions[state.questions.length - 1];
 
-export function decide(
+type Room = { closed: boolean; frozenAt: number | null; manifest: RoomManifest; members: Member[] };
+
+/**
+ * What a wake may do before anything is read from the log (I4): skip, ask the question a
+ * tick owes, or answer replies to the open question, which `decide` then reads for.
+ */
+export function admit(
   state: HostState,
   wake: HostWake,
-  room: { closed: boolean; frozenAt: number | null; manifest: RoomManifest; members: Member[] },
-  events: SessionEvent[],
-  now: number,
-): HostDecision {
+  room: Room,
+): { kind: "skip"; why: string } | { kind: "question"; tick: number } | { kind: "replies"; open: HostQuestion } {
   if (wake.cursor <= state.lastCause) return { kind: "skip", why: `already handled a wake at ${state.lastCause}` };
   if (room.closed) return { kind: "skip", why: "the room is closed" };
   if (room.frozenAt !== null) return { kind: "skip", why: "the room is frozen" };
@@ -114,6 +120,13 @@ export function decide(
   const open = latest(state);
   if (open === undefined) return { kind: "skip", why: "no question is open" };
   if (open.answers >= REPLIES_PER_QUESTION) return { kind: "skip", why: "the latest question has had its three answers" };
+  return { kind: "replies", open };
+}
+
+export function decide(state: HostState, wake: HostWake, room: Room, events: SessionEvent[], now: number): HostDecision {
+  const gate = admit(state, wake, room);
+  if (gate.kind !== "replies") return gate;
+  const open = gate.open;
   const replies = events.filter((e) =>
     e.cursor > state.cursor && (e.type === "message" || e.type === "progress") && e.refId !== null &&
     Number(e.refId) === open.cursor && e.fromMemberId !== HOST_MEMBER_ID);
@@ -231,10 +244,17 @@ export const joinsQueue = (record: HostRecord, pending: readonly HostWake[], wak
 export interface HostDriver {
   /** The delay before each retry, in order: `RETRY_MS`, or shorter in a test. */
   readonly retryMs: readonly number[];
-  read(sessionId: string): Promise<{ room: StoredSession | undefined; events: (cursor: number) => Promise<SessionEvent[]> }>;
+  read(sessionId: string): Promise<{
+    room: StoredSession | undefined;
+    /** At most `limit` events after `cursor` (I4). */
+    events: (cursor: number, limit: number) => Promise<SessionEvent[]>;
+    /** The host's write under a wake's intent id, if one landed (M6). */
+    sent: (key: string) => Promise<SessionEvent | undefined>;
+  }>;
   /** One Messages API call, `callMessages`. Throws when the model cannot be reached. */
   callModel(body: object): Promise<{ status: number; json: unknown }>;
-  write(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend>;
+  /** `appendHostEvent`, keyed by the wake's intent id, so a second write under it posts and charges nothing (M6). */
+  write(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend>;
   load(sessionId: string): Promise<HostRecord>;
   save(sessionId: string, record: HostRecord): Promise<void>;
 }
@@ -254,19 +274,29 @@ export async function callMessages(
   return { status: res.status, json: await res.json().catch(() => null) };
 }
 
+/** The text of a post the host made, as the seat remembers its questions. */
+const postedText = (e: SessionEvent): string => {
+  const text = (e.payload as { text?: unknown } | null)?.text;
+  return typeof text === "string" ? text : "";
+};
+
 /**
  * One wake, start to finish (spec D4–D6), whichever driver runs it. Returns how long to
  * wait before running the same wake again, or null when it is done with.
  *
+ * In order, and nothing later runs once an earlier step has settled the wake: what the
+ * record and the room alone decide (`admit`); whether this wake's post already landed, its
+ * response lost (M6); the whole meter, run read-only (I4, M7); then, for a reply wake, a
+ * bounded read of the log (I4); then the model and the write. So a wake the room cannot
+ * pay for, or a question with its answers given, costs no read and no call. The room
+ * charges again in the write's own transaction, and that charge is the one that counts.
+ *
  * Settled, meaning `lastCause` raised to the wake's cursor and the attempts cleared, when
- * the room is gone, `decide` skips, the month cannot pay, the model's answer is
- * unreadable, or the room refuses the write. The meter is read before the model is
- * called, so a wake the month cannot pay for costs no call; the room charges again in the
- * write's own transaction, and that charge is the one that counts. A 429, a 5xx or a
- * model that cannot be reached is the model's failure: the attempt is counted and the
- * next of `driver.retryMs` returned, up to MAX_ATTEMPTS calls, then settled. Anything
- * else that throws (the room, the record) propagates and leaves the wake queued, for the
- * driver to run again; `lastCause` makes a second run of a handled wake a skip.
+ * the room is gone, `admit` or `decide` skips, the meter refuses, the model's answer is
+ * unreadable, or the room refuses the write. A 429, a 5xx or a model that cannot be
+ * reached is the model's failure: the attempt is counted and the next of `driver.retryMs`
+ * returned, up to MAX_ATTEMPTS calls, then settled. Anything else that throws (the room,
+ * the record) propagates to `runWake`, which counts it the same way.
  */
 export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<number | null> {
   const record = await driver.load(wake.sessionId);
@@ -275,30 +305,53 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
     return null;
   };
 
-  const { room, events } = await driver.read(wake.sessionId);
+  const { room, events, sent } = await driver.read(wake.sessionId);
   if (!room) return settle(record);
-  const read = wake.cause === "reply" ? await events(record.cursor) : [];
-  const decision = decide(record, wake, room, read, now);
-  if (decision.kind === "skip") return settle(record);
+  const gate = admit(record, wake, room);
+  if (gate.kind === "skip") return settle(record);
 
-  const host = room.manifest.host!; // decide skips a room without one
+  const host = room.manifest.host!; // admit skips a room without one
   const units = unitsFor(host.model);
   const label = `${host.role}@bellman`;
-  /** One notice a month, outside the meter: written with zero units, so the spent month it reports cannot refuse it. */
+  /**
+   * One notice a month, outside the meter (spec D6, I9): written with zero units, which
+   * neither cap refuses, and recorded only once it lands, so a refused one is tried again.
+   */
   const notice = async (used: number, allowed: number): Promise<HostRecord> => {
     const month = monthKey(now);
     if (record.noticed === month) return record;
-    await driver.write(wake.sessionId, {
+    const written = await driver.write(wake.sessionId, {
       type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: label,
       payload: { kind: "notice", text: `The host has used its ${allowed} units this month (${used} spent; a ${host.model} wake costs ${units}). It is quiet until the month turns.` },
       refId: null,
-    }, 0, now);
-    return { ...record, noticed: month };
+    }, 0, now, `host:notice:${month}`);
+    return written.ok ? { ...record, noticed: month } : record;
   };
 
-  if (room.hostUnits.month === monthKey(now) && room.hostUnits.used + units > room.hostUnitsPerMonth) {
-    return settle(await notice(room.hostUnits.used, room.hostUnitsPerMonth));
+  // A write that landed and whose response was lost (M6): `runWake` runs the wake again, as
+  // it runs any wake that threw, and the seat finds the post it made instead of making another.
+  const key = hostWakeIntent(wake.sessionId, wake.cause, wake.cursor).id;
+  const earlier = await sent(key);
+  if (earlier) {
+    if (gate.kind === "question") {
+      return settle({ ...record, ...applyDecision(record, { kind: "question", tick: gate.tick }, { cursor: earlier.cursor, text: postedText(earlier) }, now) });
+    }
+    // ponytail: which replies the lost answer read is not recorded, so the cursor moves to the
+    // wake's own reply, and a reply after it may be answered twice. Record the last read in the
+    // post if that rare double answer ever matters.
+    const questions = record.questions.map((q) => q.cursor === gate.open.cursor ? { ...q, answers: q.answers + 1 } : q);
+    return settle({ ...record, cursor: Math.max(record.cursor, wake.cursor), questions });
   }
+
+  const charge = decideHostCharge(room, units, now);
+  if (!charge.ok) return settle(charge.reason === "units" ? await notice(charge.used, charge.allowed) : record);
+
+  // A window ending past the reply that woke the seat, never the whole tail (I4).
+  const read = gate.kind === "replies"
+    ? await events(Math.max(record.cursor, gate.open.cursor, wake.cursor - READ_LIMIT), READ_LIMIT)
+    : [];
+  const decision = decide(record, wake, room, read, now);
+  if (decision.kind === "skip") return settle(record);
 
   const prompt = decision.kind === "question"
     ? questionPrompt(room.manifest, record)
@@ -320,9 +373,32 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
     ...(decision.kind === "question"
       ? { payload: { kind: "question", text, tick: decision.tick }, refId: null }
       : { payload: { kind: "answer", text }, refId: String(decision.question.cursor) }),
-  }, units, now);
+  }, units, now, key);
   if (!written.ok) return settle(written.reason === "units" ? await notice(written.used, written.allowed) : record);
-  const next = applyDecision(record, decision, { cursor: written.event.cursor, text }, now);
+  const next = applyDecision(record, decision, { cursor: written.event.cursor, text: postedText(written.event) }, now);
   await driver.save(wake.sessionId, { ...record, ...next, attempts: 0 });
   return null;
+}
+
+/**
+ * `handleWake` as both drivers run it (I8). A throw that is not the model's (the room's
+ * read or write, the record) counts as an attempt on the wake, as a failed model call
+ * does, and the wake is tried again after the same delays. At MAX_ATTEMPTS it is dropped
+ * and logged, and the queue behind it is handled: one wake the room cannot serve must not
+ * silence the seat. Only the error's message is logged; no room error carries a prompt or
+ * a key. A throw from the record itself propagates, and the driver's runtime retries it.
+ */
+export async function runWake(driver: HostDriver, wake: HostWake, now: number): Promise<number | null> {
+  try {
+    return await handleWake(driver, wake, now);
+  } catch (err) {
+    const record = await driver.load(wake.sessionId);
+    if (record.attempts + 1 >= MAX_ATTEMPTS) {
+      console.error(`hosted seat: dropped the ${wake.cause} wake at cursor ${wake.cursor} after ${MAX_ATTEMPTS} attempts: ${err instanceof Error ? err.message : String(err)}`);
+      await driver.save(wake.sessionId, { ...record, lastCause: Math.max(record.lastCause, wake.cursor), attempts: 0 });
+      return null;
+    }
+    await driver.save(wake.sessionId, { ...record, attempts: record.attempts + 1 });
+    return driver.retryMs[record.attempts];
+  }
 }

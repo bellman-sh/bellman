@@ -11,7 +11,7 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
+  ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
   decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
   isReplyToHost, markRemoved, seatVictims, stampSeen,
 } from "./store.js";
@@ -406,10 +406,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * override cannot shadow a `#private` method, so converting this would retire
    * both.
    */
-  private async events(after = 0): Promise<SessionEvent[]> {
+  private async events(after = 0, limit?: number): Promise<SessionEvent[]> {
     const map = await this.ctx.storage.list<SessionEvent>({
       prefix: "e:",
       start: eventKey(after + 1),
+      ...(limit === undefined ? {} : { limit }),
     });
     return [...map.values()];
   }
@@ -1518,20 +1519,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * The hosted seat's one write (hosted seat spec, D3): the event, the charge of
-   * `units` against the room's month, the host's `lastSeenAt` stamp and the send's
-   * audit row (C1), in one transaction. `decideHostCharge` decides, the call
-   * MemoryStore makes, so a refusal writes nothing in either store. A missing row is
-   * `not_found`. It queues no wake.
+   * `units` against the room's month, the host's `lastSeenAt` stamp, the send's audit
+   * row (C1) and the record of `key` (M6), in one transaction. `decideHostCharge`
+   * decides, the call MemoryStore makes, so a refusal writes nothing in either store. A
+   * key already used returns the event it wrote and charges nothing, for
+   * `appendEventOnce`'s reason. A missing row is `not_found`. It queues no wake.
    */
   async appendHostEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
     units: number,
     now: number,
+    key: string,
   ): Promise<HostAppend> {
+    let appended = false;
     let audited = false;
     const result = await this.ctx.storage.transaction<HostAppend>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
+      const storageKey = idempotencyKey(e.fromMemberId, key);
+      const done = await txn.get<IdempotencyRecord>(storageKey);
+      if (done) {
+        const original = await txn.get<SessionEvent>(eventKey(done.cursor));
+        if (!original) throw new Error(`Idempotency record names missing cursor ${done.cursor}`);
+        return { ok: true, event: original };
+      }
       const charge = decideHostCharge(s, units, now);
       if (!charge.ok) return charge;
       const event: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
@@ -1539,11 +1550,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const intents = hostSentEntries(s, e, now).map(auditIntent);
       audited = intents.length > 0;
       const rows = audited ? await this.driver.enqueue(txn, intents) : {};
-      await this.#writeEvent(txn, event, { session: { ...s, hostUnits: charge.next, members: stamped }, ...rows });
+      const record: IdempotencyRecord = { cursor: event.cursor, print: fingerprint(e) };
+      await this.#writeEvent(txn, event, { session: { ...s, hostUnits: charge.next, members: stamped }, [storageKey]: record, ...rows });
+      appended = true;
       return { ok: true, event };
     });
-    if (result.ok) this.#wake(result.event);
-    if (result.ok && audited) await this.driver.deliverNow();
+    if (result.ok && appended) this.#wake(result.event);
+    if (appended && audited) await this.driver.deliverNow();
     return result;
   }
 
@@ -1636,8 +1649,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
-  async eventsAfter(cursor: number): Promise<SessionEvent[]> {
-    return this.events(cursor);
+  /** `limit` bounds the storage list itself (I4): the hosted seat's read passes one, every other read none. */
+  async eventsAfter(cursor: number, limit?: number): Promise<SessionEvent[]> {
+    return this.events(cursor, limit);
+  }
+
+  /**
+   * The host's write under `key` (M6), or undefined: what the seat checks before it calls
+   * the model, so a wake run again after a lost response finds its post. A read, so it
+   * answers RPC like `eventsAfter`.
+   */
+  async hostEventFor(key: string): Promise<SessionEvent | undefined> {
+    const done = await this.ctx.storage.get<IdempotencyRecord>(idempotencyKey(HOST_MEMBER_ID, key));
+    return done ? this.ctx.storage.get<SessionEvent>(eventKey(done.cursor)) : undefined;
   }
 
   async eventAt(cursor: number): Promise<SessionEvent | undefined> {
@@ -3266,8 +3290,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
-  async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
-    return this.session(sessionId).eventsAfter(cursor);
+  async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
+    return this.session(sessionId).eventsAfter(cursor, limit);
   }
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
@@ -3291,8 +3315,13 @@ export class DurableObjectStore implements BellmanStore {
     e: Omit<SessionEvent, "cursor" | "at">,
     units: number,
     now: number,
+    key: string,
   ): Promise<HostAppend> {
-    return this.session(sessionId).appendHostEvent(e, units, now);
+    return this.session(sessionId).appendHostEvent(e, units, now, key);
+  }
+
+  async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
+    return this.session(sessionId).hostEventFor(key);
   }
 
   async waitForEvents(

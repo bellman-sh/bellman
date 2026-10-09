@@ -580,6 +580,11 @@ export type HostAppend =
  * The meter's decision (hosted seat spec, D3), shared by both stores so they
  * cannot charge differently. Returns the refusal, or the units record to write.
  * A host the room has evicted is refused (`removed`, C1) before the meter is read.
+ *
+ * A write of no units is the month's notice, which is outside the meter (spec D6, I9):
+ * neither cap applies to it and the hour does not count it, so the spent month it reports
+ * cannot refuse it. The seat also runs this read-only before it reads or calls anything
+ * (I4, M7), so a wake the meter would refuse costs neither.
  */
 export function decideHostCharge(
   s: Pick<StoredSession, "closed" | "frozenAt" | "members" | "hostUnitsPerMonth" | "hostUnits">,
@@ -591,6 +596,7 @@ export function decideHostCharge(
   if (!hostSeated(s)) return { ok: false, reason: "removed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
   const month = monthKey(now);
   const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
+  if (units === 0) return { ok: true, next: current };
   const wakes = current.wakes.filter((t) => t > now - 3_600_000);
   if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
   if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
@@ -1055,7 +1061,12 @@ export interface BellmanStore {
     key: string,
     extras?: AppendExtras
   ): Promise<EventWrite>;
-  eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
+  /**
+   * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
+   * when a limit is given. The hosted seat's read is the bounded one (I4); every other
+   * caller reads the tail whole.
+   */
+  eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]>;
   /**
    * The event at exactly this cursor, or undefined.
    *
@@ -1099,8 +1110,15 @@ export interface BellmanStore {
    * The hosted seat's one write (hosted seat spec, D3): the event and the charge
    * of `units` against the room's month, in one transaction. Refused, nothing is
    * written. `now` is the caller's clock, as `seatMember`'s is.
+   *
+   * `key` is the wake's intent id (`host:<cause>:<cursor>`, M6). A write under a key
+   * already used returns the event that key wrote and charges nothing, so a seat that
+   * runs a wake again after losing the response to its write cannot post or charge
+   * twice. The key alone decides: the rerun's text is a new model call's.
    */
-  appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend>;
+  appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend>;
+  /** The host's write under `key` (M6), or undefined: what the seat checks before it calls the model. */
+  hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -1699,17 +1717,35 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend> {
+  async appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
+    // Synchronous from here, for appendEventOnce's reason: the key check, the event, the
+    // meter, the stamp and the audit row land together.
+    const storageKey = idempotencyKey(e.fromMemberId, key);
+    const done = this.keys.get(sessionId)?.get(storageKey);
+    if (done) {
+      const original = s.events.find((ev) => ev.cursor === done.cursor);
+      if (!original) throw new Error(`Idempotency record names missing cursor ${done.cursor}`);
+      return { ok: true, event: detach(original) };
+    }
     const charge = decideHostCharge(s, units, now);
     if (!charge.ok) return charge;
-    // Synchronous from here: the event, the meter, the stamp and the audit row land together.
     const event = this.appendNow(s, e);
+    const keys = this.keys.get(sessionId) ?? new Map<string, IdempotencyRecord>();
+    keys.set(storageKey, { cursor: event.cursor, print: fingerprint(e) });
+    this.keys.set(sessionId, keys);
     s.hostUnits = charge.next;
     s.members = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
     this.recordAudit(hostSentEntries(s, e, now));
     return { ok: true, event: detach(event) };
+  }
+
+  async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
+    const done = this.keys.get(sessionId)?.get(idempotencyKey(HOST_MEMBER_ID, key));
+    const s = this.sessions.get(sessionId);
+    const event = done && s?.events.find((ev) => ev.cursor === done.cursor);
+    return event ? detach(event) : undefined;
   }
 
   /**
@@ -1832,10 +1868,10 @@ export class MemoryStore implements BellmanStore {
     return event;
   }
 
-  async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
+  async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
     if (!s) return [];
-    return detach(s.events.filter((e) => e.cursor > cursor));
+    return detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit));
   }
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {

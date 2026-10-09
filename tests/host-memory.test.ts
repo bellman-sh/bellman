@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../src/app.js";
@@ -41,12 +41,36 @@ function held(text: string) {
   return { reply, asked, release };
 }
 
+/**
+ * A store whose room read or host write can be made to fail: `poison` makes every log read
+ * throw, and `loseNextWrite` commits the next host write and then throws, as a write whose
+ * RPC response was lost does.
+ */
+class FlakyStore extends MemoryStore {
+  poison = false;
+  loseNextWrite = false;
+  override async eventsAfter(id: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
+    if (this.poison) throw new Error("the room's log could not be read");
+    return super.eventsAfter(id, cursor, limit);
+  }
+  override async appendHostEvent(...args: Parameters<MemoryStore["appendHostEvent"]>) {
+    const written = await super.appendHostEvent(...args);
+    if (this.loseNextWrite) {
+      this.loseNextWrite = false;
+      throw new Error("the response was lost");
+    }
+    return written;
+  }
+}
+
+afterEach(() => { vi.restoreAllMocks(); });
+
 /** With `deliver: false` the store's wakes are kept in `woken`, for the test to deliver itself. */
 async function hostedStore(replies: Reply[], { deliver = true } = {}) {
   const { f, calls } = fakeModel(replies);
   let host!: MemoryHost;
   const woken: HostWake[] = [];
-  const store = new MemoryStore({ host: (w) => { if (deliver) void host.wake(w); else woken.push(w); } });
+  const store = new FlakyStore({ host: (w) => { if (deliver) void host.wake(w); else woken.push(w); } });
   host = new MemoryHost(store, { modelUrl: "http://fake", fetch: f, retryMs: [5, 5, 5] });
   const m = hosted();
   const now = Date.now();
@@ -106,6 +130,57 @@ describe("MemoryHost", () => {
     expect(calls).toHaveLength(1);
     expect(await hostSaid(store, id, q.cursor)).toEqual([]);
     expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+  });
+
+  /**
+   * One poison wake must not silence the seat (I8). A throw that is not the model's counts
+   * as an attempt on that wake; at the limit the wake is dropped and logged, and the queue
+   * behind it is handled.
+   */
+  it("drops a wake whose read throws every time after the limit, logs it, and handles the next wake", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, host, id, calls, woken } = await hostedStore(
+      [{ status: 200, text: "What shipped?" }, { status: 200, text: "What did you learn?" }], { deliver: false });
+    await store.appendEvent(id, heartbeat);
+    await host.wake(woken.shift()!);
+    await host.settled();
+    const [q] = await hostSaid(store, id);
+
+    await store.appendEvent(id, replyTo(q.cursor));
+    const beat = (await store.appendEvent(id, heartbeat))!;
+    store.poison = true;
+    await host.wake(woken.shift()!);
+    await host.wake(woken.shift()!);
+    await host.settled();
+    store.poison = false;
+
+    expect(calls, "the reply's wake never reached the model; the tick behind it did").toHaveLength(2);
+    expect((await hostSaid(store, id, q.cursor)).map((e) => e.payload)).toEqual([
+      { kind: "question", text: "What did you learn?", tick: beat.cursor },
+    ]);
+    expect(errors.mock.calls.map((c) => String(c[0]))).toEqual([expect.stringMatching(/dropped the reply wake at cursor \d+ after 4 attempts/)]);
+  });
+
+  /**
+   * A write that landed and whose response was lost (M6): the seat runs the wake again, as
+   * it runs any wake that threw, and finds its post already made. One model call, one
+   * question, one unit.
+   */
+  it("runs a wake whose write's response was lost again without a second call, post or charge", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { store, host, id, calls } = await hostedStore([{ status: 200, text: "What shipped?" }, { status: 200, text: "Nice." }]);
+    store.loseNextWrite = true;
+    await store.appendEvent(id, heartbeat);
+    await host.settled();
+    expect(calls).toHaveLength(1);
+    const asked = await hostSaid(store, id);
+    expect(asked.map((e) => e.payload)).toEqual([{ kind: "question", text: "What shipped?", tick: 1 }]);
+    expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+
+    // The rerun kept what the lost write did: the question is open, so a reply to it is answered.
+    await store.appendEvent(id, replyTo(asked[0].cursor));
+    await host.settled();
+    expect((await hostSaid(store, id, asked[0].cursor)).map((e) => e.payload)).toEqual([{ kind: "answer", text: "Nice." }]);
   });
 
   it("retries a 429 and gives up after three", async () => {

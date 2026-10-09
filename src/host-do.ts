@@ -14,7 +14,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { BellmanEnv } from "./store-do.js";
 import type { HostAppend } from "./store.js";
 import {
-  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, handleWake, joinsQueue,
+  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
 } from "./host.js";
 
@@ -38,13 +38,17 @@ export class HostDO extends DurableObject<BellmanEnv> {
     retryMs: RETRY_MS,
     read: async (sessionId) => {
       const room = this.#room(sessionId);
-      return { room: await room.getSession(), events: (cursor) => room.eventsAfter(cursor) };
+      return {
+        room: await room.getSession(),
+        events: (cursor, limit) => room.eventsAfter(cursor, limit),
+        sent: (key) => room.hostEventFor(key),
+      };
     },
     callModel: (body) =>
       callMessages((url, init) => fetch(url, init), this.env.MODEL_URL ?? ANTHROPIC_MESSAGES_URL, this.env.ANTHROPIC_API_KEY, body),
     // Read as the store's union, as the facade's appendHostEvent returns it: the RPC
     // stub's mapped result does not narrow on `ok`.
-    write: async (sessionId, e, units, now) => (await this.#room(sessionId).appendHostEvent(e, units, now)) as HostAppend,
+    write: async (sessionId, e, units, now, key) => (await this.#room(sessionId).appendHostEvent(e, units, now, key)) as HostAppend,
     load: async () => (await this.ctx.storage.get<HostRecord>("state")) ?? emptyHostRecord(),
     save: async (_sessionId, record) => {
       if (!this.#forgotten) await this.ctx.storage.put("state", record);
@@ -74,16 +78,17 @@ export class HostDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * Handles the wake at the head of the queue. A wake the model failed stays at the head
-   * and the alarm comes back after its retry delay; any other leaves the queue, and the
+   * Handles the wake at the head of the queue. A wake that failed, the model or the room
+   * (`runWake`, I8), stays at the head and the alarm comes back after its retry delay,
+   * until its attempts run out and it is dropped; any other leaves the queue, and the
    * alarm comes back now while wakes remain. The queue is read again after the model call,
-   * so a wake queued during it is kept. A throw leaves the head queued, and the runtime
-   * retries a throwing alarm.
+   * so a wake queued during it is kept. Only a throw from the seat's own storage leaves the
+   * alarm throwing, for the runtime to retry.
    */
   async alarm(): Promise<void> {
     const [head] = await this.#pending();
     if (!head) return;
-    const retryIn = await handleWake(this.#driver, head, Date.now());
+    const retryIn = await runWake(this.#driver, head, Date.now());
     if (this.#forgotten) return;
     if (retryIn !== null) return this.ctx.storage.setAlarm(Date.now() + retryIn);
     const rest = (await this.#pending()).filter((w) => w.cursor !== head.cursor);

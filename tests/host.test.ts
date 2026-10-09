@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
-  HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS,
-  hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
-  questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue,
+  HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT,
+  WAKES_PER_HOUR, hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
+  questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake,
+  type HostDriver, type HostRecord,
 } from "../src/host.js";
+import { decideHostCharge, type HostAppend } from "../src/store.js";
+import { monthKey, type StoredSession } from "../src/stored-session.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { SessionEvent } from "../src/types.js";
 
@@ -279,5 +282,118 @@ describe("the answer", () => {
   it("leaves the state alone for a skip", () => {
     const s = { cursor: 5, lastCause: 4, questions: [{ cursor: 3, text: "q", askedAt: NOW, answers: 1 }] };
     expect(applyDecision(s, { kind: "skip", why: "x" }, { cursor: 9, text: "" }, NOW)).toEqual(s);
+  });
+});
+
+/**
+ * `handleWake` over a driver that records what it was asked: what the seat reads, calls
+ * and writes, and what it keeps. The room is a hosted one with ten units a month, a reply
+ * wake's open question is at cursor 10, and the model answers "Fine." unless told otherwise.
+ */
+function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend } = {}) {
+  const { events: _e, ...rest } = session({ manifest: hosted(), members: [member({ lastSeenAt: NOW }), hostMember(hosted(), NOW)],
+    hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 0, wakes: [] } });
+  const room = { ...rest, ...over.room } as StoredSession;
+  let record: HostRecord = { ...emptyHostRecord(), ...over.record };
+  const seen = { reads: [] as [number, number | undefined][], keys: [] as string[], calls: 0, writes: [] as { payload: unknown; units: number; key: unknown }[] };
+  const driver: HostDriver = {
+    retryMs: [1, 1, 1],
+    read: async () => ({
+      room,
+      events: async (cursor: number, limit?: number) => { seen.reads.push([cursor, limit]); return []; },
+      sent: async (key: string) => { seen.keys.push(key); return over.sent; },
+    }),
+    callModel: async () => { seen.calls++; return { status: 200, json: { content: [{ type: "text", text: "Fine." }], stop_reason: "end_turn" } }; },
+    write: async (_id, e, units, now, key) => {
+      seen.writes.push({ payload: e.payload, units, key });
+      return over.write ?? { ok: true, event: { ...e, cursor: 900, at: now } };
+    },
+    load: async () => record,
+    save: async (_id, r) => { record = r; },
+  };
+  return { driver, seen, record: () => record };
+}
+const open10 = { cursor: 10, lastCause: 10, questions: [{ cursor: 10, text: "What shipped?", askedAt: NOW - 60_000, answers: 0 }] };
+const replyWake = (cursor: number) => ({ sessionId: "qs_test", cause: "reply" as const, cursor });
+const tickWake = (cursor: number) => ({ sessionId: "qs_test", cause: "tick" as const, cursor });
+
+describe("handleWake checks before it reads (I4, M7)", () => {
+  it("reads nothing and calls nothing when the month is spent, and posts its notice", async () => {
+    const { driver, seen } = seat({ room: { hostUnits: { month: monthKey(NOW), used: 10, wakes: [] } }, record: open10 });
+    await handleWake(driver, replyWake(11), NOW);
+    expect(seen.reads).toEqual([]);
+    expect(seen.calls).toBe(0);
+    expect(seen.writes).toMatchObject([{ payload: { kind: "notice" }, units: 0 }]);
+  });
+
+  it("reads nothing and calls nothing once the open question has had its three answers", async () => {
+    const { driver, seen } = seat({ record: { ...open10, questions: [{ ...open10.questions[0], answers: REPLIES_PER_QUESTION }] } });
+    await handleWake(driver, replyWake(11), NOW);
+    expect(seen.reads).toEqual([]);
+    expect(seen.calls).toBe(0);
+    expect(seen.writes).toEqual([]);
+  });
+
+  it("checks the hourly cap before the model is called, and settles", async () => {
+    const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW - i * 60_000);
+    const { driver, seen, record } = seat({ room: { hostUnits: { month: monthKey(NOW), used: 0, wakes: recent } } });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen.calls).toBe(0);
+    expect(seen.writes).toEqual([]);
+    expect(record().lastCause).toBe(12);
+  });
+
+  it("reads a bounded window that ends past the reply that woke it", async () => {
+    const { driver, seen } = seat({ record: open10 });
+    await handleWake(driver, replyWake(500), NOW);
+    expect(seen.reads).toEqual([[500 - READ_LIMIT, READ_LIMIT]]);
+    // Nearer than a window, the read starts at the seat's own cursor.
+    const near = seat({ record: open10 });
+    await handleWake(near.driver, replyWake(14), NOW);
+    expect(near.seen.reads).toEqual([[10, READ_LIMIT]]);
+  });
+});
+
+describe("handleWake and a write it never heard back from (M6)", () => {
+  it("keys each write by the wake's intent id", async () => {
+    const tick = seat();
+    await handleWake(tick.driver, tickWake(12), NOW);
+    expect(tick.seen.writes).toMatchObject([{ payload: { kind: "question", tick: 12 }, key: "host:tick:12" }]);
+  });
+
+  it("finds its post already made, and neither calls the model nor posts again", async () => {
+    const earlier: SessionEvent = { cursor: 13, type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+      payload: { kind: "question", text: "What did you ship?", tick: 12 }, refId: null, at: NOW - 1_000 };
+    const { driver, seen, record } = seat({ sent: earlier });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen.keys).toEqual(["host:tick:12"]);
+    expect(seen.calls).toBe(0);
+    expect(seen.writes).toEqual([]);
+    // What the seat keeps is what the post it made would have left: the question is open.
+    expect(record()).toMatchObject({ lastCause: 12, cursor: 13, questions: [{ cursor: 13, text: "What did you ship?", answers: 0 }] });
+  });
+});
+
+describe("the month's notice (I9)", () => {
+  it("is outside the meter: a write of no units passes the spent month and the hour's cap, and is not counted", () => {
+    const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW - i * 60_000);
+    const { events: _e, ...rest } = session({ manifest: hosted(), members: [member(), hostMember(hosted(), NOW)],
+      hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 10, wakes: recent } });
+    expect(decideHostCharge(rest, 0, NOW)).toEqual({ ok: true, next: { month: monthKey(NOW), used: 10, wakes: recent } });
+    expect(decideHostCharge(rest, 1, NOW)).toMatchObject({ ok: false, reason: "hourly" });
+  });
+
+  it("is recorded as given only when its write lands, so a refused one is tried again", async () => {
+    const spent = { hostUnits: { month: monthKey(NOW), used: 10, wakes: [] } };
+    const refused = seat({ room: spent, write: { ok: false, reason: "frozen", used: 10, allowed: 10 } });
+    await handleWake(refused.driver, tickWake(12), NOW);
+    expect(refused.seen.writes).toMatchObject([{ payload: { kind: "notice" }, units: 0 }]);
+    expect(refused.record().noticed).toBeNull();
+
+    const landed = seat({ room: spent });
+    await handleWake(landed.driver, tickWake(12), NOW);
+    expect(landed.record().noticed).toBe(monthKey(NOW));
+    await handleWake(landed.driver, tickWake(13), NOW);
+    expect(landed.seen.writes, "one notice a month").toHaveLength(1);
   });
 });

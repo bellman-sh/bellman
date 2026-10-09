@@ -5,7 +5,7 @@
  * the queue in order. Local development and tests; production is `HostDO`. Imports
  * nothing from `cloudflare:workers`.
  */
-import { RETRY_MS, callMessages, emptyHostRecord, handleWake, joinsQueue, type HostDriver, type HostRecord, type HostWake } from "./host.js";
+import { RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake, type HostDriver, type HostRecord, type HostWake } from "./host.js";
 import type { MemoryStore } from "./store.js";
 
 export class MemoryHost {
@@ -25,9 +25,13 @@ export class MemoryHost {
     const fetcher = opts.fetch ?? fetch;
     this.#driver = {
       retryMs: opts.retryMs ?? RETRY_MS,
-      read: async (id) => ({ room: await store.getSession(id), events: (cursor) => store.eventsAfter(id, cursor) }),
+      read: async (id) => ({
+        room: await store.getSession(id),
+        events: (cursor, limit) => store.eventsAfter(id, cursor, limit),
+        sent: (key) => store.hostEventFor(id, key),
+      }),
       callModel: (body) => callMessages(fetcher, opts.modelUrl, opts.apiKey, body),
-      write: (id, e, units, now) => store.appendHostEvent(id, e, units, now),
+      write: (id, e, units, now, key) => store.appendHostEvent(id, e, units, now, key),
       load: async (id) => this.#records.get(id) ?? emptyHostRecord(),
       save: async (id, record) => { this.#records.set(id, record); },
     };
@@ -62,7 +66,7 @@ export class MemoryHost {
   async #drain(id: string, pending: HostWake[]): Promise<void> {
     try {
       while (pending.length > 0) {
-        const retryIn = await handleWake(this.#driver, pending[0], Date.now());
+        const retryIn = await runWake(this.#driver, pending[0], Date.now());
         if (retryIn === null) pending.shift();
         // Unref'd: a retry waiting up to 15 minutes does not keep a stopping process alive.
         else await new Promise<void>((resolve) => setTimeout(resolve, retryIn).unref());

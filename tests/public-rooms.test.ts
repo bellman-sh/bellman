@@ -6,9 +6,10 @@
 import { describe, expect, it } from "vitest";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
 import { asManifest, checkPreset } from "../src/presets.js";
+import { roomPreview } from "../src/projections.js";
 import { isPublic } from "../src/rooms.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
-import type { SavedPreset } from "../src/types.js";
+import type { SavedPreset, Session } from "../src/types.js";
 import { roomManifest, session } from "./helpers/fixtures.js";
 
 const roles = { a: { can: ["send"] }, b: { can: ["send"] } };
@@ -74,5 +75,15 @@ describe("whether a room is publicly readable", () => {
     const hydrated = hydrateStoredSession(old)!;
     expect(hydrated.unpublishedAt).toBeNull();
     expect(isPublic(hydrated)).toBe(true);
+  });
+});
+
+describe("the preview", () => {
+  it("says whether the room is public, in its trusted part, as the room stands", () => {
+    const view = (over: Partial<Session>) => roomPreview(session(over), "peer_b");
+    expect(view({ manifest: roomManifest({ public: true }) }).public).toBe(true);
+    expect(view({ manifest: roomManifest({ public: true }), unpublishedAt: 1 }).public).toBe(false);
+    expect(view({}).public).toBe(false);
+    expect(view({ manifest: roomManifest({ public: true }) }).text.data).not.toHaveProperty("public");
   });
 });

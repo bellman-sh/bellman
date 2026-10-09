@@ -12,6 +12,8 @@ export interface Untrusted<T> {
 export interface RoomBlock {
   preset: string | null;
   mode: string;
+  /** Whether anyone with the room's link may read it. Absent from a server that predates public rooms. */
+  public?: boolean;
   your_role: string;
   your_verbs: string[];
   heartbeat_on_seconds: number | null;

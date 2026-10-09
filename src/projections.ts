@@ -3,7 +3,7 @@ import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
 import { asked, capacityOf, isActiveMember } from "./store.js";
-import { activeMembers, sessionStatus } from "./rooms.js";
+import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import { purgeDueAt } from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
@@ -91,7 +91,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * The manifest as one seat sees it, split by trust: a joiner's preview, and the
  * creator's read-back of what the server recorded.
  *
- * The spine (preset, mode, role keys, verbs, cadence, whether this seat reports)
+ * The spine (preset, mode, whether the room is public, role keys, verbs, cadence, whether this seat reports)
  * is server-validated — role keys match a short snake_case regex, verbs come
  * from a closed enum, and the cadence is a parsed number — so it ships as fact,
  * and all it can carry is identifiers, enum values, a number and a boolean. The skin
@@ -163,6 +163,9 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
   return {
     preset: m.preset,
     mode: m.mode,
+    // Whether anyone with the room's link reads it (public rooms spec D5): a boolean the server
+    // computed, so it is spine, and the room as it stands, so a room made private says so.
+    public: isPublic(session),
     your_role: viewerRole,
     your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),

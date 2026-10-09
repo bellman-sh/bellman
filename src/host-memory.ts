@@ -5,8 +5,31 @@
  * the queue in order. Local development and tests; production is `HostDO`. Imports
  * nothing from `cloudflare:workers`.
  */
-import { RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake, type HostDriver, type HostRecord, type HostWake } from "./host.js";
+import {
+  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
+  type HostDriver, type HostRecord, type HostWake,
+} from "./host.js";
 import type { MemoryStore } from "./store.js";
+
+/**
+ * Which model the Node server's seat calls (M11), and the line it prints at startup to say
+ * so. Claude Code users commonly export ANTHROPIC_API_KEY, so the key alone must not make
+ * `npm start` spend it: the real Messages API is called only with BELLMAN_REAL_MODEL=1
+ * beside the key. MODEL_URL, set by hand, is used as it says. Anything else gets the
+ * server's own fake model, which is sent no key. The line never holds the key.
+ */
+export function nodeModel(env: Record<string, string | undefined>, port: number): { modelUrl: string; apiKey: string | undefined; says: string } {
+  if (env.MODEL_URL) {
+    return { modelUrl: env.MODEL_URL, apiKey: env.ANTHROPIC_API_KEY, says: `hosted seat: the model at MODEL_URL (${env.MODEL_URL})` };
+  }
+  if (env.BELLMAN_REAL_MODEL === "1" && env.ANTHROPIC_API_KEY) {
+    return { modelUrl: ANTHROPIC_MESSAGES_URL, apiKey: env.ANTHROPIC_API_KEY, says: "hosted seat: the real Messages API, billed to ANTHROPIC_API_KEY (BELLMAN_REAL_MODEL=1)" };
+  }
+  return {
+    modelUrl: `http://localhost:${port}/__fake-model`, apiKey: undefined,
+    says: "hosted seat: this server's fake model; set BELLMAN_REAL_MODEL=1 beside ANTHROPIC_API_KEY to call the real Messages API",
+  };
+}
 
 export class MemoryHost {
   // ponytail: a purged room's record stays in this map until the process exits, because

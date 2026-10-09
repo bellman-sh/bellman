@@ -674,6 +674,13 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
       .toThrow(/a room with a host must tick no faster than 1h/);
   });
 
+  // M8: main's strict cite refused the key; a preset with no host has nothing to tick for.
+  it.each(["pair", "swarm", "review"])("refuses heartbeat_on on a cite of %s, a preset with no host", (preset) => {
+    expect(() => resolveManifest({ room: "r", preset, heartbeat_on: "5m" } as never)).toThrow(/heartbeat_on/);
+    expect(() => resolveManifest({ room: "r", preset, heartbeat_on: null } as never)).toThrow(/heartbeat_on/);
+    expect(resolveManifest({ room: "r", preset } as never).heartbeatOnMs).toBeNull();
+  });
+
   it("gives the other presets no host and, as before, no beat", () => {
     expect(resolveManifest({ room: "r", preset: "pair" }).host).toBeNull();
     expect(resolveManifest({ room: "r", preset: "pair" }).heartbeatOnMs).toBeNull();

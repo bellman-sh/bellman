@@ -1,21 +1,18 @@
 import { createApp } from "./app.js";
 import { MemoryBlobStore } from "./blobs.js";
 import { tickStep } from "./heartbeat.js";
-import { ANTHROPIC_MESSAGES_URL } from "./host.js";
-import { MemoryHost } from "./host-memory.js";
+import { MemoryHost, nodeModel } from "./host-memory.js";
 import { MemoryStore } from "./store.js";
 
 const port = parseInt(process.env.PORT || "3900", 10);
 
 // One blob store for the routes, the tools and the store: the purge deletes from the same bucket they serve.
 const blobs = new MemoryBlobStore();
-// The hosted seat (hosted seat spec, D7). With neither MODEL_URL nor a key it asks
-// this server's own fake model, so a host runs locally with no key.
+// The hosted seat (hosted seat spec, D7). It asks this server's own fake model unless
+// BELLMAN_REAL_MODEL=1 is set beside ANTHROPIC_API_KEY, or MODEL_URL points elsewhere (M11).
+const model = nodeModel(process.env, port);
 const store = new MemoryStore({ blobs, host: (w) => void host.wake(w) });
-const host = new MemoryHost(store, {
-  modelUrl: process.env.MODEL_URL ?? (process.env.ANTHROPIC_API_KEY ? ANTHROPIC_MESSAGES_URL : `http://localhost:${port}/__fake-model`),
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+const host = new MemoryHost(store, { modelUrl: model.modelUrl, apiKey: model.apiKey });
 const app = createApp(store, blobs);
 
 // Periodic expiry of sessions and pending connect tokens, and the heartbeat: what
@@ -32,4 +29,5 @@ setInterval(() => {
 
 app.listen(port, () => {
   console.error(`bellman-mcp-server listening on http://localhost:${port}/mcp`);
+  console.error(model.says);
 });

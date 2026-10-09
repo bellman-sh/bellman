@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
-import { MemoryHost } from "../src/host-memory.js";
+import { MemoryHost, nodeModel } from "../src/host-memory.js";
 import { HOST_MEMBER_ID, hostMember, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
 import type { SessionEvent } from "../src/types.js";
@@ -316,5 +316,38 @@ describe("MemoryHost", () => {
     expect((await hostSaid(store, id, q2.cursor)).map((e) => [e.refId, e.payload])).toEqual([
       [String(q2.cursor), { kind: "answer", text: "Good one." }],
     ]);
+  });
+});
+
+/**
+ * `npm start` must not spend a developer's own money (M11): Claude Code users commonly export
+ * ANTHROPIC_API_KEY, so the key alone selects the fake model, and only BELLMAN_REAL_MODEL=1
+ * beside it selects the real Messages API. What was chosen is said at startup.
+ */
+describe("the Node server's model", () => {
+  const fake = "http://localhost:3900/__fake-model";
+
+  it("uses the fake model when only a key is set, and sends it no key", () => {
+    expect(nodeModel({ ANTHROPIC_API_KEY: "sk-ant-dev" }, 3900)).toMatchObject({ modelUrl: fake, apiKey: undefined });
+    expect(nodeModel({}, 3900)).toMatchObject({ modelUrl: fake, apiKey: undefined });
+    expect(nodeModel({ BELLMAN_REAL_MODEL: "1" }, 3900)).toMatchObject({ modelUrl: fake, apiKey: undefined });
+  });
+
+  it("calls the real Messages API only with BELLMAN_REAL_MODEL=1 beside the key", () => {
+    expect(nodeModel({ ANTHROPIC_API_KEY: "sk-ant-dev", BELLMAN_REAL_MODEL: "1" }, 3900))
+      .toMatchObject({ modelUrl: "https://api.anthropic.com/v1/messages", apiKey: "sk-ant-dev" });
+  });
+
+  it("says which model it chose, and never the key", () => {
+    const real = nodeModel({ ANTHROPIC_API_KEY: "sk-ant-dev", BELLMAN_REAL_MODEL: "1" }, 3900).says;
+    const local = nodeModel({ ANTHROPIC_API_KEY: "sk-ant-dev" }, 3900).says;
+    expect(real).toMatch(/real Messages API/);
+    expect(local).toMatch(/fake model/);
+    expect(local).toMatch(/BELLMAN_REAL_MODEL=1/);
+    expect(real + local).not.toContain("sk-ant-dev");
+  });
+
+  it("goes where MODEL_URL points when it is set", () => {
+    expect(nodeModel({ MODEL_URL: "http://127.0.0.1:9/model" }, 3900)).toMatchObject({ modelUrl: "http://127.0.0.1:9/model" });
   });
 });

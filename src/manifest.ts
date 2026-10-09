@@ -357,6 +357,13 @@ export function resolveManifest(input: unknown): RoomManifest {
 
   if ("preset" in v) {
     const body = PRESETS[v.preset];
+    // A cite may set the beat only for a preset with a host, as main's strict cite refused the
+    // key for every preset (M8): with no host and no reporting role, nothing would ever tick.
+    if (v.heartbeat_on !== undefined && body.host === null) {
+      throw new ManifestError(
+        `heartbeat_on: the "${v.preset}" preset has no host, so a cite of it cannot set a cadence; author the roles to set one`,
+      );
+    }
     const manifest: RoomManifest = {
       room: v.room,
       purpose: v.purpose ?? null,

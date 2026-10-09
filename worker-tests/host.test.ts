@@ -203,6 +203,39 @@ it("an evicted host is woken by neither a reply nor a tick, and a wake delivered
   expect((await store.getSession(id))!.hostUnits.used).toBe(1);
 });
 
+/**
+ * "3 at a time, quiet on lapse" (I7), through HostDO's own read of the creator's plan: the
+ * worker's key map names u_jesse on team, and no key or provider names u_lapsed. The room's
+ * meter is a month behind, so the wake is the month's first. No model reply is queued for
+ * the lapsed room, so a model call there would be a stray one.
+ */
+it("at the month turn a creator whose plan lapsed pauses the host with a notice and no model call", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_lapsed");
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<Record<string, unknown>>("session");
+    await ctx.storage.put("session", { ...s, createdBy: "u_lapsed", hostUnits: { month: "2000-01", used: 10, wakes: [] } });
+  });
+  await host.wake({ sessionId: id, cause: "tick", cursor: 1 }, "host:tick:1");
+  await seatIdle(host);
+  const said = await hostSaid(store, id);
+  expect(said.map((e) => e.payload)).toEqual([{ kind: "notice", text: expect.stringMatching(/paused/) }]);
+  expect((await store.getSession(id))!).toMatchObject({ hostUnitsPerMonth: 0, hostUnits: { used: 0 } });
+});
+
+it("at the month turn a creator still on team keeps the allowance, and the host asks", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_renewed");
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<Record<string, unknown>>("session");
+    await ctx.storage.put("session", { ...s, hostUnits: { month: "2000-01", used: 10, wakes: [] } });
+  });
+  modelAnswers("What did you ship this month?");
+  await host.wake({ sessionId: id, cause: "tick", cursor: 1 }, "host:tick:1");
+  await seatIdle(host);
+  expect((await hostSaid(store, id)).map((e) => e.payload)).toEqual([{ kind: "question", text: "What did you ship this month?", tick: 1 }]);
+  // The fixture stamped 10 units; the team plan's 3,000 came from the plan read.
+  expect((await store.getSession(id))!).toMatchObject({ hostUnitsPerMonth: 3_000, hostUnits: { used: 1 } });
+});
+
 it("drops a wake for a frozen room without calling the model", async () => {
   const { store, id, stub, host } = await hostedRoom();
   await store.freezeSession(id, Date.now());

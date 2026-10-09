@@ -1122,6 +1122,14 @@ export interface BellmanStore {
   appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend>;
   /** The host's write under `key` (M6), or undefined: what the seat checks before it calls the model. */
   hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined>;
+  /**
+   * The hosted seat's allowance for a new month (I7): `units`, its creator's plan's as the
+   * seat read it at the month's first wake, 0 once that plan includes no hosted seat, with
+   * the meter started empty in `month`. A renewal for a month the meter has reached already
+   * changes nothing, so a second one cannot hand back what the month has spent. A missing
+   * room is a no-op.
+   */
+  renewHostAllowance(sessionId: string, month: string, units: number): Promise<void>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -1751,6 +1759,13 @@ export class MemoryStore implements BellmanStore {
     s.members = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
     this.recordAudit(hostSentEntries(s, e, now));
     return { ok: true, event: detach(event) };
+  }
+
+  async renewHostAllowance(sessionId: string, month: string, units: number): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.hostUnits.month >= month) return;
+    s.hostUnitsPerMonth = units;
+    s.hostUnits = { month, used: 0, wakes: [] };
   }
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {

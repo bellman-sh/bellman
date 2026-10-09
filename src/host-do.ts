@@ -11,8 +11,15 @@
  * object, so no two wakes are handled at once and neither saves over the other's record.
  */
 import { DurableObject } from "cloudflare:workers";
-import type { BellmanEnv } from "./store-do.js";
+import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import type { HostAppend } from "./store.js";
+import { keyedPlan } from "./auth.js";
+import { billingSettings, type BillingEnv } from "./billing/config.js";
+import { parseOverrides } from "./oauth/providers.js";
+import { signedInPlan } from "./oauth/routes.js";
+
+/** What the seat reads beyond the room's own bindings: what resolving a room creator's plan needs (I7). */
+type HostEnv = BellmanEnv & BillingEnv & { BELLMAN_USERS?: string };
 import {
   ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
@@ -21,7 +28,7 @@ import {
 /** The seat's queue of wakes, oldest first. The head is the one being handled, or waiting on a retry. */
 const PENDING = "pending";
 
-export class HostDO extends DurableObject<BellmanEnv> {
+export class HostDO extends DurableObject<HostEnv> {
   /**
    * Set by `forget`, for a purge that lands while a wake is being handled: that wake settles
    * after the purge, and its save and its queue write would put back what `forget` emptied.
@@ -53,6 +60,17 @@ export class HostDO extends DurableObject<BellmanEnv> {
     save: async (_sessionId, record) => {
       if (!this.#forgotten) await this.ctx.storage.put("state", record);
     },
+    // As the Worker resolves a caller (`resolveCaller`): the key map when one is set and names
+    // them, never the dev keys; else what their next token refresh would carry; else free.
+    plan: async (userId) =>
+      (this.env.BELLMAN_KEYS ? keyedPlan(userId, this.env.BELLMAN_KEYS) : null) ??
+      (await signedInPlan(userId, {
+        overrides: parseOverrides(this.env.BELLMAN_USERS),
+        plans: new DurableObjectStore(this.env),
+        honourPurchases: billingSettings(this.env).applyPlans,
+      })) ??
+      "free",
+    renew: async (sessionId, month, units) => { await this.#room(sessionId).renewHostAllowance(month, units); },
   };
 
   #room(sessionId: string) {

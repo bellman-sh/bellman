@@ -8,7 +8,7 @@ import {
 import { decideHostCharge, type HostAppend } from "../src/store.js";
 import { monthKey, type StoredSession } from "../src/stored-session.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
-import type { SessionEvent } from "../src/types.js";
+import type { Plan, SessionEvent } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-08T12:00:00Z");
 const hosted = () => roomManifest({
@@ -313,12 +313,13 @@ describe("the answer", () => {
  * and writes, and what it keeps. The room is a hosted one with ten units a month, a reply
  * wake's open question is at cursor 10, and the model answers "Fine." unless told otherwise.
  */
-function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown } } = {}) {
+function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown }; plan?: Plan } = {}) {
   const { events: _e, ...rest } = session({ manifest: hosted(), members: [member({ lastSeenAt: NOW }), hostMember(hosted(), NOW)],
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 0, wakes: [] } });
   const room = { ...rest, ...over.room } as StoredSession;
   let record: HostRecord = { ...emptyHostRecord(), ...over.record };
-  const seen = { reads: [] as [number, number | undefined][], keys: [] as string[], calls: 0, writes: [] as { payload: unknown; units: number; key: unknown }[] };
+  const seen = { reads: [] as [number, number | undefined][], keys: [] as string[], calls: 0, writes: [] as { payload: unknown; units: number; key: unknown }[],
+    plans: [] as string[], renewals: [] as [string, number][] };
   const driver: HostDriver = {
     retryMs: [1, 1, 1],
     read: async () => ({
@@ -333,6 +334,8 @@ function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord
     },
     load: async () => record,
     save: async (_id, r) => { record = r; },
+    plan: async (userId: string) => { seen.plans.push(userId); return over.plan ?? "max"; },
+    renew: async (_id: string, month: string, units: number) => { seen.renewals.push([month, units]); },
   };
   return { driver, seen, record: () => record };
 }
@@ -507,5 +510,40 @@ describe("the model call's bound (M10)", () => {
     driver.callModel = () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
     expect(await handleWake(driver, tickWake(12), NOW)).toBe(driver.retryMs[0]);
     expect(record().attempts).toBe(1);
+  });
+});
+
+/**
+ * "3 at a time, quiet on lapse" (I7): a hosted room's allowance renews each month from its
+ * creator's plan as it is then, read once at the month's first wake, before any model call.
+ * A creator whose plan no longer includes a hosted seat gets a paused host.
+ */
+describe("the allowance at the month turn (I7)", () => {
+  const lastMonth = { hostUnits: { month: "2026-09", used: 2_900, wakes: [] }, hostUnitsPerMonth: 3_000 };
+
+  it("keeps 3,000 units for a creator who still has max", async () => {
+    const { driver, seen } = seat({ room: lastMonth, plan: "max" });
+    await handleWake(driver, tickWake(12), NOW);
+    expect(seen.plans).toEqual(["u_jesse"]);
+    expect(seen.renewals).toEqual([["2026-10", 3_000]]);
+    expect(seen.calls).toBe(1);
+    expect(seen.writes).toMatchObject([{ payload: { kind: "question" }, units: 1 }]);
+  });
+
+  it("pauses the host for a creator who lapsed to free: its notice, and no model call", async () => {
+    const { driver, seen, record } = seat({ room: lastMonth, plan: "free" });
+    await handleWake(driver, tickWake(12), NOW);
+    expect(seen.renewals).toEqual([["2026-10", 0]]);
+    expect(seen.calls).toBe(0);
+    expect(seen.writes).toMatchObject([{ payload: { kind: "notice", text: expect.stringMatching(/paused.*no longer includes a hosted seat/) }, units: 0 }]);
+    expect(record().noticed).toBe("2026-10");
+  });
+
+  it("reads the plan only at the month's first wake", async () => {
+    const { driver, seen } = seat({ plan: "free" });
+    await handleWake(driver, tickWake(12), NOW);
+    expect(seen.plans).toEqual([]);
+    expect(seen.renewals).toEqual([]);
+    expect(seen.calls).toBe(1);
   });
 });

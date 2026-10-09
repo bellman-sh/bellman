@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleOAuth, identityFromAccessToken, type OAuthConfig } from "../src/oauth/routes.js";
+import { handleOAuth, identityFromAccessToken, signedInPlan, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { MemoryStore } from "../src/store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
@@ -1316,5 +1316,33 @@ describe("the grant endpoint validates what it is given", () => {
 
     expect(res.status).toBe(201);
     expect((await config.plans!.getGrant("github:5006"))?.source).toBe("operator");
+  });
+});
+
+/**
+ * A hosted room's seat reads its creator's plan at each month turn (I7), from the user id
+ * alone. For a user who signed in with a provider that is what their next token refresh
+ * would carry: `replanOnRefresh` over the provider subject the id is built from.
+ */
+describe("signedInPlan", () => {
+  const grant = (key: string, plan: "pro" | "max", source = "operator") =>
+    ({ key, plan, role: "member" as const, orgId: null, source, grantedAt: 0, grantedBy: "test", expiresAt: null });
+
+  it("re-resolves a signed-in user's plan from their provider subject, as a refresh does", async () => {
+    const plans = new MemoryStore();
+    await plans.putGrant(grant("github:4242", "max"));
+    expect(await signedInPlan("u_github_4242", { plans })).toBe("max");
+    expect(await signedInPlan("u_github_99", { plans })).toBe("free");
+    // The operator's override outranks a grant, as at refresh.
+    const overrides: Record<string, Identity> = { "github:4242": { userId: "u_x", orgId: null, plan: "pro", role: "member", label: "x" } };
+    expect(await signedInPlan("u_github_4242", { plans, overrides })).toBe("pro");
+  });
+
+  it("drops a purchase when purchases are not honoured, and answers null for an id no provider minted", async () => {
+    const plans = new MemoryStore();
+    await plans.putGrant(grant("google:77", "max", "purchase"));
+    expect(await signedInPlan("u_google_77", { plans, honourPurchases: false })).toBe("free");
+    expect(await signedInPlan("u_google_77", { plans })).toBe("max");
+    expect(await signedInPlan("u_jesse", { plans })).toBeNull();
   });
 });

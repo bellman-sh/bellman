@@ -3,7 +3,7 @@ import { isOrgId } from "../grant-index.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { BellmanStore } from "../store.js";
-import type { Identity, PlanGrant } from "../types.js";
+import type { Identity, Plan, PlanGrant } from "../types.js";
 import {
   PROVIDERS, defaultIdentity, grantKeys, identityKeys, immutableKeys,
   isProviderName, isStableIdentityKey,
@@ -177,6 +177,22 @@ export async function replanOnRefresh(
     };
   }
   return { identity: base, source: "default" };
+}
+
+/**
+ * The plan a user who signed in with a provider holds now, from their user id alone (I7):
+ * what their next token refresh would carry, `replanOnRefresh` over the provider subject the
+ * id is built from (`defaultIdentity`). A hosted room's seat reads its creator's plan this way
+ * at each month turn. Null for a user id no provider minted, such as a key table's.
+ */
+export async function signedInPlan(
+  userId: string,
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">,
+): Promise<Plan | null> {
+  const subject = /^u_(github|google)_(\d+)$/.exec(userId);
+  if (!subject) return null;
+  const stored: Identity = { userId, orgId: null, plan: "free", role: "member", label: "" };
+  return (await replanOnRefresh(stored, [`${subject[1]}:${subject[2]}`], config)).identity.plan;
 }
 
 /**

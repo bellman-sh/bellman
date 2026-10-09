@@ -12,7 +12,8 @@
  * `isHostMember`, `isReplyToHost`, the hourly cap), which this module re-exports,
  * and this module is a consumer of the store like a tool is.
  */
-import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
+import type { HostModelName, Member, Plan, RoomManifest, SessionEvent } from "./types.js";
+import { ENTITLEMENTS } from "./auth.js";
 import type { OutboxIntent } from "./outbox.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./store.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
@@ -285,6 +286,10 @@ export interface HostDriver {
   write(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend>;
   load(sessionId: string): Promise<HostRecord>;
   save(sessionId: string, record: HostRecord): Promise<void>;
+  /** The plan this user holds now (I7), resolved as a call from them would be. Read for a room's creator at a month turn. */
+  plan(userId: string): Promise<Plan>;
+  /** `renewHostAllowance`: the room's units for a new month. */
+  renew(sessionId: string, month: string, units: number): Promise<void>;
 }
 
 /** One Messages API call, as both drivers make it. `fetcher` is the runtime's `fetch`, so a network failure throws. */
@@ -352,17 +357,21 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
   const host = room.manifest.host!; // admit skips a room without one
   const units = unitsFor(host.model);
   const label = HOST_LABEL;
+  const month = monthKey(now);
   /**
    * One notice a month, outside the meter (spec D6, I9): written with zero units, which
    * neither cap refuses, and recorded only once it lands, so a refused one is tried again.
+   * A month with no units at all is a paused host, whose creator's plan includes no hosted
+   * seat any more (I7), and the notice says so.
    */
   const notice = async (used: number, allowed: number): Promise<HostRecord> => {
-    const month = monthKey(now);
     if (record.noticed === month) return record;
+    const text = allowed === 0
+      ? "The host is paused: the plan of the person who created this room no longer includes a hosted seat. It is quiet until a month begins on a plan that does."
+      : `The host has used its ${allowed} units this month (${used} spent; a ${host.model} wake costs ${units}). It is quiet until the month turns.`;
     const written = await driver.write(wake.sessionId, {
       type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: label,
-      payload: { kind: "notice", text: `The host has used its ${allowed} units this month (${used} spent; a ${host.model} wake costs ${units}). It is quiet until the month turns.` },
-      refId: null,
+      payload: { kind: "notice", text }, refId: null,
     }, 0, now, `host:notice:${month}`);
     return written.ok ? { ...record, noticed: month } : record;
   };
@@ -382,7 +391,18 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
     return settle({ ...record, cursor: Math.max(record.cursor, wake.cursor), questions });
   }
 
-  const charge = decideHostCharge(room, units, now);
+  // The month's first wake reads the allowance again (I7): the creator's plan's units if that
+  // plan still includes a hosted seat, else none, which pauses the host. Before any model
+  // call, and outside the room's transaction: a plan that changes between this read and the
+  // write costs one wake at most.
+  let meter: StoredSession = room;
+  if (room.hostUnits.month < month) {
+    const ent = ENTITLEMENTS[await driver.plan(room.createdBy)];
+    const allowed = ent.hostedRooms > 0 ? ent.hostUnitsPerRoom : 0;
+    await driver.renew(wake.sessionId, month, allowed);
+    meter = { ...room, hostUnitsPerMonth: allowed, hostUnits: { month, used: 0, wakes: [] } };
+  }
+  const charge = decideHostCharge(meter, units, now);
   if (!charge.ok) return settle(charge.reason === "units" ? await notice(charge.used, charge.allowed) : record);
 
   // A window ending past the reply that woke the seat, never the whole tail (I4).

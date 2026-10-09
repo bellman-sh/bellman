@@ -10,6 +10,8 @@ import {
   type HostDriver, type HostRecord, type HostWake,
 } from "./host.js";
 import type { MemoryStore } from "./store.js";
+import type { Plan } from "./types.js";
+import { keyedPlan } from "./auth.js";
 
 /**
  * Which model the Node server's seat calls (M11), and the line it prints at startup to say
@@ -44,7 +46,15 @@ export class MemoryHost {
   readonly #inFlight = new Set<Promise<void>>();
   readonly #driver: HostDriver;
 
-  constructor(store: MemoryStore, opts: { modelUrl: string; apiKey?: string; fetch?: typeof fetch; retryMs?: number[] }) {
+  /**
+   * `plan` is how a room creator's plan is read at a month turn (I7). The Node server knows a
+   * caller only from its key table (`resolveIdentity`), so by default that table decides,
+   * and a user it does not name holds the free plan.
+   */
+  constructor(
+    store: MemoryStore,
+    opts: { modelUrl: string; apiKey?: string; fetch?: typeof fetch; retryMs?: number[]; plan?: (userId: string) => Promise<Plan> },
+  ) {
     const fetcher = opts.fetch ?? fetch;
     this.#driver = {
       retryMs: opts.retryMs ?? RETRY_MS,
@@ -57,6 +67,8 @@ export class MemoryHost {
       write: (id, e, units, now, key) => store.appendHostEvent(id, e, units, now, key),
       load: async (id) => this.#records.get(id) ?? emptyHostRecord(),
       save: async (id, record) => { this.#records.set(id, record); },
+      plan: opts.plan ?? (async (userId) => keyedPlan(userId) ?? "free"),
+      renew: (id, month, units) => store.renewHostAllowance(id, month, units),
     };
   }
 

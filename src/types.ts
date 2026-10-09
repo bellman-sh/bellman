@@ -134,7 +134,11 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
-  /** Units the hosted seat may spend a calendar month: the plan's `hostUnitsPerRoom`, or 0 for a room with no host. */
+  /**
+   * Units the hosted seat may spend this calendar month: the creator's plan's
+   * `hostUnitsPerRoom`, stamped at creation and read from the creator's plan again at each
+   * month turn (I7); 0 for a room with no host, or once the creator's plan includes none.
+   */
   hostUnitsPerMonth: number;
   /** The meter. See `HostUnits`. */
   hostUnits: HostUnits;

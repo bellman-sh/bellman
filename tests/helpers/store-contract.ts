@@ -2287,6 +2287,24 @@ export function describeStoreContract(
         expect(await store.hostEventFor("qs_nobody", "host:tick:7")).toBeUndefined();
       });
 
+      /**
+       * A hosted room's allowance renews at the month turn from its creator's plan as it is then
+       * (I7): the seat reads the plan and writes the month's units here, the meter starting
+       * empty. A renewal for a month the meter has reached already changes nothing, so a second
+       * one cannot hand back what the month has spent.
+       */
+      it("renews the allowance for a new month, once, with the meter emptied", async () => {
+        const s = hostedRoom({ id: "qs_host_renew", hostUnits: { month: "2026-02", used: 9, wakes: [NOW() - 1_000] } });
+        await store.createSession(s);
+        await store.renewHostAllowance(s.id, "2026-03", 0);
+        expect(await store.getSession(s.id)).toMatchObject({ hostUnitsPerMonth: 0, hostUnits: { month: "2026-03", used: 0, wakes: [] } });
+        await store.renewHostAllowance(s.id, "2026-03", 3_000);
+        expect((await store.getSession(s.id))!.hostUnitsPerMonth).toBe(0);
+        await store.renewHostAllowance(s.id, "2026-02", 3_000);
+        expect((await store.getSession(s.id))!.hostUnits.month).toBe("2026-03");
+        await store.renewHostAllowance("qs_nobody", "2026-03", 1);
+      });
+
       /** The month's notice is outside the meter (spec D6, I9): a write of no units passes both caps and counts in neither. */
       it("writes a zero-unit notice whatever the month and the hour have spent, and counts it in neither", async () => {
         const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW() - i * 60_000);

@@ -1673,6 +1673,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /**
+   * The hosted seat's allowance for a new month (I7), `BellmanStore.renewHostAllowance`'s
+   * rule: in one transaction, so a renewal and the seat's charge cannot interleave inside
+   * the record. The seat is the only caller, on its first wake of a month.
+   */
+  async renewHostAllowance(month: string, units: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.hostUnits.month >= month) return;
+      await txn.put<unknown>({ session: { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } } });
+    });
+  }
+
   /** `limit` bounds the storage list itself (I4): the hosted seat's read passes one, every other read none. */
   async eventsAfter(cursor: number, limit?: number): Promise<SessionEvent[]> {
     return this.events(cursor, limit);
@@ -3366,6 +3379,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
     return this.session(sessionId).hostEventFor(key);
+  }
+
+  async renewHostAllowance(sessionId: string, month: string, units: number): Promise<void> {
+    await this.session(sessionId).renewHostAllowance(month, units);
   }
 
   async waitForEvents(

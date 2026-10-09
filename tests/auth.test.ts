@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { ENTITLEMENTS, entitlementsFor, resolveIdentity } from "../src/auth.js";
+import { ENTITLEMENTS, entitlementsFor, keyedPlan, resolveIdentity } from "../src/auth.js";
 import type { Identity, Plan } from "../src/types.js";
 
 const ORIGINAL_KEYS = process.env.BELLMAN_KEYS;
@@ -226,5 +226,29 @@ describe("plan entitlements", () => {
       };
       expect(entitlementsFor(identity)).toBe(ENTITLEMENTS[plan]);
     }
+  });
+});
+
+/**
+ * A hosted room's creator is known by user id alone, and at each month turn its seat reads
+ * the plan that creator holds then (I7). A key-table user's plan is the table's.
+ */
+describe("keyedPlan", () => {
+  it("gives the plan a key table names a user with, the higher of two, and null for a user it does not name", () => {
+    const table = JSON.stringify({
+      qk_a1: { userId: "u_a", orgId: null, plan: "pro", role: "member", label: "a" },
+      qk_a2: { userId: "u_a", orgId: null, plan: "max", role: "member", label: "a" },
+      qk_b: { userId: "u_b", orgId: null, plan: "free", role: "member", label: "b" },
+      qk_junk: "not an identity",
+    });
+    expect(keyedPlan("u_a", table)).toBe("max");
+    expect(keyedPlan("u_b", table)).toBe("free");
+    expect(keyedPlan("u_nobody", table)).toBeNull();
+    expect(keyedPlan("u_a", "{not json")).toBeNull();
+  });
+
+  it("reads the table resolveIdentity reads when given none, and no table when given null", () => {
+    expect(keyedPlan("u_jesse")).toBe("team");
+    expect(keyedPlan("u_jesse", null)).toBeNull();
   });
 });

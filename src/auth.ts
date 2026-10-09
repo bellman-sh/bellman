@@ -169,3 +169,32 @@ export function resolveIdentity(
 export function entitlementsFor(identity: Identity): Entitlements {
   return ENTITLEMENTS[identity.plan];
 }
+
+/**
+ * The plan a key table gives this user, or null when no key in it names them (I7). A hosted
+ * room knows its creator by user id alone, and its seat reads that creator's plan again at
+ * each month turn. The table is the one `resolveIdentity` reads: `keysJson` when given, else
+ * BELLMAN_KEYS, else the dev keys; `null` is no table at all, which is how the Worker asks,
+ * since it never reads the dev keys (`resolveCaller`). Two keys for one user count for the
+ * higher plan, as billing ranks plans: cheapest first in ENTITLEMENTS.
+ */
+export function keyedPlan(userId: string, keysJson?: string | null): Plan | null {
+  if (keysJson === null) return null;
+  const raw = keysJson ?? envKeys();
+  let table: unknown = DEV_KEYS;
+  if (raw) {
+    try {
+      table = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof table !== "object" || table === null) return null;
+  const ranks = Object.keys(ENTITLEMENTS);
+  let best: Plan | null = null;
+  for (const v of Object.values(table)) {
+    if (!isIdentity(v) || v.userId !== userId) continue;
+    if (best === null || ranks.indexOf(v.plan) > ranks.indexOf(best)) best = v.plan;
+  }
+  return best;
+}

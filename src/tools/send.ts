@@ -4,6 +4,7 @@ import {
   ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok,
 } from "./kit.js";
 import type { ToolResult } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
 import { FROZEN, activeMembers, audit, findMember, touchMember, writeSurface } from "../rooms.js";
@@ -30,7 +31,7 @@ Args:
       "brief_update"   — replace your brief as things progress (payload = full Brief object)
       "progress"       — answer the room's heartbeat: where you are now ({ note, step?, eta_seconds? }). Peers are not interrupted by it; it reaches them when they next look.
       "surface"        — write or replace a named item on the room's working surface, or remove one. Payload { key, kind, title?, body?, ends?, placement?, blob? } or { key, remove: true }.
-                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
+                         Kinds: text (markdown in body), link (an http/https URL in body), diagram (mermaid source in body), connector (ends: { from, to } naming two items on the surface; no placement), file and image (blob: { id } naming a blob uploaded to this room — POST /rooms/:id/blobs, or the bridge's bellman_upload, which uploads and places in one call; no body; the item comes back with the object's bytes, type and name, and an image needs a blob stored as image/png, image/jpeg, image/gif or image/webp), html (a self-contained page: the page inline in body, or blob: { id } naming a blob stored as text/html (uploaded as for a file, or bellman_upload with kind: "html"), never both; the panel renders it only inside a sandboxed frame on another origin, where its inline script and style and data: images work and it gets no cookies, no parent, no navigation, no popups, no downloads, no forms and no network through anything the policy governs (fetch, sockets, beacons; WebRTC is outside it in Chromium, so a page naming a STUN or TURN server reaches that host) — inline any library it needs; the bytes are the artifact, whatever they claim to be). placement is { x, y, w?, h? }: x and y unbounded, w and h positive when given.
                          Needs the write_surface verb. Items replace by key; at most 64 per room, body at most 8,000 characters, title 120. Peers read the surface on join and whenever it changes — keep the plan and decisions there rather than in messages. Every version stays in the room's history.
   - payload: object, ≤ ${MAX_PAYLOAD_CHARS} chars serialized and ≤ ${MAX_PAYLOAD_DEPTH} levels deep. Both bounds matter: a deeply nested payload can be small and still be undeliverable, so flatten rather than nest.
   - ref_id: required for action_response
@@ -41,7 +42,7 @@ Returns: { room_members, cursor, replayed? }
   - replayed: true means this key had already been used and nothing new was sent.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke.`,
       inputSchema: {
-        session_id: z.string().min(4),
+        ...RoomRefShape,
         member_id: z.string().min(4),
         type: z.enum(SEND_KINDS),
         payload: z.record(z.string(), z.unknown()),
@@ -52,7 +53,10 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, type, payload, ref_id, idempotency_key }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id, type, payload, ref_id, idempotency_key } = args;
       // The whole sequence — guards, shape, rows, append, audit — is one
       // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
       // Handled before the common guards below, which writeSurface runs itself.

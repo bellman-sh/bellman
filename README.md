@@ -23,10 +23,13 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_rooms` | The rooms you hold a seat in: members with their roles, presence and last beat, live codes, expiry. Backs the in-chat monitor. |
+| `bellman_surface` | The room's working surface, read-only: every item and the cursor of its last change. Backs the in-chat canvas. |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
+
+Every tool that takes a room accepts `room_id` as the same id as `session_id`. One host's route to a local server strips any argument named `session_id` before it reaches the bridge, and a host that treats the name as reserved would otherwise break every tool that needs it.
 
 ## What a send proves
 
@@ -69,7 +72,7 @@ that way; the surface is where things stand.
 
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
   body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
-  `text`, `link`, `diagram`, `connector`, `file`, `image`. Items replace by key;
+  `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`. Items replace by key;
   every version stays in the log at its cursor.
 - A `file` or an `image` names a blob. Upload the bytes first — `POST
   /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
@@ -83,6 +86,12 @@ that way; the surface is where things stand.
   (`png`, `jpeg`, `gif`, `webp`), which are served inline; nothing from it is
   ever HTML. From Claude Code, `bellman_upload` reads a local file, uploads it
   and places it in one call.
+- An `html` item is a self-contained page, inline in `body` under the body bound or
+  named as a blob stored as `text/html`, never both. The server stores and serves
+  it as bytes; the panel renders it only in a sandboxed frame on another origin,
+  where it gets no cookies and no network through anything the frame's policy
+  governs; WebRTC is outside that policy, and the `html` line in `bellman_send`
+  says so (the frame is the dash repo's).
 - The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
   to the creator's seat alone; a manifest may give it to any seat. Reading is
   never gated.
@@ -95,8 +104,9 @@ that way; the surface is where things stand.
 - Every item arrives in an untrusted envelope with its writer as origin. The
   preview carries no prose at all.
 
-A canvas to see it on and sandboxed HTML artifacts are the next two pieces; the
-designs are in `docs/superpowers/specs/`.
+The `html` kind is here (#185). The canvas to see the surface on, and the sandbox
+that renders `html` and `diagram` items (`bellman-sh/dash#14`), are the control
+panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 
@@ -109,18 +119,24 @@ designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | blobs / room | |
-| --- | --- | --- | --- | --- |
-| `free` | pair | 20 | 50 MB | |
-| `pro` | pair, swarm | 500 | 500 MB | |
-| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
-| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | kept after close | |
+| --- | --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | 7 days | |
+| `pro` | pair, swarm | 500 | 500 MB | 1 year | |
+| `max` | pair, swarm | 2,000 | 5 GB | until deleted | *coming soon*: hosted agents will be what sets it apart |
+| `team` | pair, swarm | 5,000 | 5 GB | until deleted | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
 A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
+
+**What happens after a room closes.** Its record and its files are kept for the window its creator's plan promised, stamped on the room at creation like the blob ceiling (the *kept after close* column), and then deleted for good, files first. A plan change later never shortens a room that was already promised a window. Until then a closed room reads as it always has, and any file nobody placed on its surface is cleared out the moment it closes, with its bytes credited back. The window is set when a room is created, so a room created before this existed has none and is kept until someone deletes it, whatever its plan, even when it closes after the deploy.
+
+- `DELETE /rooms/:id` deletes a closed room now, for its creator or an admin of an org that sat in it. It answers `202` with `{ id, purge_at }`, `purge_at` being the time the room is stored to go (a repeated delete is told the first one's), and the purge follows within moments; a room that has not closed answers `409`, because a room is deleted after it closes, never before.
+- `GET /rooms/:id` carries `closed_at` and `purge_at` as ISO times, to a member as to an admin: when the room closed and when it goes. Each is `null` where the record has none, so an open room has neither and a room kept until it is deleted has no `purge_at`.
+- On the team plan an org's admin can read any closed room one of that org's people sat in, though they never held a seat: `GET /rooms/:id` answers with `viewer: "admin"`, `GET /rooms/:id/surface` returns the whole surface, `GET /rooms/:id/events` the whole log, a file on it downloads through `GET /rooms/:id/blobs/:blobId` as it does for a member, and `GET /rooms?as=admin` lists those rooms, newest close first. An admin the room's creator removed reads the closed room the same way, since what a removal cuts is a seat's reading and they no longer hold one; their removed handles are still listed in `my_handles`. It is a read: an admin writes nothing to the room, so a surface write or an upload from one is a `403`, and an open room stays its members' alone. The list reads up to 500 rooms from the org's index, open ones among them, keeps the closed ones and returns the newest 50 by close; `truncated: true` says the index held that many, or more than 50 were closed. That scan costs up to 500 room reads for one request, which the summary index of #49 removes. A room created before this deploy is not in the index, though reading that room by its id still works.
 
 ## Run it
 
@@ -161,7 +177,10 @@ Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a 
 npm install -g @bellman-sh/mcp-server
 ```
 
-That puts three commands on your PATH: `bellman-channel` (the bridge Claude Code spawns), `bellman-stop-hook` (the fallback), and `bellman-claude` (the launcher below). Working from a clone instead? `npm install && npm run build`, and use `node "$PWD/dist/channel.js"` wherever `bellman-channel` appears.
+That puts four commands on your PATH: `bellman-channel` (the bridge Claude Code spawns), `bellman-stop-hook` (the fallback), `bellman-claude` (the launcher below), and `bellman` (the command line, below). Working from a clone instead? `npm install && npm run build`, and use `node "$PWD/dist/channel.js"` wherever `bellman-channel` appears.
+
+- `bellman update` installs the latest release from npm (`--check` only reports; in a clone or as a project's dependency it prints the commands and runs none). Claude Code sessions already open keep the old bridge until you restart them.
+- `bellman feature-request [words…]` opens the feature-request form on GitHub with the words as its title, and prints the URL first for a machine with no browser.
 
 **Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
 
@@ -233,7 +252,7 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **One connection per room.** Every Claude Code session starts a bridge of its own, and each used to long-poll Bellman for every room it was in. The bridges on a machine now share one connection per room instead: one of them, whichever got there first, holds a WebSocket to each room and hands every event to the others over a Unix socket in `~/.claude/bellman/bus/`, so several sessions in one room make one connection and not several. Where that cannot be set up (Windows, a socket path that is too long, a directory it cannot write to), or when it stops working, a bridge polls for its own members as it did before. To turn it off yourself, launch the bridge with `BELLMAN_BUS=off`: it then polls for its own members and makes no socket (`claude mcp add --scope user bellman -e BELLMAN_BUS=off -- bellman-channel`). It is read when the bridge starts, so restart Claude Code after changing it. `0`, `false` and `no` also mean off, and so does a value it does not recognise: the bridge says so on stderr rather than keep a bus you tried to turn off.
 
-**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's. Claude Desktop and claude.ai render MCP Apps, so there `bellman_connect` shows the join screen and `bellman_rooms` the room monitor; a host that does not render them gets the same results as text.
+**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's. Claude Desktop and claude.ai render MCP Apps, so there `bellman_connect` shows the join screen, `bellman_rooms` the room monitor, and `bellman_surface` (and `bellman_confirm`, on joining) the room's working surface as a canvas, where an `html` artifact runs in a nested sandboxed frame when the host allows one and otherwise opens in dash; a host that does not render them gets the same results as text.
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 

@@ -137,6 +137,14 @@ export interface Session {
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
+  /** When `closed` was set (#65). null while open, and on rows closed before #65. */
+  closedAt: number | null;
+  /** The window stamped at creation from the creator's plan (#65, D1); null keeps the room until deleted. */
+  retainAfterCloseMs: number | null;
+  /** A purge asked for by DELETE /rooms/:id (#65, D6): due at this time instead of the window's end. */
+  purgeAt: number | null;
+  /** Whether the close-time sweep of unnamed objects has run (#65, D3). */
+  blobsSwept: boolean;
   /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
@@ -202,6 +210,11 @@ export interface Entitlements {
    * a plan already rations.
    */
   blobBytesPerRoom: number;
+  /**
+   * How long a closed room's record and bytes are kept before the purge (#65,
+   * D1): null keeps them until a creator or an org admin deletes the room.
+   */
+  retainAfterCloseMs: number | null;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
@@ -249,10 +262,10 @@ export interface RoomManifest {
 /**
  * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
  * client is shown maps to a shape the server validates, and a kind lands with
- * its validator. `file` and `image` (#183) reference a blob; `html` arrives
- * with piece 4.
+ * its validator. `file` and `image` (#183) reference a blob; `html` (#185) is
+ * a page inline in body or a blob, never both.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html";
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -278,8 +291,9 @@ export interface BlobRef {
  * An item as written, normalised: every optional field present as null, so a
  * reader never tells "absent" from "null". `ends` is a connector's two keys;
  * every other kind has none. `body` is markdown for `text`, a URL for `link`,
- * mermaid source for `diagram`, a label for `connector`, and absent for `file`
- * and `image`, whose bytes are the blob's.
+ * mermaid source for `diagram`, a label for `connector`, the page for `html`
+ * unless it names a blob, and absent for `file` and `image`, whose bytes are the
+ * blob's.
  */
 export interface SurfaceItem {
   key: string;
@@ -288,7 +302,7 @@ export interface SurfaceItem {
   body: string | null;
   ends: { from: string; to: string } | null;
   placement: Placement | null;
-  /** The blob a `file` or `image` names; null for every other kind. */
+  /** The blob a `file`, an `image` or a blob-backed `html` item names; null for every other. */
   blob: BlobRef | null;
 }
 

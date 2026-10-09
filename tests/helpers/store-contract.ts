@@ -21,7 +21,7 @@ import { MAX_PAYLOAD_DEPTH, PayloadTooDeepError } from "../../src/payload.js";
 import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
-import { blobBytesUsed } from "../../src/blobs.js";
+import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { Session, SurfaceItem } from "../../src/types.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
@@ -57,13 +57,34 @@ export interface StoreContractDivergences {
   readonly __none__?: never;
 }
 
+/**
+ * What a store's caller supplies beside the store, for the cases that reach outside it (#65): a
+ * purge deletes from a blob store, and a store whose retention runs on a room's own alarm has to be
+ * told when the alarm comes.
+ */
+export interface StoreContractHarness {
+  /**
+   * The blob store the store under test deletes from, read after each `makeStore()`. The cases put
+   * objects in it and read them back, so a purge that missed the bucket the store was built over is seen.
+   */
+  blobsFor: () => BlobStore;
+  /**
+   * Called after a case's `sweep`, for the room it names. MemoryStore sweeps every room itself and
+   * passes nothing. `DurableObjectStore.sweep` is a no-op, because a room is purged by that room's own
+   * alarm, so its caller runs the alarm here.
+   */
+  advance?: (sessionId: string) => Promise<void>;
+}
+
 export function describeStoreContract(
   name: string,
   makeStore: () => BellmanStore,
+  harness: StoreContractHarness,
   divergences: StoreContractDivergences = {},
 ): void {
   describe(`BellmanStore contract: ${name}`, () => {
     let store: BellmanStore;
+    let blobs: BlobStore;
 
     /**
      * `it`, unless this store has an argued reason it cannot pass the case.
@@ -78,6 +99,7 @@ export function describeStoreContract(
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-15T12:00:00Z"));
       store = makeStore();
+      blobs = harness.blobsFor();
     });
 
     afterEach(() => {
@@ -829,6 +851,22 @@ export function describeStoreContract(
       (await store.createSession(s));
       (await store.closeSession(s.id));
       expect((await store.getSession(s.id))?.closed).toBe(true);
+    });
+
+    it("stamps closedAt when a room closes, once, by every close path", async () => {
+      const a = session({ id: "qs_close_a" });
+      await store.createSession(a);
+      await store.closeSession(a.id);
+      const closedAt = (await store.getSession(a.id))!.closedAt;
+      expect(closedAt).toBe(Date.now());
+      vi.advanceTimersByTime(60_000);
+      await store.closeSession(a.id);
+      expect((await store.getSession(a.id))!.closedAt).toBe(closedAt);
+
+      const b = session({ id: "qs_close_b", members: [member({ leftAt: Date.now() })] });
+      await store.createSession(b);
+      expect(await store.closeSessionIfEmpty(b.id)).toBe(true);
+      expect((await store.getSession(b.id))!.closedAt).toBe(Date.now());
     });
 
     // ------------------------------------------------- closing an empty room
@@ -3075,6 +3113,16 @@ export function describeStoreContract(
       expect((await store.getSession(s.id))?.closed).toBe(true);
     });
 
+    // The third close path, beside closeSession and closeSessionIfEmpty (#65).
+    it("stamps closedAt when abandonment closes the room, and a later read keeps it", async () => {
+      const s = abandonedRoom();
+      (await store.createSession(s));
+      const closedAt = Date.now();
+      expect((await store.getSession(s.id))!.closedAt).toBe(closedAt);
+      vi.advanceTimersByTime(60_000);
+      expect((await store.getSession(s.id))!.closedAt).toBe(closedAt);
+    });
+
     it("keeps a room open while one active member was seen inside the window", async () => {
       const s = session({ members: [
         member({ lastSeenAt: AGED() }),
@@ -3159,6 +3207,346 @@ export function describeStoreContract(
       (await store.sweep(Date.now()));
       expect((await store.getSession(s.id))?.closed).toBe(false);
       expect((await store.takePendingConnect("qct_live"))).toBeDefined();
+    });
+
+    // ----------------------------------------------------------- the purge (#65)
+    /**
+     * `sweep`, then the harness's hook for the room. MemoryStore's sweep reaches every room and the hook
+     * is nothing; the Durable Object store's is a no-op, because a room is purged by that room's own
+     * alarm, and its caller runs the alarm here. Either way, when this returns the purge a case is
+     * waiting for has had its chance, and a case reads the result.
+     */
+    const sweepRoom = async (id: string) => {
+      await store.sweep(Date.now());
+      await harness.advance?.(id);
+    };
+    const putBlob = (roomId: string, id: string, bytes: number) =>
+      blobs.put(roomId, id, new Uint8Array(bytes).buffer as ArrayBuffer, {
+        bytes, type: "text/plain", name: `${id}.txt`, by: "m_creator", at: Date.now(),
+      });
+    /**
+     * The `appendEvent` a surface write makes for a `file` item naming `blobId` (#183): the event, and the
+     * row the store is asked to commit with it. A `surface` event without the row names nothing. An object
+     * a case wants to survive the close-time sweep is one an item names.
+     */
+    const nameBlob = (roomId: string, blobId: string, bytes: number) => {
+      const item: SurfaceItem = {
+        key: `file_${blobId}`, kind: "file", title: null, body: null, ends: null, placement: null,
+        blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` },
+      };
+      return store.appendEvent(
+        roomId,
+        { type: "surface", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: item, refId: null },
+        { surface: { key: item.key, item } },
+      );
+    };
+    const blobIds = async (roomId: string) => (await blobs.list(roomId)).map((o) => o.id).sort();
+    const bytesUsed = async (roomId: string) => blobBytesUsed((await store.getSession(roomId))!);
+    const peer =(over: Partial<Session["members"][number]> = {}) =>
+      member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b", orgId: "org_other", ...over });
+
+    describe("the purge (#65)", () => {
+      it("purges a closed room at its window: record, listings and objects gone", async () => {
+        const s = session({ id: "qs_purge", retainAfterCloseMs: 60_000 });
+        await store.createSession(s);
+        await putBlob(s.id, "b_one", 3);
+        await nameBlob(s.id, "b_one", 3); // named, so the close-time sweep leaves it for the purge to find
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id), "inside the window").toBeDefined();
+        expect(await blobs.list(s.id), "and its bytes with it").toHaveLength(1);
+
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id)).toBeUndefined();
+        expect(await store.sessionsCreatedBy("u_jesse", 10)).not.toContain(s.id);
+        expect(await store.sessionsJoinedBy("u_jesse", 10)).not.toContain(s.id);
+        expect(await blobs.list(s.id)).toEqual([]);
+        const audit = await store.auditForOrg("org_codenerd", 50);
+        expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });
+        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was")
+          .toEqual({ ok: false, reason: "missing" });
+      });
+
+      it("purges at the window's end exactly, and not a millisecond before", async () => {
+        const s = session({ id: "qs_edge", retainAfterCloseMs: 60_000 });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+
+        vi.advanceTimersByTime(59_999);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id), "a millisecond before the end").toBeDefined();
+
+        vi.advanceTimersByTime(1);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id), "at the end").toBeUndefined();
+      });
+
+      it("keeps a closed room with no window, and a legacy row, until a delete asks", async () => {
+        const kept = session({ id: "qs_kept", retainAfterCloseMs: null, joinCodes: {} });
+        // Closed before the window existed: the record names a window and no date for the close to start it from.
+        const legacy = session({ id: "qs_legacy", closed: true, closedAt: null, retainAfterCloseMs: 60_000, joinCodes: {} });
+        for (const s of [kept, legacy]) await store.createSession(s);
+        await store.closeSession(kept.id);
+
+        vi.advanceTimersByTime(365 * 24 * 60 * 60 * 1000);
+        for (const s of [kept, legacy]) await sweepRoom(s.id);
+        for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeDefined();
+
+        const asked = Date.now();
+        for (const s of [kept, legacy]) {
+          expect(await store.schedulePurge(s.id, asked, "u_jesse"), s.id).toEqual({ ok: true, purgeAt: asked });
+        }
+        for (const s of [kept, legacy]) await sweepRoom(s.id);
+        for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeUndefined();
+      });
+
+      it("refuses to schedule a purge of an open room, and says so for a missing one", async () => {
+        const open = session({ id: "qs_open" });
+        await store.createSession(open);
+        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
+        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "missing" });
+        // The refusal wrote nothing: the room is still open, and a sweep leaves it alone.
+        await sweepRoom(open.id);
+        expect((await store.getSession(open.id))?.closed).toBe(false);
+        expect((await store.auditForOrg("org_codenerd", 50)).filter((a) => a.sessionId === open.id)).toEqual([]);
+      });
+
+      it("files one room_purged for each org on the roster, and none for a member with no org", async () => {
+        const s = session({
+          id: "qs_orgs", retainAfterCloseMs: 60_000, joinCodes: {},
+          members: [member(), peer(), peer({ memberId: "m_solo", userId: "u_solo", orgId: null })],
+        });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+        await sweepRoom(s.id); // a second pass over a purged room files nothing more
+
+        for (const org of ["org_codenerd", "org_other"]) {
+          const filed = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
+          expect(filed, org).toEqual([{
+            at: expect.any(Number), orgId: org, sessionId: s.id, actorUserId: "system",
+            action: "room_purged", detail: { session_id: s.id, room: s.manifest.room },
+          }]);
+        }
+      });
+
+      it("files one room_deleted for each org however many times a delete is asked", async () => {
+        const s = session({ id: "qs_twice", joinCodes: {}, members: [member(), peer()] });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+
+        // A minute out, so the room is still there for the second ask: this is about the record of asking.
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toMatchObject({ ok: true });
+
+        for (const org of ["org_codenerd", "org_other"]) {
+          const asked = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
+          expect(asked, org).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+        }
+      });
+
+      // M2. The first request stands, and the answer says so: a client that asks again is told when the room goes,
+      // which is the time the record holds, and not the time of the repeat.
+      it("answers a repeated delete with the time the first one asked for", async () => {
+        const s = session({ id: "qs_first_time", joinCodes: {} });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        const first = Date.now() + 60_000;
+        const second = Date.now() + 120_000;
+
+        expect(await store.schedulePurge(s.id, first, "u_jesse")).toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, second, "u_jesse"), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
+        expect((await store.getSession(s.id))!.purgeAt, "and the record holds it").toBe(first);
+      });
+
+      it("leaves nothing of a purged room for a reader to be handed", async () => {
+        const s = session({ id: "qs_nothing", retainAfterCloseMs: 60_000, blobBytesCeiling: 100, joinCodes: {} });
+        await store.createSession(s);
+        const item: SurfaceItem = { key: "plan", kind: "text", title: "Plan", body: "1. read", ends: null, placement: null, blob: null };
+        const body = { fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null };
+        await store.appendEvent(s.id, { ...body, type: "message", payload: { text: "kept for a week" } });
+        await store.appendEvent(s.id, { ...body, type: "surface", payload: item }, { surface: { key: "plan", item } });
+        await store.chargeBlobBytes(s.id, 5);
+        await store.closeSession(s.id);
+        expect(await store.eventsAfter(s.id, 0), "before the purge").not.toEqual([]);
+        expect(await store.surfaceOf(s.id), "before the purge").toHaveLength(1);
+
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+        expect(await store.recentEvents(s.id, 10)).toEqual([]);
+        expect(await store.surfaceOf(s.id)).toEqual([]);
+        expect(await store.chargeBlobBytes(s.id, 1)).toEqual({ ok: false, reason: "not_found", used: 0 });
+        await expect(store.appendEvent(s.id, { ...body, type: "message", payload: { text: "late" } }))
+          .rejects.toThrow(/Unknown session/);
+      });
+    });
+
+    // ------------------------------------------------- the sweep at close (#65)
+    describe("the sweep at close (#65, D3)", () => {
+      it("removes the objects no item names, credits their bytes, and leaves named ones", async () => {
+        const s = session({ id: "qs_sweep", blobBytesCeiling: 1_000, joinCodes: {} });
+        await store.createSession(s);
+        await putBlob(s.id, "b_named", 10);
+        await putBlob(s.id, "b_orphan", 30);
+        await putBlob(s.id, "b_other", 5);
+        await store.chargeBlobBytes(s.id, 45);
+        await nameBlob(s.id, "b_named", 10);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+
+        expect(await blobIds(s.id)).toEqual(["b_named"]);
+        expect(await bytesUsed(s.id)).toBe(10);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+      });
+
+      // Review Focus 4: the item keeps its reference, and a download of it answers 404 as it does today.
+      it("credits nothing for a named object that is already gone, and does not throw", async () => {
+        const s = session({ id: "qs_gone", blobBytesCeiling: 1_000, joinCodes: {} });
+        await store.createSession(s);
+        await store.chargeBlobBytes(s.id, 7);
+        await nameBlob(s.id, "b_gone", 7); // the item names it; no object was ever put
+        await store.closeSession(s.id);
+
+        await expect(sweepRoom(s.id)).resolves.toBeUndefined();
+
+        expect(await bytesUsed(s.id)).toBe(7);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+        expect((await store.surfaceOf(s.id)).map((row) => row.blob?.id)).toEqual(["b_gone"]);
+      });
+
+      it("sweeps a room once: an object that turns up afterwards is left for the purge", async () => {
+        const s = session({ id: "qs_once", joinCodes: {} });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(true);
+
+        await putBlob(s.id, "b_late", 4);
+        await sweepRoom(s.id);
+
+        expect(await blobIds(s.id), "no second pass").toEqual(["b_late"]);
+      });
+
+      // An open room's unnamed object is an upload between its put and its charge or its item.
+      it("does not touch an open room, and a sweep asked for one removes nothing", async () => {
+        const s = session({ id: "qs_open_sweep", joinCodes: {} });
+        await store.createSession(s);
+        await putBlob(s.id, "b_inflight", 9);
+
+        await sweepRoom(s.id);
+        expect(await store.sweepBlobs(s.id)).toEqual({ removed: 0, credited: 0 });
+        expect(await store.sweepBlobs("qs_nobody")).toEqual({ removed: 0, credited: 0 });
+
+        expect(await blobIds(s.id)).toEqual(["b_inflight"]);
+        expect((await store.getSession(s.id))!.blobsSwept).toBe(false);
+      });
+
+      // No close time, nothing to date the sweep from; the purge, or a delete, is what reaches it.
+      it("leaves a room closed before the close was dated alone", async () => {
+        const legacy = session({ id: "qs_legacy_sweep", closed: true, closedAt: null, retainAfterCloseMs: null, joinCodes: {} });
+        await store.createSession(legacy);
+        await putBlob(legacy.id, "b_old", 3);
+
+        await sweepRoom(legacy.id);
+
+        expect(await blobIds(legacy.id)).toEqual(["b_old"]);
+        expect((await store.getSession(legacy.id))!.blobsSwept).toBe(false);
+      });
+    });
+
+    // ------------------------------------------------------ the org index (#65)
+    /**
+     * Which rooms an org sat in (D5), for the admin's list: written when a room is created for the org of
+     * everyone it starts with, and when a member joins for that member's org. It keeps a closed room, which
+     * is what an admin lists it for, and a purge is what removes one.
+     */
+    describe("the org index (#65, D5)", () => {
+      it("lists a room for the org of its creator, and for the org of each member who joins", async () => {
+        const s = session({ id: "qs_org_join", joinCodes: {} });
+        await store.createSession(s);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+
+        expect(await store.addMember(s.id, peer({ memberId: "m_o1", userId: "u_o1" }))).toBe(true);
+
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+      });
+
+      it("lists a room for the org of a member seated into it", async () => {
+        const s = swarmSession({ id: "qs_org_seat", joinCodes: {} });
+        await store.createSession(s);
+
+        const out = await store.seatMember(s.id, peer({ memberId: "m_seated", userId: "u_seated" }), Date.now() - 600_000, Date.now());
+
+        expect(out.refused).toBeNull();
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+      });
+
+      it("lists a room for the orgs of the members it is created with", async () => {
+        const s = session({ id: "qs_org_both", joinCodes: {}, members: [member(), peer()] });
+        await store.createSession(s);
+        expect(await store.sessionsForOrg("org_codenerd", 10)).toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+      });
+
+      it("adds a room to no org's list for a member who has none or a blank one, and does not fail", async () => {
+        const s = session({ id: "qs_org_none", joinCodes: {} });
+        await store.createSession(s);
+        expect(await store.addMember(s.id, peer({ memberId: "m_solo", userId: "u_solo", orgId: null }))).toBe(true);
+        expect(await store.addMember(s.id, peer({ memberId: "m_blank", userId: "u_blank", orgId: "" }))).toBe(true);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+        expect(await store.sessionsForOrg("", 10), "a blank org is no org").toEqual([]);
+      });
+
+      // The prefix is `uo:<org>:` and ends at the separator: without it org_a would list org_ab's rooms.
+      it("keeps one org's rooms out of another's, including an org whose id begins with the other's", async () => {
+        const made = (id: string, org: string) =>
+          store.createSession(session({ id, orgId: org, joinCodes: {}, members: [member({ orgId: org })] }));
+        await made("qs_in_org_a", "org_a");
+        await made("qs_in_org_ab", "org_ab");
+
+        expect(await store.sessionsForOrg("org_a", 10)).toEqual(["qs_in_org_a"]);
+        expect(await store.sessionsForOrg("org_ab", 10)).toEqual(["qs_in_org_ab"]);
+        expect(await store.sessionsForOrg("org_nobody", 10)).toEqual([]);
+      });
+
+      // An identity's org can come from a key map nobody validated, so an id may spell the key's own separator:
+      // `uo:org:x:<room>` would otherwise be a row of org "org" with a room named "x:<room>".
+      it("keeps an org whose id spells the separator apart from the org it begins with", async () => {
+        const made = (id: string, org: string) =>
+          store.createSession(session({ id, orgId: org, joinCodes: {}, members: [member({ orgId: org })] }));
+        await made("qs_in_org", "org");
+        await made("qs_in_org_x", "org:x");
+
+        expect(await store.sessionsForOrg("org", 10)).toEqual(["qs_in_org"]);
+        expect(await store.sessionsForOrg("org:x", 10)).toEqual(["qs_in_org_x"]);
+      });
+
+      it("returns at most the limit it is handed", async () => {
+        for (const n of [1, 2, 3]) await store.createSession(session({ id: `qs_org_many_${n}`, joinCodes: {} }));
+        expect(await store.sessionsForOrg("org_codenerd", 2)).toHaveLength(2);
+      });
+
+      it("keeps listing a closed room until it is purged, and then drops it from every org that sat in it", async () => {
+        const s = session({ id: "qs_org_purge", retainAfterCloseMs: 60_000, joinCodes: {}, members: [member(), peer()] });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        await sweepRoom(s.id);
+        expect(await store.sessionsForOrg("org_codenerd", 10), "closed, inside the window").toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).toContain(s.id);
+
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+
+        expect(await store.sessionsForOrg("org_codenerd", 10)).not.toContain(s.id);
+        expect(await store.sessionsForOrg("org_other", 10)).not.toContain(s.id);
+      });
     });
 
     // ----------------------------------------------------- removing a member

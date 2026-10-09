@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { pickScreen } from "../src/screen.js";
-import { connectFixture, roomsFixture } from "./fixtures.js";
+import { connectFixture, roomsFixture, surfaceFixture } from "./fixtures.js";
 
 describe("pickScreen", () => {
   it("renders the join screen for a connect result and the monitor for a rooms result", () => {
@@ -18,5 +18,11 @@ describe("pickScreen", () => {
       .toEqual({ kind: "error", text: "Error: session is full." });
     expect(pickScreen({ content: [{ type: "text", text: "plain" }] })).toEqual({ kind: "none", text: "plain" });
     expect(pickScreen({})).toEqual({ kind: "none", text: "Nothing to show." });
+  });
+
+  it("renders the canvas for a surface result, and the join screen for a connect result that also carries a surface index", () => {
+    expect(pickScreen({ structuredContent: surfaceFixture() })).toMatchObject({ kind: "canvas" });
+    const connect = { ...connectFixture(), surface: { cursor: 3, items: [] } };
+    expect(pickScreen({ structuredContent: connect })).toMatchObject({ kind: "join" });
   });
 });

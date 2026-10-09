@@ -9,6 +9,7 @@ import { registerInvite } from "./tools/invite.js";
 import { registerSend } from "./tools/send.js";
 import { registerSync } from "./tools/sync.js";
 import { registerRooms } from "./tools/rooms.js";
+import { registerSurface } from "./tools/surface.js";
 import { registerLeave } from "./tools/leave.js";
 import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
@@ -34,9 +35,10 @@ const SERVER_VERSION = "0.1.0";
  * `tests/extension.test.ts` asserts the two against each other. The resource is
  * registered last; it is not a tool, and the manifest does not list it.
  *
- * `blobs` is the blob seam (#183), handed only to `bellman_send`, whose `file`
- * and `image` items read it; it has no default, so a deploy that forgets the
- * binding does not compile rather than serving a store that forgets.
+ * `blobs` is the blob seam (#183), handed only to `bellman_send`, whose `file`,
+ * `image` and blob-backed `html` items read it; it has no default, so a deploy
+ * that forgets the binding does not compile rather than serving a store that
+ * forgets.
  */
 export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStore): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
@@ -48,6 +50,7 @@ export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStor
   registerSend(server, identity, s, blobs);
   registerSync(server, identity, s);
   registerRooms(server, identity, s);
+  registerSurface(server, identity, s);
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);

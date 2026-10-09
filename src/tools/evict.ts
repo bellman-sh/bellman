@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { evictMember } from "../rooms.js";
@@ -23,7 +24,7 @@ Returns: { evicted, code_retired (the role whose code was retired, or null), ses
 Members see a member_evicted event, the person removed too. If the room freezes while the call is in progress, the call is refused and nothing changes — the person is still in the room and their seat's code is untouched — so repeat it once the room thaws. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live — leaving does not.`,
       inputSchema: {
-        session_id: z.string().min(4),
+        ...RoomRefShape,
         member_id: z.string().min(4),
       },
       // idempotentHint is false. MCP defines it by effect — calling again with the same
@@ -46,7 +47,10 @@ Errors: only the creator may call it; you cannot evict yourself (use bellman_lea
         readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id } = args;
       // member_id is the TARGET's, not the caller's: every sibling tool takes the
       // caller's own handle in this slot. The creator-only check lives in evictMember.
       const r = await evictMember(s, identity, session_id, member_id);

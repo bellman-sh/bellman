@@ -6,8 +6,9 @@
  * ./README.md.
  */
 import { afterEach } from "vitest";
-import { env, reset, abortAllDurableObjects } from "cloudflare:test";
-import { DurableObjectStore } from "../src/store-do.js";
+import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { R2BlobStore } from "../src/blobs-r2.js";
+import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { describeStoreContract } from "../tests/helpers/store-contract.js";
 
 /**
@@ -33,4 +34,17 @@ afterEach(async () => {
 // No divergences. `errorIdentityAcrossRpc` was the last one and closed with #101:
 // DurableObjectStore reaches every object through accessors wrapped in `reviving`,
 // so a class thrown inside one is still that class outside.
-describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as never));
+//
+// What the harness hands the suite instead (#65): the real bucket the rooms' objects go in, and the
+// alarm. `DurableObjectStore.sweep` is a no-op, since a room is purged by its own alarm, so after a case
+// sweeps, the alarm of the room it names runs here. Called on the instance and not through
+// `runDurableObjectAlarm`: this pool fires a due alarm by itself, and these cases' faked clock is months
+// behind the real one, so an alarm armed on it is already due. Measured through the pool's helper, the
+// cases that wait for a purge found no alarm armed when they asked (`getAlarm()` null, the helper
+// answering false and running nothing) and failed three runs in three; `alarm()` is the same handler,
+// run when asked.
+describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as never), {
+  blobsFor: () => new R2BlobStore((env as unknown as { BLOBS: R2Bucket }).BLOBS),
+  advance: (id) =>
+    runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), (instance: SessionDO) => instance.alarm()),
+});

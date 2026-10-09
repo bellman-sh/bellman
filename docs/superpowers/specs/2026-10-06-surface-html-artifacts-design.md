@@ -26,7 +26,7 @@ to hand it the bytes without handing it anything else.
 1. An `html` kind, inline for small artifacts and blob-backed for large ones.
 2. A sandbox origin, cross-site to `bellman.sh`, serving one static frame.
 3. The frame's protocol: the panel posts the content in, the frame renders it
-   in a nested sandboxed document, nothing is fetched.
+   in a nested sandboxed document, no content is fetched.
 4. `diagram` rendered in the same frame, so mermaid never runs in the panel.
 5. The contract an artifact gets: what it can and cannot do, stated where an
    agent reads it.
@@ -84,19 +84,34 @@ The panel embeds
 ```
 
 and on `load` posts `{ kind: "html", html }` or `{ kind: "diagram", source }`
-with `postMessage(message, SANDBOX_ORIGIN)`. The frame accepts a message only
-when `event.origin` is the panel origin, baked in at build, and ignores
-everything else. For `html` it writes the content into a nested
+to the frame's `contentWindow`. The frame accepts a message only when
+`event.origin` is the panel origin baked in at build and `event.source` is the
+parent window, and ignores everything else.
+
+The outer frame is sandboxed without `allow-same-origin`, so its document's
+origin is opaque and reads `"null"`. Two things follow. The panel cannot name it
+as a target: it posts with `"*"` to the exact `contentWindow` it created, which
+is safe because that window is the panel's own and a nested artifact cannot
+navigate its parent frame (no `allow-top-navigation` on either frame). And the
+panel accepts a reply only from that window, whose `event.origin` is `"null"`,
+never by origin alone. The frame's own module script is a cross-origin fetch
+from an opaque origin, so the sandbox serves its assets with
+`Access-Control-Allow-Origin: *` (static script, nothing else). Measured in
+Chromium: without these, the module script is refused by CORS and the post is
+dropped with 'The target origin provided does not match the recipient window's
+origin (null)'.
+
+For `html` the frame writes the content into a nested
 `<iframe sandbox="allow-scripts" srcdoc>`; for `diagram` it renders mermaid —
 bundled into the frame at a pinned version, `securityLevel: "strict"` — and
 shows the SVG. The artifact may post `{ type: "resize", height }` up through
 the frame, and the panel sizes the node to it.
 
-**The frame fetches nothing.** The panel is the authenticated party: it reads
-an inline body off the item, or fetches a blob through the download route with
-its credentials, and posts the bytes. The sandbox origin holds no credential
-and makes no request, so there is nothing on it to steal and no route it has
-to be trusted with.
+**The frame fetches no content.** The panel is the authenticated party: it
+reads an inline body off the item, or fetches a blob through the download route
+with its credentials, and posts the bytes. The sandbox origin holds no
+credential and requests nothing but its own script, so there is nothing on it
+to steal and no route it has to be trusted with.
 
 **Nested, not direct**, for two reasons. An artifact written straight into the
 frame's own document would replace the frame's script (that is what
@@ -122,6 +137,10 @@ Content-Security-Policy:
   base-uri 'none'; form-action 'none'
 ```
 
+The frame's assets are served with `Access-Control-Allow-Origin: *` (D3): the
+module script is fetched cross-origin by an opaque origin, and the assets are
+static script and nothing else.
+
 A `srcdoc` document inherits its parent's policy, which is the point: the
 artifact's inline script and style run (`'unsafe-inline'` on a page that holds
 nothing is the price of running artifacts at all), it loads no script from
@@ -132,10 +151,17 @@ and it can be embedded by the panel and by nothing else. A top-level visit to
 ### D5 — What an artifact may do, said where an agent reads it.
 
 The `html` line in `bellman_send`'s description states the contract: a
-self-contained page; inline script and style; `data:` images; no network, no
-cookies, no parent, no navigation, no popups, no downloads, no forms.
-Interaction inside the artifact works. An artifact that needs a library inlines
-it.
+self-contained page; inline script and style; `data:` images; no cookies, no
+parent, no navigation, no popups, no downloads, no forms, and no network through
+anything the policy governs (fetch, sockets, beacons). WebRTC is outside that
+policy: Chromium does not implement the CSP `webrtc` directive (measured: the
+directive is reported as unrecognised, and an `RTCPeerConnection` gathers
+candidates under the committed policy), so an artifact that names a STUN or TURN
+server reaches that host, which learns the viewer's address and can receive
+what the viewer typed into the artifact. The cookie, the panel and the room stay
+out of reach either way. The contract says so rather than claiming more than the
+policy delivers. Interaction inside the artifact works. An artifact that needs a
+library inlines it.
 
 A CDN allowlist — `script-src https://cdnjs.cloudflare.com …` — is the obvious
 follow-up and is not in this design. It widens what an artifact can reach, and
@@ -164,14 +190,17 @@ sandbox origin in `frame-src`, which is the one place the two meet.
   cookie is ever sent; D3's `sandbox` without `allow-same-origin` makes its
   origin opaque, so even a same-site deployment would send none. Either alone
   would hold; both are kept because the cost is an attribute.
-- **No network from an artifact** (D4). `connect-src 'none'` and no
-  `allow-same-origin`: an artifact that calls `fetch` gets a refusal, and an
-  artifact that tries `parent.document` gets a `SecurityError`. Both are in the
-  manual check below, and both must fail.
-- **The frame holds nothing** (D3). No credential, no fetch, no storage. A
-  compromise of the sandbox origin yields an empty page.
-- **Only the panel can speak to it** (D3, D4). `event.origin` is checked, and
-  `frame-ancestors` names the panel.
+- **No network from an artifact through anything the policy governs** (D4).
+  `connect-src 'none'` and no `allow-same-origin`: an artifact that calls
+  `fetch` gets a refusal, and an artifact that tries `parent.document` gets a
+  `SecurityError`. Both are in the manual check below, and both must fail.
+  WebRTC is the exception (D5): no CSP directive closes it in Chromium, and a
+  prelude that deletes the constructor from the nested document is bypassed by
+  a child `srcdoc` realm, so it is stated rather than claimed closed.
+- **The frame holds nothing** (D3). No credential, no content fetch, no
+  storage. A compromise of the sandbox origin yields an empty page.
+- **Only the panel can speak to it** (D3, D4). `event.origin` is the panel's,
+  `event.source` is the parent window, and `frame-ancestors` names the panel.
 - **The bytes are never a page on the API host** (D1). A download, always.
 
 ## Testing
@@ -186,18 +215,22 @@ Sandbox (`sandbox/frame.test.ts`, under the dash `vitest`): a message from the
 wrong origin is ignored and nothing is rendered; the right origin renders a
 nested frame whose `sandbox` attribute is exactly `allow-scripts`; a
 `diagram` message renders an `<svg>`; the policy string served on `frame.html`
-is pinned — `connect-src 'none'`, no `allow-same-origin` anywhere, and
-`frame-ancestors` naming the panel.
+and the assets' CORS header are pinned — `connect-src 'none'`, no
+`allow-same-origin` anywhere, `frame-ancestors` naming the panel, and
+`Access-Control-Allow-Origin: *` on the assets.
 
 Panel (`src/components/canvas/html-node.test.tsx`): the node posts the bytes
-only after the frame has loaded, with the sandbox origin as the target, and
-never writes the content anywhere in its own document.
+only after the frame has loaded, to the `contentWindow` it created with `"*"` as
+the target, takes a reply only from that window, and never writes the content
+anywhere in its own document.
 
 Manual, before calling it done, with an artifact written for the purpose: a
 `fetch` to `https://mcp.bellman.sh/auth/session` with credentials fails; a
 read of `parent.document` throws; `document.cookie` is empty; a `<form>`
 submission is blocked; the artifact's own button handlers run. All five, every
-time the frame's policy changes.
+time the frame's policy changes; the check artifact also prints the WebRTC
+result as information, neither pass nor fail, so the five are not mistaken for
+a full inventory.
 
 ## Files
 

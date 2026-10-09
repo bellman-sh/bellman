@@ -1,5 +1,5 @@
 /**
- * INVARIANT 9: the tool surface stays at 10. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 11. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: tools first — every tool's text result stands alone; one UI
@@ -10,6 +10,7 @@ import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
+import { SURFACE_KINDS } from "../../src/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
@@ -23,6 +24,7 @@ const EXPECTED_TOOLS = [
   "bellman_invite",
   "bellman_evict",
   "bellman_rooms",
+  "bellman_surface",
 ].sort();
 
 describe("tool surface", () => {
@@ -44,7 +46,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(10);
+    expect(EXPECTED_TOOLS).toHaveLength(11);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -193,12 +195,12 @@ describe("tool surface", () => {
   // The host renders a tool through the resource its _meta names. A tool that
   // named a resource this server does not serve would render nothing, so every
   // ui meta present must point at the one resource.
-  it("attaches the app to bellman_connect and bellman_rooms, and to no other tool", async () => {
+  it("attaches the app to bellman_connect, bellman_confirm, bellman_rooms and bellman_surface, and to no other tool", async () => {
     const { tools } = await jesse.listTools();
     const uiOf = (t: { _meta?: Record<string, unknown> }) =>
       (t._meta as { ui?: { resourceUri?: string } } | undefined)?.ui;
     const withApp = tools.filter((t) => uiOf(t)?.resourceUri === APP_RESOURCE_URI).map((t) => t.name).sort();
-    expect(withApp).toEqual(["bellman_connect", "bellman_rooms"]);
+    expect(withApp).toEqual(["bellman_confirm", "bellman_connect", "bellman_rooms", "bellman_surface"]);
     for (const t of tools) {
       const ui = uiOf(t);
       if (ui) expect(ui.resourceUri, t.name).toBe(APP_RESOURCE_URI);
@@ -273,6 +275,24 @@ describe("tool surface", () => {
     // in the text, so that slip passes here.
     for (const kind of kinds!) {
       expect(send.description, `${kind} missing from the description`).toContain(kind);
+    }
+  });
+
+  // The loop above reads the send kinds, so a kind added to SURFACE_KINDS with no clause in the `surface` line
+  // would pass it (#185 is the case this closes). This one reads the Kinds sentence alone, from `Kinds:` to the
+  // `placement is` after it, so a kind whose name appears elsewhere in the description (`code` is in "code/doc/data
+  // payload") still has to be named in that sentence. It is still a substring of the sentence: `text` is satisfied
+  // by `text/html` inside it, so this catches a kind added without a clause, not the removal of `text`'s.
+  it("names every surface kind in the Kinds sentence of bellman_send's description", async () => {
+    const { tools } = await jesse.listTools();
+    const description = tools.find((t) => t.name === "bellman_send")!.description!;
+    const from = description.indexOf("Kinds:");
+    const to = description.indexOf("placement is", from);
+    expect(from, "the surface line has a Kinds: sentence").toBeGreaterThanOrEqual(0);
+    expect(to, "and it ends where `placement is` begins").toBeGreaterThan(from);
+    const sentence = description.slice(from, to);
+    for (const kind of SURFACE_KINDS) {
+      expect(sentence, `${kind} missing from the Kinds sentence`).toContain(kind);
     }
   });
 });

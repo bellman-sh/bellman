@@ -31,6 +31,7 @@ import {
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import type { EventType } from "./types.js";
+import { VERSION } from "./version.js";
 
 /**
  * The Bellman bridge for Claude Code.
@@ -66,7 +67,6 @@ import type { EventType } from "./types.js";
 
 export type Delivery = "channel" | "hook";
 
-const VERSION = "0.1.0";
 const MAX_WAIT_SECONDS = 25;
 /** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
 const START_TOOL = "bellman_start";
@@ -258,17 +258,17 @@ Returns: { source, label, plan, role, org_id } when source is "oauth" — this b
 const UPLOAD_TOOL: Tool = {
   name: "bellman_upload",
   title: "Upload a file and place it on the room's surface",
-  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file or image item, in one call. Local to this bridge: the server has no binary channel, and a hosted connector has no bellman_upload; the control panel's upload comes with the canvas.
+  description: `Read a file from this machine, upload it to the room's blob store, and place it on the working surface as a file, image or html item, in one call. Local to this bridge: the server has no binary channel, and a hosted connector has no bellman_upload; the control panel's upload comes with the canvas.
 
 Args:
   - session_id, member_id: your handles from start/confirm; the seat must hold write_surface
   - path: a regular file under the upload root (the directory the bridge was started in, or BELLMAN_UPLOAD_ROOT; / for any file), not a symbolic link, at most ${MAX_BLOB_BYTES} bytes
   - key: the surface key to place it under; an item already there is replaced
-  - kind: "file" | "image". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file
+  - kind: "file" | "image" | "html". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file, so a .html file is placed as a file unless kind: "html" is asked for; an html item needs a file the server stores as text/html (a .html or .htm file)
   - title?, placement? ({ x, y, w?, h? }): as on bellman_send type "surface"
-The type is taken from the file's extension. The server checks an image's bytes against that claim and stores a mismatch as application/octet-stream. A placement the server refuses — an image over a mismatched type, a key it does not accept, a surface that is full — is reported with the blob's id, bytes and stored type, so you can place it again with bellman_send, without uploading again.
+The type is taken from the file's extension. The server checks an image's bytes against that claim and stores a mismatch as application/octet-stream. A placement the server refuses — an image over a mismatched type, an html item over a type that is not text/html, a key it does not accept, a surface that is full — is reported with the blob's id, bytes and stored type, so you can place it again with bellman_send, without uploading again.
 
-Returns: { blob_id, bytes, type, cursor, room_members } — type is what the server stored, cursor is the surface event's, room_members is bellman_send's (not a read receipt).`,
+Returns: { blob_id, bytes, type, kind, cursor, room_members } — type is what the server stored, kind is what was placed, cursor is the surface event's, room_members is bellman_send's (not a read receipt).`,
   // The bounds on key, title and placement are the server's, held in one place
   // (`SurfaceKeyShape`, `boundedText` in surface.ts); this schema names the
   // fields and carries no number it could drift from.
@@ -276,10 +276,11 @@ Returns: { blob_id, bytes, type, cursor, room_members } — type is what the ser
     type: "object",
     properties: {
       session_id: { type: "string" },
+      room_id: { type: "string", description: "session_id under another name, for a host that reserves it." },
       member_id: { type: "string" },
       path: { type: "string" },
       key: { type: "string" },
-      kind: { type: "string", enum: ["file", "image"] },
+      kind: { type: "string", enum: ["file", "image", "html"] },
       title: { type: "string" },
       placement: {
         type: "object",
@@ -287,7 +288,7 @@ Returns: { blob_id, bytes, type, cursor, room_members } — type is what the ser
         required: ["x", "y"],
       },
     },
-    required: ["session_id", "member_id", "path", "key"],
+    required: ["member_id", "path", "key"],
   },
   annotations: {
     readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
@@ -801,7 +802,8 @@ export function createBridge(opts: BridgeOptions) {
   function observe(name: string, args: Record<string, unknown>, result: CallToolResult): void {
     if (result.isError) return;
     const out = (result.structuredContent ?? {}) as Record<string, unknown>;
-    const sessionId = String(out.session_id ?? args.session_id ?? "");
+    // room_id is session_id under another name (RoomRefShape in tools/kit.ts); the server answers with session_id either way.
+    const sessionId = String(out.session_id ?? args.session_id ?? args.room_id ?? "");
     const memberId = String(out.member_id ?? args.member_id ?? "");
 
     switch (name) {
@@ -1264,11 +1266,11 @@ export function createBridge(opts: BridgeOptions) {
     const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
     const upload = opts.upload;
     if (!upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
-    const sessionId = String(args.session_id ?? "");
+    const sessionId = String(args.session_id ?? args.room_id ?? "");
     const memberId = String(args.member_id ?? "");
     const path = String(args.path ?? "");
     const key = String(args.key ?? "");
-    if (!sessionId || !memberId || !path || !key) return fail("session_id, member_id, path and key are required");
+    if (!sessionId || !memberId || !path || !key) return fail("session_id (or room_id), member_id, path and key are required");
 
     let file: { bytes: Buffer<ArrayBuffer> };
     try {
@@ -1277,7 +1279,9 @@ export function createBridge(opts: BridgeOptions) {
       return fail((e as Error).message);
     }
     const claimed = typeFromExtension(path);
-    const kind = args.kind === "file" || args.kind === "image" ? args.kind : isImageType(claimed) ? "image" : "file";
+    // html is passed through as asked: the server holds an html item to a blob stored as text/html, and a .html
+    // file is a file unless the caller says otherwise (#185).
+    const kind = args.kind === "file" || args.kind === "image" || args.kind === "html" ? args.kind : isImageType(claimed) ? "image" : "file";
 
     const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/blobs`, upload.serverUrl);
     target.searchParams.set("member_id", memberId);
@@ -1333,7 +1337,7 @@ export function createBridge(opts: BridgeOptions) {
       );
     }
     const out = (placed.structuredContent ?? {}) as Record<string, unknown>;
-    const result = { blob_id: uploaded.blob_id, bytes: uploaded.bytes, type: uploaded.type, cursor: out.cursor, room_members: out.room_members };
+    const result = { blob_id: uploaded.blob_id, bytes: uploaded.bytes, type: uploaded.type, kind, cursor: out.cursor, room_members: out.room_members };
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }
 

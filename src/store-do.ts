@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -19,7 +19,12 @@ import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
-import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
+import { R2BlobStore } from "./blobs-r2.js";
+import {
+  PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
+  sweepDueAt, unnamedObjects,
+} from "./retention.js";
 import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
@@ -59,6 +64,13 @@ const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
  * nothing prunes the entries.
  */
 const deliveredKey = (intentId: string) => `d:${intentId}`;
+/**
+ * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
+ * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
+ * `[A-Za-z0-9_-]` where grants are written (isOrgId), but an identity's org can come from a key
+ * map nobody validated, and grant-index.ts makes the same argument at more length.
+ */
+const orgRoomPrefix = (orgId: string): string => `uo:${encodeURIComponent(orgId)}:`;
 /**
  * The alarm handler that asks the room's members where they are (#111). A name
  * only: its due time is derived, never stored under `due:`. See derivedDue().
@@ -243,7 +255,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
-   * are due and points the alarm at the soonest. Three handlers use it.
+   * are due and points the alarm at the soonest. Five handlers use it.
    *
    * "outbox" delivers what a join-code change owes the registry. A code lives in two
    * objects, here and in the registry's index, so the two writes cannot share a
@@ -262,6 +274,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * cadence and one of them owes an answer (#111). Derived like "abandoned", and for a
    * firmer reason: a stored row that an older build never consumes is the spin
    * alarm() warns about. See derivedDue() and #tickIfDue().
+   *
+   * "purge" deletes a closed room once the window its plan promised has run out, or
+   * when a delete asked for it sooner (#65). Derived like the two above, from the
+   * record (`purgeDueAt`), so a room closed before it existed is not given a clock it
+   * was never promised. See derivedDue() and #purgeIfDue().
+   *
+   * "sweep" deletes the objects no surface item names, once, the moment the room
+   * closes, and credits the room their bytes (#65, D3). Derived from the record too
+   * (`sweepDueAt`): due at `closedAt` until `blobsSwept` says it ran, so it fires one
+   * time and then owes nothing, and a row closed before the close was dated owes
+   * nothing at all. See derivedDue() and #sweepIfDue().
    */
   private driver = new OutboxDriver(
     this.ctx.storage,
@@ -476,7 +499,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.#closeIfAbandoned(s, Date.now());
     // Re-read: closeIfAbandoned may have written closed=true and cleared the codes,
     // or stamped a socket's members.
-    return this.stored();
+    const read = await this.stored();
+    // A closed room owes two things (#derivedDue): the sweep of its unnamed objects, once, and
+    // the purge. If either is already due, its alarm should have run it. When one is found
+    // here the alarm has been lost (a throwing alarm() is retried a few times and then left,
+    // with nothing armed), so point it back. reArm() arms the earliest of what is owed, so the
+    // one question covers both. Re-armed and not run from here: the alarm does the work, as
+    // it does for every other room, so no read pays for deleting a prefix. A room kept until
+    // deleted owes the sweep and nothing else, which is why the sweep counts: no purge is
+    // ever due to bring a read back to it. Nothing is asked of a room still inside its window
+    // with its sweep done, a room kept and swept, or one from before the window, whose due
+    // times are null (review I1).
+    if (read) {
+      const owed = [sweepDueAt(read), purgeDueAt(read)].filter((at): at is number => at !== null);
+      if (owed.length > 0 && Date.now() >= Math.min(...owed)) await this.driver.reArm();
+    }
+    return read;
   }
 
   /**
@@ -1255,7 +1293,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async closeSession(): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    await this.ctx.storage.put("session", { ...s, closed: true });
+    // `closedAt` once (#65): the window starts at the first close, and a second one
+    // does not move it.
+    await this.ctx.storage.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
+    // The purge is due from the close, and the alarm may be pointing at an abandonment
+    // time months off: nothing else re-arms it for a room with no code to retire and
+    // no audit row to queue. See derivedDue().
+    await this.driver.reArm();
   }
 
   /**
@@ -1277,14 +1321,70 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * between finds them still listed and finishes the job.
    */
   async closeSessionIfEmpty(): Promise<boolean> {
-    return this.ctx.storage.transaction(async (txn) => {
+    const closed = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
       if (s.members.some(isActiveMember)) return false;
-      await txn.put("session", { ...s, closed: true });
+      await txn.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
       return true;
     });
+    // After the commit, never inside the closure (see stored()), and for closeSession's reason.
+    if (closed) await this.driver.reArm();
+    return closed;
+  }
+
+  /**
+   * The delete on demand (#65, D6): ask for this closed room to be purged at `at`.
+   * Only the asking happens here, in the one transaction that queues the entries
+   * recording who asked, since the record still exists to carry the outbox. The purge
+   * is the alarm's, so a delete and a window that ran out are one code path
+   * (`#purgeIfDue`) and no request holds the object open while a prefix is deleted.
+   *
+   * "open" for a room that has not closed, which a delete never closes, and "missing"
+   * for one that is not there. A room already asked for answers with the time it is
+   * stored with and writes nothing: the first request stands, and a client retrying a
+   * delete it never heard the answer to files one `room_deleted` for each org, not two,
+   * and is told the first request's `purgeAt` and not the `at` of the retry.
+   *
+   * The re-arm and the delivery are for that retry as much as for the first ask: a
+   * process that died between the commit and them left an alarm only if there was an
+   * entry to queue, and the retry is what points it at the purge.
+   */
+  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+    const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "missing" };
+      if (!s.closed) return { ok: false, reason: "open" };
+      if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
+      const now = Date.now();
+      const rows = await this.driver.enqueue(
+        txn, orgsOnRoster(s).map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
+      );
+      await txn.put<unknown>({ session: { ...s, purgeAt: at }, ...rows });
+      return { ok: true, purgeAt: at };
+    });
+    if (outcome.ok) {
+      await this.driver.reArm();
+      await this.driver.deliverNow();
+    }
+    return outcome;
+  }
+
+  /**
+   * The close-time sweep (#65, D3), run now. `BellmanStore.sweepBlobs` is the contract and
+   * this is SessionDO's answer to it; the alarm reaches the same work through #sweepIfDue,
+   * which first asks whether it is owed. Public because the facade calls it, so anything
+   * holding the SESSION binding can ask for a closed room's sweep, which is the work the
+   * alarm does for every closed room anyway.
+   *
+   * An open room, whose unnamed object is an upload between its put and its charge or its
+   * item, and a room that is not there, are left alone.
+   */
+  async sweepBlobs(): Promise<{ removed: number; credited: number }> {
+    const s = await this.stored();
+    if (!s || !s.closed) return { removed: 0, credited: 0 };
+    return this.#sweep(s);
   }
 
   /**
@@ -1740,6 +1840,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * uses. A rename would undo the order and leave the next pair to be discovered,
    * and the handler that reads its own precondition is the one a reader can check.
    *
+   * **"purge" and "sweep" can be due at one firing, and the purge wins** (#65): a room
+   * closed with a window of nothing, or an alarm that ran late past the window. The
+   * purge deletes every object under the prefix and then the record, so a sweep first
+   * is work thrown away, and one after it finds no record to read. "purge" sorts before
+   * "sweep" today, and #sweepIfDue does not lean on that: it returns when the purge is
+   * due, and worker-tests/purge.test.ts runs the names the other way round to hold it.
+   *
    * Each handler reads the session itself, inside the transaction it writes in, so
    * nothing is passed down from here: a record read in this loop and written by a
    * later iteration would be the stale snapshot #tickIfDue's own comment is about.
@@ -1771,29 +1878,74 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const name of await this.driver.dueNow(now)) {
-      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
-      if (name === ABANDONED_HANDLER) {
-        const s = await this.stored();
-        if (s) await this.#closeIfAbandoned(s, now);
+      try {
+        if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+        if (name === ABANDONED_HANDLER) {
+          const s = await this.stored();
+          if (s) await this.#closeIfAbandoned(s, now);
+        }
+        if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
+        if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
+        if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
+      } catch (error) {
+        // The runtime retries a throwing alarm a few times and then leaves it with nothing armed
+        // (a read of the room arms it again: getSession), and it says nothing of which object it
+        // gave up on. This line is the one record of the room and the handler. Rethrown, so the
+        // runtime still retries (review I1).
+        console.error(`alarm handler "${name}" failed for room ${await this.#roomIdForLog()}:`, error);
+        throw error;
       }
-      if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
     }
     await this.driver.reArm();
   }
 
   /**
+   * The room's id for a log line: from the record, else the name the object was addressed by.
+   * Never a second failure. The storage that made a handler throw may not answer a read, and the
+   * line it is for must still be written.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #roomIdForLog(): Promise<string> {
+    try {
+      return (await this.stored())?.id ?? this.ctx.id.name ?? this.ctx.id.toString();
+    } catch {
+      return this.ctx.id.name ?? this.ctx.id.toString();
+    }
+  }
+
+  /**
    * Due times this object computes rather than stores. A closed session has nothing
-   * left to enforce: deriving a time for it would re-arm the alarm to a moment already
-   * past, and it would fire again for as long as the session existed. It has no tick
-   * to send either, which is why the early return covers both. A frozen room derives
-   * neither (both functions answer null for it), and reArm() never clears an alarm,
-   * so a freeze leaves the one already armed to fire once, find nothing due and arm
-   * nothing after it. The thaw re-arms.
+   * left to enforce but its own end (#65): the sweep of its unnamed objects, once, and
+   * the purge, at the window's end or when a delete asked. A room kept until deleted
+   * owes the sweep alone, and one closed before the close was dated owes nothing at
+   * all. Deriving the abandonment time for it would re-arm the alarm to a moment
+   * already past, and it would fire again for as long as the session existed; neither
+   * of these can, because a firing that runs the sweep sets `blobsSwept`, and one that
+   * runs the purge deletes the record and a derivation from a missing record answers
+   * nothing. It has no tick to send either, which is why the early return covers
+   * both. A frozen room derives neither (both functions answer null for it), and
+   * reArm() never clears an alarm, so a freeze leaves the one already armed to fire
+   * once, find nothing due and arm nothing after it. The thaw re-arms.
+   *
+   * Every name derived here has a branch in alarm() that consumes it, or it is never
+   * consumed and the closing reArm() points the alarm straight back at it for good.
+   * The close-time sweep (`sweepDueAt`) is consumed by setting `blobsSwept`, which
+   * moves it out of this map, so it fires once.
    */
   async #derivedDue(): Promise<Map<string, number>> {
     const s = await this.stored();
-    if (!s || s.closed) return new Map();
+    if (!s) return new Map();
     const due = new Map<string, number>();
+    if (s.closed) {
+      // A closed room owes two things and nothing else (#65): the sweep of its unnamed
+      // objects, once, and the purge at its window's end or when a delete asked.
+      const sweep = sweepDueAt(s);
+      if (sweep !== null) due.set(SWEEP_HANDLER, sweep);
+      const purge = purgeDueAt(s);
+      if (purge !== null) due.set(PURGE_HANDLER, purge);
+      return due;
+    }
     // Derived rather than a stored `due:` row, deliberately. A name the driver
     // can report with no branch in alarm() is never consumed, and the closing
     // reArm() fires the alarm back to back for good: the rollback hazard this
@@ -1856,11 +2008,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         at: now,
       };
       await this.#writeEvent(txn, expired, {
-        session: { ...s, closed: true, joinCodes: {} }, ...rows,
+        session: { ...s, closed: true, closedAt: s.closedAt ?? now, joinCodes: {} }, ...rows,
       });
       return expired;
     });
     this.#wake(event);
+    // The purge is due from the close (#65). The alarm that reaches here re-arms on its
+    // way out, and a read that finds the room abandoned does not, so the close does.
+    await this.driver.reArm();
     // Last, so a poll woken above does not wait on the registry. Reached from the
     // alarm and from any read that finds the room abandoned, and both drain here
     // rather than leave the rows for the next alarm.
@@ -1941,6 +2096,153 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       return tick;
     });
     if (event) this.#wake(event);
+  }
+
+  /**
+   * The purge (#65, D2). Bytes first, then what other objects hold about this room,
+   * then the record: a crash between leaves a record whose next wake does it all
+   * again. What the order guarantees is never bytes that no record can find, the
+   * orphan the sweep exists for. It does not keep a record from naming bytes that
+   * are gone: between the bucket's delete and the wipe, and after a crash between
+   * them until the next wake, the record exists and its objects do not, and a
+   * download of one answers 404, as it does for any reference that dangles. Direct
+   * calls rather than the outbox, because the outbox rows live in the storage the
+   * last step empties.
+   *
+   * Every step can run twice. The bucket delete and the two index drops are
+   * idempotent, and the audit entry carries `purge:<room>:<org>` as its intent id,
+   * which `AuditDO.append` dedupes on, so a purge retried after a crash, or run by
+   * two firings at once, files one entry for each org.
+   *
+   * What the outbox still owes is delivered before the storage goes, and a row that
+   * will not deliver holds the purge back: a `room_deleted` entry, or a member's
+   * removal, queued here and not yet filed in an org's stream would be emptied with
+   * the rest, and an audit log that quietly drops the record of a delete is not one.
+   * The throw is what makes the runtime try again. Once the room is gone its
+   * watchers are told (#settleWatchers).
+   *
+   * `#private`, because it empties this object and a Durable Object answers RPC for
+   * every method on its class (ARCHITECTURE.md section 9, runtime fact 3).
+   */
+  async #purgeIfDue(now: number): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    const due = purgeDueAt(s);
+    if (due === null || now < due) return;
+    await new R2BlobStore(this.env.BLOBS).deleteAll(s.id);
+    const registry = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
+    await registry.dropCreatedIndex(s.createdBy, s.id);
+    for (const userId of new Set(s.members.map((m) => m.userId))) {
+      await registry.dropMembershipIndex(userId, s.id);
+    }
+    for (const orgId of orgsOnRoster(s)) await registry.dropOrgIndex(orgId, s.id);
+    for (const orgId of orgsOnRoster(s)) {
+      await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
+        .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
+    }
+    await this.driver.deliverNow();
+    if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
+      throw new Error(`purge of ${s.id}: the outbox still holds rows owed to other objects`);
+    }
+    await this.ctx.storage.deleteAll();
+    // Measured on workerd 1.20260926.1 with SQLite-backed storage, which all four classes
+    // here use: deleteAll() clears an armed alarm itself, so this call is redundant there,
+    // and dropping it leaves every test green. It stays so that a purged room arms nothing
+    // however the storage behaves, and worker-tests/purge.test.ts asserts that outcome.
+    await this.ctx.storage.deleteAlarm();
+    this.#settleWatchers();
+  }
+
+  /**
+   * Tell the room's watchers it is gone (#65, review M3): a purged room has no future for them to wait on.
+   * A long poll in flight is settled with nothing, as MemoryStore.purgeNow settles it, where it would wait
+   * out its own timer on an empty object. A socket is closed, where it would stay attached to an empty
+   * object until its client gave up on it.
+   *
+   * The close is the ordinary 1000, with a reason for the developer reading their client's close event.
+   * No close code means "room gone" to the bridge: src/room-socket.ts reconnects after any close, whatever
+   * its code, and learns the room's state from the upgrade's answer or from its poll.
+   *
+   * It never throws. The purge has committed, and a socket that will not close must not turn it into an
+   * error for the runtime to retry, nor leave the rest of the sockets open: each is its own try, for
+   * #wake's reason.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  #settleWatchers(): void {
+    for (const waiter of this.waiters.splice(0)) waiter.resolve([]);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        if (!isOpen(ws)) continue;
+        ws.close(1000, "room purged");
+      } catch (err) {
+        console.error("closing a purged room's socket failed:", err);
+      }
+    }
+  }
+
+  /**
+   * The sweep, when it is owed (#65, D3): the alarm's gate in front of #sweep.
+   *
+   * **The purge wins when it is due as well.** It deletes every object under the prefix and
+   * then the record, so a sweep first is work thrown away. alarm() runs "purge" ahead of
+   * "sweep" because of the alphabet, and this does not lean on that (see alarm()): a room
+   * whose purge is due is not swept, whichever name came first.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #sweepIfDue(now: number): Promise<void> {
+    const s = await this.stored();
+    if (!s) return;
+    const due = sweepDueAt(s);
+    if (due === null || now < due) return;
+    const purge = purgeDueAt(s);
+    if (purge !== null && now >= purge) return;
+    await this.#sweep(s);
+  }
+
+  /**
+   * Delete the objects under this room's prefix that no surface item names, and credit the
+   * room their bytes, once. The bucket is outside any transaction, as the purge's is: a
+   * delete here holds this object for as long as R2 takes if it sits inside one.
+   *
+   * The objects are listed before the rows are read, so an object an item names is listed
+   * first and named after, never the reverse. The record is read again inside the
+   * transaction that writes it, and only a sweep that finds `blobsSwept` still false
+   * credits the room: two that overlap list the same objects and free the same bytes, and
+   * the second would otherwise take them off twice. A purge that got in between leaves no
+   * record to write to, and nothing is.
+   *
+   * A delete that fails throws before the record is touched, so `blobsSwept` stays false
+   * and the next firing starts again. The bytes of the objects removed before the failure
+   * are then not credited, since they cannot be listed twice. The room is closed, so
+   * nothing charges it again, and the purge deletes whatever is left.
+   *
+   * A member's own append can land after the sweep's read of the rows: a member whose
+   * surface write passed its gate and whose own leave then closed the room leaves an item
+   * naming an object the sweep has deleted and credited. It takes a writer racing its own
+   * leave, since another member's seat keeps the room open, and the download's 404 covers
+   * an item that names bytes that are gone, so no code here tries to prevent it.
+   *
+   * `#private`: it deletes from the bucket on the strength of the record it is handed.
+   */
+  async #sweep(s: StoredSession): Promise<{ removed: number; credited: number }> {
+    const blobs = new R2BlobStore(this.env.BLOBS);
+    const listed = await blobs.list(s.id);
+    const orphans = unnamedObjects(listed, await this.surfaceOf());
+    let credited = 0;
+    for (const object of orphans) {
+      await blobs.delete(s.id, object.id);
+      credited += object.bytes;
+    }
+    await this.ctx.storage.transaction(async (txn) => {
+      const live = await this.stored(txn);
+      if (!live || live.blobsSwept) return;
+      await txn.put("session", {
+        ...live, blobBytes: creditedBlobBytes(live.blobBytes ?? 0, credited), blobsSwept: true,
+      });
+    });
+    return { removed: orphans.length, credited };
   }
 }
 
@@ -2369,10 +2671,21 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * before (#75, #115).
    *
    * Only the `us:` half. `um:` is history and keeps its rows deliberately: its
-   * contract is rooms a person HELD a handle in, closed ones included.
+   * contract is rooms a person HELD a handle in, closed ones included, until the room
+   * is purged (`dropMembershipIndex`).
    */
   async dropCreatedIndex(userId: string, sessionId: string): Promise<void> {
     await this.ctx.storage.delete(`us:${userId}:${sessionId}`);
+  }
+
+  /**
+   * Forget that this person held a handle in this room: the purge's (#65), and only
+   * the purge's. A closed room stays in `um:` as history, but a room that has been
+   * purged is no room at all, and a row naming it would list something no read can
+   * open. Idempotent, so a purge retried after a crash drops it again.
+   */
+  async dropMembershipIndex(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`um:${userId}:${sessionId}`);
   }
 
   /**
@@ -2410,6 +2723,35 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     const prefix = `um:${userId}:`;
     const map = await this.ctx.storage.list<number>({ prefix, limit });
     return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /**
+   * `uo:<org>:<room>` — which rooms an org sat in (#65, D5), for the admin's list of the
+   * closed ones. The same shape as `um:`, keyed by org, so a room several of an org's people
+   * joined is one entry, and a room people from two orgs joined is in both lists.
+   *
+   * **It starts at its deploy, like the two above.** A room created before it is not listed,
+   * and cannot be backfilled: this registry has never held a list of rooms to walk. The
+   * admin's read of such a room by id does not use the index and works. And a write that fails
+   * is logged rather than thrown (`DurableObjectStore.writeIndex`), for the reason `um:` gives,
+   * so a room can be missing from the list and present for the read.
+   *
+   * Kept for a closed room, which is what it is for, and dropped by the purge
+   * (`dropOrgIndex`).
+   */
+  async indexOrg(orgId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.put(`${orgRoomPrefix(orgId)}${sessionId}`, Date.now());
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    const prefix = orgRoomPrefix(orgId);
+    const map = await this.ctx.storage.list<number>({ prefix, limit });
+    return [...map.keys()].map((k) => k.slice(prefix.length));
+  }
+
+  /** The purge's (#65), and only the purge's: a room that is gone is no room any org sat in. Idempotent. */
+  async dropOrgIndex(orgId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`${orgRoomPrefix(orgId)}${sessionId}`);
   }
 
   async recordCreate(userId: string): Promise<void> {
@@ -2479,6 +2821,8 @@ export interface BellmanEnv {
   SESSION: DurableObjectNamespace<SessionDO>;
   REGISTRY: DurableObjectNamespace<RegistryDO>;
   AUDIT: DurableObjectNamespace<AuditDO>;
+  /** The room blob store (#183): a room's objects are deleted from it when the room is purged (#65). */
+  BLOBS: R2Bucket;
   BELLMAN_KEYS?: string;
 }
 
@@ -2570,6 +2914,12 @@ export class DurableObjectStore implements BellmanStore {
       await this.writeIndex("um", m.userId, s.id, () =>
         this.registry.indexMembership(m.userId, s.id));
     }
+    // `uo:` is how an org's admin finds a closed room its people sat in (#65, D5): one row for each
+    // org on the roster it starts with, the creator's included. A missed entry leaves the room out of
+    // that one list, and the admin's read of it by id works all the same.
+    for (const orgId of orgsOnRoster(s)) {
+      await this.writeIndex("uo", orgId, s.id, () => this.registry.indexOrg(orgId, s.id));
+    }
   }
 
   async getSession(id: string): Promise<StoredSession | undefined> {
@@ -2618,6 +2968,10 @@ export class DurableObjectStore implements BellmanStore {
     if (added) {
       await this.writeIndex("um", member.userId, sessionId, () =>
         this.registry.indexMembership(member.userId, sessionId));
+      // The member's org, when it has one: a person from another org joining puts the room in that
+      // org's list too (#65, D5).
+      const orgId = member.orgId;
+      if (orgId) await this.writeIndex("uo", orgId, sessionId, () => this.registry.indexOrg(orgId, sessionId));
     }
     return added;
   }
@@ -2637,6 +2991,8 @@ export class DurableObjectStore implements BellmanStore {
     if (seated.refused === null) {
       await this.writeIndex("um", member.userId, sessionId, () =>
         this.registry.indexMembership(member.userId, sessionId));
+      const orgId = member.orgId;
+      if (orgId) await this.writeIndex("uo", orgId, sessionId, () => this.registry.indexOrg(orgId, sessionId));
     }
     return seated;
   }
@@ -2683,6 +3039,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async freezeSession(sessionId: string, frozenAt: number | null): Promise<void> {
     await this.session(sessionId).freezeSession(frozenAt);
+  }
+
+  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+    return this.session(sessionId).schedulePurge(at, by);
+  }
+
+  async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
+    return this.session(sessionId).sweepBlobs();
   }
 
   /**
@@ -2754,6 +3118,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async sessionsJoinedBy(userId: string, limit: number): Promise<string[]> {
     return this.registry.sessionsJoinedBy(userId, limit);
+  }
+
+  async sessionsForOrg(orgId: string, limit: number): Promise<string[]> {
+    return this.registry.sessionsForOrg(orgId, limit);
   }
 
   async appendEvent(
@@ -2881,8 +3249,9 @@ export class DurableObjectStore implements BellmanStore {
   /**
    * No-op by design. MemoryStore sweeps on a timer because it can iterate every
    * session cheaply; a DO namespace cannot. Abandonment is enforced by the
-   * per-object alarm set in SessionDO.createSession, and connect tokens are
-   * checked for expiry when taken. Nothing is left for a sweep to do.
+   * per-object alarm set in SessionDO.createSession, the sweep and the purge of a
+   * closed room (#65) by the same alarm, and connect tokens are checked for expiry
+   * when taken. Nothing is left for a sweep to do.
    */
   async sweep(_now: number): Promise<void> {}
 }

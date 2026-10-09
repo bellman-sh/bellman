@@ -94,6 +94,29 @@ export class R2BlobStore implements BlobStore {
   async delete(sessionId: string, id: string): Promise<void> {
     await this.bucket.delete(blobKey(sessionId, id));
   }
+
+  async list(sessionId: string): Promise<{ id: string; bytes: number }[]> {
+    const prefix = blobKey(sessionId, "");
+    const out: { id: string; bytes: number }[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await this.bucket.list({ prefix, cursor, limit: 1000 });
+      for (const o of page.objects) out.push({ id: o.key.slice(prefix.length), bytes: o.size });
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+    return out;
+  }
+
+  async deleteAll(sessionId: string): Promise<number> {
+    const prefix = blobKey(sessionId, "");
+    let removed = 0;
+    for (;;) {
+      const page = await this.bucket.list({ prefix, limit: 1000 });
+      if (page.objects.length === 0) return removed;
+      await this.bucket.delete(page.objects.map((o) => o.key));
+      removed += page.objects.length;
+    }
+  }
 }
 
 function metaOf(object: R2Object): BlobMeta {

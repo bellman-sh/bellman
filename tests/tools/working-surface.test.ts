@@ -850,4 +850,27 @@ describe("shape items (#197)", () => {
     }]);
     expect(JSON.stringify(preview.data)).not.toContain("Group A");
   });
+  it("holds every form, colour and kind to the rules, not one of each", async () => {
+    const p = await pairUp(h);
+    for (const form of ["rect", "ellipse", "diamond", "arrow", "line"]) {
+      for (const flip of [false, true]) {
+        const out = await write(p, box({ key: `${form}_${flip}`, shape: { form, flip } }));
+        expect(out.isError, `${form} flip ${flip}: ${out.text}`).toBe(flip && form !== "arrow" && form !== "line");
+      }
+    }
+    for (const color of ["slate", "blue", "green", "amber", "red", "violet"]) {
+      const out = await write(p, box({ key: `c_${color}`, shape: { form: "rect", color } }));
+      expect(out.isError, `${color}: ${out.text}`).toBe(false);
+    }
+    await refusedWith(p, box({ key: "no_w", placement: { x: 0, y: 0, h: 10 } }), "a shape needs placement { x, y, w, h }");
+    await refusedWith(p, box({ ends: { from: "plan", to: "arch" } }), "only a connector has ends");
+    await refusedWith(p, box({ blob: { id: newBlobId() } }), "only a file, an image or an html item names a blob");
+    for (const other of [
+      plan(), { key: "pr", kind: "link", body: "https://example.com" }, { key: "arch", kind: "diagram", body: "flowchart LR" },
+      { key: "c1", kind: "connector", ends: { from: "plan", to: "arch" } }, { key: "f", kind: "file", blob: { id: newBlobId() } },
+      { key: "i", kind: "image", blob: { id: newBlobId() } }, { key: "demo", kind: "html", body: "<p>hi</p>" },
+    ]) {
+      await refusedWith(p, { ...other, shape: { form: "rect" } }, "only a shape has shape");
+    }
+  });
 });

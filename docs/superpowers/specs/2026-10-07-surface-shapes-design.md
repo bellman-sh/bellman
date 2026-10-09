@@ -172,7 +172,7 @@ the same size and color.
 
 bellman: `src/surface.ts` (the forms, the colors, `ShapeShape`, the rules),
 `src/types.ts` (`Shape` on `SurfaceItem`), `src/store.ts` and `src/store-do.ts`
-(the row carries `shape`), `src/projections.ts` (`surfaceItem`), `src/tools/send.ts`
+(unchanged as it turned out: both keep the item they are handed), `src/projections.ts` (`surfaceItem`), `src/tools/send.ts`
 (the kind named in the tool's text), `README.md` and `docs/ARCHITECTURE.md`
 (the kinds list), the tests above.
 

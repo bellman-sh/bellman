@@ -98,7 +98,7 @@ that way; the surface is where things stand.
   an arrow or a line from the bottom-left to the top-right. A shape needs `placement`
   with `x`, `y`, `w` and `h`, because its size is the placement's, and takes no `body`,
   because its label is the `title`; `flip: true` on any other form is refused, and so
-  is `shape` on any other kind.
+  is a non-null `shape` on any other kind.
 - The verb is `write_surface`. Every preset gives it to the creator's seat
   alone; a manifest may give it to any seat. Reading is never gated.
 - A joiner's preview lists what the surface holds — keys, kinds and sizes — and

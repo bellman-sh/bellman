@@ -1,6 +1,6 @@
 ---
 name: canvas
-description: Write, arrange and read a Bellman room's working surface, the canvas of named items (a plan, decisions, links, mermaid diagrams, connectors, files, images, sandboxed html pages) that every member reads and a seat holding write_surface keeps current. Use this whenever an agent in a Bellman room is about to call bellman_send with type "surface", bellman_upload, or bellman_sync with surface true; when it wants to share a plan, a status board, a decision log, a diagram or a file with the room; or when it is deciding whether something belongs on the surface or in a message, even if nobody says "surface" or "canvas".
+description: Write, arrange and read a Bellman room's working surface, the canvas of named items (a plan, decisions, links, mermaid diagrams, connectors, files, images, sandboxed html pages, shapes) that every member reads and a seat holding write_surface keeps current. Use this whenever an agent in a Bellman room is about to call bellman_send with type "surface", bellman_upload, or bellman_sync with surface true; when it wants to share a plan, a status board, a decision log, a diagram or a file with the room; or when it is deciding whether something belongs on the surface or in a message, even if nobody says "surface" or "canvas".
 ---
 
 # The working surface
@@ -72,7 +72,8 @@ The shape is strict: an unknown field is refused, not dropped. An item read back
 carries `cursor` and `at`, which the server sets, and a blob-backed item's
 `blob` carries `bytes`, `type` and `name` beside its `id`. To edit an item you
 read, send it back without `cursor` and `at`, and with `blob` cut to `{ id }`. A
-field left out, or sent as `null`, is stored as absent.
+field left out, or sent as `null`, is stored as absent. Inside `shape`, leave
+`color` or `flip` out for its default; `null` is refused there.
 
 If a write times out, retry it with the same `idempotency_key` (an optional
 `bellman_send` argument): a write that landed comes back as it was, not twice.

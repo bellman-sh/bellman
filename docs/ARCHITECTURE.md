@@ -1782,12 +1782,12 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,741** | every request, whether or not you are in a room |
+| Tool definitions | **~7,743** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
 
 Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 71 tokens
 over the 7,651 that `bfebd30` measures by the same method, all of them `bellman_send`'s
@@ -1796,7 +1796,9 @@ which names the field, its forms and colours and `flip`, and says that the size 
 placement's and the label is the title, and 2 for `shape?` in the payload's field list.
 No other entry changed and no tool was added. Merged over per-role heartbeat
 instructions (#229, below), which changed only `bellman_start`, the listing is the sum:
-7,670 and 71, 7,741.
+7,670 and 71, 7,741. The review then named `shape` in `bellman_surface`'s `Returns:` line: 2 more,
+7,743, and that tool's row reads 283 (281 since the `room_id` alias, measured at `bfebd30`, `a1bcce7` and
+`a93217c`; the 254 it read before that was stale).
 
 Re-measured on 2026-10-09 for per-role heartbeat instructions, on top of room
 housekeeping: 19 tokens over main, all of them `bellman_start`'s (now 2,070), for

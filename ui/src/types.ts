@@ -82,7 +82,7 @@ export interface RoomsResult {
 }
 
 /** The surface kinds the server knows today. A kind the page predates still renders, by name. */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape";
 
 export interface Placement {
   x: number;
@@ -100,6 +100,7 @@ export interface SurfaceItemWire {
   ends: { from: string; to: string } | null;
   placement: Placement | null;
   blob: { id: string; bytes: number; type: string; name: string } | null;
+  shape: { form: string; color: string; flip: boolean } | null;
   cursor: number;
   at: string;
 }

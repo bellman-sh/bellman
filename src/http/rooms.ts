@@ -25,7 +25,7 @@ import {
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf } from "../projections.js";
 import { verbsOfRole } from "../roles.js";
-import { findMember, gateSeat, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -391,10 +391,6 @@ const closedAtDescending = (a: StoredSession, b: StoredSession): number => {
   return b.closedAt - a.closedAt;
 };
 
-/** Every handle this person holds in the room, in roster order. Empty means a stranger. */
-const handlesOf = (session: StoredSession, identity: Identity): Member[] =>
-  session.members.filter((m) => m.userId === identity.userId);
-
 /**
  * The three conditions `bellman_audit` already asks of a reader of an org's log (#65, D4): the
  * team plan, which is what pays for the audit log, the admin role, and an org. A falsy org is no
@@ -579,26 +575,6 @@ const etagMatches = (header: string | null, tag: string): boolean =>
     const t = v.trim().replace(/^W\//, "");
     return t === "*" || t === tag;
   });
-
-/**
- * Where a person's reading stops (#113), if anywhere. Only when every handle
- * they hold was removed: a handle still in the room, or one that left of its
- * own accord, keeps the open feed, as it does on `bellman_sync`. With several
- * removed handles, the latest cut: the most this person was ever shown.
- */
-const cutFor = (handles: readonly Member[]): number | undefined =>
-  handles.every(isRemovedMember)
-    ? Math.max(...handles.map((m) => m.removedAtCursor ?? 0))
-    : undefined;
-
-/**
- * The same cut as a moment, for what a cursor cannot bound: the roster and the
- * member count carry times and no cursors. `markRemoved` sets `leftAt` in the
- * write that sets the cut, so the latest removal's `leftAt` is when this person's
- * reading stopped. Undefined exactly when `cutFor` is, since it asks `cutFor`.
- */
-const cutAtFor = (handles: readonly Member[]): number | undefined =>
-  cutFor(handles) === undefined ? undefined : Math.max(...handles.map((m) => m.leftAt ?? 0));
 
 /**
  * The surface read (D2): the same envelopes `bellman_sync surface: true`

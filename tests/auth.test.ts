@@ -17,6 +17,10 @@ afterEach(() => {
 });
 
 describe("resolveIdentity", () => {
+  const OTHER: Identity = {
+    userId: "u_other", orgId: null, plan: "free", role: "member", label: "other",
+  };
+
   it("rejects a missing header", () => {
     expect(resolveIdentity(undefined)).toBeNull();
   });
@@ -62,7 +66,7 @@ describe("resolveIdentity", () => {
    * in the README, so it must stop resolving the moment real keys exist.
    */
   it("takes dev keys out of play entirely once BELLMAN_KEYS is set", () => {
-    process.env.BELLMAN_KEYS = JSON.stringify({ qk_other: { userId: "u_other" } });
+    process.env.BELLMAN_KEYS = JSON.stringify({ qk_other: OTHER });
 
     expect(resolveIdentity("Bearer qk_dev_jesse")).toBeNull();
     expect(resolveIdentity("Bearer qk_dev_peer")).toBeNull();
@@ -75,6 +79,46 @@ describe("resolveIdentity", () => {
 
     expect(resolveIdentity("Bearer qk_dev_jesse")).toBeNull();
     expect(resolveIdentity("Bearer qk_other")).toBeNull();
+  });
+
+  /**
+   * Both tables are plain objects, and a plain object answers for every name
+   * on Object.prototype. A bearer of `constructor` once resolved to the Object
+   * function: non-null, so it passed as an identity whose every field was
+   * undefined, on the dev table and on a configured key map alike.
+   */
+  it("refuses a bearer that names an inherited property, on the dev table", () => {
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(resolveIdentity(`Bearer ${name}`), name).toBeNull();
+    }
+  });
+
+  it("refuses a bearer that names an inherited property, on a configured key map", () => {
+    process.env.BELLMAN_KEYS = JSON.stringify({ qk_other: OTHER });
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      expect(resolveIdentity(`Bearer ${name}`), name).toBeNull();
+    }
+    expect(resolveIdentity("Bearer qk_other")?.userId).toBe("u_other");
+  });
+
+  /**
+   * A key map is operator-written JSON. A value that is not an identity (a
+   * string, a partial object, an unknown plan or role) must not become a
+   * caller with undefined fields that every later check reads as unrestricted.
+   */
+  it("refuses a configured key whose value is not a whole identity", () => {
+    const cases: Record<string, unknown> = {
+      qk_string: "u_x",
+      qk_partial: { userId: "u_x" },
+      qk_plan: { ...OTHER, plan: "enterprise" },
+      qk_role: { ...OTHER, role: "owner" },
+      qk_null: null,
+    };
+    process.env.BELLMAN_KEYS = JSON.stringify({ ...cases, qk_other: OTHER });
+    for (const key of Object.keys(cases)) {
+      expect(resolveIdentity(`Bearer ${key}`), key).toBeNull();
+    }
+    expect(resolveIdentity("Bearer qk_other")?.userId).toBe("u_other");
   });
 });
 

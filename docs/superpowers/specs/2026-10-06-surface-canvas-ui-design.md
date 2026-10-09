@@ -144,15 +144,18 @@ Content-Security-Policy:
   img-src 'self' https://mcp.bellman.sh data:;
   frame-src <the sandbox origin, piece 4>;
   script-src 'self';
-  style-src 'self' 'unsafe-inline';
+  style-src 'self';
   object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
 ```
 
-`style-src 'unsafe-inline'` because React Flow positions nodes with inline
-`style` attributes, and a nonce cannot reach an attribute. Scripts are
-`'self'` only, which is what makes an injected `<script>` inert and is the
-line the whole page stands on. The sandbox origin in `frame-src` is piece 4's
-one hook into this policy.
+The panel's policy carries `style-src 'self'` with no inline allowance:
+`bellman-sh/dash#18` dropped `'unsafe-inline'` after a Chromium check with a
+violation listener. React Flow's node positions do not need it, because React
+applies `style` props by writing through the CSSOM, and `style-src` governs
+`<style>` elements, markup `style=""` and `setAttribute("style")`, not CSSOM
+writes. Scripts are `'self'` only, which is what makes an injected `<script>`
+inert and is the line the whole page stands on. The sandbox origin in
+`frame-src` is piece 4's one hook into this policy.
 
 ### D6 — Human writes go through the seat the human holds.
 

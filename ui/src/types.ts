@@ -73,3 +73,38 @@ export interface RoomSummary {
 export interface RoomsResult {
   rooms: RoomSummary[];
 }
+
+/** The surface kinds the server knows today. A kind the page predates still renders, by name. */
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html";
+
+export interface Placement {
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+}
+
+/** One item as `surfaceItem` (src/projections.ts) projects it, inside an envelope. */
+export interface SurfaceItemWire {
+  key: string;
+  kind: SurfaceKind | string;
+  title: string | null;
+  body: string | null;
+  ends: { from: string; to: string } | null;
+  placement: Placement | null;
+  blob: { id: string; bytes: number; type: string; name: string } | null;
+  cursor: number;
+  at: string;
+}
+
+export interface SurfaceBlock {
+  cursor: number;
+  items: Untrusted<SurfaceItemWire>[];
+}
+
+/** bellman_surface's structuredContent, and the part of bellman_confirm's the canvas reads. */
+export interface SurfaceResult {
+  session_id: string;
+  room: RoomBlock;
+  surface: SurfaceBlock;
+}

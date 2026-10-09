@@ -63,7 +63,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>ten MCP tools,<br/>one UI resource"]
+        MCP["/mcp<br/>eleven MCP tools,<br/>one UI resource"]
         WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants"]
@@ -100,7 +100,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the ten tools work over plain remote MCP. The bridge exists
+use Bellman** — the eleven tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
@@ -184,7 +184,7 @@ flowchart TB
 | Claude Code, terminal, `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
-| Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room without asking the agent |
+| Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
 Two consequences:
@@ -622,11 +622,12 @@ need the upgrade stamp as well and is not done.
 ### The working surface
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally
-placed items — `text`, `link`, `diagram`, `connector`, and the blob-backed
-`file` and `image` — that members read and a seat holding `write_surface` keeps
-current. The log is how the surface got that way; the surface is where things
-stand. Blobs, piece 2, are the next subsection; pieces 3 and 4 add a canvas and
-sandboxed HTML artifacts on top of it.
+placed items — `text`, `link`, `diagram`, `connector`, the blob-backed `file`
+and `image`, and `html` — that members read and a seat holding `write_surface`
+keeps current. The log is how the surface got that way; the surface is where
+things stand. Blobs, piece 2, are the next subsection. The `html` kind (#185) is
+the server's half of piece 4; the canvas (piece 3) and the sandbox that renders
+`html` and `diagram` items (`bellman-sh/dash#14`) are the control panel's.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -657,12 +658,12 @@ admin of an org that sat in the room, under the audit log's conditions
 
 ### Blobs
 
-A `file` or an `image` item (#183) names bytes that live in R2, under
-`rooms/<sessionId>/<blobId>`, behind the second seam storage has:
-`BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore` for tests
-and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only) for
-production, held to one contract by `tests/helpers/blob-store-contract.ts` the
-way the two session stores are. No row in the room object describes a blob:
+A `file` or an `image` item (#183) names bytes that live in R2 — and an `html`
+item may (#185) — under `rooms/<sessionId>/<blobId>`, behind the second seam
+storage has: `BlobStore` (`src/blobs.ts`, runtime-free), with `MemoryBlobStore`
+for tests and `npm start` and `R2BlobStore` (`src/blobs-r2.ts`, Workers-only)
+for production, held to one contract by `tests/helpers/blob-store-contract.ts`
+the way the two session stores are. No row in the room object describes a blob:
 the object's own metadata — the type as decided at upload, the name, the
 uploading member, the time — is the metadata, because a row and an object are
 two systems with no transaction between them, and the one holding the bytes
@@ -921,6 +922,13 @@ loud:
   a file item's bytes come down through the download route under the headers a
   member's do. The delete is the one write, and the room's creator may ask for it
   as well.
+- **An `html` or `diagram` item never runs on a Bellman origin.** The API host
+  serves an `html` blob as a download (`application/octet-stream`, `attachment`,
+  `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
+  kinds only inside a frame served from a cross-site origin with no credential,
+  no network and an opaque document origin (the dash repo's sandbox, #185 and
+  its spec's D2 to D4). The server's part of that boundary is the download rule
+  and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and
@@ -1483,19 +1491,29 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~6,372** | every request, whether or not you are in a room |
+| Tool definitions | **~6,875** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-07, after #183 and #28 both landed:
-6,372 tokens in all, of which `bellman_rooms` (#28) is 255 and the
-`_meta.ui` on `bellman_connect` 16. The three rows below that one are from
-the original measurement and have not been re-measured since. The joining row
-predates the surface: `bellman_connect` now carries its index and
-`bellman_confirm` its items, so a joiner pays for the room's surface too, up to
-64 items.
+Tool definitions were re-measured on 2026-10-09, after the canvas landed:
+6,875 tokens in all. Measured the same way at `d6a90f9`, main's head before
+the canvas branch, the listing was 6,605, so the branch's share is 270:
+`bellman_surface` 254 and the `_meta.ui` now on `bellman_confirm` 16. The 89
+between 6,605 and the 6,516 recorded next were there before the branch: that
+measurement was taken before #18's changes to `bellman_start`'s text landed,
+as #206 noted when it recorded it.
+
+Tool definitions were re-measured on 2026-10-08, after #185 landed: 6,516
+tokens in all, of which `bellman_rooms` (#28) is 255 and the `_meta.ui` on
+`bellman_connect` 16. The figure before it was 6,372, from 2026-10-07 after #183
+and #28 both landed; the last paragraphs of this section account for the
+difference. The three rows below that one are from the original measurement and
+have not been re-measured since. The joining row predates the surface:
+`bellman_connect` now carries its index and `bellman_confirm` its items, so a
+joiner pays for the room's surface too, up to 64 items.
 
 The method is cl100k over the compact JSON of the `tools/list` entries, summed.
 List the real server's tools through an in-memory MCP client, as
@@ -1503,8 +1521,9 @@ List the real server's tools through an in-memory MCP client, as
 `json.dumps(entry, separators=(",", ":"))` with tiktoken's `cl100k_base`, which
 leaves non-ASCII `\u`-escaped. Nothing in the repository runs it. On `14fd00b`,
 where 4,820 was recorded, it gives 4,820, and 1,462 for `bellman_start`; on
-`77396879` it gives 4,962, the figure recorded after #111, and on `c9789ae`
-6,008, the figure recorded after #129. So the measurements are comparable.
+`77396879` it gives 4,962, the figure recorded after #111, on `c9789ae`
+6,008, the figure recorded after #129, and on `f79b599` 6,499, the figure
+recorded after #185's `html` clause. So the measurements are comparable.
 
 #111 added `heartbeat_on` and `reports` to the manifest schema inside
 `bellman_start`, and `progress` to `bellman_send`. It added nothing to
@@ -1550,7 +1569,27 @@ no other tool moved. Per tool, now: `bellman_start` 1,507, `bellman_send` 1,092,
 `bellman_connect` 500, `bellman_evict` 489, `bellman_audit` 178 and
 `bellman_leave` 155.
 
-`bellman_start` alone is 1,507 tokens, 25% of the tool budget, paid even by
+#185 added the `html` kind to `bellman_send`: one clause in the `surface`
+line's `Kinds:` sentence, which says the page is inline in `body` or a blob
+stored as `text/html`, never both, and what the sandboxed frame that renders it
+allows and withholds, and a pointer for a bridge user to `bellman_upload` with
+`kind: "html"`. It added no tool and no field. The bridge's own `bellman_upload`
+gained the kind too; as in #183's paragraph, that tool is listed only to a
+client that connects through the bridge, so it is not in these figures.
+
+Counted this way the total is 6,516, which is 144 more than the 6,372 recorded.
+26 of those predate #185, so the recorded figure was already out of date on
+main: `bellman_start` +13 and `bellman_connect` +13, the same words in both
+`Returns:` lines (`reports (per role, whether that seat is asked to report)`,
+#196). The other 118 are #185's, all of them `bellman_send`, which went from
+1,092 to 1,210: 101 for the clause and 17 for the pointer that followed it in
+the same PR; no other tool moved. Per tool, now: `bellman_start` 1,520,
+`bellman_send` 1,210, `bellman_confirm` 760, `bellman_sync` 716,
+`bellman_invite` 704, `bellman_connect` 529 (its `_meta.ui` is 16 of them),
+`bellman_evict` 489, `bellman_rooms` 255, `bellman_audit` 178 and
+`bellman_leave` 155.
+
+`bellman_start` alone is 1,520 tokens, 23% of the tool budget, paid even by
 sessions that only ever join. That number belongs in review whenever its
 description grows; [#78](../../../issues/78) proposes generating it, which also
 makes it measurable.

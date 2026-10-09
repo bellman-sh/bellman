@@ -33,6 +33,23 @@ const write = (p: PairedSession, payload: Record<string, unknown>, extra: Record
 const rows = (p: PairedSession) => h.store.surfaceOf(p.sessionId);
 const eventCount = async (p: PairedSession) => (await h.store.eventsAfter(p.sessionId, 0)).length;
 
+/** A blob in the harness's store, as the upload route would have left it. */
+const stored = async (p: PairedSession, type: string, bytes: Uint8Array, name = "notes.md", room = p.sessionId) => {
+  const id = newBlobId();
+  await h.blobs.put(room, id, bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer, {
+    bytes: bytes.byteLength, type, name, by: p.creatorMemberId, at: 1_700_000_000_000,
+  });
+  return id;
+};
+
+const refusedWith = async (p: PairedSession, payload: Record<string, unknown>, words: string) => {
+  const before = await eventCount(p);
+  const out = await write(p, payload);
+  expect(out.isError, JSON.stringify(payload).slice(0, 80)).toBe(true);
+  expect(out.text, JSON.stringify(payload).slice(0, 80)).toContain(words);
+  expect(await eventCount(p)).toBe(before);
+};
+
 describe("writing an item", () => {
   it("appends a surface event carrying the normalised item, and the row commits with it", async () => {
     const p = await pairUp(h);
@@ -279,7 +296,7 @@ describe("what is refused, and that a refusal leaves nothing behind", () => {
     // it: null is absence, so each is refused for the rule and not for its type.
     await refused(p, { key: "t", kind: "text", body: null }, "needs a body");
     await refused(p, { key: "c", kind: "connector", ends: null }, "needs ends");
-    // A file or an image names a blob (#183) and carries no body; nothing else names one.
+    // A file or an image names a blob (#183) and carries no body; nothing else names one but an html item (#185, below).
     const id = "ab".repeat(16);
     await refused(p, { key: "t3", kind: "text", body: "x", blob: { id } }, "names a blob");
     await refused(p, { key: "c3", kind: "connector", ends: { from: "plan", to: "arch" }, blob: { id } }, "names a blob");
@@ -595,23 +612,6 @@ describe("a room's retention window", () => {
 describe("file and image items (#183)", () => {
   const MD = text("# notes\n");
 
-  /** A blob in the harness's store, as the upload route would have left it. */
-  const stored = async (p: PairedSession, type: string, bytes: Uint8Array, name = "notes.md", room = p.sessionId) => {
-    const id = newBlobId();
-    await h.blobs.put(room, id, bytes.buffer.slice(0, bytes.byteLength) as ArrayBuffer, {
-      bytes: bytes.byteLength, type, name, by: p.creatorMemberId, at: 1_700_000_000_000,
-    });
-    return id;
-  };
-
-  const refusedWith = async (p: PairedSession, payload: Record<string, unknown>, words: string) => {
-    const before = await eventCount(p);
-    const out = await write(p, payload);
-    expect(out.isError, JSON.stringify(payload).slice(0, 80)).toBe(true);
-    expect(out.text, JSON.stringify(payload).slice(0, 80)).toContain(words);
-    expect(await eventCount(p)).toBe(before);
-  };
-
   it("places a file carrying the object's metadata, which the payload never named", async () => {
     const p = await pairUp(h);
     const id = await stored(p, "text/markdown", MD);
@@ -711,5 +711,47 @@ describe("file and image items (#183)", () => {
     expect(await h.blobs.head(p.sessionId, id)).toEqual(before);
     await write(p, { key: "notes", remove: true });
     expect(await h.blobs.head(p.sessionId, id)).toEqual(before);
+  });
+});
+
+describe("html items (#185)", () => {
+  const PAGE = "<!doctype html><title>demo</title><button onclick=\"this.textContent='hi'\">press</button>";
+  const HTML = text(PAGE);
+
+  it("places an inline page in body, and a page from a text/html blob, never both and never neither", async () => {
+    const p = await pairUp(h);
+    const inline = await write(p, { key: "demo", kind: "html", body: PAGE, title: "Demo" });
+    expect(inline.isError, inline.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({ key: "demo", kind: "html", title: "Demo", body: PAGE, blob: null });
+    const audit = (await h.store.auditForOrg(p.creator.identity.orgId!, 50)).at(-1)!;
+    expect(audit.detail).toMatchObject({ key: "demo", kind: "html", chars: PAGE.length });
+
+    const id = await stored(p, "text/html", HTML, "demo.html");
+    const backed = await write(p, { key: "big", kind: "html", blob: { id } });
+    expect(backed.isError, backed.text).toBe(false);
+    expect((await rows(p)).find((r) => r.key === "big")).toMatchObject({
+      kind: "html", body: null, blob: { id, type: "text/html", name: "demo.html", bytes: HTML.byteLength },
+    });
+
+    await refusedWith(p, { key: "both", kind: "html", body: PAGE, blob: { id } }, "not both");
+    // The html arm's own words: the generic `needs a body` is also what a text item with no body is told.
+    await refusedWith(p, { key: "neither", kind: "html" }, "needs a body (the page, inline) or blob");
+  });
+
+  it("accepts a parameterised text/html type and refuses any other stored type, which still places as a file", async () => {
+    const p = await pairUp(h);
+    const charset = await stored(p, "text/html; charset=utf-8", HTML, "page.html");
+    const ok = await write(p, { key: "page", kind: "html", blob: { id: charset } });
+    expect(ok.isError, ok.text).toBe(false);
+
+    const md = await stored(p, "text/markdown", text("# notes\n"));
+    await refusedWith(p, { key: "notes", kind: "html", blob: { id: md } }, "not text/html");
+    const asFile = await write(p, { key: "notes", kind: "file", blob: { id: md } });
+    expect(asFile.isError, asFile.text).toBe(false);
+  });
+
+  it("holds an inline page to the body bound", async () => {
+    const p = await pairUp(h);
+    await refusedWith(p, { key: "long", kind: "html", body: "<p>" + "x".repeat(MAX_SURFACE_BODY_CHARS) }, "must be at most 8000 characters");
   });
 });

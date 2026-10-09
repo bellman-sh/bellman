@@ -64,7 +64,6 @@ else
 fi
 
 pkg_version=$(node -p "require('$pkg_json').version")
-sdk=$(node -p "require('$pkg_json').dependencies['@modelcontextprotocol/sdk']")
 
 echo "==> Staging bundle ($source_desc, v$pkg_version)"
 
@@ -80,25 +79,37 @@ node -e '
 
 [ -f "$here/icon.png" ] && cp "$here/icon.png" "$stage/icon.png"
 
-# The bridge imports only the MCP SDK at runtime. The published package also
-# declares express and zod — those are for the standalone server and the
-# schemas it builds, not for this stdio bridge — and installing all three
-# roughly triples the bundle. So the staging directory declares just the one.
-cat > "$stage/package.json" <<JSON
-{
-  "name": "bellman-desktop-extension",
-  "version": "$pkg_version",
-  "private": true,
-  "type": "module",
-  "dependencies": { "@modelcontextprotocol/sdk": "$sdk" }
-}
-JSON
+# The staging package.json carries the package's dependency list, copied whole.
+# It used to pin the SDK alone, on the reading that the bridge reached nothing
+# else — true until src/bridge.ts imported yaml, after which every bundle died
+# at its first import and Claude Desktop said only "Server disconnected"
+# (v0.3.0 shipped that way). Copying costs nothing: the SDK already depends on
+# express and zod, so the only package this adds is yaml.
+node -e '
+  const fs = require("fs");
+  const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  fs.writeFileSync(process.argv[2], JSON.stringify({
+    name: "bellman-desktop-extension",
+    version: pkg.version,
+    private: true,
+    type: "module",
+    dependencies: pkg.dependencies,
+  }, null, 2) + "\n");
+' "$pkg_json" "$stage/package.json"
 
 npm --prefix "$stage" install --silent --omit=dev --no-fund --no-audit --no-package-lock
 rm -rf "$stage/.npm"
 
+# And the proof, on the artifact: every package the staged server imports,
+# transitively from server/channel.js, resolves beside it. A list copied from
+# package.json can still be wrong — a package the code imports but only
+# devDependencies declares — and this is the one step that would notice.
+echo "==> Checking imports"
+node "$here/check-deps.mjs" "$stage"
+
 echo "==> Packing"
-npx --yes @anthropic-ai/mcpb pack "$stage" "$out/bellman.mcpb"
+# Pinned to the major the manifest targets (manifest_version 0.3).
+npx --yes @anthropic-ai/mcpb@2 pack "$stage" "$out/bellman.mcpb"
 
 echo ""
 echo "  $out/bellman.mcpb"

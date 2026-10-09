@@ -23,6 +23,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_send` | `message` \| `artifact` \| `action_request` \| `action_response` \| `brief_update` \| `progress` \| `surface` |
 | `bellman_sync` | Poll/long-poll for peer events (MCP has no push). |
 | `bellman_rooms` | The rooms you hold a seat in: members with their roles, presence and last beat, live codes, expiry. Backs the in-chat monitor. |
+| `bellman_surface` | The room's working surface, read-only: every item and the cursor of its last change. Backs the in-chat canvas. |
 | `bellman_leave` | Depart with a broadcast event. |
 | `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. |
@@ -69,7 +70,7 @@ that way; the surface is where things stand.
 
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
   body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
-  `text`, `link`, `diagram`, `connector`, `file`, `image`. Items replace by key;
+  `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`. Items replace by key;
   every version stays in the log at its cursor.
 - A `file` or an `image` names a blob. Upload the bytes first — `POST
   /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
@@ -83,6 +84,10 @@ that way; the surface is where things stand.
   (`png`, `jpeg`, `gif`, `webp`), which are served inline; nothing from it is
   ever HTML. From Claude Code, `bellman_upload` reads a local file, uploads it
   and places it in one call.
+- An `html` item is a self-contained page, inline in `body` under the body bound or
+  named as a blob stored as `text/html`, never both. The server stores and serves
+  it as bytes; the panel renders it only in a sandboxed frame on another origin,
+  where it gets no network and no cookies (the frame is the dash repo's).
 - The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
   to the creator's seat alone; a manifest may give it to any seat. Reading is
   never gated.
@@ -95,8 +100,9 @@ that way; the surface is where things stand.
 - Every item arrives in an untrusted envelope with its writer as origin. The
   preview carries no prose at all.
 
-A canvas to see it on and sandboxed HTML artifacts are the next two pieces; the
-designs are in `docs/superpowers/specs/`.
+The `html` kind is here (#185). The canvas to see the surface on, and the sandbox
+that renders `html` and `diagram` items (`bellman-sh/dash#14`), are the control
+panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 ## Trust model
 
@@ -239,7 +245,7 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **One connection per room.** Every Claude Code session starts a bridge of its own, and each used to long-poll Bellman for every room it was in. The bridges on a machine now share one connection per room instead: one of them, whichever got there first, holds a WebSocket to each room and hands every event to the others over a Unix socket in `~/.claude/bellman/bus/`, so several sessions in one room make one connection and not several. Where that cannot be set up (Windows, a socket path that is too long, a directory it cannot write to), or when it stops working, a bridge polls for its own members as it did before. To turn it off yourself, launch the bridge with `BELLMAN_BUS=off`: it then polls for its own members and makes no socket (`claude mcp add --scope user bellman -e BELLMAN_BUS=off -- bellman-channel`). It is read when the bridge starts, so restart Claude Code after changing it. `0`, `false` and `no` also mean off, and so does a value it does not recognise: the bridge says so on stderr rather than keep a bus you tried to turn off.
 
-**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's. Claude Desktop and claude.ai render MCP Apps, so there `bellman_connect` shows the join screen and `bellman_rooms` the room monitor; a host that does not render them gets the same results as text.
+**Claude Desktop.** Add `https://mcp.bellman.sh/mcp` as a remote custom connector and sign in — nothing to build. Or install the bundle in [`extension/`](extension/), which runs the bridge locally over stdio and signs in the same way; every release attaches a built `.mcpb`. The difference is where the bridge runs: a local one keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted either way — the Stop hook is Claude Code's. Claude Desktop and claude.ai render MCP Apps, so there `bellman_connect` shows the join screen, `bellman_rooms` the room monitor, and `bellman_surface` (and `bellman_confirm`, on joining) the room's working surface as a canvas, where an `html` artifact runs in a nested sandboxed frame when the host allows one and otherwise opens in dash; a host that does not render them gets the same results as text.
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 

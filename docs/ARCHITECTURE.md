@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: f53ca48
+last-verified-against-source: 87ad161
 last-updated: 2026-10-09
 ---
 
@@ -1347,11 +1347,18 @@ loss is findable, and the sweep at close (#65) is what finds it.
    a window ahead, so a firing cannot find the same thing due again at once. What
    it reads is kept at every append by both stores (`noteAppend` in `store.ts`):
    each member's last send, the room's last member event and the requests still
-   waiting, so no scan of the log has to find them. The one append that can bring
-   the alarm forward, an `action_request` in a room that declares `answer_within`,
-   re-arms after its commit. A thaw restarts the clocks (`thawedAt`): nobody can
-   send in a frozen room, so a freeze is never counted as silence. It counts
-   people (`isActivePerson`, hosted seat D5): the hosted seat is never named
+   waiting, so no scan of the log has to find them. Of one sender's open requests
+   the three oldest are named (`MAX_REQUESTS_PER_SENDER`), so a member cannot fill
+   every window by asking more; the record keeps them all. Every append compares
+   the soonest housekeeping time of the record it wrote with the record it read,
+   inside its transaction, and re-arms after its commit when the first is earlier (a
+   null before counts as later). An `action_request` can bring it forward, by adding
+   an anchor. So can a send or a response that ends a raised finding, because the
+   member's new condition is due at its own anchor and not at the old raise's
+   window, and the anchor is the earlier whenever `repeat_after` is the longer; a
+   member event does the same to a raised `room_idle`. A thaw restarts the clocks
+   (`thawedAt`): nobody can send in a frozen room, so a freeze is never counted as
+   silence. It counts people (`isActivePerson`, hosted seat D5): the hosted seat is never named
    quiet, what it says moves no clock, a room only it speaks in reads idle, and a
    proposal never wakes it. `MemoryStore` keeps the same books at every append
    and raises nothing, because the Node server's tick loop (#188) does not run
@@ -1388,9 +1395,10 @@ loss is findable, and the sweep at close (#65) is what finds it.
    `SessionDO.getSession` re-arms it too when the earliest of what the room owes
    is already past, whichever handler owes it (a closed room's sweep or purge, an
    open room's tick or housekeeping time), for work the runtime gave up on, and
-   leaves the work itself to the alarm. A dropped alarm is recovered by the next
-   read of the room and by nothing else: a room nobody reads again keeps what it
-   owes until someone does.
+   leaves the work itself to the alarm. A derivation or a re-arm that throws there
+   is logged the way `alarm()` logs a handler's, and the read still returns the
+   record. A dropped alarm is recovered by the next read of the room and by
+   nothing else: a room nobody reads again keeps what it owes until someone does.
    The runtime retries a throwing alarm a few times and then says nothing of
    which object it gave up on, so `alarm()` writes the room id and the handler
    name to the log before it rethrows, and that line is the only record. The
@@ -1642,7 +1650,12 @@ The sweep and the purge (#65) are derived the same way, so rolling back past the
 strands nothing either: an older build never computes the names, and a room it
 finds closed is kept. Housekeeping (#66) is derived too, and the fields it adds to
 the record are read with defaults, so rolling back past it strands nothing. What a
-rollback cannot undo is a purge that has already run.
+rollback leaves behind is the books those fields hold: a build older than #66 keeps
+them on the record and moves none of them, so after rolling forward a request
+answered in the meantime is still open and is named unanswered every window until
+its sender leaves, since nobody may answer a request twice, and a member who sent
+in the meantime is named quiet until it next sends. What a rollback cannot undo is
+a purge that has already run.
 An alarm already armed for a tick, or for housekeeping, fires once into a build
 that knows the `abandoned` name, which finds nothing to run and re-arms for the
 abandonment time. A build older than #18 does not know that name: for a row #18
@@ -1735,12 +1748,25 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,377** | every request, whether or not you are in a room |
+| Tool definitions | **~7,651** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
+tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,
+the figure the next paragraph records. All 274 are `bellman_start`'s and
+`bellman_connect`'s. The branch put the `housekeeping` field in the manifest schema
+inside `bellman_start`, on both arms of it: 208, measured at `1bcbf11`
+(`bellman_start` 1,810 to 2,018). The review's fix wave then named the connect
+preview's new `housekeeping` key in the `Returns:` line of `bellman_start` and of
+`bellman_connect`: 33 each (`bellman_start` 2,051, `bellman_connect` 588 to 621).
+Per tool, now: `bellman_start` 2,051, `bellman_send` 1,294, `bellman_confirm` 776,
+`bellman_sync` 740, `bellman_invite` 728, `bellman_connect` 621, `bellman_evict`
+513, `bellman_surface` 281, `bellman_rooms` 255, `bellman_audit` 213 and
+`bellman_leave` 179.
 
 Re-measured on 2026-10-09 once main's saved presets (#224) merged beneath the
 hosted seat: 7,377 tokens, 23 over the 7,354 below, all of them

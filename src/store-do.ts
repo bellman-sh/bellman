@@ -1545,12 +1545,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
    * spent, and the tick it produces is correct.
    *
-   * **One exception: an `action_request` in a room that declares `answer_within`
-   * (#66).** It adds an anchor, the request's time plus `answer_within`, that can fall
-   * before the time already armed, and nothing else brings the alarm forward for it, so
-   * the append does, after the commit. It is the only append that moves the soonest due
-   * time earlier: a join re-arms in `addMember`, and every other send only moves a
-   * member's quiet clock later.
+   * **One exception, and it is a rule and not a list of event kinds (#66, I1): an append
+   * that brings housekeeping's soonest time forward re-arms after its commit.**
+   * `#writeEvent` compares that time for the record it wrote against the record this
+   * transaction read (`bringsForward`), and a null before counts as later. An
+   * `action_request` in a room that declares `answer_within` adds an anchor, the
+   * request's time plus `answer_within`, that can fall before the time armed. So can a
+   * send, or a response, that ends a raised finding: the member's new condition is due
+   * at its own anchor (R8), which is before the old raise's window whenever
+   * `repeat_after` is the longer, and a member event does the same to a raised
+   * `room_idle`. A join re-arms in `addMember`. An append that moves the time later, or
+   * not at all, asks for nothing, which is the ordinary send.
    */
   async appendEvent(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -1663,7 +1668,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reliable there. The wake comes after the commit, so nobody hears of an event that
    * did not land.
    *
-   * An `action_request` in a room that declares `answer_within` re-arms after the commit, as
+   * An append that brings housekeeping's soonest time forward re-arms after the commit, as
    * `appendEvent`'s docblock says, when it is appended. A replay appended nothing, so it
    * brings nothing forward and asks for no re-arm.
    */

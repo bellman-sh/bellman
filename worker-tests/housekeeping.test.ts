@@ -404,9 +404,9 @@ it("names a sender's three oldest unanswered requests and not the fourth, which 
 });
 
 
-// R6. A request is the one append that can bring the soonest due time forward: it adds an anchor that may
-// fall before the alarm already armed. Every other append only moves a deadline later, and an alarm that is
-// early at worst corrects itself.
+// R6. A request adds an anchor that may fall before the alarm already armed, so the append that lands it brings
+// the soonest due time forward. A send that ends a raised finding does too (I1, above). An append that only moves
+// a deadline later asks for nothing, and an alarm that is early at worst corrects itself.
 it("re-arms when an action_request lands in a room that declares answer_within", async () => {
   const T0 = Date.now();
   const store = new DurableObjectStore(env as never);
@@ -443,7 +443,7 @@ it("re-arms on a keyed action_request too, and not on its replay", async () => {
   expect(reArms).toBe(0);
 });
 
-it("does not re-arm for any other append, nor for a request in a room that declares no answer_within", async () => {
+it("does not re-arm for an append that only moves a deadline later, nor for a request in a room that declares no answer_within", async () => {
   const T0 = Date.now();
   const store = new DurableObjectStore(env as never);
   await store.createSession(room("qs_r6_with", T0, { quietAfterMs: HOUR, answerWithinMs: 5 * MIN }));
@@ -459,9 +459,9 @@ it("does not re-arm for any other append, nor for a request in a room that decla
       return n;
     });
 
-  expect(await count("qs_r6_with", message()), "a message only moves a deadline later").toBe(0);
+  expect(await count("qs_r6_with", message()), "with nothing raised, a message only moves a deadline later").toBe(0);
   expect(await count("qs_r6_without", request()), "no answer_within, no anchor for it").toBe(0);
-  expect(await count("qs_r6_with", request()), "the one append that brings the soonest forward").toBe(1);
+  expect(await count("qs_r6_with", request()), "a request adds an anchor before the soonest").toBe(1);
 });
 
 // ---------------------------------------------------------------------------

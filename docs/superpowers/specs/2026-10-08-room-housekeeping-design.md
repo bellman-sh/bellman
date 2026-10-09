@@ -1,7 +1,7 @@
 # Room Housekeeping: the Server Observes and Proposes — Design
 
 Issue: [#66](https://github.com/bellman-sh/bellman/issues/66)
-Status: approved design, pending implementation plan
+Status: implemented on `mcfearsome/room-housekeeping`; plan: [room housekeeping](../plans/2026-10-08-room-housekeeping.md)
 Depends on: [heartbeat events](2026-10-02-heartbeat-events-design.md) (D1 the server ticks, D5 the derived named alarm, D7 a member may not forge a server event, D9 attention on the wire, D10 when an alarm may fire), [the working surface](2026-10-06-working-surface-design.md) (D12: the scribe writes `plan`; housekeeping that acts stays here), [room manifests](2026-09-23-room-manifests-design.md) (where a room declares what it wants), [the hosted seat](2026-10-08-hosted-seat-design.md) (D5: who counts as a person)
 Related: #65 (the record after close), #2 (verbs: nothing here is given one), #28 (the monitor, which may show these later)
 Repos: `bellman-sh/bellman` only
@@ -40,7 +40,9 @@ the panel's and the monitor's rendering beyond the wire.
   rarely wants `quiet_after` as well, and nothing stops it.
 - `request_unanswered`: an `action_request` with no `action_response` whose
   `ref_id` names its cursor, older than `answer_within`, while its sender is
-  still in the room.
+  still in the room. Of one sender's open requests the three oldest are named,
+  and the next once an older one is answered, so a member cannot fill every window
+  by asking more; the record keeps them all.
 - `room_idle`: no member event for `idle_after`. Server-authored events (a
   tick, a housekeeping proposal) are not activity.
 
@@ -62,9 +64,11 @@ the server's numbers, never prose: `{ finding, about, since, repeat }`, where
 `about` is `{ member_id }` for a quiet member, `{ cursor }` for an unanswered
 request and absent for an idle room, `since` the moment the condition began,
 and `repeat` how many times this finding has been raised. Attention is
-`interrupt`, so a bridge pushes it, and it carries nothing a reader needs to
-distrust, so it ships unwrapped like the tick's snapshot. `bellman_send`
-refuses `type: "housekeeping"` as it refuses a forged tick (heartbeat D7).
+`interrupt`, so a bridge pushes it. It carries nothing a reader needs to
+distrust, and `publicEvent` hands the payload over as stored; the poll then wraps
+every event type in its untrusted envelope, the tick's included, so a proposal
+arrives wrapped as they do. `bellman_send` refuses `type: "housekeeping"` as it
+refuses a forged tick (heartbeat D7).
 
 ### D3 — It never acts, and it says what to do by naming the condition.
 
@@ -101,7 +105,10 @@ preset a person saves ([room designer](2026-10-09-room-designer-design.md)) is
 what an authored manifest is without its room and purpose, so it carries the
 block as it carries `heartbeat_on`: stored as the keys it sets, null when it
 sets none, and cited by `bellman_start` like any other field. A block beside
-such a cite replaces the preset's whole, and an empty or null one turns it off.
+such a cite replaces the preset's whole, and an empty one turns it off; with no
+block, or a null one, the cite keeps the preset's own, as it keeps its
+`heartbeat_on`. A preset saved before the field existed has no such key, which
+reads as none, as `host` does.
 
 ### D6 — The alarm is derived, and fires only when something is due.
 
@@ -112,7 +119,11 @@ event's `at` plus `idle_after`, and each raised key's last raise plus its
 `repeat_after`. A room with no housekeeping, a closed room and a frozen room
 derive `null` (heartbeat D10). A firing computes the findings, appends one
 event per key that is due, updates `raised`, and re-arms; it reads and writes
-inside one object, so nothing here crosses the atomicity gap. A thaw restarts
+inside one object, so nothing here crosses the atomicity gap. An append that
+brings that time forward re-arms after its commit: each one compares the time for
+the record it wrote with the record it read, because a send that ends a raised
+finding starts a new condition that is due at its own anchor, before the old
+raise's window when `repeat_after` is the longer. A thaw restarts
 the clocks, as heartbeat D10 refuses the tick its silence across a freeze: the
 session records `thawedAt` and every base time (a member's last send, a
 request's time, the last member event) is floored at it, so nothing the freeze
@@ -177,23 +188,31 @@ finding every second.
 session, each threshold at the boundary, `nextHousekeepAt` the soonest of the
 anchors and `null` for a closed, frozen or undeclared room, `repeat_after`
 defaulting per finding, keys cleared by each condition. `tests/manifest.test.ts`:
-the field parses, each bound refuses with its message, no preset carries it,
-the enum of verbs is unchanged. `tests/tools/send.test.ts`: `type:
-"housekeeping"` refused. `tests/helpers/store-contract.ts`: a firing appends
-one event per due key with `repeat` counting, `raised` persists, `lastSentAt`
-is set at append and not by a read. `worker-tests`: the derived alarm fires
-at the soonest anchor, once, and re-arms; a frozen room fires nothing. Every
-test is run once against the broken implementation before it counts.
+the field parses, each bound refuses with its message, no built-in preset carries
+it, the enum of verbs is unchanged. `tests/tools/progress.test.ts`: `type:
+"housekeeping"` refused. `tests/helpers/store-contract.ts`, for both stores: the
+books. `lastSentAt` is set at append and not by a read, a request opens and
+closes, a departure closes a leaver's requests, a thaw sets `thawedAt`.
+`worker-tests`: what only a real Durable Object runs, because `MemoryStore` raises
+nothing. A firing appends one event per due key with `repeat` counting and
+`raised` persists; the derived alarm fires at the soonest anchor, once, and
+re-arms; an append that ends a raised finding brings it forward; a firing that
+comes late arms a window after itself; a frozen room fires nothing. Every test is
+run once against the broken implementation before it counts.
 
 ## Files
 
-`src/housekeeping.ts` (new), `src/types.ts`, `src/attention.ts`,
-`src/manifest.ts`, `src/store.ts` and `src/store-do.ts` (the handler,
-`lastSentAt`, `raised`), `src/tools/send.ts` (the refusal), `src/public-event.ts`
-(the projection), `docs/ARCHITECTURE.md` (§4 the alarm, §8 the roadmap's B3),
-`README.md` (the manifest field), the tests above. A saved preset carries the
-block too: `src/presets.ts` and `src/tools/start.ts` (D5), with the registry
-reading an older row as a preset that sets none.
+`src/housekeeping.ts` (new), `src/types.ts`, `src/stored-session.ts` (an older
+row reads with defaults), `src/attention.ts`, `src/manifest.ts`, `src/store.ts`
+and `src/store-do.ts` (the handler, `lastSentAt`, `raised`, the re-arm),
+`src/tools/send.ts` (a comment only: the refusal is `SEND_KINDS`, the closed list
+of what a member may send, which does not name the type), `docs/ARCHITECTURE.md`
+(§9, the alarm, and §8, the roadmap's B3), `README.md` (the manifest field), the
+tests above. `src/public-event.ts` needed no change: it branches on type only
+through `isAmbient`. The preview a joiner reads carries the thresholds:
+`src/projections.ts`, the `Returns:` lines of `bellman_connect` and
+`bellman_start`, and the join page in `ui/`. A saved preset carries the block too:
+`src/presets.ts` and `src/tools/start.ts` (D5).
 
 ## Out of scope
 

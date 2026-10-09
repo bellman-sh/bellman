@@ -177,7 +177,10 @@ Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a 
 npm install -g @bellman-sh/mcp-server
 ```
 
-That puts three commands on your PATH: `bellman-channel` (the bridge Claude Code spawns), `bellman-stop-hook` (the fallback), and `bellman-claude` (the launcher below). Working from a clone instead? `npm install && npm run build`, and use `node "$PWD/dist/channel.js"` wherever `bellman-channel` appears.
+That puts four commands on your PATH: `bellman-channel` (the bridge Claude Code spawns), `bellman-stop-hook` (the fallback), `bellman-claude` (the launcher below), and `bellman` (the command line, below). Working from a clone instead? `npm install && npm run build`, and use `node "$PWD/dist/channel.js"` wherever `bellman-channel` appears.
+
+- `bellman update` installs the latest release from npm (`--check` only reports; in a clone or as a project's dependency it prints the commands and runs none). Claude Code sessions already open keep the old bridge until you restart them.
+- `bellman feature-request [words…]` opens the feature-request form on GitHub with the words as its title, and prints the URL first for a machine with no browser.
 
 **Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
 

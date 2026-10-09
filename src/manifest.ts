@@ -47,50 +47,62 @@ export class ManifestError extends Error {
 export const MIN_HEARTBEAT_MS = 30_000;
 export const MAX_HEARTBEAT_MS = 3_600_000;
 
-const DURATION = /^(\d{1,4})(s|m|h)$/;
-const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
+/**
+ * The bounds on every housekeeping key (#66, D5): one pair for all four. The floor
+ * keeps a manifest from making a room raise a finding every few seconds; the
+ * ceiling is a week.
+ */
+export const MIN_HOUSEKEEPING_MS = 5 * 60_000;
+export const MAX_HOUSEKEEPING_MS = 7 * 24 * 3_600_000;
+
+const DURATION = /^(\d{1,4})(s|m|h|d)$/;
+const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
 
 /**
  * Milliseconds back to the shortest duration that denotes them — the inverse of
- * what parseHeartbeatOn reads, so an error can name a bound in the same notation
+ * what parseDuration reads, so an error can name a bound in the same notation
  * the caller wrote. Largest unit that divides exactly, so 3_600_000 is "1h"
- * rather than "60m".
+ * rather than "60m", and a week is "7d" rather than "168h".
  */
 const duration = (ms: number): string => {
-  for (const [unit, size] of [["h", UNIT_MS.h], ["m", UNIT_MS.m]] as const) {
+  for (const [unit, size] of [["d", UNIT_MS.d], ["h", UNIT_MS.h], ["m", UNIT_MS.m]] as const) {
     if (ms % size === 0) return `${ms / size}${unit}`;
   }
   return `${ms / UNIT_MS.s}s`;
 };
 
 /**
- * `"30s"`, `"5m"`, `"1h"` to milliseconds.
+ * `"30s"`, `"5m"`, `"1h"`, `"2d"` to milliseconds, refused outside `[min, max]`.
+ * `field` is the manifest key, and both errors name it first.
  *
  * The raw value is echoed by both errors, and those reach tool errors and the
- * audit log, so HeartbeatOnShape bounds it to 8 characters before it can get
+ * audit log, so DurationShape bounds it to 8 characters before it can get
  * here. The regex caps the digits too, so neither message can be grown by its
  * input.
  */
-function parseHeartbeatOn(raw: string): number {
+function parseDuration(field: string, raw: string, min: number, max: number): number {
   const m = DURATION.exec(raw);
   if (!m) {
-    throw new ManifestError(
-      `heartbeat_on must be a duration like "30s", "5m" or "1h" (got "${raw}")`,
-    );
+    // heartbeat_on tops out at an hour, so a day was never among its examples.
+    const examples = field === "heartbeat_on" ? '"30s", "5m" or "1h"' : '"30s", "5m", "1h" or "2d"';
+    throw new ManifestError(`${field} must be a duration like ${examples} (got "${raw}")`);
   }
   const ms = Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS];
-  if (ms < MIN_HEARTBEAT_MS || ms > MAX_HEARTBEAT_MS) {
-    // Rendered from the constants, not restated. A bound change would otherwise
+  if (ms < min || ms > max) {
+    // Rendered from the bounds, not restated. A bound change would otherwise
     // leave this message wrong while the test pinning its literal text passed.
     throw new ManifestError(
-      `heartbeat_on must be between ${duration(MIN_HEARTBEAT_MS)} and ${duration(MAX_HEARTBEAT_MS)} (got "${raw}")`,
+      `${field} must be between ${duration(min)} and ${duration(max)} (got "${raw}")`,
     );
   }
   return ms;
 }
 
-/** Bounded before interpolation. See parseHeartbeatOn. */
-const HeartbeatOnShape = z.string().max(8);
+const parseHeartbeatOn = (raw: string): number =>
+  parseDuration("heartbeat_on", raw, MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS);
+
+/** Bounded before interpolation. See parseDuration. */
+const DurationShape = z.string().max(8);
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -174,17 +186,34 @@ const RolesShape = z.preprocess(
     .refine((r) => Object.keys(r).length <= MAX_ROLES, `at most ${MAX_ROLES} roles`),
 );
 
+/**
+ * The thresholds past which the server proposes a housekeeping finding (#66). Each
+ * key is nullish for the reason `heartbeat_on` is: a valueless `idle_after:` in
+ * YAML is null, and means that finding is off. An authored "" is still refused,
+ * by resolveHousekeeping.
+ */
+const HousekeepingShape = z.strictObject({
+  quiet_after: DurationShape.nullish(),
+  answer_within: DurationShape.nullish(),
+  idle_after: DurationShape.nullish(),
+  repeat_after: DurationShape.nullish(),
+});
+export type HousekeepingInput = z.input<typeof HousekeepingShape>;
+
 const CiteShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   preset: z.enum(PRESET_NAMES),
+  // Housekeeping is not part of what a preset is (D5), so a citation may add it.
+  housekeeping: HousekeepingShape.nullish(),
 });
 
 const AuthorShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   mode: z.enum(["pair", "swarm"]),
-  heartbeat_on: HeartbeatOnShape.nullish(),
+  heartbeat_on: DurationShape.nullish(),
+  housekeeping: HousekeepingShape.nullish(),
   roles: RolesShape,
   // Both are echoed verbatim by the cross-field errors, which reach tool errors and
   // the audit log, so they are bounded like every other string in the shape.
@@ -220,10 +249,11 @@ export type ManifestInput = z.input<typeof ManifestShape>;
 // Preset catalog
 // ---------------------------------------------------------------------------
 
-// A preset carries no cadence (D3), so the catalog's shape leaves it out and
-// resolveManifest supplies null. Making it unrepresentable here is stronger than
-// a catalog entry that happens to say null.
-type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs">;
+// A preset carries no cadence (D3) and no housekeeping thresholds (#66, D5), so
+// the catalog's shape leaves both out and resolveManifest supplies them. Making
+// them unrepresentable here is stronger than a catalog entry that happens to say
+// null.
+type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs" | "housekeeping">;
 
 function role(can: Verb[], description: string): RoleDef {
   // No preset expects a report (D3). Turning this on for shipped presets would
@@ -332,6 +362,7 @@ export function resolveManifest(input: unknown): RoomManifest {
       defaultRole: body.defaultRole,
       creatorRole: body.creatorRole,
       heartbeatOnMs: null,
+      housekeeping: resolveHousekeeping(v.housekeeping),
     };
   }
 
@@ -392,5 +423,37 @@ export function resolveManifest(input: unknown): RoomManifest {
     // `!= null`, not truthiness: an authored "" is a mistake to refuse, not an
     // absent key. A valueless `heartbeat_on:` in YAML is null and means no cadence.
     heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : null,
+    housekeeping: resolveHousekeeping(v.housekeeping),
   };
+}
+
+/**
+ * The housekeeping block as milliseconds, or null when it asks for no finding.
+ *
+ * Null, not an object of nulls, for an empty block and for one holding only
+ * `repeat_after`: a repeat window with nothing to repeat is the same room as one
+ * with no block, and one representation of "off" is one fewer thing for the rules
+ * and the stored row to check. Every key is parsed before that is decided, so a
+ * bad `repeat_after` is refused even when it stands alone.
+ *
+ * `!= null` for the reason `heartbeat_on` uses it: an authored "" is a mistake to
+ * refuse, and a valueless key is off.
+ */
+function resolveHousekeeping(
+  h: z.infer<typeof HousekeepingShape> | null | undefined,
+): RoomManifest["housekeeping"] {
+  if (!h) return null;
+  const ms = (key: keyof typeof h): number | null => {
+    const raw = h[key];
+    return raw != null
+      ? parseDuration(`housekeeping.${key}`, raw, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS)
+      : null;
+  };
+  const out = {
+    quietAfterMs: ms("quiet_after"),
+    answerWithinMs: ms("answer_within"),
+    idleAfterMs: ms("idle_after"),
+    repeatAfterMs: ms("repeat_after"),
+  };
+  return out.quietAfterMs === null && out.answerWithinMs === null && out.idleAfterMs === null ? null : out;
 }

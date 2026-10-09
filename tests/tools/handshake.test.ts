@@ -711,11 +711,40 @@ describe("INVARIANT 10 — every room is declared", () => {
       defaultRole: "navigator",
       creatorRole: "driver",
       heartbeatOnMs: null,
+      housekeeping: null,
     });
     expect(capacityOf(session!.manifest)).toBe(2);
     const roleOf = (userId: string) => session?.members.find((m) => m.userId === userId)?.roomRole;
     expect(roleOf("u_jesse")).toBe("driver");
     expect(roleOf("u_peer")).toBe("navigator");
+  });
+
+  // The field reaches a room only through this tool, so this is where "a manifest can
+  // declare housekeeping" stops being a claim about resolveManifest and becomes one about
+  // a room: the tool's input schema admits it, the store keeps it, and a value outside its
+  // bounds is refused before anything is created.
+  it("records the housekeeping a manifest declares, and refuses one outside its bounds", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const started = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: manifestFixture({ housekeeping: { quiet_after: "2h", idle_after: "1d" } }),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const session = await h.store.getSession(String(started.data.session_id));
+    expect(session?.manifest.housekeeping).toEqual({
+      quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null,
+    });
+
+    const created = await h.store.countCreatesThisMonth("u_jesse");
+    const refused = await jesse.call("bellman_start", {
+      brief: brief(),
+      manifest: manifestFixture({ housekeeping: { quiet_after: "1m" } }),
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain(
+      'invalid manifest — housekeeping.quiet_after must be between 5m and 7d (got "1m")',
+    );
+    expect(await h.store.countCreatesThisMonth("u_jesse")).toBe(created);
   });
 
   // The creator otherwise never sees what the server recorded. A manifest can

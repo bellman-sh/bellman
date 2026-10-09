@@ -119,6 +119,41 @@ describe("hydrateStoredSession — a manifest stored before the heartbeat", () =
 });
 
 /**
+ * A manifest written before housekeeping (#66): the key is ABSENT, not null, which is
+ * what Durable Object storage hands back for a row that never had it.
+ */
+function preHousekeepingRow(fixture = session()) {
+  const { events: _events, ...rest } = fixture;
+  const { housekeeping: _housekeeping, ...manifest } = rest.manifest;
+  return { ...rest, manifest };
+}
+
+describe("hydrateStoredSession — a manifest stored before housekeeping", () => {
+  /** `=== null` is how every rule downstream asks "no housekeeping", and undefined fails it. */
+  it("reads a missing housekeeping as null", () => {
+    const raw = preHousekeepingRow();
+    // Without this, a fixture that stopped carrying the key would pass for the wrong reason.
+    expect("housekeeping" in raw.manifest).toBe(false);
+    expect(hydrateStoredSession(raw)!.manifest.housekeeping).toBeNull();
+  });
+
+  /** A default that clobbered would switch off every room that did declare thresholds. */
+  it("leaves declared thresholds alone", () => {
+    const declared = roomManifest({
+      housekeeping: { quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null },
+    });
+    const { events: _events, ...raw } = session({ manifest: declared });
+    expect(hydrateStoredSession(raw)!.manifest.housekeeping).toEqual(declared.housekeeping);
+  });
+
+  it("does not rewrite the row it was handed", () => {
+    const raw = preHousekeepingRow();
+    hydrateStoredSession(raw);
+    expect("housekeeping" in raw.manifest).toBe(false);
+  });
+});
+
+/**
  * A record written before the working surface (#129): it has no `surfaceCursor`.
  * The key is ABSENT, not undefined, which is what Durable Object storage hands
  * back for a row that never had it.

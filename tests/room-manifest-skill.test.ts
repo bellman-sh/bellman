@@ -162,6 +162,43 @@ describe("the skill's yaml examples", () => {
   });
 });
 
+describe("what the skill says about housekeeping (#66)", () => {
+  const KEYS = ["quiet_after", "answer_within", "idle_after", "repeat_after"];
+
+  // The resolved object has one field per key. A key added on the server makes its length
+  // differ from this list, and this test fails until the skill and the list both learn it.
+  it("documents every key the server resolves, and the resolved object holds no other", () => {
+    const resolved = resolveManifest({
+      room: "t", preset: "pair", housekeeping: Object.fromEntries(KEYS.map((k) => [k, "1h"])),
+    }).housekeeping;
+    expect(Object.keys(resolved ?? {})).toHaveLength(KEYS.length);
+    for (const key of KEYS) expect(SKILL, key).toContain(`\`${key}\``);
+  });
+
+  // Read out of the refusal an author would see, as the roles ceiling is below, so the
+  // skill cannot quote a bound the server no longer holds.
+  it("quotes the real bounds", () => {
+    let named: RegExpExecArray | null = null;
+    try {
+      resolveManifest({ room: "t", preset: "pair", housekeeping: { quiet_after: "1m" } });
+    } catch (e) {
+      named = /between (\S+) and (\S+) /.exec((e as Error).message);
+    }
+    expect(named, "the housekeeping bounds are no longer reported in that wording").not.toBeNull();
+    expect(SKILL).toContain(`between **${named![1]}** and **${named![2]}**`);
+  });
+
+  // The generic example test above proves each yaml block resolves. This proves one of
+  // them is about housekeeping and sets every key, so the prose has a manifest to point at.
+  it("shows a manifest that sets every key", () => {
+    const declared = yamlExamples()
+      .map((src) => resolveManifest(parseYaml(src)).housekeeping)
+      .filter((h) => h != null);
+    expect(declared.length, "no yaml example declares housekeeping").toBeGreaterThanOrEqual(1);
+    expect(declared.some((h) => Object.values(h).every((ms) => ms !== null))).toBe(true);
+  });
+});
+
 describe("the limits the skill quotes", () => {
   it("quotes the real role-key shape", () => {
     expect(SKILL).toContain(`[a-z][a-z0-9_]{0,${MAX_ROLE_KEY_LENGTH - 1}}`);

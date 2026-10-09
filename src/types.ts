@@ -257,6 +257,21 @@ export interface RoomManifest {
    * reading silence reads it against the same number every member was given.
    */
   heartbeatOnMs: number | null;
+  /**
+   * The thresholds past which the server proposes a housekeeping finding (#66), or
+   * null for a room that asked for none. Each is a duration in ms, or null where its
+   * finding is off; `repeatAfterMs` null means each finding repeats after its own
+   * threshold. Never an object of three null thresholds: `resolveManifest` makes
+   * that null, so "off" has one representation. Immutable with the rest of the
+   * manifest, and absent on rows written before this, which `hydrateStoredSession`
+   * reads as null.
+   */
+  housekeeping: {
+    quietAfterMs: number | null;
+    answerWithinMs: number | null;
+    idleAfterMs: number | null;
+    repeatAfterMs: number | null;
+  } | null;
 }
 
 /**

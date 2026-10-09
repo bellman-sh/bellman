@@ -38,8 +38,9 @@ purpose: Port Stripe v2 to v3   # optional, ≤300 chars
 preset: review                  # pair | swarm | review
 ```
 
-That is the entire file. Adding `roles`, `mode`, `default_role` or
-`creator_role` next to `preset` is rejected — the two forms are exclusive.
+That is the entire file, apart from the optional `housekeeping` block (Step 2c).
+Adding `roles`, `mode`, `default_role` or `creator_role` next to `preset` is
+rejected — the two forms are exclusive.
 
 What each preset expands to:
 
@@ -135,6 +136,38 @@ authority anyone needs, and issue a stronger role deliberately with
 
 A `default_role` that can `invite` means anyone who gets the code can widen the
 room.
+
+## Step 2c — ask for housekeeping (optional)
+
+A room can ask the server to notice when it has gone quiet. Add a `housekeeping`
+block to either form, a cited preset or authored roles:
+
+```yaml
+room: payments-migration
+preset: swarm
+housekeeping:
+  quiet_after: 2h       # a member has sent nothing for this long
+  answer_within: 30m    # an action request is still unanswered after this long
+  idle_after: 1d        # no member has sent anything for this long
+  repeat_after: 4h      # optional: wait this long before naming the same finding again
+```
+
+| Key | The server names |
+|---|---|
+| `quiet_after` | a member who has sent nothing for this long. A member who only reads is quiet. |
+| `answer_within` | an `action_request` with no `action_response` after this long, while the member who sent it is still in the room. |
+| `idle_after` | a room in which no member has sent anything for this long. |
+| `repeat_after` | no finding of its own: how long a finding that still holds waits before it is named again. Left out, each finding repeats after its own threshold. |
+
+Each value is a whole number and a unit (`s`, `m`, `h` or `d`),
+between **5m** and **7d**. A key left out turns that finding off, and a block
+that sets no threshold turns housekeeping off. No preset sets it, so a room that
+wants it says so here.
+
+A finding is a `housekeeping` event in the room. It names the condition and does
+nothing about it: the server sends no nudge, answers no request, closes no room
+and removes no member. Whether to ping the quiet member, answer the request or
+leave is a member's call.
 
 ## Step 3 — check it
 

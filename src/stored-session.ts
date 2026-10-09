@@ -75,7 +75,7 @@ export interface StoredSession extends Omit<Session, "events"> {
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Eight changes to the stored shape landed after the sessions now in production
+ * Ten changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -100,6 +100,10 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   invents nothing. Left alone, both read as `undefined`, which is neither: a
  *   guard written `=== null` misses the cadence and goes on to do arithmetic with
  *   it, and `mustReport` hands out an `undefined` its signature calls a boolean.
+ * - **manifest.housekeeping** (#66) defaults to `null`, for the same reason: a
+ *   manifest that never mentioned housekeeping asks for no finding, so the default
+ *   invents nothing. Left alone it reads as `undefined`, which `=== null` misses,
+ *   and the rules would go on to read thresholds off nothing.
  * - **surfaceCursor** (#129) defaults to `0`: a room written before the surface
  *   existed has never had a row change, which is what 0 says.
  * - **expiresAt and maxMembers** (#18) are stripped. Rooms persist, so a missing
@@ -118,7 +122,7 @@ export interface StoredSession extends Omit<Session, "events"> {
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All nine live here, in one gate, rather than in separate functions that could drift.
+ * All ten live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -135,7 +139,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
   return {
     ...row,
-    manifest: withHeartbeatDefaults(row.manifest),
+    manifest: withManifestDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
     surfaceCursor: row.surfaceCursor ?? 0,
     blobBytes: row.blobBytes ?? 0,
@@ -156,17 +160,18 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
 /**
  * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
- * null, and `reports` a boolean on every role.
+ * null, `housekeeping` an object or null, and `reports` a boolean on every role.
  *
- * The types already say so, because every row written since the heartbeat has
- * both. The `??` is for the rows that predate it. New objects all the way down
+ * The types already say so, because every row written since each of them landed
+ * has it. The `??` is for the rows that predate it. New objects all the way down
  * rather than assignments into the row, so the gate stays a pure function of what
  * it was handed.
  */
-function withHeartbeatDefaults(m: RoomManifest): RoomManifest {
+function withManifestDefaults(m: RoomManifest): RoomManifest {
   return {
     ...m,
     heartbeatOnMs: m.heartbeatOnMs ?? null,
+    housekeeping: m.housekeeping ?? null,
     roles: Object.fromEntries(
       Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false }]),
     ),

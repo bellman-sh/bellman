@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
-import { ENTITLEMENTS, entitlementsFor, resolveIdentity } from "../src/auth.js";
+import { ENTITLEMENTS, entitlementsFor, keyedPlan, resolveIdentity } from "../src/auth.js";
 import type { Identity, Plan } from "../src/types.js";
 
 const ORIGINAL_KEYS = process.env.BELLMAN_KEYS;
@@ -153,23 +153,33 @@ describe("plan entitlements", () => {
 
   /**
    * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
-   * differs from pro by creates, the blob ceiling and how long a closed room is kept (#65); hosted
-   * agents (#188, #189) are the facet that will set it apart, and landing one is a deliberate edit to this line.
+   * differs from pro by creates, the blob ceiling, how long a closed room is kept
+   * (#65) and the hosted seat (#188); landing another facet is a deliberate edit
+   * to this line.
    */
-  it("gives max nothing but creates, the blob ceiling and the retention window over pro, until it has a facet", () => {
+  it("gives max creates, the blob ceiling, the retention window and the hosted seat over pro, and nothing else", () => {
     const {
-      monthlyCreates: maxCreates, blobBytesPerRoom: maxBlobs, retainAfterCloseMs: maxKept, ...maxRest
+      monthlyCreates: mc, blobBytesPerRoom: mb, retainAfterCloseMs: mk,
+      hostedRooms: mh, hostUnitsPerRoom: mu, ...maxRest
     } = ENTITLEMENTS.max;
     const {
-      monthlyCreates: proCreates, blobBytesPerRoom: proBlobs, retainAfterCloseMs: proKept, ...proRest
+      monthlyCreates: pc, blobBytesPerRoom: pb, retainAfterCloseMs: pk,
+      hostedRooms: ph, hostUnitsPerRoom: pu, ...proRest
     } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
-    expect(maxCreates).toBe(2000);
-    expect(proCreates).toBe(500);
-    expect(maxBlobs).toBe(5 * 1024 * 1024 * 1024);
-    expect(proBlobs).toBe(500 * 1024 * 1024);
-    expect(maxKept).toBeNull();
-    expect(proKept).toBe(365 * 24 * 60 * 60 * 1000);
+    expect([mc, pc]).toEqual([2000, 500]);
+    expect([mb, pb]).toEqual([5 * 1024 * 1024 * 1024, 500 * 1024 * 1024]);
+    expect(mk).toBeNull();
+    expect(pk).toBe(365 * 24 * 60 * 60 * 1000);
+    expect([mh, ph]).toEqual([3, 0]);
+    expect([mu, pu]).toEqual([3000, 0]);
+  });
+
+  it("gives the hosted seat to max and team only", () => {
+    expect(ENTITLEMENTS.free.hostedRooms).toBe(0);
+    expect(ENTITLEMENTS.pro.hostedRooms).toBe(0);
+    expect(ENTITLEMENTS.team.hostedRooms).toBe(5);
+    expect(ENTITLEMENTS.team.hostUnitsPerRoom).toBe(3000);
   });
 
   /** The reason a company with several people creating rooms still buys team. */
@@ -195,11 +205,13 @@ describe("plan entitlements", () => {
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
    * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
-   * room is kept; neither says who may join it.
+   * room is kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
+   * hosted rooms a person holds open and what each spends. None says who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
       "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
+      "hostedRooms", "hostUnitsPerRoom",
     ].sort();
 
     for (const plan of plans) {
@@ -214,5 +226,29 @@ describe("plan entitlements", () => {
       };
       expect(entitlementsFor(identity)).toBe(ENTITLEMENTS[plan]);
     }
+  });
+});
+
+/**
+ * A hosted room's creator is known by user id alone, and at each month turn its seat reads
+ * the plan that creator holds then (I7). A key-table user's plan is the table's.
+ */
+describe("keyedPlan", () => {
+  it("gives the plan a key table names a user with, the higher of two, and null for a user it does not name", () => {
+    const table = JSON.stringify({
+      qk_a1: { userId: "u_a", orgId: null, plan: "pro", role: "member", label: "a" },
+      qk_a2: { userId: "u_a", orgId: null, plan: "max", role: "member", label: "a" },
+      qk_b: { userId: "u_b", orgId: null, plan: "free", role: "member", label: "b" },
+      qk_junk: "not an identity",
+    });
+    expect(keyedPlan("u_a", table)).toBe("max");
+    expect(keyedPlan("u_b", table)).toBe("free");
+    expect(keyedPlan("u_nobody", table)).toBeNull();
+    expect(keyedPlan("u_a", "{not json")).toBeNull();
+  });
+
+  it("reads the table resolveIdentity reads when given none, and no table when given null", () => {
+    expect(keyedPlan("u_jesse")).toBe("team");
+    expect(keyedPlan("u_jesse", null)).toBeNull();
   });
 });

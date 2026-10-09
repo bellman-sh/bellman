@@ -6,9 +6,10 @@
  */
 import { it, expect, afterEach } from "vitest";
 import {
-  env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
+  env, SELF, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects,
 } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { hostMember } from "../src/host.js";
 import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
 import type { Member } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
@@ -178,7 +179,7 @@ it("writes no tick when nobody is due, but still re-arms", async () => {
   });
 });
 
-it("arms nothing for a room whose roles ask for no reports", async () => {
+it("arms nothing for a room without a host whose roles ask for no reports", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(session({ id: "qs_none", joinCodes: {} }));
   await runInDurableObject(
@@ -751,4 +752,159 @@ it("gives a thawed room a fresh cadence before it asks again", async () => {
   const after = await rows(stub);
   expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
   expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
+});
+
+// ---------------------------------------------------------------------------
+// The hosted seat's tick (#188). A room with a host ticks on its own cadence
+// whether or not any role reports, writes the tick only while a person is in the
+// room, and queues the seat's wake in the tick's own put. The manifest is the one
+// the hosted-seat tests use: no role reports, as in every preset.
+// ---------------------------------------------------------------------------
+
+const HOUR = 3_600_000;
+
+const hostedRoles = (host: boolean, reports = false) => roomManifest({
+  mode: "swarm", preset: null, heartbeatOnMs: HOUR,
+  roles: {
+    lead: { can: ["send", "invite"], description: null, reports },
+    host: { can: ["send"], description: null, reports: false },
+  },
+  defaultRole: "lead", creatorRole: "lead",
+  host: host ? { role: "host", model: "haiku", instructions: null } : null,
+});
+
+/**
+ * A room of one person (`m_creator`, u_jesse, the identity the test key holds) and,
+ * unless `host: false`, its host. Its last firing was `tickAgo` ago, and woke the host
+ * (`lastHostTickAt`, I3), and the person was last seen at `seenAt`; the host was seen at
+ * creation, after that firing, so a rule that counted the host would tick every room below.
+ */
+async function hostedRoom(
+  id: string,
+  { host = true, reports = false, seenAt = Date.now(), joinedAt = Date.now(), tickAgo = HOUR + 1 } = {},
+) {
+  const store = new DurableObjectStore(env as never);
+  const m = hostedRoles(host, reports);
+  await store.createSession(session({
+    id, manifest: m, joinCodes: {},
+    members: [member({ roomRole: "lead" }), ...(host ? [hostMember(m, Date.now())] : [])],
+  }));
+  const stub = env.SESSION.get(env.SESSION.idFromName(id));
+  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
+    const s = await ctx.storage.get<{ members: Member[] }>("session");
+    await ctx.storage.put("session", {
+      ...s,
+      lastTickAt: Date.now() - tickAgo,
+      ...(host ? { lastHostTickAt: Date.now() - tickAgo } : {}),
+      members: s!.members.map((x) => (x.memberId === "m_creator" ? { ...x, joinedAt, lastSeenAt: seenAt } : x)),
+    });
+  });
+  return stub;
+}
+
+/**
+ * One firing with the outbox's inline delivery held back, so the rows the firing
+ * queued are still there to read. Delivery is the outbox's business and has its
+ * own tests; what is on trial here is what the tick's put carried.
+ */
+const fireHeld = (stub: DurableObjectStub, { named = false } = {}) =>
+  runInDurableObject(stub, async (i: SessionDO) => {
+    (i as unknown as { driver: { deliverNow(): Promise<void> } }).driver.deliverNow = async () => {};
+    if (named) nameTheTick(i);
+    await i.alarm();
+  });
+
+const queued = (stub: DurableObjectStub) =>
+  runInDurableObject(stub, async (_i: SessionDO, ctx) =>
+    [...(await ctx.storage.list<{ kind: string }>({ prefix: "ob:" })).values()]);
+
+it("ticks a hosted room no role reports in, and queues the seat's wake in the tick's own put", async () => {
+  const stub = await hostedRoom("qs_hosted_tick");
+  await fireHeld(stub);
+
+  const after = await rows(stub);
+  const ticks = after.events.filter((e) => e.type === "heartbeat") as unknown as { cursor: number; payload: unknown }[];
+  expect(ticks).toHaveLength(1);
+  // Nobody is asked for a report; the tick is the seat's.
+  expect(ticks[0].payload).toMatchObject({ members: [] });
+  const cursor = ticks[0].cursor;
+  // The host's own clock moved in the tick's own put (I3).
+  expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBe(after.session!.lastTickAt);
+  expect(await queued(stub)).toEqual([{
+    id: `host:tick:${cursor}`, kind: "host", attempts: 0,
+    payload: { sessionId: "qs_hosted_tick", cause: "tick", cursor },
+  }]);
+});
+
+it("writes nothing into a hosted room no person has been in since the last tick, and moves the clock", async () => {
+  const stub = await hostedRoom("qs_hosted_empty", { seenAt: Date.now() - HOUR - 1_000 });
+  await fireHeld(stub);
+
+  const after = await rows(stub);
+  // The premise: the firing dispatched the tick and decided, so "nothing" is its answer.
+  expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  expect(await queued(stub)).toEqual([]);
+});
+
+it("counts a person whose socket is open, however long since it was seen", async () => {
+  const stub = await hostedRoom("qs_hosted_socket", { seenAt: Date.now() - HOUR - 1_000 });
+  const res = await SELF.fetch("https://bellman.test/ws?session=qs_hosted_socket&cursor=0", {
+    headers: { upgrade: "websocket", authorization: "Bearer qk_ws_test" },
+  });
+  expect(res.status).toBe(101);
+  const ws = res.webSocket!;
+  ws.accept();
+
+  await fireHeld(stub);
+
+  const after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toHaveLength(1);
+  ws.close();
+});
+
+it("writes no hosted tick before its cadence comes round, even when the alarm names it", async () => {
+  const stub = await hostedRoom("qs_hosted_early", { tickAgo: 60_000 });
+  await fireHeld(stub, { named: true });
+
+  const after = await rows(stub);
+  expect(after.session!.lastTickAt).toBeGreaterThan(Date.now() - 1_000);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  expect(await queued(stub)).toEqual([]);
+});
+
+it("still never ticks a room without a host whose roles ask for no reports", async () => {
+  const stub = await hostedRoom("qs_unhosted_quiet", { host: false });
+  const before = await rows(stub);
+  await fireHeld(stub);
+
+  let after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+  // nextTickAt is null for it, so the alarm never named the tick and the clock did not move.
+  expect(after.session!.lastTickAt).toBe(before.session!.lastTickAt);
+
+  // Named anyway, #tickIfDue's own reading writes nothing either.
+  await fireHeld(stub, { named: true });
+  after = await rows(stub);
+  expect(after.events.filter((e) => e.type === "heartbeat")).toEqual([]);
+});
+
+/**
+ * A reporter's deadline can make a hosted room's tick due with nobody in the room: the
+ * tick is written for the reporter, and the seat, which only asks people who are there,
+ * is not woken (`tickPlan`).
+ */
+it("writes a hosted room's tick for a due reporter, and queues no wake when nobody has been seen since the last tick", async () => {
+  const stub = await hostedRoom("qs_hosted_reporter", {
+    reports: true, joinedAt: Date.now() - HOUR - 1_000, seenAt: Date.now() - HOUR - 1_000,
+  });
+  await fireHeld(stub);
+
+  const after = await rows(stub);
+  const ticks = after.events.filter((e) => e.type === "heartbeat");
+  expect(ticks).toHaveLength(1);
+  expect(ticks[0].payload).toMatchObject({ members: [{ member_id: "m_creator" }] });
+  expect(await queued(stub)).toEqual([]);
+  // A reporter's tick leaves the host's own clock where it was (I3).
+  expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBeLessThan(after.session!.lastTickAt!);
 });

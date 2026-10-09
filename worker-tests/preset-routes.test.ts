@@ -24,7 +24,7 @@ describe("the preset routes through the Worker", () => {
     const auth = { authorization: `Bearer ${KEY}` };
     const list = await call("/presets", { headers: auth });
     expect(list.status, await list.clone().text()).toBe(200);
-    expect(((await list.json()) as { builtin: unknown[] }).builtin).toHaveLength(3);
+    expect(((await list.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
     const body = { mode: "pair", roles: { lead: { can: ["send"] } }, default_role: "lead", creator_role: "lead" };
     const saved = await call("/presets/solo_lead", {
       method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify(body),

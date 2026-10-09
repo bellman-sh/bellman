@@ -14,6 +14,7 @@ import {
 } from "../src/presence.js";
 import { activeMembers, announceReclaimed, seatedMembers, touchMember } from "../src/rooms.js";
 import { MemoryStore, ROOM_MEMBER_CEILING, capacityOf, seatVictims, stampSeen } from "../src/store.js";
+import { hostMember } from "../src/host.js";
 import type { Identity } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { Harness, DEV_KEY, envelopes } from "./helpers/harness.js";
@@ -766,5 +767,28 @@ describe("capacity is the manifest's (#18)", () => {
     // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
     // of a 2 MB Durable Object value. 250 would be 3.7 MB.
     expect(ROOM_MEMBER_CEILING).toBe(100);
+  });
+});
+
+describe("the hosted seat and liveness (hosted seat spec, D5)", () => {
+  const NOW = Date.now();
+  const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+
+  it("abandonedAt ignores the host, so a room with only a host in it is abandoned when the people are", () => {
+    const person = member({ memberId: "m_p", lastSeenAt: NOW - ABANDONED_AFTER_MS - 1 });
+    const host = hostMember(hostedManifest(), NOW);
+    const s = session({ manifest: hostedManifest(), members: [person, host] });
+    expect(abandonedAt(s)).toBe(NOW - ABANDONED_AFTER_MS - 1 + ABANDONED_AFTER_MS);
+    expect(abandonedAt(session({ manifest: hostedManifest(), members: [host] }))).toBeNull();
+  });
+
+  it("never reclaims the host's seat", () => {
+    const stale = NOW - STALE_AFTER_MS - 1;
+    const host = { ...hostMember(hostedManifest(), NOW), lastSeenAt: stale };
+    const quiet = member({ memberId: "m_q", lastSeenAt: stale });
+    const victims = seatVictims([host, quiet], 2, NOW - STALE_AFTER_MS, new Set());
+    expect(victims?.map((m) => m.memberId)).toEqual(["m_q"]);
   });
 });

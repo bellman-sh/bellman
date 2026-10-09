@@ -75,6 +75,12 @@ describe("publicEvent", () => {
     expect(publicEvent({ ...base, type: "progress" })).toMatchObject({ ambient: true });
   });
 
+  // M4: a hosted room's own tick names nobody, so it reaches members without interrupting them.
+  it("marks a heartbeat that asks nobody ambient, and leaves one that asks somebody an interrupt", () => {
+    expect(publicEvent({ ...base, type: "heartbeat", payload: { members: [] } })).toMatchObject({ ambient: true });
+    expect("ambient" in publicEvent({ ...base, type: "heartbeat", payload: { members: [{ member_id: "m_a" }] } })).toBe(false);
+  });
+
   it("never leaks fromUserId, whatever the posture", () => {
     for (const type of ["message", "progress"] as const) {
       expect(JSON.stringify(publicEvent({ ...base, type }))).not.toContain("u_jesse");

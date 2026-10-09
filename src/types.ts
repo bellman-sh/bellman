@@ -161,6 +161,14 @@ export interface Session {
    * plan's ceiling through `hydrateStoredSession`.
    */
   blobBytesCeiling: number;
+  /**
+   * Units the hosted seat may spend this calendar month: the creator's plan's
+   * `hostUnitsPerRoom`, stamped at creation and read from the creator's plan again at each
+   * month turn (I7); 0 for a room with no host, or once the creator's plan includes none.
+   */
+  hostUnitsPerMonth: number;
+  /** The meter. See `HostUnits`. */
+  hostUnits: HostUnits;
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
@@ -271,6 +279,18 @@ export interface Entitlements {
    */
   blobBytesPerRoom: number;
   /**
+   * Rooms with a hosted seat a person may hold open at once (spec D2 as ruled on I7): a
+   * slot is taken when one is created and given back when it closes. 0 means the plan
+   * includes no hosted seat.
+   */
+  hostedRooms: number;
+  /**
+   * Units a hosted room may spend a month (spec D3): stamped on the room at creation, and
+   * read again from its creator's plan at each month turn (I7), 0 once that plan includes
+   * no hosted seat.
+   */
+  hostUnitsPerRoom: number;
+  /**
    * How long a closed room's record and bytes are kept before the purge (#65,
    * D1): null keeps them until a creator or an org admin deletes the room.
    */
@@ -286,7 +306,32 @@ export type Verb =
   | "respond_actions"
   | "write_surface";
 
-export type PresetName = "pair" | "swarm" | "review";
+export type PresetName = "pair" | "swarm" | "review" | "social";
+
+/** The names a manifest may give `host.model`. The ids and weights live in src/host.ts. */
+export type HostModelName = "haiku" | "sonnet" | "opus";
+
+/**
+ * The one hosted seat a room may declare (hosted seat spec, D1). `role` names a
+ * declared role holding exactly `send`; `instructions` is creator prose bounded
+ * like `purpose`, and null means Bellman's defaults alone.
+ */
+export interface HostConfig {
+  role: string;
+  model: HostModelName;
+  instructions: string | null;
+}
+
+/**
+ * The room's hosted-seat meter (spec D3): `month` is the UTC calendar month the
+ * count is for, `used` the units spent in it, `wakes` the epoch ms of the wakes
+ * in the last hour, for the burst cap.
+ */
+export interface HostUnits {
+  month: string;
+  used: number;
+  wakes: number[];
+}
 
 export interface RoleDef {
   can: Verb[];
@@ -332,6 +377,8 @@ export interface RoomManifest {
     idleAfterMs: number | null;
     repeatAfterMs: number | null;
   } | null;
+  /** The hosted seat, or null for a room with none. Immutable with the rest. */
+  host: HostConfig | null;
 }
 
 /**
@@ -355,6 +402,11 @@ export interface SavedPreset {
   roles: Record<string, { can: Verb[]; description: string | null; reports: boolean }>;
   default_role: string;
   creator_role: string;
+  /**
+   * The author arm's `host` block. Absent from a preset saved before hosted seats
+   * (#188) reached the presets, and read as null: no host.
+   */
+  host?: HostConfig | null;
   /** ISO 8601 when it was saved; null for a built-in, which never was. */
   updated_at: string | null;
 }

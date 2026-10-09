@@ -237,6 +237,13 @@ describe("channel delivery", () => {
     ]);
   });
 
+  // A room's host answers only replies that carry its question's cursor (I1), so both
+  // deliveries tell the agent how to thread a reply, where it reads its instructions.
+  it("tells the agent, in either delivery, to set ref_id to an event's cursor when replying to it", async () => {
+    expect((await open(DEV_KEY.jesse)).client.getInstructions()).toContain("to reply to an event, set ref_id to its cursor");
+    expect((await open(DEV_KEY.peer, "hook")).client.getInstructions()).toContain("to reply to an event, set ref_id to its cursor");
+  });
+
   it("pushes peer events into the session without the agent polling", async () => {
     const a = await open(DEV_KEY.jesse);
     const b = await open(DEV_KEY.peer);

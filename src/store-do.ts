@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, PurgeSchedule, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -11,9 +11,12 @@ import type {
   SeatOutcome,
 } from "./store.js";
 import {
-  ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
-  isAbandoned, isActiveMember, isRemovedMember, markRemoved, noteAppend, seatVictims, stampSeen,
+  ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
+  decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
+  isReplyToHost, markRemoved, noteAppend, seatVictims, stampSeen,
 } from "./store.js";
+import { hostWakeIntent, type HostWake } from "./host.js";
+import type { HostDO } from "./host-do.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -25,7 +28,7 @@ import {
   PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
-import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "./housekeeping.js";
 import { liftPreset } from "./presets.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
@@ -150,6 +153,16 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
 });
+
+/**
+ * A hosted room gives its creator's slot back as it closes (I7), however it closes: queued
+ * in the close's own transaction and delivered to the registry by the outbox. None for a
+ * room with no host, or one already closed.
+ */
+const hostedReleaseIntents = (s: StoredSession): OutboxIntent[] =>
+  s.manifest.host !== null && !s.closed
+    ? [{ id: crypto.randomUUID(), kind: "hosted_release", payload: { userId: s.createdBy, sessionId: s.id } }]
+    : [];
 
 /**
  * An audit entry as an outbox intent, for an object that earns the entry in a
@@ -411,10 +424,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * override cannot shadow a `#private` method, so converting this would retire
    * both.
    */
-  private async events(after = 0): Promise<SessionEvent[]> {
+  private async events(after = 0, limit?: number): Promise<SessionEvent[]> {
     const map = await this.ctx.storage.list<SessionEvent>({
       prefix: "e:",
       start: eventKey(after + 1),
+      ...(limit === undefined ? {} : { limit }),
     });
     return [...map.values()];
   }
@@ -1320,15 +1334,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   async closeSession(): Promise<void> {
-    const s = await this.stored();
-    if (!s) return;
-    // `closedAt` once (#65): the window starts at the first close, and a second one
-    // does not move it.
-    await this.ctx.storage.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
+    let released = false;
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      // A hosted room's slot goes back with the close, in its transaction (I7).
+      const intents = hostedReleaseIntents(s);
+      released = intents.length > 0;
+      const rows = released ? await this.driver.enqueue(txn, intents) : {};
+      // `closedAt` once (#65): the window starts at the first close, and a second one
+      // does not move it.
+      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
+    });
     // The purge is due from the close, and the alarm may be pointing at an abandonment
     // time months off: nothing else re-arms it for a room with no code to retire and
     // no audit row to queue. See derivedDue().
     await this.driver.reArm();
+    if (released) await this.driver.deliverNow();
   }
 
   /**
@@ -1350,16 +1372,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * between finds them still listed and finishes the job.
    */
   async closeSessionIfEmpty(): Promise<boolean> {
+    let released = false;
     const closed = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
-      if (s.members.some(isActiveMember)) return false;
-      await txn.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
+      if (s.members.some(isActivePerson)) return false;
+      // A hosted room's slot goes back with the close, in its transaction (I7).
+      const intents = hostedReleaseIntents(s);
+      released = intents.length > 0;
+      const rows = released ? await this.driver.enqueue(txn, intents) : {};
+      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
       return true;
     });
     // After the commit, never inside the closure (see stored()), and for closeSession's reason.
     if (closed) await this.driver.reArm();
+    if (released) await this.driver.deliverNow();
     return closed;
   }
 
@@ -1511,13 +1539,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     extras: AppendExtras = {},
   ): Promise<SessionEvent | null> {
     let asksForAnswer = false as boolean;
+    let wakesHost = false;
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
       if (s.frozenAt !== null) return null;
       const next: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
       const owed = await extraRows(txn, s, next, extras);
-      await this.#writeEvent(txn, s, next, owed.puts, owed.deletes);
+      const wake = await this.#replyWakeRows(txn, s, next);
+      wakesHost = Object.keys(wake).length > 0;
+      await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
       asksForAnswer = startsAnswerClock(s, e);
       return next;
     });
@@ -1525,10 +1556,80 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // After the wake, so the member removed receives the frame announcing it
     // before the socket goes. The notice is the last thing they get.
     if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
-    // After the commit and the wake, and last, as addMember's is: the append has landed, and
+    // After the commit and the wake, as addMember's is: the append has landed, and
     // reArm() reads the record it landed in.
     if (event && asksForAnswer) await this.driver.reArm();
+    // Last, so nobody woken above waits on the host's delivery.
+    if (wakesHost) await this.driver.deliverNow();
     return event;
+  }
+
+  /**
+   * The wake a reply to the hosted seat owes it (hosted seat spec, D4), as outbox rows
+   * for the caller to fold into the event's own put: none unless the room has a host it
+   * has not evicted (`hostSeated`, C1) and `event` is a message or progress event whose
+   * `refId` names one of the host's events. The two public appends call it, which are
+   * MemoryStore's places too.
+   * `appendHostEvent` does not: the host's own answer names its question, and a seat
+   * must not wake itself.
+   *
+   * `#private` for the reason every writing method on this class is: it queues a row
+   * this object then delivers.
+   */
+  async #replyWakeRows(
+    txn: DurableObjectTransaction,
+    s: StoredSession,
+    event: SessionEvent,
+  ): Promise<Record<string, unknown>> {
+    if (s.manifest.host === null || !hostSeated(s) || event.refId === null) return {};
+    const referenced = await txn.get<SessionEvent>(eventKey(Number(event.refId)));
+    if (!isReplyToHost(event, referenced)) return {};
+    return this.driver.enqueue(txn, [hostWakeIntent(s.id, "reply", event.cursor)]);
+  }
+
+  /**
+   * The hosted seat's one write (hosted seat spec, D3): the event, the charge of
+   * `units` against the room's month, the host's `lastSeenAt` stamp, the send's audit
+   * row (C1) and the record of `key` (M6), in one transaction. `decideHostCharge`
+   * decides, the call MemoryStore makes, so a refusal writes nothing in either store. A
+   * key already used returns the event it wrote and charges nothing, for
+   * `appendEventOnce`'s reason. A missing row is `not_found`. It queues no wake.
+   */
+  async appendHostEvent(
+    e: Omit<SessionEvent, "cursor" | "at">,
+    units: number,
+    now: number,
+    key: string,
+  ): Promise<HostAppend> {
+    let appended = false;
+    let audited = false;
+    const result = await this.ctx.storage.transaction<HostAppend>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
+      const storageKey = idempotencyKey(e.fromMemberId, key);
+      const done = await txn.get<IdempotencyRecord>(storageKey);
+      if (done) {
+        const original = await txn.get<SessionEvent>(eventKey(done.cursor));
+        if (!original) throw new Error(`Idempotency record names missing cursor ${done.cursor}`);
+        return { ok: true, event: original };
+      }
+      const charge = decideHostCharge(s, units, now);
+      if (!charge.ok) return charge;
+      const event: SessionEvent = { ...e, cursor: await this.nextCursor(txn), at: Date.now() };
+      const stamped = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
+      const intents = hostSentEntries(s, e, now).map(auditIntent);
+      audited = intents.length > 0;
+      const rows = audited ? await this.driver.enqueue(txn, intents) : {};
+      const record: IdempotencyRecord = { cursor: event.cursor, print: fingerprint(e) };
+      // `session` is the base the books merge into (see #writeEvent), so the charge and the
+      // stamp are kept: this write runs the books like every other (#66).
+      await this.#writeEvent(txn, s, event, { session: { ...s, hostUnits: charge.next, members: stamped }, [storageKey]: record, ...rows });
+      appended = true;
+      return { ok: true, event };
+    });
+    if (result.ok && appended) this.#wake(result.event);
+    if (appended && audited) await this.driver.deliverNow();
+    return result;
   }
 
   /**
@@ -1555,6 +1656,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     extras: AppendExtras = {},
   ): Promise<EventWrite> {
     let asksForAnswer = false as boolean;
+    let wakesHost = false;
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) throw new Error("Unknown session");
@@ -1602,7 +1704,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // retry that follows appends the duplicate this method exists to prevent.
       const stored: IdempotencyRecord = { cursor: event.cursor, print };
       const owed = await extraRows(txn, s, event, extras);
-      await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts }, owed.deletes);
+      // Appended only: a replay's wake went out with the first attempt's event.
+      const wake = await this.#replyWakeRows(txn, s, event);
+      wakesHost = Object.keys(wake).length > 0;
+      await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts, ...wake }, owed.deletes);
       asksForAnswer = startsAnswerClock(s, e);
       return { outcome: "appended", event };
     });
@@ -1619,11 +1724,37 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await this.#closeCutSockets();
     }
     if (result.outcome === "appended" && asksForAnswer) await this.driver.reArm();
+    // Last, as in appendEvent: nobody woken above waits on the host's delivery.
+    if (wakesHost) await this.driver.deliverNow();
     return result;
   }
 
-  async eventsAfter(cursor: number): Promise<SessionEvent[]> {
-    return this.events(cursor);
+  /**
+   * The hosted seat's allowance for a new month (I7), `BellmanStore.renewHostAllowance`'s
+   * rule: in one transaction, so a renewal and the seat's charge cannot interleave inside
+   * the record. The seat is the only caller, on its first wake of a month.
+   */
+  async renewHostAllowance(month: string, units: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.hostUnits.month >= month) return;
+      await txn.put<unknown>({ session: { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } } });
+    });
+  }
+
+  /** `limit` bounds the storage list itself (I4): the hosted seat's read passes one, every other read none. */
+  async eventsAfter(cursor: number, limit?: number): Promise<SessionEvent[]> {
+    return this.events(cursor, limit);
+  }
+
+  /**
+   * The host's write under `key` (M6), or undefined: what the seat checks before it calls
+   * the model, so a wake run again after a lost response finds its post. A read, so it
+   * answers RPC like `eventsAfter`.
+   */
+  async hostEventFor(key: string): Promise<SessionEvent | undefined> {
+    const done = await this.ctx.storage.get<IdempotencyRecord>(idempotencyKey(HOST_MEMBER_ID, key));
+    return done ? this.ctx.storage.get<SessionEvent>(eventKey(done.cursor)) : undefined;
   }
 
   async eventAt(cursor: number): Promise<SessionEvent | undefined> {
@@ -1863,9 +1994,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // ARCHITECTURE.md section 9, runtime fact 4.
       if (!entry.orgId) return;
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
+    } else if (row.kind === "host") {
+      await this.#deliverHost(row);
+    } else if (row.kind === "hosted_release") {
+      const { userId, sessionId } = row.payload as { userId: string; sessionId: string };
+      await registry().releaseHostedRoom(userId, sessionId);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
+  }
+
+  /**
+   * A wake for the hosted seat (hosted seat spec, D4), delivered to the room's own
+   * `HostDO` by RPC. The row's id goes with it, as an audit row's does. A throw here
+   * leaves the row queued, so the outbox redelivers it, and the seat drops a wake whose
+   * cause it has already handled.
+   */
+  async #deliverHost(row: OutboxRow): Promise<void> {
+    const wake = row.payload as HostWake;
+    await this.env.HOST.get(this.env.HOST.idFromName(wake.sessionId)).wake(wake, row.id);
   }
 
   /**
@@ -2054,7 +2201,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // with it, in the same transaction. Otherwise an abandoned room's codes stay there
     // for good. They are already inert, because getSessionByJoinCode refuses a closed
     // session; this is about not leaking rows.
-    const intents = Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code));
+    // And a hosted room gives its creator's slot back (I7), by the same outbox.
+    const intents = [...Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code)), ...hostedReleaseIntents(s)];
     // The cursor is read in the transaction that writes the event (see nextCursor), and
     // every write is to this object's own storage, so a transaction is enough and no
     // outbox is needed for the event.
@@ -2117,9 +2265,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * silent for having answered. `#wake` comes after the commit, so nobody hears
    * of a tick that did not land.
    *
-   * `#tickIfDue` makes no cross-object call, so the closure stays within
-   * ARCHITECTURE.md §9 runtime fact 2: everything awaited in it is this object's
-   * storage.
+   * The closure makes no cross-object call, so it stays within ARCHITECTURE.md §9
+   * runtime fact 2: everything awaited in it is this object's storage. A room with a
+   * host ticks on its own cadence whether or not anyone reports, and `tickPlan` decides
+   * both whether the tick is written and whether the seat is woken (#188). The seat's
+   * wake (hosted seat spec, D4) is queued as an outbox row in the tick's own put, and
+   * delivered after the commit.
    *
    * `lastTickAt` advances whether or not an event is written, which is what
    * stops the alarm spinning: the clock has to move even on a firing that found
@@ -2127,15 +2278,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * the alarm straight back at it.
    */
   async #tickIfDue(now: number): Promise<void> {
+    let wakesHost = false;
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return null;
       if (s.closed || s.frozenAt !== null) return null;
-      if (isAbandoned(s, now, connectedAmong(s.members, this.#attachedIds()))) return null;
+      const connected = connectedAmong(s.members, this.#attachedIds());
+      if (isAbandoned(s, now, connected)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
-      const due = dueMembers(s, now);
-      if (due.length === 0) {
+      // Read before the write below moves `lastTickAt`, as `tickPlan` requires.
+      const plan = tickPlan(s, now, connected);
+      if (!plan.write) {
         // Nothing to ask, but the clock still moves. See the comment above.
         await txn.put<unknown>({ session: { ...s, lastTickAt: now } });
         return null;
@@ -2154,11 +2308,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       };
       // The event, its cursor and the advanced clock in one put. Committed
       // separately, an interruption between them leaves a tick stored with the
-      // clock unmoved, and the next firing writes the same tick again.
-      await this.#writeEvent(txn, s, tick, { session: { ...s, lastTickAt: now } });
+      // clock unmoved, and the next firing writes the same tick again. The seat's
+      // wake rides the same put, so a tick that owes one cannot land without it.
+      const wake = plan.wakeHost
+        ? await this.driver.enqueue(txn, [hostWakeIntent(s.id, "tick", tick.cursor)])
+        : {};
+      wakesHost = plan.wakeHost;
+      // The host's own clock moves only on a tick that wakes it (I3), in the tick's own put.
+      const clocks = plan.wakeHost ? { lastTickAt: now, lastHostTickAt: now } : { lastTickAt: now };
+      await this.#writeEvent(txn, s, tick, { session: { ...s, ...clocks }, ...wake });
       return tick;
     });
     if (event) this.#wake(event);
+    if (wakesHost) await this.driver.deliverNow();
   }
 
   /**
@@ -2240,8 +2402,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * calls rather than the outbox, because the outbox rows live in the storage the
    * last step empties.
    *
-   * Every step can run twice. The bucket delete and the two index drops are
-   * idempotent, and the audit entry carries `purge:<room>:<org>` as its intent id,
+   * Every step can run twice. The bucket delete, the index drops and the hosted
+   * seat's `forget` are idempotent, and the audit entry carries `purge:<room>:<org>` as its intent id,
    * which `AuditDO.append` dedupes on, so a purge retried after a crash, or run by
    * two firings at once, files one entry for each org.
    *
@@ -2263,6 +2425,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await new R2BlobStore(this.env.BLOBS).deleteAll(s.id);
     const registry = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
     await registry.dropCreatedIndex(s.createdBy, s.id);
+    // The close gave the slot back already (I7); a purge makes sure, and the delete is idempotent.
+    if (s.manifest.host !== null) await registry.releaseHostedRoom(s.createdBy, s.id);
     for (const userId of new Set(s.members.map((m) => m.userId))) {
       await registry.dropMembershipIndex(userId, s.id);
     }
@@ -2275,8 +2439,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
       throw new Error(`purge of ${s.id}: the outbox still holds rows owed to other objects`);
     }
+    // The hosted seat keeps its own record of the room, the questions it asked among it, in its
+    // own object. That goes too: by direct call, for the registry's reason, and after the outbox
+    // has drained, so no wake queued here reaches the seat once it is emptied.
+    if (s.manifest.host !== null) await this.env.HOST.get(this.env.HOST.idFromName(s.id)).forget();
     await this.ctx.storage.deleteAll();
-    // Measured on workerd 1.20260926.1 with SQLite-backed storage, which all four classes
+    // Measured on workerd 1.20260926.1 with SQLite-backed storage, which all five classes
     // here use: deleteAll() clears an armed alarm itself, so this call is redundant there,
     // and dropping it leaves every test green. It stays so that a purged room arms nothing
     // however the storage behaves, and worker-tests/purge.test.ts asserts that outcome.
@@ -2733,10 +2901,30 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async countCreatesThisMonth(userId: string): Promise<number> {
-    const list = (await this.ctx.storage.get<number[]>(`cr:${userId}`)) ?? [];
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    return list.filter((t) => t >= monthStart).length;
+    return this.#countMonth(`cr:${userId}`);
+  }
+
+  /**
+   * `ho:<userId>:<sessionId>` — the hosted rooms a person holds open (I7), one row a
+   * slot. The count and the record are one transaction, so two starts at the limit
+   * cannot both pass, and a room's close gives its row back through its outbox
+   * (`hosted_release`). Neither segment can contain the separator, for the `us:` index's
+   * reason below. A plan's hosted rooms are the most a person holds open at once, not a
+   * count of creations a month: each room's allowance renews monthly, so a monthly count
+   * let a creator's spend grow every month they kept rooms open.
+   */
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const held = await txn.list({ prefix: `ho:${userId}:` });
+      if (held.has(`ho:${userId}:${sessionId}`)) return { ok: true };
+      if (held.size >= limit) return { ok: false, open: held.size };
+      await txn.put(`ho:${userId}:${sessionId}`, Date.now());
+      return { ok: true };
+    });
+  }
+
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`ho:${userId}:${sessionId}`);
   }
 
   /**
@@ -2886,7 +3074,22 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async recordCreate(userId: string): Promise<void> {
-    const key = `cr:${userId}`;
+    await this.#recordMonth(`cr:${userId}`);
+  }
+
+  /**
+   * The monthly create count's rule, `cr:`, shared by its count and its record.
+   * `#private`, as `#deliver` is: a Durable Object answers RPC for every method on
+   * its class, and these read and write any key they are handed.
+   */
+  async #countMonth(key: string): Promise<number> {
+    const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return list.filter((t) => t >= monthStart).length;
+  }
+
+  async #recordMonth(key: string): Promise<void> {
     const list = (await this.ctx.storage.get<number[]>(key)) ?? [];
     list.push(Date.now());
     // Only the current month is ever counted, so drop anything well past it —
@@ -2994,9 +3197,15 @@ export interface BellmanEnv {
   SESSION: DurableObjectNamespace<SessionDO>;
   REGISTRY: DurableObjectNamespace<RegistryDO>;
   AUDIT: DurableObjectNamespace<AuditDO>;
+  /** One per hosted room, keyed by session id (hosted seat spec, D4). */
+  HOST: DurableObjectNamespace<HostDO>;
   /** The room blob store (#183): a room's objects are deleted from it when the room is purged (#65). */
   BLOBS: R2Bucket;
   BELLMAN_KEYS?: string;
+  /** A Worker secret. Absent, the seat's model calls go out unauthenticated and are refused. */
+  ANTHROPIC_API_KEY?: string;
+  /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */
+  MODEL_URL?: string;
 }
 
 export class DurableObjectStore implements BellmanStore {
@@ -3314,8 +3523,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
-  async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
-    return this.session(sessionId).eventsAfter(cursor);
+  async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
+    return this.session(sessionId).eventsAfter(cursor, limit);
   }
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
@@ -3332,6 +3541,24 @@ export class DurableObjectStore implements BellmanStore {
 
   async chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge> {
     return this.session(sessionId).chargeBlobBytes(bytes);
+  }
+
+  async appendHostEvent(
+    sessionId: string,
+    e: Omit<SessionEvent, "cursor" | "at">,
+    units: number,
+    now: number,
+    key: string,
+  ): Promise<HostAppend> {
+    return this.session(sessionId).appendHostEvent(e, units, now, key);
+  }
+
+  async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
+    return this.session(sessionId).hostEventFor(key);
+  }
+
+  async renewHostAllowance(sessionId: string, month: string, units: number): Promise<void> {
+    await this.session(sessionId).renewHostAllowance(month, units);
   }
 
   async waitForEvents(
@@ -3356,6 +3583,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async recordCreate(userId: string): Promise<void> {
     await this.registry.recordCreate(userId);
+  }
+
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    return this.registry.reserveHostedRoom(userId, sessionId, limit);
+  }
+
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    await this.registry.releaseHostedRoom(userId, sessionId);
   }
 
   async listPresets(userId: string): Promise<SavedPreset[]> {

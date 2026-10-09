@@ -37,6 +37,7 @@ describe("checkPreset", () => {
         },
         default_role: "reviewer",
         creator_role: "author",
+        host: null,
         updated_at: "2026-10-09T12:00:00.000Z",
       },
     });
@@ -48,7 +49,7 @@ describe("checkPreset", () => {
     });
   });
 
-  it.each(["pair", "swarm", "review"])("refuses the built-in name %s with its own error", (name) => {
+  it.each(["pair", "swarm", "review", "social"])("refuses the built-in name %s with its own error", (name) => {
     expect(checkPreset(name, body(), NOW)).toMatchObject({ ok: false, status: 409, error: "builtin" });
   });
 
@@ -146,15 +147,76 @@ describe("checkPreset and housekeeping", () => {
   });
 });
 
+describe("a saved preset with a host (#188 beneath the designer)", () => {
+  const hosted = (over: Record<string, unknown> = {}) => body({
+    description: "Ask the room something each morning",
+    mode: "swarm",
+    heartbeat_on: "24h",
+    roles: {
+      lead: { can: ["send", "invite"] },
+      guest: { can: ["send"] },
+      emcee: { can: ["send"] },
+    },
+    default_role: "guest",
+    creator_role: "lead",
+    host: { role: "emcee", instructions: "One question about what they shipped." },
+    ...over,
+  });
+
+  it("keeps the host block, its model defaulted as the author arm defaults it", () => {
+    const check = checkPreset("standup", hosted(), NOW);
+    if (!check.ok) throw new Error(check.description);
+    expect(check.preset.host).toEqual({ role: "emcee", model: "haiku", instructions: "One question about what they shipped." });
+  });
+
+  it("hands the host to resolveManifest, so the room it starts has one", () => {
+    const check = checkPreset("standup", hosted(), NOW);
+    if (!check.ok) throw new Error(check.description);
+    const m = resolveManifest(asManifest(check.preset, "mornings", null));
+    expect(m.host).toEqual({ role: "emcee", model: "haiku", instructions: "One question about what they shipped." });
+    expect(m.heartbeatOnMs).toBe(86_400_000);
+  });
+
+  it("refuses a host block the room validator refuses, in its words", () => {
+    expect(checkPreset("standup", hosted({ heartbeat_on: "30m" }), NOW)).toEqual({
+      ok: false, status: 400, error: "invalid_manifest", description: 'a room with a host must tick no faster than 1h (got "30m")',
+    });
+    expect(checkPreset("standup", hosted({ host: { role: "lead" } }), NOW)).toMatchObject({
+      ok: false, error: "invalid_manifest", description: 'host role "lead" must hold exactly the verb "send" (it holds: send, invite)',
+    });
+  });
+
+  it("reads a preset saved before hosts reached the presets, with no host key, as having none", () => {
+    const check = checkPreset("my_review", body(), NOW);
+    if (!check.ok) throw new Error(check.description);
+    const { host: _gone, ...legacy } = check.preset;
+    expect(resolveManifest(asManifest(legacy, "Q3 review", null)).host).toBeNull();
+  });
+});
+
 describe("builtinPresets", () => {
-  it("lists the three built-ins in a saved preset's form, each of which saves under a new name", () => {
+  it("lists the four built-ins in a saved preset's form, each of which saves under a new name", () => {
     const all = builtinPresets();
-    expect(all.map((p) => p.name)).toEqual(["pair", "swarm", "review"]);
+    expect(all.map((p) => p.name)).toEqual(["pair", "swarm", "review", "social"]);
     for (const p of all) {
       expect(p.updated_at).toBeNull();
       expect(typeof p.description).toBe("string");
-      const clone = { description: p.description, mode: p.mode, heartbeat_on: p.heartbeat_on, housekeeping: p.housekeeping, roles: p.roles, default_role: p.default_role, creator_role: p.creator_role };
+      const clone = { description: p.description, mode: p.mode, heartbeat_on: p.heartbeat_on, housekeeping: p.housekeeping, roles: p.roles, default_role: p.default_role, creator_role: p.creator_role, host: p.host };
       expect(checkPreset(`my_${p.name}`, clone, NOW), p.name).toMatchObject({ ok: true, preset: { housekeeping: null } });
+    }
+  });
+
+  it("shows social with its host and its hour, so a clone of it saves a hosted preset", () => {
+    const social = builtinPresets().find((p) => p.name === "social")!;
+    expect(social).toMatchObject({ mode: "swarm", heartbeat_on: "1h", host: { role: "host", model: "haiku", instructions: null } });
+    const { name: _name, updated_at: _at, ...shape } = social;
+    const check = checkPreset("my_social", shape, NOW);
+    if (!check.ok) throw new Error(check.description);
+    expect(resolveManifest(asManifest(check.preset, "the square", null))).toMatchObject({
+      host: { role: "host", model: "haiku", instructions: null }, heartbeatOnMs: 3_600_000, defaultRole: "guest",
+    });
+    for (const p of builtinPresets().filter((b) => b.name !== "social")) {
+      expect({ name: p.name, heartbeat_on: p.heartbeat_on, host: p.host }).toEqual({ name: p.name, heartbeat_on: null, host: null });
     }
   });
 

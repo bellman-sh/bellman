@@ -45,6 +45,14 @@ class_name = "AuditDO"
 name = "AUTH"
 class_name = "AuthDO"
 
+# One per hosted room, keyed by session id: the seat that calls the model
+# (src/host-do.ts). ANTHROPIC_API_KEY is a secret, never a var:
+#   npx wrangler secret put ANTHROPIC_API_KEY
+# MODEL_URL, unset here, defaults to Anthropic's Messages API.
+[[durable_objects.bindings]]
+name = "HOST"
+class_name = "HostDO"
+
 # The room blob store (#183): one bucket, keyed rooms/<sessionId>/<blobId>, and
 # private — every byte leaves through the download route, under membership.
 # `npx wrangler r2 bucket create bellman-blobs` once, before the first deploy.
@@ -61,6 +69,10 @@ new_sqlite_classes = ["SessionDO", "RegistryDO", "AuditDO"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["AuthDO"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["HostDO"]
 
 [observability.logs]
 enabled = true

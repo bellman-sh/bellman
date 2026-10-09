@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { hydrateStoredSession } from "../src/stored-session.js";
+import { hydrateStoredSession, monthKey } from "../src/stored-session.js";
 import { ENTITLEMENTS } from "../src/auth.js";
 import { mustReport } from "../src/roles.js";
 import { roomManifest, session } from "./helpers/fixtures.js";
@@ -263,6 +263,38 @@ describe("hydrateStoredSession — a record stored before blobs", () => {
     expect("blobBytesCeiling" in raw).toBe(false);
     expect(hydrateStoredSession(raw)!.blobBytesCeiling).toBe(ENTITLEMENTS.free.blobBytesPerRoom);
     expect(hydrateStoredSession({ ...raw, blobBytesCeiling: 7 })!.blobBytesCeiling).toBe(7);
+  });
+});
+
+/** The meter keys its month with this, so a month that rolled in the local zone would rotate the meter at the wrong hour. */
+describe("monthKey", () => {
+  it("names the UTC calendar month, whatever the local zone", () => {
+    expect(monthKey(Date.UTC(2026, 9, 8, 12))).toBe("2026-10");
+    expect(monthKey(Date.UTC(2026, 8, 30, 23, 59, 59, 999))).toBe("2026-09");
+    expect(monthKey(Date.UTC(2026, 9, 1))).toBe("2026-10");
+  });
+});
+
+describe("hydrateStoredSession — a record stored before the hosted seat", () => {
+  it("reads a manifest with no host block as host: null", () => {
+    const { events: _events, ...raw } = session();
+    const { host: _h, ...manifest } = raw.manifest;
+    expect(hydrateStoredSession({ ...raw, manifest })!.manifest.host).toBeNull();
+  });
+
+  it("reads missing host units as none allowed and none used", () => {
+    const { events: _events, hostUnitsPerMonth: _p, hostUnits: _u, ...raw } = session();
+    const row = hydrateStoredSession(raw)!;
+    expect(row.hostUnitsPerMonth).toBe(0);
+    expect(row.hostUnits).toEqual({ month: monthKey(Date.now()), used: 0, wakes: [] });
+  });
+
+  it("leaves stamped host units alone", () => {
+    const { events: _events, ...raw } = session();
+    const units = { month: "2026-09", used: 12, wakes: [1, 2] };
+    const row = hydrateStoredSession({ ...raw, hostUnitsPerMonth: 3000, hostUnits: units })!;
+    expect(row.hostUnits).toEqual(units);
+    expect(row.hostUnitsPerMonth).toBe(3000);
   });
 });
 

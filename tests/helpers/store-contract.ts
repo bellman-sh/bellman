@@ -22,8 +22,15 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { SavedPreset, Session, SurfaceItem } from "../../src/types.js";
+import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
+import { monthKey } from "../../src/stored-session.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
+
+/** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
+const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+  roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+  defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
 
 /**
  * Cases an implementation cannot pass, each mapped to the reason it cannot.
@@ -1514,6 +1521,20 @@ export function describeStoreContract(
       expect((await store.eventsAfter("qs_nope", 0))).toEqual([]);
     });
 
+    // The hosted seat's read is bounded (I4): a room busy for weeks must not hand it its whole tail.
+    it("eventsAfter reads at most `limit` events when given one, the earliest after the cursor", async () => {
+      const s = session();
+      await store.createSession(s);
+      for (const text of ["one", "two", "three", "four"]) {
+        await store.appendEvent(s.id, {
+          type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse", payload: { text }, refId: null,
+        });
+      }
+      expect((await store.eventsAfter(s.id, 1, 2)).map((e) => e.cursor)).toEqual([2, 3]);
+      expect((await store.eventsAfter(s.id, 3, 2)).map((e) => e.cursor)).toEqual([4]);
+      expect((await store.eventsAfter(s.id, 0)).map((e) => e.cursor)).toEqual([1, 2, 3, 4]);
+    });
+
     it("eventAt returns exactly the event at that cursor", async () => {
       const s = session();
       await store.createSession(s);
@@ -2441,6 +2462,244 @@ export function describeStoreContract(
         const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 })] });
         await store.createSession(s);
         expect(await store.chargeBlobBytes(s.id, 1)).toMatchObject({ ok: false, reason: "closed" });
+      });
+    });
+
+    // ------------------------------------------------ the hosted seat's meter
+    /**
+     * The seat's send and the charge are one write (hosted seat spec, D3): a
+     * refused wake appends nothing and charges nothing, and a month that turns
+     * starts the count again.
+     */
+    describe("appendHostEvent", () => {
+      const NOW = () => Date.now();
+      const hostedRoom = (over: Partial<Session> = {}) => {
+        const m = hostedManifest();
+        return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
+      };
+      /** What the host writes on a tick: a thread root, the tick's cursor in its payload (I1). */
+      const question = (): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+        payload: { kind: "question", text: "What shipped?", tick: 1 }, refId: null,
+      });
+
+      it("appends the event and charges the units in one write", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        const r = await store.appendHostEvent(s.id, question(), 3, NOW(), "host:tick:1");
+        expect(r).toMatchObject({ ok: true, event: { fromMemberId: HOST_MEMBER_ID, refId: null } });
+        const after = (await store.getSession(s.id))!;
+        expect(after.hostUnits.used).toBe(3);
+        expect(after.hostUnits.wakes).toHaveLength(1);
+        expect((await store.eventsAfter(s.id, 0)).map((e) => e.fromMemberId)).toEqual([HOST_MEMBER_ID]);
+      });
+
+      it("refuses a wake that would cross the month's units, appending nothing", async () => {
+        const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 8, wakes: [] } });
+        await store.createSession(s);
+        expect(await store.appendHostEvent(s.id, question(), 3, NOW(), "host:tick:1")).toEqual({ ok: false, reason: "units", used: 8, allowed: 10 });
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+        expect((await store.getSession(s.id))!.hostUnits.used).toBe(8);
+      });
+
+      it("a new month starts the count again", async () => {
+        const s = hostedRoom({ hostUnits: { month: "2026-09", used: 10, wakes: [] } });
+        await store.createSession(s);
+        const r = await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1");
+        expect(r.ok).toBe(true);
+        expect((await store.getSession(s.id))!.hostUnits).toMatchObject({ month: monthKey(NOW()), used: 1 });
+      });
+
+      it("refuses the ninth wake in an hour, and forgets wakes older than an hour", async () => {
+        const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW() - i * 60_000);
+        const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 0, wakes: recent } });
+        await store.createSession(s);
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: false, reason: "hourly" });
+        const old = recent.map((t) => t - 3_600_000 - 1);
+        const s2 = hostedRoom({ id: "qs_host_2", hostUnits: { month: monthKey(NOW()), used: 0, wakes: old } });
+        await store.createSession(s2);
+        expect((await store.appendHostEvent(s2.id, question(), 1, NOW(), "host:tick:1")).ok).toBe(true);
+        expect((await store.getSession(s2.id))!.hostUnits.wakes).toHaveLength(1);
+      });
+
+      it("refuses a closed, a frozen and a missing room", async () => {
+        const closed = hostedRoom({ id: "qs_host_c" });
+        await store.createSession(closed);
+        await store.closeSession(closed.id);
+        expect(await store.appendHostEvent(closed.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: false, reason: "closed" });
+        const frozen = hostedRoom({ id: "qs_host_f" });
+        await store.createSession(frozen);
+        await store.freezeSession(frozen.id, NOW());
+        expect(await store.appendHostEvent(frozen.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: false, reason: "frozen" });
+        expect(await store.appendHostEvent("qs_nobody", question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: false, reason: "not_found" });
+      });
+
+      it("stamps the host as seen on its send, and the roster shows it", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!.lastSeenAt!;
+        await store.appendHostEvent(s.id, question(), 1, before + 5_000, "host:tick:1");
+        const after = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!;
+        expect(after.lastSeenAt).toBe(before + 5_000);
+      });
+
+      /**
+       * Evicting the host is the creator's one control over it (C1). Whatever wakes a
+       * departed host, the room refuses its write, so it posts nothing and spends nothing.
+       */
+      it("refuses the write of a host the room has evicted, appending and charging nothing", async () => {
+        const s = hostedRoom({ id: "qs_host_gone" });
+        await store.createSession(s);
+        await store.removeMember(s.id, HOST_MEMBER_ID, {
+          now: NOW(), frozen: "refuse", cut: true, byUserId: "u_jesse", audit: [],
+          event: { type: "member_evicted", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+            payload: { member_id: HOST_MEMBER_ID }, refId: null },
+        });
+        const before = await store.eventsAfter(s.id, 0);
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toEqual({ ok: false, reason: "removed", used: 0, allowed: 10 });
+        expect(await store.eventsAfter(s.id, 0)).toEqual(before);
+        expect((await store.getSession(s.id))!.hostUnits.used).toBe(0);
+      });
+
+      /**
+       * A lost RPC response must not double-post or double-charge (M6). The seat runs a wake
+       * again when it never heard back from its write, so the write is keyed by the wake's
+       * intent id, and a second write under that key returns the first event and charges
+       * nothing. `hostEventFor` is how the seat finds it before calling the model.
+       */
+      it("returns the first write under a key with no second post or charge, and finds it by that key", async () => {
+        const s = hostedRoom({ id: "qs_host_once" });
+        await store.createSession(s);
+        const first = await store.appendHostEvent(s.id, question(), 3, NOW(), "host:tick:7");
+        const again = await store.appendHostEvent(s.id, { ...question(), payload: { kind: "question", text: "Another?", tick: 7 } }, 3, NOW(), "host:tick:7");
+        if (!first.ok) throw new Error("the first write was refused");
+        expect(again).toEqual({ ok: true, event: first.event });
+        expect((await store.eventsAfter(s.id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toEqual([first.event]);
+        expect((await store.getSession(s.id))!.hostUnits.used).toBe(3);
+        expect(await store.hostEventFor(s.id, "host:tick:7")).toEqual(first.event);
+        expect(await store.hostEventFor(s.id, "host:tick:8")).toBeUndefined();
+        expect(await store.hostEventFor("qs_nobody", "host:tick:7")).toBeUndefined();
+      });
+
+      /**
+       * A hosted room's allowance renews at the month turn from its creator's plan as it is then
+       * (I7): the seat reads the plan and writes the month's units here, the meter starting
+       * empty. A renewal for a month the meter has reached already changes nothing, so a second
+       * one cannot hand back what the month has spent.
+       */
+      it("renews the allowance for a new month, once, with the meter emptied", async () => {
+        const s = hostedRoom({ id: "qs_host_renew", hostUnits: { month: "2026-02", used: 9, wakes: [NOW() - 1_000] } });
+        await store.createSession(s);
+        await store.renewHostAllowance(s.id, "2026-03", 0);
+        expect(await store.getSession(s.id)).toMatchObject({ hostUnitsPerMonth: 0, hostUnits: { month: "2026-03", used: 0, wakes: [] } });
+        await store.renewHostAllowance(s.id, "2026-03", 3_000);
+        expect((await store.getSession(s.id))!.hostUnitsPerMonth).toBe(0);
+        await store.renewHostAllowance(s.id, "2026-02", 3_000);
+        expect((await store.getSession(s.id))!.hostUnits.month).toBe("2026-03");
+        await store.renewHostAllowance("qs_nobody", "2026-03", 1);
+      });
+
+      /** The month's notice is outside the meter (spec D6, I9): a write of no units passes both caps and counts in neither. */
+      it("writes a zero-unit notice whatever the month and the hour have spent, and counts it in neither", async () => {
+        const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW() - i * 60_000);
+        const s = hostedRoom({ id: "qs_host_notice", hostUnits: { month: monthKey(NOW()), used: 10, wakes: recent } });
+        await store.createSession(s);
+        const notice = { ...question(), payload: { kind: "notice", text: "The host has used its units." } };
+        expect((await store.appendHostEvent(s.id, notice, 0, NOW(), "host:notice:1")).ok).toBe(true);
+        expect((await store.getSession(s.id))!.hostUnits).toMatchObject({ used: 10, wakes: recent });
+      });
+
+      /** A team org's audit stream records the host's sends as it records every member's (`bellman_send`'s `sent_message` row). */
+      it("records the host's send in the room's audit stream, as a member's send is recorded", async () => {
+        const s = hostedRoom({ id: "qs_host_audit" });
+        await store.createSession(s);
+        const answer = { ...question(), payload: { kind: "answer", text: "Nice." }, refId: "1" };
+        expect((await store.appendHostEvent(s.id, answer, 1, NOW(), "host:reply:2")).ok).toBe(true);
+        expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([
+          expect.objectContaining({ orgId: "org_codenerd", actorUserId: HOST_USER_ID, action: "sent_message",
+            detail: { chars: JSON.stringify(answer.payload).length, ref_id: "1" } }),
+        ]);
+      });
+    });
+
+    /**
+     * The host is not a person (#188): when the last member who is one leaves, the
+     * room closes as a room without a host does. `abandonedAt` already ignores the
+     * seat; without this the two paths that end a room both missed one whose only
+     * remaining member was its host, and it stayed open for good.
+     */
+    describe("a hosted room whose people have left", () => {
+      it("closes when the last person has left, with its host still seated", async () => {
+        const m = hostedManifest();
+        const s = session({ manifest: m, members: [member(), hostMember(m, Date.now())] });
+        await store.createSession(s);
+        // The control: a person is in it, so it stays open.
+        expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+        await store.updateMember(s.id, "m_creator", { leftAt: Date.now() });
+        expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+        expect((await store.getSession(s.id))!.closed).toBe(true);
+      });
+    });
+
+    /**
+     * A plan's hosted rooms are the most a creator holds open at once (I7), not a count of
+     * creations a month: each hosted room open past the first month renews its allowance,
+     * so a monthly count let a creator's spend grow every month. A slot is taken by one
+     * count-and-record call and given back when the room closes.
+     */
+    describe("hosted room slots", () => {
+      it("admits a creator's hosted rooms up to the limit, then refuses with the count open", async () => {
+        expect(await store.reserveHostedRoom("u_slots", "qs_s1", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s2", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: false, open: 2 });
+        // A retry for a room that holds a slot is not a second room.
+        expect(await store.reserveHostedRoom("u_slots", "qs_s1", 2)).toEqual({ ok: true });
+        // Another creator's slots are their own.
+        expect(await store.reserveHostedRoom("u_other", "qs_s4", 2)).toEqual({ ok: true });
+        // A slot given back is free again, and giving one back twice is harmless.
+        await store.releaseHostedRoom("u_slots", "qs_s2");
+        await store.releaseHostedRoom("u_slots", "qs_s2");
+        expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s5", 2)).toEqual({ ok: false, open: 2 });
+      });
+
+      it("admits one of two reservations made at once at the limit", async () => {
+        const both = await Promise.all([
+          store.reserveHostedRoom("u_race", "qs_r1", 1),
+          store.reserveHostedRoom("u_race", "qs_r2", 1),
+        ]);
+        expect(both.filter((r) => r.ok)).toHaveLength(1);
+        expect(both.filter((r) => !r.ok)).toEqual([{ ok: false, open: 1 }]);
+      });
+
+      it("frees a hosted room's slot when the room closes, however it closes", async () => {
+        const m = hostedManifest();
+        const room = (id: string, seenAt = Date.now()) => session({
+          id, manifest: m, createdBy: "u_closer", members: [member({ lastSeenAt: seenAt }), hostMember(m, Date.now())],
+        });
+        const full = { ok: false, open: 1 };
+
+        await store.createSession(room("qs_close_a"));
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_a", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_b", 1)).toEqual(full);
+        await store.closeSession("qs_close_a");
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_b", 1)).toEqual({ ok: true });
+
+        // The last person leaves: the host does not keep the room, or its slot.
+        await store.createSession(room("qs_close_b"));
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_c", 1)).toEqual(full);
+        await store.updateMember("qs_close_b", "m_creator", { leftAt: Date.now() });
+        expect(await store.closeSessionIfEmpty("qs_close_b")).toBe(true);
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_c", 1)).toEqual({ ok: true });
+
+        // Nobody seen for the abandonment window: the room is closed by a read, or sooner by
+        // the Durable Objects store's own alarm, so the slot is checked as held before the room
+        // exists and as free once a read has seen it closed.
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_d", 1)).toEqual(full);
+        await store.createSession(room("qs_close_c", Date.now() - ABANDONED_AFTER_MS - 1));
+        expect((await store.getSession("qs_close_c"))!.closed).toBe(true);
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_d", 1)).toEqual({ ok: true });
       });
     });
 
@@ -3372,6 +3631,20 @@ export function describeStoreContract(
         got.housekeeping!.quiet_after = "5m";
         expect((await store.getPreset("u_jesse", "a"))!.housekeeping).toEqual(block);
         expect((await store.listPresets("u_jesse")).map((p) => p.housekeeping)).toEqual([block]);
+      });
+
+      // A saved preset carries the author arm's host block (#188 beneath the designer); a store
+      // that dropped it would turn a hosted preset into a room with nobody in its host role.
+      it("keeps a preset's host block, and gives back one saved without the key as it was saved", async () => {
+        const hosted = preset("h", {
+          mode: "swarm", heartbeat_on: "1h",
+          roles: { lead: { can: ["send"], description: null, reports: false }, emcee: { can: ["send"], description: null, reports: false } },
+          host: { role: "emcee", model: "sonnet", instructions: "Ask one thing." },
+        });
+        await store.putPreset("u_jesse", hosted, 20);
+        await store.putPreset("u_jesse", preset("legacy"), 20);
+        expect(await store.getPreset("u_jesse", "h")).toEqual(hosted);
+        expect((await store.listPresets("u_jesse")).map((p) => [p.name, p.host])).toEqual([["h", hosted.host], ["legacy", undefined]]);
       });
 
       it("replaces by name", async () => {

@@ -19,7 +19,7 @@ import type { Member } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 // `asked` and `clearSilence` live in store.ts beside `isActiveMember`, because
 // `freezeSession` applies them inside the store and this module imports that one.
-import { asked, clearSilence } from "./store.js";
+import { asked, clearSilence, hostSeated, isActivePerson, lastSeen } from "./store.js";
 export { asked, clearSilence };
 
 /**
@@ -94,7 +94,8 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
  *   construction, with nothing to clamp.
  *
  * Together they give a property the old rule lacked: **every armed firing finds
- * somebody due.** If the earliest is a deadline, that member is due at it by
+ * somebody due**, in a room without a host (`hostedTickAt` says what a host's room
+ * gives up). If the earliest is a deadline, that member is due at it by
  * definition; if it is `lastTickAt + cadence`, that member's report is a cadence
  * older still, so it has been due for two. `#tickIfDue`'s nobody-due branch is
  * still reached constantly, because a member reporting between the arming and
@@ -103,8 +104,8 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
  * Takes no `now`: every anchor is stored state, and a parameter nothing reads
  * would suggest the answer depends on the clock.
  *
- * Null for a room with no cadence, no member to ask, or that cannot be answered
- * — a frozen or closed room. Deriving a time for a closed session would re-arm
+ * Null for a room with no cadence, no member to ask and no host, or that cannot be
+ * answered — a frozen or closed room. Deriving a time for a closed session would re-arm
  * the alarm to a moment already past and fire for as long as the object lived,
  * which is the reason `derivedDue` already gives about abandonment.
  *
@@ -116,9 +117,110 @@ const askAt = (m: Member, every: number, tick: number | undefined): number => {
 export function nextTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
   if (every === null || s.closed || s.frozenAt !== null) return null;
-  const asked = reporting(s);
-  if (asked.length === 0) return null;
-  return Math.min(...asked.map((m) => askAt(m, every, s.lastTickAt)));
+  const times = reporting(s).map((m) => askAt(m, every, s.lastTickAt));
+  const hosted = hostedTickAt(s);
+  if (hosted !== null) times.push(hosted);
+  if (times.length === 0) return null;
+  return Math.min(...times);
+}
+
+/**
+ * When a hosted room's own tick falls due (hosted seat spec, D4; #188), or null for a
+ * room with no host, a host it has evicted (C1), or no cadence.
+ *
+ * The host asks on its own cadence and on nothing else's (I3): one cadence after the last
+ * tick that woke it, `lastHostTickAt`, which only such a tick moves. A reporter's tick
+ * moves `lastTickAt` and not this, so a reporting seat's deadline neither makes the host
+ * ask early, which spent a room's month two or three times over, nor pushes it back. No
+ * role in a hosted room need report, `social`'s included, and `nextTickAt` takes the
+ * earlier of this and every reporter's own deadline, so a reporter is still asked on time.
+ *
+ * A host that has never asked anchors on the room's first seat, which is stored state
+ * like every other anchor here, and not on the clock. `#derivedDue` recomputes this on
+ * every re-arm, so an answer measured from now would move a cadence later each time
+ * anything re-armed the alarm, and a busy room would never tick at all.
+ *
+ * A firing at or after that time that found nobody to ask (`personSince`) moved
+ * `lastTickAt` and not `lastHostTickAt`, so the answer is then a cadence after that
+ * firing. P2 holds, as `askAt`'s does: every answer is after `lastTickAt`. P1's
+ * companion does not: a hosted firing can find nobody to ask, which is one silent firing
+ * a cadence for a room its people have left.
+ */
+function hostedTickAt(s: StoredSession): number | null {
+  const every = s.manifest.heartbeatOnMs;
+  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. A
+  // seated host is on the roster, so the roster is never empty below.
+  if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
+  const due = (s.lastHostTickAt ?? Math.min(...s.members.map((m) => m.joinedAt))) + every;
+  return s.lastTickAt !== undefined && s.lastTickAt >= due ? s.lastTickAt + every : due;
+}
+
+/**
+ * Whether a person — `isActivePerson`, so not the seat and not a member who has left —
+ * was seen after the host last asked, or is on a socket now (#188, I3). A room whose host
+ * has never asked counts every person in it. `connected` is the members a live socket
+ * vouches for (`connectedAmong`); a store with no sockets passes `NO_SOCKETS`.
+ */
+const personSince = (s: StoredSession, connected: ReadonlySet<string>): boolean => {
+  const asked = s.lastHostTickAt ?? null;
+  return s.members.some((m) => isActivePerson(m) &&
+    (asked === null || lastSeen(m) > asked || connected.has(m.memberId)));
+};
+
+/**
+ * Whether a hosted room's tick, fired at `now`, wakes its host (#188, I3): the host's own
+ * cadence has come round and `personSince` holds. False means the host's part of the
+ * firing writes nothing and moves no `lastHostTickAt`, so a hosted room nobody is in costs
+ * a silent firing a cadence and no growth in its log. Pure, and the clock is `now`, as for
+ * `dueMembers`.
+ */
+export function hostedTickDue(s: StoredSession, now: number, connected: ReadonlySet<string>): boolean {
+  const at = hostedTickAt(s);
+  return at !== null && at <= now && personSince(s, connected);
+}
+
+/**
+ * What a tick fired at `now` does (#188): the rule both stores apply, so they tick alike.
+ *
+ * `wakeHost` — the host's own cadence has come round since it last asked, and a person
+ * was seen since then or is on a socket (`hostedTickDue`). A reporter's deadline never
+ * wakes the host (I3): each question resets the three answers and spends units, so a room
+ * that declared `1h` hears from its host hourly however its reporters report.
+ * `write` — `wakeHost`, or a reporting member is due: the tick is written, and when it wakes
+ * the host the store moves `lastHostTickAt` in the same write.
+ *
+ * Both are read off the room as it stands BEFORE the tick's write moves the clocks, which
+ * is why presence is decided here and not by the seat: read after that write, every
+ * person reads as unseen since the host last asked.
+ */
+export function tickPlan(
+  s: StoredSession,
+  now: number,
+  connected: ReadonlySet<string>,
+): { write: boolean; wakeHost: boolean } {
+  const wakeHost = hostedTickDue(s, now, connected);
+  return { write: wakeHost || dueMembers(s, now).length > 0, wakeHost };
+}
+
+/**
+ * Everything one room's tick at `now` needs decided, for a store that cannot import this
+ * module (#188). `MemoryStore.tick` takes `tickStep` from its caller: this module imports
+ * store.ts, so store.ts importing it back would be the cycle store.ts documents.
+ */
+export type TickStep = { due: boolean; write: boolean; wakeHost: boolean; payload: HeartbeatPayload };
+
+/**
+ * `due` is the moment SessionDO's alarm would name the tick (`nextTickAt`); the two
+ * booleans are `tickPlan`'s with no sockets, which is what a store without any has; the
+ * payload is the tick's own snapshot. Throws for a room with no cadence, as `snapshotOf`
+ * does, so a caller asks only of a room that declared one.
+ */
+export function tickStep(s: StoredSession, now: number): TickStep {
+  return {
+    due: (nextTickAt(s) ?? Infinity) <= now,
+    ...tickPlan(s, now, new Set()),
+    payload: snapshotOf(s, now),
+  };
 }
 
 /** Members that have gone a full cadence without reporting. The tick asks these. */

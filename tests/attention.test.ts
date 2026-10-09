@@ -21,15 +21,22 @@ describe("attention", () => {
     expect(attentionOf("progress")).toBe("ambient");
     expect(attentionOf("surface")).toBe("ambient");
     expect(attentionOf("heartbeat")).toBe("interrupt");
-    expect(isAmbient("progress")).toBe(true);
-    expect(isAmbient("surface")).toBe(true);
-    expect(isAmbient("heartbeat")).toBe(false);
+    expect(isAmbient({ type: "progress", payload: { note: "n" } })).toBe(true);
+    expect(isAmbient({ type: "surface", payload: {} })).toBe(true);
+    expect(isAmbient({ type: "heartbeat", payload: { members: [{ member_id: "m_a" }] } })).toBe(false);
+  });
+
+  // A tick that names nobody asks nobody (M4): in a hosted room it is the host's own, and
+  // interrupting every member each cadence would spend a turn of theirs on nothing.
+  it("makes a heartbeat that asks no member for a report ambient", () => {
+    expect(isAmbient({ type: "heartbeat", payload: { cadence_seconds: 3600, ask: "...", members: [] } })).toBe(true);
+    expect(isAmbient({ type: "message", payload: { members: [] } })).toBe(false);
   });
 
   // A finding nobody reads produces no action, which is the tick's reason too.
   it("makes a housekeeping proposal an interrupt (#66)", () => {
     expect(attentionOf("housekeeping")).toBe("interrupt");
-    expect(isAmbient("housekeeping")).toBe(false);
+    expect(isAmbient({ type: "housekeeping", payload: { finding: "room_idle", since: 1, repeat: 1 } })).toBe(false);
   });
 
   /**

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PresetName, RoleDef, RoomManifest, SavedPreset, Verb } from "./types.js";
+import type { HostConfig, HostModelName, PresetName, RoleDef, RoomManifest, SavedPreset, Verb } from "./types.js";
 
 /**
  * The verbs a room role can be declared to hold. The set is closed so that every verb a joiner's human
@@ -18,7 +18,8 @@ export const VERBS = [
   "send", "invite", "revoke", "request_actions", "respond_actions", "write_surface",
 ] as const satisfies readonly Verb[];
 
-export const PRESET_NAMES = ["pair", "swarm", "review"] as const satisfies readonly PresetName[];
+export const PRESET_NAMES = ["pair", "swarm", "review", "social"] as const satisfies readonly PresetName[];
+export const HOST_MODEL_NAMES = ["haiku", "sonnet", "opus"] as const satisfies readonly HostModelName[];
 
 const MAX_ROLES = 16;
 
@@ -41,11 +42,14 @@ export class ManifestError extends Error {
 
 /**
  * The cadence bounds. Below the floor it is a liveness timer, which is #103's
- * job and what #111 explicitly is not. Above the ceiling the cadence says
- * nothing a peer could act on inside a working session.
+ * job and what #111 explicitly is not. The ceiling is a day: a hosted seat
+ * (spec D3) is slowed, not stopped, by a heavy model, and a daily question is
+ * the slow end of that. Above a day the cadence says nothing a peer could act on.
  */
 export const MIN_HEARTBEAT_MS = 30_000;
-export const MAX_HEARTBEAT_MS = 3_600_000;
+export const MAX_HEARTBEAT_MS = 86_400_000;
+/** A room with a host ticks no faster than this: 744 wakes a month at most from ticks alone. */
+export const MIN_HOST_HEARTBEAT_MS = 3_600_000;
 
 /**
  * The bounds on every housekeeping key (#66, D5): one pair for all four. The floor
@@ -83,7 +87,8 @@ const duration = (ms: number): string => {
 function parseDuration(field: string, raw: string, min: number, max: number): number {
   const m = DURATION.exec(raw);
   if (!m) {
-    // heartbeat_on tops out at an hour, so a day was never among its examples.
+    // heartbeat_on's message keeps the examples it always had. Its ceiling has since moved
+    // from an hour to a day (the hosted seat's daily beat), and a day is still not among them.
     const examples = field === "heartbeat_on" ? '"30s", "5m" or "1h"' : '"30s", "5m", "1h" or "2d"';
     throw new ManifestError(`${field} must be a duration like ${examples} (got "${raw}")`);
   }
@@ -203,10 +208,20 @@ const HousekeepingShape = z.strictObject({
 });
 export type HousekeepingInput = z.input<typeof HousekeepingShape>;
 
+const HostShape = z.strictObject({
+  // Echoed verbatim by the cross-field errors, as default_role is, so it is bounded the same way.
+  role: z.string().max(MAX_ROLE_KEY_LENGTH),
+  model: z.enum(HOST_MODEL_NAMES).default("haiku"),
+  instructions: z.string().max(300).nullish(),
+});
+
 const CiteShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   preset: PresetNameShape,
+  // A cite may set the beat of a preset with a host, built-in or saved (checkCiteCadence); for
+  // `social` that is how a room has its host ask less often than hourly.
+  heartbeat_on: DurationShape.nullish(),
   // Housekeeping is not part of what a preset is (D5), so a citation may add it.
   housekeeping: HousekeepingShape.nullish(),
 });
@@ -222,6 +237,7 @@ const AuthorShape = z.strictObject({
   // the audit log, so they are bounded like every other string in the shape.
   default_role: z.string().max(MAX_ROLE_KEY_LENGTH),
   creator_role: z.string().max(MAX_ROLE_KEY_LENGTH),
+  host: HostShape.nullish(),
 });
 
 /** One issue as "path: message". Symbol-safe: a symbol key can reach a path. */
@@ -267,10 +283,14 @@ export type PresetInput = z.input<typeof PresetShape>;
 // ---------------------------------------------------------------------------
 
 // A preset carries no cadence (D3) and no housekeeping thresholds (#66, D5), so
-// the catalog's shape leaves both out and resolveManifest supplies them. Making
+// the catalog's shape leaves both out and resolveManifest supplies null. Making
 // them unrepresentable here is stronger than a catalog entry that happens to say
-// null.
-type PresetBody = Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs" | "housekeeping">;
+// null. The exception is a preset with a host, which must tick to be asked its
+// question (hosted seat spec, D1): `heartbeatOnMs` is optional so that entry can
+// set it, and `social` is the only one that does. `housekeeping` has no exception:
+// `social` carries none either.
+type PresetBody =
+  Omit<RoomManifest, "room" | "purpose" | "preset" | "heartbeatOnMs" | "housekeeping"> & { heartbeatOnMs?: number };
 
 function role(can: Verb[], description: string): RoleDef {
   // No preset expects a report (D3). Turning this on for shipped presets would
@@ -298,6 +318,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     },
     defaultRole: "peer_b",
     creatorRole: "peer_a",
+    host: null,
   },
   swarm: {
     mode: "swarm",
@@ -314,6 +335,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     },
     defaultRole: "helper",
     creatorRole: "lead",
+    host: null,
   },
   review: {
     mode: "pair",
@@ -329,6 +351,22 @@ const PRESETS: Record<PresetName, PresetBody> = {
     },
     defaultRole: "reviewer",
     creatorRole: "author",
+    host: null,
+  },
+  social: {
+    mode: "swarm",
+    roles: {
+      lead: role(
+        ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"],
+        "Opened the room: controls who can join, and writes the surface.",
+      ),
+      guest: role(["send"], "Answers the host's questions and talks with the room."),
+      host: role(["send"], "Asks the room a question each tick and answers in the thread. Bellman runs it."),
+    },
+    defaultRole: "guest",
+    creatorRole: "lead",
+    host: { role: "host", model: "haiku", instructions: null },
+    heartbeatOnMs: MIN_HOST_HEARTBEAT_MS,
   },
 };
 
@@ -337,12 +375,14 @@ const BUILTIN_DESCRIPTIONS: Record<PresetName, string> = {
   pair: "Two peers. The creator controls who joins and writes the surface.",
   swarm: "A lead who runs the room, helpers who work it, and observers who read it.",
   review: "An author who brought the work, and a reviewer who answers but does not ask.",
+  social: "A lead who opened the room, guests who talk in it, and a host Bellman runs that asks them a question each hour.",
 };
 
 /**
  * The built-ins in a saved preset's form, fresh copies on every call, for the
  * panel to show and clone (designer spec D5). PRESETS itself stays unexported:
- * its `can` arrays are mutable.
+ * its `can` arrays are mutable. `social` comes with its host and its hour, so a
+ * clone of it saves a hosted preset rather than a room whose `host` role nobody runs.
  */
 export function builtinPresets(): SavedPreset[] {
   return PRESET_NAMES.map((name) => {
@@ -351,12 +391,13 @@ export function builtinPresets(): SavedPreset[] {
       name,
       description: BUILTIN_DESCRIPTIONS[name],
       mode: body.mode,
-      heartbeat_on: null,
-      // No built-in sets housekeeping (D5), and PresetBody cannot say it does.
+      heartbeat_on: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs),
+      // No built-in sets housekeeping, `social` included (D5), and PresetBody cannot say it does.
       housekeeping: null,
       roles: structuredClone(body.roles),
       default_role: body.defaultRole,
       creator_role: body.creatorRole,
+      host: structuredClone(body.host),
       updated_at: null,
     };
   });
@@ -400,7 +441,8 @@ export function resolveManifest(input: unknown): RoomManifest {
 
   if ("preset" in v) {
     const body = PRESETS[v.preset as PresetName];
-    return {
+    checkCiteCadence(v.preset, body.host !== null, v.heartbeat_on);
+    const manifest: RoomManifest = {
       room: v.room,
       purpose: v.purpose ?? null,
       preset: v.preset as PresetName,
@@ -408,9 +450,16 @@ export function resolveManifest(input: unknown): RoomManifest {
       roles: structuredClone(body.roles),
       defaultRole: body.defaultRole,
       creatorRole: body.creatorRole,
-      heartbeatOnMs: null,
+      // Cloned like `roles`: the catalog is private so that one room's edit cannot reach the next.
+      host: structuredClone(body.host),
+      // A cite may set the beat. Absent, it takes the preset's own, which is null for
+      // every preset but one with a host (see PresetBody).
+      heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : (body.heartbeatOnMs ?? null),
+      // A cite may add housekeeping to any preset, the host's included (#66, D5).
       housekeeping: resolveHousekeeping(v.housekeeping),
     };
+    checkHost(manifest);
+    return manifest;
   }
 
   const defined = Object.keys(v.roles);
@@ -459,7 +508,11 @@ export function resolveManifest(input: unknown): RoomManifest {
     };
   }
 
-  return {
+  const host: HostConfig | null = v.host == null ? null : {
+    role: v.host.role, model: v.host.model, instructions: v.host.instructions ?? null,
+  };
+
+  const manifest: RoomManifest = {
     room: v.room,
     purpose: v.purpose ?? null,
     preset: null,
@@ -471,7 +524,55 @@ export function resolveManifest(input: unknown): RoomManifest {
     // absent key. A valueless `heartbeat_on:` in YAML is null and means no cadence.
     heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : null,
     housekeeping: resolveHousekeeping(v.housekeeping),
+    host,
   };
+  checkHost(manifest);
+  return manifest;
+}
+
+/**
+ * A cite may set the beat only of a preset with a host, built-in or saved, as main's
+ * strict cite refused the key for every preset (M8). With no host a cite has nothing to
+ * slow: a built-in has no reporting role, so nothing would ever tick, and a saved preset
+ * already carries the cadence its author chose. bellman_start meets it for a saved
+ * preset, which resolveManifest never sees cited.
+ */
+export function checkCiteCadence(preset: string, hasHost: boolean, heartbeatOn: unknown): void {
+  if (heartbeatOn !== undefined && !hasHost) {
+    throw new ManifestError(
+      `heartbeat_on: the "${preset}" preset has no host, so a cite of it cannot set a cadence; author the roles to set one`,
+    );
+  }
+}
+
+/**
+ * The cross-field rules a hosted seat adds (hosted seat spec, D1). One function for
+ * both arms, so a preset and an authored manifest cannot be refused differently.
+ */
+function checkHost(m: RoomManifest): void {
+  if (m.host === null) return;
+  const defined = Object.keys(m.roles);
+  if (!defined.includes(m.host.role)) {
+    throw new ManifestError(`host.role "${m.host.role}" is not defined in roles (defined: ${defined.join(", ")})`);
+  }
+  if (m.mode === "pair") {
+    throw new ManifestError("a pair room cannot have a host: its two seats are its members'");
+  }
+  const def = m.roles[m.host.role];
+  if (def.can.length !== 1 || def.can[0] !== "send") {
+    const holds = def.can.length > 0 ? def.can.join(", ") : "none";
+    throw new ManifestError(`host role "${m.host.role}" must hold exactly the verb "send" (it holds: ${holds})`);
+  }
+  if (def.reports) throw new ManifestError(`host role "${m.host.role}" must not report`);
+  // Rendered from the constant, as parseHeartbeatOn renders its bounds: a floor change
+  // would otherwise leave these messages naming a floor that no longer exists.
+  const floor = duration(MIN_HOST_HEARTBEAT_MS);
+  if (m.heartbeatOnMs === null) {
+    throw new ManifestError(`a room with a host must set heartbeat_on (at least ${floor})`);
+  }
+  if (m.heartbeatOnMs < MIN_HOST_HEARTBEAT_MS) {
+    throw new ManifestError(`a room with a host must tick no faster than ${floor} (got "${duration(m.heartbeatOnMs)}")`);
+  }
 }
 
 /**

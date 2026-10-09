@@ -661,16 +661,20 @@ describe("negative control: the same calls with the guard removed", () => {
    * there and never show the harm this test is about. The stub has no `roles`, so the real
    * guard still reads the row as gone, and the cadence is null, so `nextTickAt` asks nothing
    * further of it.
+   *
+   * Both rows carry `host: null` in that stub, for the same reason (I7): every close now reads
+   * `manifest.host` to give a hosted room's slot back, and on a row with no manifest that read
+   * is the TypeError again. A null host asks the close for nothing more.
    */
   it("lets a mutator rewrite it and a due alarm expire it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
 
-    const viaMutator = await worldOn(unguarded);
+    const viaMutator = await worldOn(unguarded, { ...legacyRow(), manifest: { host: null } });
     await viaMutator.legacy.closeSession();
     expect(viaMutator.legacyStorage.snapshot().session).toMatchObject({ closed: true });
 
     const viaAlarm = await worldOn(unguarded, {
-      ...legacyRow({ members: [member({ lastSeenAt: 1 })] }), joinCodes: {}, manifest: { heartbeatOnMs: null },
+      ...legacyRow({ members: [member({ lastSeenAt: 1 })] }), joinCodes: {}, manifest: { heartbeatOnMs: null, host: null },
     });
     await viaAlarm.legacy.alarm();
     const rows = viaAlarm.legacyStorage.snapshot();
@@ -683,13 +687,14 @@ describe("negative control: the same calls with the guard removed", () => {
   /**
    * The same again for closeSessionIfEmpty's own guard test above, which could
    * otherwise pass because the harness never gave the row to the method. The room
-   * is empty, so that with the guard gone the method has something to close.
+   * is empty, so that with the guard gone the method has something to close. The
+   * row carries the `host: null` stub the test above explains.
    */
   it("lets closeSessionIfEmpty close it", async () => {
     const unguarded = await loadStoreDoWithoutGuard();
     const { legacy, legacyStorage } = await worldOn(
       unguarded,
-      legacyRow({ members: [member({ leftAt: Date.now() })] }),
+      { ...legacyRow({ members: [member({ leftAt: Date.now() })] }), manifest: { host: null } },
     );
 
     expect(await legacy.closeSessionIfEmpty()).toBe(true);

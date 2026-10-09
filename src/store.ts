@@ -1,5 +1,5 @@
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
+  AuditEntry, HostUnits, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
   SavedPreset, SurfaceRow,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
@@ -7,7 +7,11 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
 } from "./retention.js";
-import type { StoredSession } from "./stored-session.js";
+import { monthKey, type StoredSession } from "./stored-session.js";
+// Type-only: host.ts and heartbeat.ts import this module at runtime, so a value import
+// back would be a cycle. `MemoryStore.tick` is handed its rule for that reason.
+import type { HostWake } from "./host.js";
+import type { TickStep } from "./heartbeat.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -49,6 +53,48 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  * applies to `joinCode`.
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * The hosted seat's identity (hosted seat spec, D1): the member id it holds in
+ * every room, and the user every hosted seat is seated under.
+ *
+ * These and the two rules below are here beside `isActiveMember`, and
+ * re-exported from host.ts, for the reason `lastSeen` gives: both stores read
+ * them inside their own methods, and host.ts imports this module.
+ */
+export const HOST_MEMBER_ID = "m_host";
+export const HOST_USER_ID = "u_bellman_host";
+export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
+
+/**
+ * A member still in the room who is a person and not the hosted seat (hosted seat
+ * spec, D5). The host does not vouch for a room, so whether a room is empty, when it
+ * is abandoned and whether a hosted tick has anyone to ask all count these and only
+ * these: one predicate, so the three cannot disagree about who is there.
+ */
+export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
+
+/**
+ * Whether the room's hosted seat is still in it (C1). Evicting the host is the
+ * creator's one control over it, so once it has left nothing wakes it and the room
+ * refuses its writes: the tick (`tickPlan`), both stores' reply wakes and
+ * `decideHostCharge` all ask this.
+ */
+export const hostSeated = (s: Pick<Session, "members">): boolean =>
+  s.members.some((m) => isHostMember(m) && isActiveMember(m));
+
+/** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
+export const WAKES_PER_HOUR = 8;
+
+/** A member's answer to the host: a message or a progress event whose ref names one of the host's events. */
+export function isReplyToHost(
+  e: Pick<SessionEvent, "type" | "refId">,
+  referenced: Pick<SessionEvent, "fromMemberId"> | undefined,
+): boolean {
+  if (e.refId === null || referenced === undefined) return false;
+  if (e.type !== "message" && e.type !== "progress") return false;
+  return referenced.fromMemberId === HOST_MEMBER_ID;
+}
 
 /** Nobody is on a socket. What every reading of presence assumes until it is told otherwise. */
 export const NO_SOCKETS: ReadonlySet<string> = new Set();
@@ -116,11 +162,13 @@ export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
  * closed room is over, a frozen one is waiting on a payment and `touchMember`
  * cannot stamp it, and an empty one is `closeSessionIfEmpty`'s. Departed members
  * do not count: a goodbye yesterday does not keep open a room that nobody else
- * has been in for a season.
+ * has been in for a season. Nor does the hosted seat (hosted seat spec, D5): its
+ * sends stamp it as seen, and a room whose people have all gone quiet still ends
+ * 90 days after one of them was last there, however recently its host spoke.
  */
 export function abandonedAt(s: RoomRoster): number | null {
   if (s.closed || s.frozenAt !== null) return null;
-  const active = s.members.filter(isActiveMember);
+  const active = s.members.filter(isActivePerson);
   if (active.length === 0) return null;
   return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
 }
@@ -468,6 +516,10 @@ export interface SeatOutcome {
  * MemoryStore from a hook that is empty unless a test says otherwise. The rule
  * stays one function, and the contract suite still holds both to it.
  *
+ * The hosted seat holds a seat and is never reclaimable (hosted seat spec, D5).
+ * Its `lastSeenAt` moves only when it sends, so a quiet host reads stale, and
+ * without this it would be the first seat a full room gave up.
+ *
  * `null` means refuse: the room is full of members that are not reclaimable.
  * An empty array means seat them with nobody removed.
  */
@@ -483,7 +535,7 @@ export function seatVictims(
   // Longest-quiet first: if only one seat has to go, it is the one whose member
   // has been gone longest.
   const victims = active
-    .filter((m) => lastSeen(m) < staleBefore && !connected.has(m.memberId))
+    .filter((m) => !isHostMember(m) && lastSeen(m) < staleBefore && !connected.has(m.memberId))
     .sort((a, b) => lastSeen(a) - lastSeen(b))
     .slice(0, needed);
   return victims.length < needed ? null : victims;
@@ -598,6 +650,58 @@ export function decideBlobCharge(
   if (s.frozenAt !== null) return { ok: false, reason: "frozen", used };
   if (used + bytes > s.blobBytesCeiling) return { ok: false, reason: "over_quota", used };
   return { ok: true, used: used + bytes };
+}
+
+/** Whether a hosted-room slot was taken (I7), and when refused, how many the person holds open. */
+export type HostedSlot = { ok: true } | { ok: false; open: number };
+
+/**
+ * What the hosted seat's write did (hosted seat spec, D3). A refusal says what
+ * the room's month has spent (`used`) and may spend (`allowed`), so the seat can
+ * say so in its one notice.
+ */
+export type HostAppend =
+  | { ok: true; event: SessionEvent }
+  | { ok: false; reason: "not_found" | "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number };
+
+/**
+ * The meter's decision (hosted seat spec, D3), shared by both stores so they
+ * cannot charge differently. Returns the refusal, or the units record to write.
+ * A host the room has evicted is refused (`removed`, C1) before the meter is read.
+ *
+ * A write of no units is the month's notice, which is outside the meter (spec D6, I9):
+ * neither cap applies to it and the hour does not count it, so the spent month it reports
+ * cannot refuse it. The seat also runs this read-only before it reads or calls anything
+ * (I4, M7), so a wake the meter would refuse costs neither.
+ */
+export function decideHostCharge(
+  s: Pick<StoredSession, "closed" | "frozenAt" | "members" | "hostUnitsPerMonth" | "hostUnits">,
+  units: number,
+  now: number,
+): { ok: false; reason: "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
+  if (s.closed) return { ok: false, reason: "closed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (!hostSeated(s)) return { ok: false, reason: "removed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  const month = monthKey(now);
+  const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
+  if (units === 0) return { ok: true, next: current };
+  const wakes = current.wakes.filter((t) => t > now - 3_600_000);
+  if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
+  if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
+  return { ok: true, next: { month, used: current.used + units, wakes: [...wakes, now] } };
+}
+
+/**
+ * The audit row a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for
+ * a member, so a team org's stream sees the host as it sees members. The host belongs to
+ * no org, so only the room's own gets it. Both stores queue it in the send's own write.
+ */
+export function hostSentEntries(s: Pick<StoredSession, "id" | "orgId">, e: Omit<SessionEvent, "cursor" | "at">, now: number): AuditEntry[] {
+  if (!s.orgId) return [];
+  return [{
+    at: now, orgId: s.orgId, sessionId: s.id, actorUserId: e.fromUserId, action: `sent_${e.type}`,
+    detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+  }];
 }
 
 /**
@@ -868,9 +972,11 @@ export interface BellmanStore {
    * occupied room, those keep a join from landing on a closed one, and neither is
    * enough alone.
    *
-   * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
-   * like any other: freezing refuses writes into a room someone is in, and an
-   * empty one is over either way.
+   * "Nobody" is no member for whom `isActivePerson` holds: `isActiveMember`, and
+   * not the hosted seat (#188). The host is not a person, so a hosted room closes
+   * when its last person leaves, as a room without one does, with the seat still on
+   * the roster. A frozen room closes like any other: freezing refuses writes into a
+   * room someone is in, and an empty one is over either way.
    *
    * The answer is a state and not an event, on purpose, and DurableObjectStore
    * depends on it. An already-closed room answers true whoever is listed in it.
@@ -1043,7 +1149,12 @@ export interface BellmanStore {
     key: string,
     extras?: AppendExtras
   ): Promise<EventWrite>;
-  eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]>;
+  /**
+   * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
+   * when a limit is given. The hosted seat's read is the bounded one (I4); every other
+   * caller reads the tail whole.
+   */
+  eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]>;
   /**
    * The event at exactly this cursor, or undefined.
    *
@@ -1083,12 +1194,43 @@ export interface BellmanStore {
    * just put. Nothing credits the total; retention (#65) will.
    */
   chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge>;
+  /**
+   * The hosted seat's one write (hosted seat spec, D3): the event and the charge
+   * of `units` against the room's month, in one transaction. Refused, nothing is
+   * written. `now` is the caller's clock, as `seatMember`'s is.
+   *
+   * `key` is the wake's intent id (`host:<cause>:<cursor>`, M6). A write under a key
+   * already used returns the event that key wrote and charges nothing, so a seat that
+   * runs a wake again after losing the response to its write cannot post or charge
+   * twice. The key alone decides: the rerun's text is a new model call's.
+   */
+  appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend>;
+  /** The host's write under `key` (M6), or undefined: what the seat checks before it calls the model. */
+  hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined>;
+  /**
+   * The hosted seat's allowance for a new month (I7): `units`, its creator's plan's as the
+   * seat read it at the month's first wake, 0 once that plan includes no hosted seat, with
+   * the meter started empty in `month`. A renewal for a month the meter has reached already
+   * changes nothing, so a second one cannot hand back what the month has spent. A missing
+   * room is a no-op.
+   */
+  renewHostAllowance(sessionId: string, month: string, units: number): Promise<void>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
 
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
+  /**
+   * Take one of this person's hosted-room slots for `sessionId`, unless `limit` are held
+   * already (I7): the count and the record are one operation, so two starts at the limit
+   * cannot both pass. A plan's hosted rooms are the most a person holds open at once; a
+   * slot is given back when the room closes, which both stores do inside their closes,
+   * or is purged. Taking a slot the room already holds is not a second room.
+   */
+  reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot>;
+  /** Give the slot back. Idempotent. `bellman_start` calls it when the room it reserved for was not created. */
+  releaseHostedRoom(userId: string, sessionId: string): Promise<void>;
 
   /** A person's saved presets (designer spec D4), in name order. Keyed by the person: nothing here reads another's. */
   listPresets(userId: string): Promise<SavedPreset[]>;
@@ -1178,6 +1320,7 @@ export class MemoryStore implements BellmanStore {
   private byOrg = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
+  private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
   private presets = new Map<string, Map<string, SavedPreset>>(); // userId -> name -> preset
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
@@ -1202,7 +1345,8 @@ export class MemoryStore implements BellmanStore {
    */
   private readonly blobs: BlobStore;
 
-  constructor(options: { blobs?: BlobStore } = {}) {
+  /** `host` is what a wake of a hosted seat does here: the Node server hands in `MemoryHost.wake`. */
+  constructor(private readonly options: { blobs?: BlobStore; host?: (wake: HostWake) => void } = {}) {
     this.blobs = options.blobs ?? new MemoryBlobStore();
   }
 
@@ -1500,7 +1644,7 @@ export class MemoryStore implements BellmanStore {
     // writes. The Durable Objects store gets it from a transaction instead. The
     // sweep that follows is after the close, so it is outside that rule.
     if (s.closed) return true;
-    if (s.members.some(isActiveMember)) return false;
+    if (s.members.some(isActivePerson)) return false;
     this.closeNow(s);
     await this.sweepAfterClose(sessionId);
     return true;
@@ -1564,6 +1708,8 @@ export class MemoryStore implements BellmanStore {
     s.closedAt ??= at;
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     s.joinCodes = {};
+    // A hosted room gives its creator's slot back as it closes (I7), however it closes.
+    if (s.manifest.host !== null) this.hostedOpen.get(s.createdBy)?.delete(s.id);
   }
 
   /**
@@ -1663,7 +1809,76 @@ export class MemoryStore implements BellmanStore {
     // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
     const event = this.appendNow(s, e);
     this.applyExtras(s, event, extras);
+    this.wakeHost(s, event);
     return detach(event);
+  }
+
+  /**
+   * Called synchronously once an append has landed that wakes the hosted seat
+   * (hosted seat spec, D4): hands the wake to `options.host`, the Node server's
+   * `MemoryHost`, or to nothing when none was given. `SessionDO` queues the same
+   * wakes as outbox rows, in the event's own transaction.
+   */
+  protected hostWoken(wake: HostWake): void {
+    this.options.host?.(wake);
+  }
+
+  /**
+   * Wake the hosted seat if `event` is one of the two causes (spec D4): a
+   * `heartbeat`, or a reply to one of the host's events, in a room whose
+   * manifest has a host and which has not evicted it (`hostSeated`, C1).
+   *
+   * Called by the two public appends once the event and its extras have landed,
+   * which are `SessionDO`'s places too, and not from `appendNow`: the host's own
+   * answer names its question as `refId`, so it reads as a reply, and
+   * `appendHostEvent` queues no wake in either store. No awaits, for
+   * appendEvent's reason.
+   */
+  private wakeHost(s: Session, event: SessionEvent): void {
+    if (s.manifest.host === null || !hostSeated(s)) return;
+    if (event.type === "heartbeat") this.hostWoken({ sessionId: s.id, cause: "tick", cursor: event.cursor });
+    else if (event.refId !== null) {
+      const referenced = s.events.find((x) => x.cursor === Number(event.refId));
+      if (isReplyToHost(event, referenced)) this.hostWoken({ sessionId: s.id, cause: "reply", cursor: event.cursor });
+    }
+  }
+
+  async appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number, key: string): Promise<HostAppend> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
+    // Synchronous from here, for appendEventOnce's reason: the key check, the event, the
+    // meter, the stamp and the audit row land together.
+    const storageKey = idempotencyKey(e.fromMemberId, key);
+    const done = this.keys.get(sessionId)?.get(storageKey);
+    if (done) {
+      const original = s.events.find((ev) => ev.cursor === done.cursor);
+      if (!original) throw new Error(`Idempotency record names missing cursor ${done.cursor}`);
+      return { ok: true, event: detach(original) };
+    }
+    const charge = decideHostCharge(s, units, now);
+    if (!charge.ok) return charge;
+    const event = this.appendNow(s, e);
+    const keys = this.keys.get(sessionId) ?? new Map<string, IdempotencyRecord>();
+    keys.set(storageKey, { cursor: event.cursor, print: fingerprint(e) });
+    this.keys.set(sessionId, keys);
+    s.hostUnits = charge.next;
+    s.members = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
+    this.recordAudit(hostSentEntries(s, e, now));
+    return { ok: true, event: detach(event) };
+  }
+
+  async renewHostAllowance(sessionId: string, month: string, units: number): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.hostUnits.month >= month) return;
+    s.hostUnitsPerMonth = units;
+    s.hostUnits = { month, used: 0, wakes: [] };
+  }
+
+  async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {
+    const done = this.keys.get(sessionId)?.get(idempotencyKey(HOST_MEMBER_ID, key));
+    const s = this.sessions.get(sessionId);
+    const event = done && s?.events.find((ev) => ev.cursor === done.cursor);
+    return event ? detach(event) : undefined;
   }
 
   /**
@@ -1768,6 +1983,7 @@ export class MemoryStore implements BellmanStore {
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
     this.applyExtras(s, event, extras);
+    this.wakeHost(s, event);
     return { outcome: "appended", event: detach(event) };
   }
 
@@ -1776,9 +1992,9 @@ export class MemoryStore implements BellmanStore {
    * it without yielding between their guard and their write. Same rule, and
    * the same reason, as liveGrant and waitForEvents.
    */
-  private appendNow(s: Session, e: Omit<SessionEvent, "cursor" | "at">): SessionEvent {
+  private appendNow(s: Session, e: Omit<SessionEvent, "cursor" | "at">, at = Date.now()): SessionEvent {
     const event: SessionEvent = {
-      ...detach(e), cursor: s.events.length + 1, at: Date.now(),
+      ...detach(e), cursor: s.events.length + 1, at,
     };
     s.events.push(event);
     // Housekeeping's books (#66), in the same synchronous stretch as the push so the event
@@ -1791,10 +2007,10 @@ export class MemoryStore implements BellmanStore {
     return event;
   }
 
-  async eventsAfter(sessionId: string, cursor: number): Promise<SessionEvent[]> {
+  async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
     if (!s) return [];
-    return detach(s.events.filter((e) => e.cursor > cursor));
+    return detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit));
   }
 
   async eventAt(sessionId: string, cursor: number): Promise<SessionEvent | undefined> {
@@ -1874,15 +2090,38 @@ export class MemoryStore implements BellmanStore {
   }
 
   async countCreatesThisMonth(userId: string): Promise<number> {
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    return (this.creates.get(userId) ?? []).filter((t) => t >= monthStart).length;
+    return this.countMonth(this.creates, userId);
   }
 
   async recordCreate(userId: string): Promise<void> {
-    const list = this.creates.get(userId) ?? [];
+    this.recordMonth(this.creates, userId);
+  }
+
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    // No await: the count and the record are one step, for seatMember's reason.
+    const held = this.hostedOpen.get(userId) ?? new Set<string>();
+    if (held.has(sessionId)) return { ok: true };
+    if (held.size >= limit) return { ok: false, open: held.size };
+    held.add(sessionId);
+    this.hostedOpen.set(userId, held);
+    return { ok: true };
+  }
+
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    this.hostedOpen.get(userId)?.delete(sessionId);
+  }
+
+  /** The monthly create count's rule, as `RegistryDO`'s `#countMonth` is, so the two cannot drift. */
+  private countMonth(counts: Map<string, number[]>, userId: string): number {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return (counts.get(userId) ?? []).filter((t) => t >= monthStart).length;
+  }
+
+  private recordMonth(counts: Map<string, number[]>, userId: string): void {
+    const list = counts.get(userId) ?? [];
     list.push(Date.now());
-    this.creates.set(userId, list);
+    counts.set(userId, list);
   }
 
   async listPresets(userId: string): Promise<SavedPreset[]> {
@@ -2062,6 +2301,37 @@ export class MemoryStore implements BellmanStore {
   }
 
   /**
+   * The Node server's heartbeat (#111, #188): for every room, what SessionDO's alarm
+   * does for one. `step` is `tickStep` from heartbeat.ts, handed in because that module
+   * imports this one; it decides, and this writes. Not on `BellmanStore`: the Workers
+   * store ticks by alarm.
+   *
+   * A room whose tick is not due is left alone, clock included. The caller runs this
+   * far more often than any cadence, and moving `lastTickAt` on every call would push
+   * every room's next tick back for good. A due room either gets its heartbeat, written
+   * as `#tickIfDue` writes it, or only its clock moved; the seat is woken after the
+   * write when the step says so. No awaits, for appendEvent's reason.
+   */
+  tick(now: number, step: (s: StoredSession, now: number) => TickStep): void {
+    for (const s of this.sessions.values()) {
+      if (s.closed || s.frozenAt !== null || s.manifest.heartbeatOnMs === null) continue;
+      if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
+      const r = step(s, now);
+      if (!r.due) continue;
+      (s as { lastTickAt?: number }).lastTickAt = now;
+      if (!r.write) continue;
+      const tick = this.appendNow(s, {
+        type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+        payload: r.payload, refId: null,
+      }, now);
+      if (!r.wakeHost) continue;
+      // The host's own clock moves only on a tick that wakes it (I3), in the same step as the tick.
+      (s as { lastHostTickAt?: number | null }).lastHostTickAt = now;
+      this.hostWoken({ sessionId: s.id, cause: "tick", cursor: tick.cursor });
+    }
+  }
+
+  /**
    * The purge (#65, D2), in the order the Durable Objects store keeps: the bytes first, then what
    * the rest of the store holds about the room, then the room. The first step is the only one that
    * can fail, and it fails before anything is forgotten, so a failed purge leaves a room the next
@@ -2076,6 +2346,7 @@ export class MemoryStore implements BellmanStore {
   private async purgeNow(s: Session, now: number): Promise<void> {
     await this.blobs.deleteAll(s.id);
     this.byCreator.get(s.createdBy)?.delete(s.id);
+    this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);

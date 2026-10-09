@@ -1,6 +1,7 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
+import { monthKey } from "../../src/stored-session.js";
 import { JOIN_CODE_TTL } from "../../src/store.js";
 
 export const anthropicAgent = {
@@ -69,6 +70,8 @@ export function session(over: Partial<Session> = {}): Session {
     orgOnly: false,
     joinCodes: { [manifest.defaultRole]: { code: "BELL-TEST-01", expiresAt: now + 15 * 60 * 1000 } },
     blobBytesCeiling: ENTITLEMENTS.team.blobBytesPerRoom,
+    hostUnitsPerMonth: 0,
+    hostUnits: { month: monthKey(now), used: 0, wakes: [] },
     closedAt: null,
     retainAfterCloseMs: null,
     purgeAt: null,

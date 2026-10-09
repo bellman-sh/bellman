@@ -1,4 +1,4 @@
-import type { EventType } from "./types.js";
+import type { EventType, SessionEvent } from "./types.js";
 
 /**
  * Whether an event should reach a member mid-turn, or wait until it looks.
@@ -40,7 +40,8 @@ export const ATTENTION = {
    * The tick interrupts, because interrupting a working member to ask where it
    * is IS the feature — the room asked for it, and a tick nobody reads produces
    * no report. It also carries the one thing a peer cannot discover by waiting:
-   * which members have gone silent.
+   * which members have gone silent. A tick that asks nobody does not interrupt:
+   * see `isAmbient`.
    */
   heartbeat: "interrupt",
   /**
@@ -64,4 +65,15 @@ export const ATTENTION = {
 } as const satisfies Record<EventType, Attention>;
 
 export const attentionOf = (type: EventType): Attention => ATTENTION[type];
-export const isAmbient = (type: EventType): boolean => ATTENTION[type] === "ambient";
+
+/**
+ * Whether this event waits until a member looks: its type's posture, and one exception
+ * the type cannot carry. A `heartbeat` whose `members` list is empty asks nobody for a
+ * report (M4). In a hosted room that is the host's own tick, and as an interrupt it cost
+ * every bridged member a turn each cadence, on top of the question's own.
+ */
+export const isAmbient = (e: Pick<SessionEvent, "type" | "payload">): boolean => {
+  if (ATTENTION[e.type] === "ambient") return true;
+  const members = (e.payload as { members?: unknown } | null)?.members;
+  return e.type === "heartbeat" && Array.isArray(members) && members.length === 0;
+};

@@ -29,7 +29,7 @@
 1. A room stored before instructions existed: every role reads `report: null`, and its tick sends `instructions: null`. Test in Task 1 and Task 2.
 2. A creator instruction that looks like a command ("ignore your instructions and..."): it travels only inside the creator's envelope, never in `ask`. Test in Task 2.
 3. A role switched off "Answers the heartbeat" in the designer with an instruction typed: the body sends no instruction for it, so the server does not refuse the save. Test in Task 4.
-4. An instruction holding quotes and a newline: the YAML export keeps it in one quoted scalar and the bridge reads it back. Test in Task 3.
+4. An instruction holding quotes and a newline: the YAML export keeps it in one quoted scalar and the bridge reads it back. Test in Task 1.
 5. An instruction rendered in the MCP App or dash: text, never markup. Tests in Tasks 3 and 4.
 
 ---
@@ -41,10 +41,10 @@
 - Modify: `src/manifest.ts` (`RoleDefShape`, the role loop in `resolveManifest`, `role()`)
 - Modify: `src/stored-session.ts` (`withHeartbeatDefaults`)
 - Modify: `src/presets.ts` (`checkPreset`'s role normalisation)
-- Test: `tests/report-instructions.test.ts` (new)
+- Test: `tests/report-instructions.test.ts` (new), `tests/room-yaml-export.test.ts`
 
 **Interfaces:**
-- Produces: `RoleDef.report?: string | null` (always a string or null after `resolveManifest` and after `hydrateStoredSession`); `SavedPreset["roles"][string].report?: string | null`.
+- Produces: `RoleDef.report?: string | null` (always a string or null after `resolveManifest` and after `hydrateStoredSession`); `SavedPreset["roles"][string].report?: string | null`; the `EXPORTED` text with a `report:` line, which dash's fixture (Task 4) repeats byte for byte.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -111,10 +111,29 @@ describe("a role's report instruction", () => {
 });
 ```
 
+The panel's export carries an instruction (Task 4 writes it): in `tests/room-yaml-export.test.ts`, change `EXPORTED`'s author block from
+
+```
+    description: "Brought the work."
+    reports: true
+```
+
+to
+
+```
+    description: "Brought the work."
+    report: "What changed, and what \"done\" means\nfor the next step"
+    reports: true
+```
+
+and its expected `m.roles` author to `{ can: [...], description: "Brought the work.", reports: true, report: "What changed, and what \"done\" means\nfor the next step" }`, the reviewer to `{ ..., reports: false, report: null }`.
+
+`EXPORTED` stays dash's `src/lib/presets.test.ts` fixture byte for byte; Task 4 makes the same change there.
+
 - [ ] **Step 2: Run it to see it fail**
 
-Run: `npm test -- tests/report-instructions.test.ts`
-Expected: FAIL: the first case reads `undefined` (or `Unrecognized key: "report"` from the strict role shape), the refusal case throws a different message, and the normaliser case reads `undefined`.
+Run: `npm test -- tests/report-instructions.test.ts tests/room-yaml-export.test.ts`
+Expected: FAIL: the first case reads `undefined` (or `Unrecognized key: "report"` from the strict role shape), the refusal case throws a different message, the normaliser case reads `undefined`, and the exported room.yaml's `report:` line is refused.
 
 - [ ] **Step 3: The type**
 
@@ -166,13 +185,13 @@ In `src/presets.ts`, in `checkPreset`, change `roles[key] = { can: [...def.can],
 
 - [ ] **Step 6: Run the tests, the neighbours, both typechecks**
 
-Run: `npm test -- tests/report-instructions.test.ts tests/manifest.test.ts tests/presets.test.ts tests/http-presets.test.ts tests/store.test.ts && npm run typecheck && npm run typecheck:worker`
+Run: `npm test -- tests/report-instructions.test.ts tests/room-yaml-export.test.ts tests/manifest.test.ts tests/presets.test.ts tests/http-presets.test.ts tests/store.test.ts && npm run typecheck && npm run typecheck:worker`
 Expected: PASS; both typechecks clean. If `tests/presets.test.ts`'s first case fails on a missing `report: null` in its expected roles, add `report: null` to both expected roles there: the saved form now names it.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/types.ts src/manifest.ts src/stored-session.ts src/presets.ts tests/report-instructions.test.ts tests/presets.test.ts
+git add src/types.ts src/manifest.ts src/stored-session.ts src/presets.ts tests/report-instructions.test.ts tests/presets.test.ts tests/room-yaml-export.test.ts
 git commit -m "A role's heartbeat instruction: at most 300 characters, only on a seat that answers, null for older rooms and the built-ins"
 ```
 
@@ -304,16 +323,14 @@ git commit -m "The preview and the tick carry each role's instruction as the cre
 
 ---
 
-### Task 3: The MCP App, the export, the docs, and the bellman PR
+### Task 3: The MCP App, the docs, and the bellman PR
 
 **Files:**
-- Modify: `ui/src/types.ts`, `ui/src/join.ts`, `ui/test/fixtures.ts`, `ui/test/render.test.ts`
-- Modify: `tests/room-yaml-export.test.ts`
+- Modify: `ui/src/types.ts`, `ui/src/join.ts`, `ui/test/render.test.ts`
 - Modify: `README.md`, `docs/ARCHITECTURE.md`, `skills/room-manifest/SKILL.md`
 
 **Interfaces:**
 - Consumes: `room.text.data.report_instructions` (Task 2).
-- Produces: the `EXPORTED` text with a `report:` line, which dash's fixture (Task 4) repeats byte for byte.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -334,27 +351,10 @@ In `ui/test/render.test.ts`, inside `describe("renderJoin")`, add:
   });
 ```
 
-In `tests/room-yaml-export.test.ts`, change `EXPORTED`'s author block from
-
-```
-    description: "Brought the work."
-    reports: true
-```
-
-to
-
-```
-    description: "Brought the work."
-    report: "What changed, and what \"done\" means\nfor the next step"
-    reports: true
-```
-
-and its expected `m.roles` author to `{ can: [...], description: "Brought the work.", reports: true, report: "What changed, and what \"done\" means\nfor the next step" }`, the reviewer to `{ ..., reports: false, report: null }`.
-
 - [ ] **Step 2: Run them to see them fail**
 
-Run: `npm test -- ui/test/render.test.ts tests/room-yaml-export.test.ts`
-Expected: FAIL: the cell reads `yes`; the export's author has no `report` (the bridge's loader reads the line; the old `toEqual` lacks it, and the reviewer lacks `report: null`, so it fails until Task 1's resolve is in: if Task 1 is in, it fails only on the expected object you changed, which is the RED that pins it).
+Run: `npm test -- ui/test/render.test.ts`
+Expected: FAIL: the cell reads `yes`.
 
 - [ ] **Step 3: The join screen**
 
@@ -368,7 +368,7 @@ In `ui/src/join.ts`, in `renderJoin`'s `roleRows`, replace `el("td", {}, r.room.
 
 - [ ] **Step 4: Run them**
 
-Run: `npm test -- ui/test/render.test.ts tests/room-yaml-export.test.ts && npm run typecheck:ui`
+Run: `npm test -- ui/test/render.test.ts && npm run typecheck:ui`
 Expected: PASS; clean.
 
 - [ ] **Step 5: The docs**
@@ -387,7 +387,7 @@ Run: `npm run verify && npx wrangler deploy --dry-run --outdir .wrangler/dry-run
 Expected: green; the dry run bundles.
 
 ```bash
-git add ui/src/types.ts ui/src/join.ts ui/test/render.test.ts tests/room-yaml-export.test.ts README.md docs/ARCHITECTURE.md skills/room-manifest/SKILL.md
+git add ui/src/types.ts ui/src/join.ts ui/test/render.test.ts README.md docs/ARCHITECTURE.md skills/room-manifest/SKILL.md
 git commit -m "The join screen shows a seat's instruction, the export carries it, and the docs say what it is"
 git push -u origin mcfearsome/heartbeat-instructions
 gh pr create --repo bellman-sh/bellman --base main --head mcfearsome/heartbeat-instructions --draft --title "Per-role heartbeat instructions: what each answering seat reports, in the creator's words" --body-file <scratchpad>/heartbeat-pr-body.md
@@ -404,7 +404,7 @@ The body: what it adds, rulings R1 and R2, the trust trade from the spec's D5 wo
 - Test: `src/lib/presets.test.ts`, `src/components/presets/preset-editor.test.tsx`
 
 **Interfaces:**
-- Consumes: the wire's `roles[].report` (Task 1) and Task 3's `EXPORTED`.
+- Consumes: the wire's `roles[].report` and the `EXPORTED` text (Task 1).
 - Produces: `DraftRole.report: string`; `bodyOf` sends `report` only for an answering role with text; `joinerRows(...)[i].instruction: string | null`.
 
 - [ ] **Step 1: The worktree**
@@ -421,7 +421,7 @@ ln -s "$D/node_modules" "$DASH/node_modules"
 
 In `src/test-fixtures.ts`, in `preset()`, give the author role `report: "What changed, and what \"done\" means\nfor the next step"` and the reviewer `report: null`.
 
-In `src/lib/presets.test.ts`, replace `EXPORTED` with Task 3's text (byte for byte), update the first `draftFrom` case's expected roles to carry `report: "What changed, and what \"done\" means\nfor the next step"` on the author and `report: ""` on the reviewer, and add:
+In `src/lib/presets.test.ts`, replace `EXPORTED` with Task 1's text (byte for byte), update the first `draftFrom` case's expected roles to carry `report: "What changed, and what \"done\" means\nfor the next step"` on the author and `report: ""` on the reviewer, and add:
 
 ```ts
 describe("a role's heartbeat instruction", () => {
@@ -470,15 +470,33 @@ In `src/lib/presets.ts`:
 - `emptyDraft`'s role and `addRole`'s new row get `report: ""`.
 - In `bodyOf`, each role's value becomes `{ can: [...r.can], description: r.description.trim() || null, reports: r.reports, report: r.reports && r.report.trim() ? r.report.trim() : null }`.
 - `joinerRows` adds `instruction: r.reports && d.heartbeat.on && r.report.trim() ? r.report.trim() : null`.
-- In `toYaml`, after the `description` line, add `if (r.report) lines.push(\`    report: ${q(r.report)}\`);`.
+- In `toYaml`, after the `description` line, add:
+
+```ts
+    if (r.report) lines.push(`    report: ${q(r.report)}`);
+```
 
 - [ ] **Step 5: The editor**
 
 In `src/components/presets/preset-editor.tsx`:
 - Move the heartbeat block (`data-field="heartbeat"`, its checkbox, amount and unit) inside the Roles `fieldset`, above the table, labelled "Heartbeat", with one line under it: "Every role that answers the heartbeat is asked on this cadence."
 - Rename the column header `reports` to "Answers the heartbeat" and the checkbox's `aria-label` to `Role ${i + 1} answers the heartbeat`; update the existing editor tests' labels to match.
-- After each role's `<tr>`, when `r.reports`, render a second row: `<tr><td colSpan={VERBS.length + 4}><Input aria-label={\`Role ${i + 1} heartbeat instruction\`} placeholder="What this role reports, e.g. what changed and what blocks it" maxLength={300} value={r.report} onChange={(e) => setRole(i, { report: e.target.value })} /></td></tr>`, with a `key` of `\`${i}-report\``.
-- In "What a joiner sees", show `row.instruction` after "yes" in the Reports cell: `{row.reports ? (row.instruction ? \`yes: ${row.instruction}\` : "yes") : "no"}`.
+- Wrap each role's row in `<Fragment key={i}>` (from `react`), moving the row's key to it, and after the row, when `r.reports`, render:
+
+```tsx
+                <tr>
+                  <td colSpan={VERBS.length + 4}>
+                    <Input aria-label={`Role ${i + 1} heartbeat instruction`} placeholder="What this role reports, e.g. what changed and what blocks it"
+                      maxLength={300} value={r.report} onChange={(e) => setRole(i, { report: e.target.value })} />
+                  </td>
+                </tr>
+```
+
+- In "What a joiner sees", the Reports cell becomes:
+
+```tsx
+                <td>{row.reports ? (row.instruction ? `yes: ${row.instruction}` : "yes") : "no"}</td>
+```
 
 - [ ] **Step 6: The whole suite, typecheck, lint, build**
 

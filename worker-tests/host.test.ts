@@ -2,8 +2,9 @@ import { it, expect, afterEach, beforeEach, vi } from "vitest";
 import { env, reset, runInDurableObject, runDurableObjectAlarm, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { HostDO } from "../src/host-do.js";
-import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL } from "../src/host.js";
+import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
+import type { SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -16,11 +17,27 @@ const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 
  * Only a POST to the Messages API matches, one queued reply each, in order. Anything
  * else throws, as `disableNetConnect` did, and is recorded: the seat retries a model it
  * cannot reach, so the throw alone would not fail a case. A stray call or a reply left
- * unread fails the test in `afterEach`, as `assertNoPendingInterceptors` did.
+ * unread fails the test in `afterEach`, as `assertNoPendingInterceptors` did. A held
+ * reply (`modelHolds`) is given only once the test releases it.
+ *
+ * The hold is a flag polled on a timer, not a promise: a promise made in the test's
+ * request and awaited in the seat's alarm crosses workerd request contexts, and the
+ * runtime crashes ("Promise callback destroyed itself").
  */
-const replies: { status: number; text: string }[] = [];
+type Reply = { status: number; text: string; held?: boolean; asked?: boolean };
+const replies: Reply[] = [];
 const stray: string[] = [];
 const modelAnswers = (text: string, status = 200) => { replies.push({ status, text }); };
+
+/** A reply the model gives only once `release` is called. `asked()` waits until the seat has called for it. */
+function modelHolds(text: string) {
+  const reply: Reply = { status: 200, text, held: true, asked: false };
+  replies.push(reply);
+  return {
+    asked: () => vi.waitFor(() => expect(reply.asked).toBe(true), { timeout: 5_000, interval: 5 }),
+    release: () => { reply.held = false; },
+  };
+}
 
 beforeEach(() => {
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -30,6 +47,8 @@ beforeEach(() => {
       stray.push(`${req.method} ${req.url}`);
       throw new Error(`the model stub has no reply for ${req.method} ${req.url}`);
     }
+    reply.asked = true;
+    while (reply.held) await new Promise((r) => setTimeout(r, 5));
     return Response.json(reply.status === 200 ? { content: [{ type: "text", text: reply.text }] } : { error: { type: "rate_limit" } },
       { status: reply.status });
   });
@@ -63,10 +82,53 @@ async function tick(stub: DurableObjectStub<SessionDO>) {
   await runDurableObjectAlarm(stub);
 }
 
+/** Wait for the seat to drain its queue: nothing pending and no alarm armed. The alarm it arms for now fires by itself. */
+const seatIdle = (host: DurableObjectStub<HostDO>) =>
+  vi.waitFor(async () => {
+    const [pending, alarm] = await runInDurableObject(host, async (_i: HostDO, ctx) =>
+      [await ctx.storage.get<HostWake[]>("pending"), await ctx.storage.getAlarm()] as const);
+    expect(pending ?? []).toEqual([]);
+    expect(alarm).toBeNull();
+  }, { timeout: 5_000, interval: 10 });
+
+/** Wait for the seat to back off: its alarm armed for a retry, a backoff ahead rather than now. */
+const retryArmed = (host: DurableObjectStub<HostDO>) =>
+  vi.waitFor(async () => {
+    const alarm = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.getAlarm());
+    expect(alarm).toBeGreaterThan(Date.now() + 30_000);
+  }, { timeout: 5_000, interval: 10 });
+
+/** What the host has written into the room after `cursor`. */
+const hostSaid = async (store: DurableObjectStore, id: string, cursor = 0) =>
+  (await store.eventsAfter(id, cursor)).filter((e) => e.fromMemberId === HOST_MEMBER_ID);
+
+/**
+ * Append through the room with its outbox's inline delivery held, as heartbeat-tick.test.ts's
+ * `fireHeld` holds a tick's: the wake the event owes stays queued, so the test delivers it itself.
+ */
+const appendHeld = (stub: DurableObjectStub<SessionDO>, e: Omit<SessionEvent, "cursor" | "at">) =>
+  runInDurableObject(stub, async (i: SessionDO) => {
+    const driver = (i as unknown as { driver: { deliverNow(): Promise<void> } }).driver;
+    const deliverNow = driver.deliverNow;
+    driver.deliverNow = async () => {};
+    try {
+      return (await i.appendEvent(e))!;
+    } finally {
+      driver.deliverNow = deliverNow;
+    }
+  });
+
+const replyTo = (cursor: number): Omit<SessionEvent, "cursor" | "at"> =>
+  ({ type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "a parser" }, refId: String(cursor) });
+const heartbeat: Omit<SessionEvent, "cursor" | "at"> =
+  { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null };
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 it("a tick wakes the host, which asks a question in the room with the tick as its ref", async () => {
-  const { store, id, stub } = await hostedRoom();
+  const { store, id, stub, host } = await hostedRoom();
   modelAnswers("What did you ship this week?");
   await tick(stub);
+  await seatIdle(host);
   const events = await store.eventsAfter(id, 0);
   const heartbeat = events.find((e) => e.type === "heartbeat")!;
   const q = events.find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
@@ -75,13 +137,14 @@ it("a tick wakes the host, which asks a question in the room with the tick as it
 });
 
 it("a reply wakes the host, which answers in the thread", async () => {
-  const { store, id, stub } = await hostedRoom();
+  const { store, id, stub, host } = await hostedRoom();
   modelAnswers("Ask me anything.");
   await tick(stub);
+  await seatIdle(host);
   const q = (await store.eventsAfter(id, 0)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
   modelAnswers("Nice, tell us more.");
   await store.appendEvent(id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "a parser" }, refId: String(q.cursor) });
-  await new Promise((r) => setTimeout(r, 200));
+  await seatIdle(host);
   const answer = (await store.eventsAfter(id, q.cursor)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
   expect(answer).toMatchObject({ refId: String(q.cursor), payload: { kind: "answer", text: "Nice, tell us more." } });
   expect((await store.getSession(id))!.hostUnits.used).toBe(2);
@@ -91,6 +154,7 @@ it("backs off on a 429 and asks on the retry; a redelivered wake asks nothing tw
   const { store, id, stub, host } = await hostedRoom();
   modelAnswers("", 429);
   await tick(stub);
+  await retryArmed(host);
   expect((await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toEqual([]);
   const armed = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.getAlarm());
   expect(armed).not.toBeNull();
@@ -100,6 +164,7 @@ it("backs off on a 429 and asks on the retry; a redelivered wake asks nothing tw
   expect(asked).toHaveLength(1);
   const heartbeat = (await store.eventsAfter(id, 0)).find((e) => e.type === "heartbeat")!;
   await host.wake({ sessionId: id, cause: "tick", cursor: heartbeat.cursor }, "host:tick:redelivered");
+  await seatIdle(host);
   expect((await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toHaveLength(1);
 });
 
@@ -107,6 +172,7 @@ it("drops a wake for a frozen room without calling the model", async () => {
   const { store, id, stub, host } = await hostedRoom();
   await store.freezeSession(id, Date.now());
   await host.wake({ sessionId: id, cause: "tick", cursor: 1 }, "host:tick:1");
+  await seatIdle(host);
   expect(await store.eventsAfter(id, 0)).toEqual([]);
   void stub;
 });
@@ -119,9 +185,97 @@ it("a spent month gets one notice outside the meter, then silence", async () => 
   });
   // No reply queued: the meter refuses before the model is called, and a call would be a stray one.
   await host.wake({ sessionId: id, cause: "tick", cursor: 1 }, "host:tick:1");
+  await seatIdle(host);
   const notices = (await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID);
   expect(notices).toHaveLength(1);
   expect(notices[0].payload).toMatchObject({ kind: "notice", text: expect.stringMatching(/used its 10 units/) });
   await host.wake({ sessionId: id, cause: "tick", cursor: 2 }, "host:tick:2");
+  await seatIdle(host);
   expect((await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID)).toHaveLength(1);
+});
+
+it("a member's reply returns without waiting for the model, and the answer lands once the model answers", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_quick");
+  modelAnswers("Ask me anything.");
+  await tick(stub);
+  await seatIdle(host);
+  const [q] = await hostSaid(store, id);
+  const answer = modelHolds("Nice, tell us more.");
+  const appended = store.appendEvent(id, replyTo(q.cursor)).then(() => "returned", (err: unknown) => `threw: ${err}`);
+  // Observed while the model is held, asserted once the room and the seat are quiet: a case
+  // that fails with a call in flight leaves objects the pool aborts mid-call, and workerd crashes.
+  let first = "";
+  let whileHeld: SessionEvent[] = [];
+  try {
+    // Bounded, because a reply whose delivery makes the model call waits on the hold.
+    first = await Promise.race([appended, sleep(2_000).then(() => "still waiting on the model")]);
+    await answer.asked();
+    whileHeld = await hostSaid(store, id, q.cursor);
+  } finally {
+    answer.release();
+  }
+  await appended;
+  await seatIdle(host);
+  expect(first).toBe("returned");
+  expect(whileHeld).toEqual([]);
+  expect(await hostSaid(store, id, q.cursor)).toMatchObject([{ refId: String(q.cursor), payload: { kind: "answer", text: "Nice, tell us more." } }]);
+});
+
+it("a wake delivered while another is being handled waits its turn, and the seat keeps what both did", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_pair");
+  modelAnswers("Ask me anything.");
+  await tick(stub);
+  await seatIdle(host);
+  const [q] = await hostSaid(store, id);
+  const answer = modelHolds("Nice, tell us more.");
+  modelAnswers("What did you learn?");
+  const replied = store.appendEvent(id, replyTo(q.cursor));
+  let beat!: SessionEvent;
+  let whileHeld: SessionEvent[] = [];
+  try {
+    await answer.asked();
+    // A tick lands while the reply's model call is held; its wake is delivered by hand, so
+    // it reaches the seat now rather than behind the reply in the room's outbox.
+    beat = await appendHeld(stub, heartbeat);
+    await host.wake({ sessionId: id, cause: "tick", cursor: beat.cursor }, `host:tick:${beat.cursor}`);
+    whileHeld = await hostSaid(store, id, q.cursor);
+  } finally {
+    answer.release();
+  }
+  await replied;
+  await seatIdle(host);
+  expect(whileHeld).toEqual([]);
+  expect((await hostSaid(store, id, q.cursor)).map((e) => [e.refId, e.payload])).toEqual([
+    [String(q.cursor), { kind: "answer", text: "Nice, tell us more." }],
+    [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
+  ]);
+  const record = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.get<HostRecord>("state"));
+  expect(record!.questions.map(({ text, answers }) => ({ text, answers }))).toEqual([
+    { text: "Ask me anything.", answers: 1 },
+    { text: "What did you learn?", answers: 0 },
+  ]);
+  expect(record!.lastCause).toBe(beat.cursor);
+});
+
+it("wakes queued before the seat's alarm runs are all handled, in the order they came", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_two");
+  modelAnswers("Ask me anything.");
+  await tick(stub);
+  await seatIdle(host);
+  const [q] = await hostSaid(store, id);
+  const reply = await appendHeld(stub, replyTo(q.cursor));
+  const beat = await appendHeld(stub, heartbeat);
+  modelAnswers("Nice, tell us more.");
+  modelAnswers("What did you learn?");
+  // Both queued in one request: it awaits only storage, so the alarm the first wake arms
+  // cannot fire before the second is queued, and the second arms none of its own.
+  await runInDurableObject(host, async (i: HostDO) => {
+    await i.wake({ sessionId: id, cause: "reply", cursor: reply.cursor }, `host:reply:${reply.cursor}`);
+    await i.wake({ sessionId: id, cause: "tick", cursor: beat.cursor }, `host:tick:${beat.cursor}`);
+  });
+  await seatIdle(host);
+  expect((await hostSaid(store, id, q.cursor)).map((e) => [e.refId, e.payload])).toEqual([
+    [String(q.cursor), { kind: "answer", text: "Nice, tell us more." }],
+    [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
+  ]);
 });

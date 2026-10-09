@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS,
   hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
-  questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision,
+  questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue,
 } from "../src/host.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 import type { SessionEvent } from "../src/types.js";
@@ -143,6 +143,17 @@ describe("decide", () => {
   it("skips any wake in a room that declares no host", () => {
     const bare = { ...room(), manifest: roomManifest() };
     expect(decide(emptyHostState(), tick(9), bare, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/no host/) });
+  });
+});
+
+describe("the seat's queue", () => {
+  it("takes a wake unless its cause is already handled or already queued", () => {
+    const wake = (cursor: number) => ({ sessionId: "qs_test", cause: "tick" as const, cursor });
+    const handled = { ...emptyHostRecord(), lastCause: 9 };
+    expect(joinsQueue(handled, [], wake(10))).toBe(true);
+    expect(joinsQueue(handled, [], wake(9))).toBe(false);
+    expect(joinsQueue(handled, [wake(10)], wake(10))).toBe(false);
+    expect(joinsQueue(handled, [wake(10)], wake(11))).toBe(true);
   });
 });
 

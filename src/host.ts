@@ -200,15 +200,29 @@ export const RETRY_MS: readonly number[] = [60_000, 300_000, 900_000];
 /** Model calls one wake may have, in either driver: the first and three retries, so 4. The spec's "three attempts" are the retries. */
 export const MAX_ATTEMPTS = 1 + RETRY_MS.length;
 
-/** What a seat keeps between wakes (spec D4): its loop state, the wake it is retrying, the failed calls that wake has had, and the month of its last notice. */
-export interface HostRecord extends HostState { pending: HostWake | null; attempts: number; noticed: string | null }
+/**
+ * What a seat keeps between wakes (spec D4): its loop state, the failed calls the wake at
+ * the head of its queue has had, and the month of its last notice. The queue itself is
+ * kept beside it, by the driver, because a wake joins the queue while the head is being
+ * handled, and a record saved after a model call would put back a queue read before it.
+ */
+export interface HostRecord extends HostState { attempts: number; noticed: string | null }
 
-export const emptyHostRecord = (): HostRecord => ({ ...emptyHostState(), pending: null, attempts: 0, noticed: null });
+export const emptyHostRecord = (): HostRecord => ({ ...emptyHostState(), attempts: 0, noticed: null });
+
+/**
+ * Whether a delivered wake joins the seat's queue (spec D6): not when its cause is already
+ * handled, nor when it is already queued, which is how an at-least-once delivery is
+ * acknowledged and dropped. The queue is handled in order, one wake at a time.
+ */
+export const joinsQueue = (record: HostRecord, pending: readonly HostWake[], wake: HostWake): boolean =>
+  wake.cursor > record.lastCause && !pending.some((w) => w.cursor === wake.cursor);
 
 /**
  * What a runtime does for `handleWake` (spec D7). `HostDO` reads and writes the room by
- * RPC and keeps the record in its own storage, under its own alarm; `MemoryHost` does the
- * same over a `MemoryStore`, a map and a timer. Every decision is `handleWake`'s.
+ * RPC and keeps the record in its own storage; `MemoryHost` does the same over a
+ * `MemoryStore` and a map. Each queues its wakes and handles them one at a time, on its
+ * alarm or on a timer, through `handleWake`, which makes every decision.
  */
 export interface HostDriver {
   /** The delay before each retry, in order: `RETRY_MS`, or shorter in a test. */
@@ -219,8 +233,6 @@ export interface HostDriver {
   write(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend>;
   load(sessionId: string): Promise<HostRecord>;
   save(sessionId: string, record: HostRecord): Promise<void>;
-  /** Run the record's pending wake again in `inMs`. */
-  schedule(sessionId: string, inMs: number): Promise<void>;
 }
 
 /** One Messages API call, as both drivers make it. `fetcher` is the runtime's `fetch`, so a network failure throws. */
@@ -239,22 +251,25 @@ export async function callMessages(
 }
 
 /**
- * One wake, start to finish (spec D4–D6), whichever driver runs it.
+ * One wake, start to finish (spec D4–D6), whichever driver runs it. Returns how long to
+ * wait before running the same wake again, or null when it is done with.
  *
- * Settled, meaning `lastCause` raised to the wake's cursor and nothing pending, when the
- * room is gone, `decide` skips, the month cannot pay, the model's answer is unreadable,
- * or the room refuses the write. The meter is read before the model is called, so a wake
- * the month cannot pay for costs no call; the room charges again in the write's own
- * transaction, and that charge is the one that counts. A 429, a 5xx or a model that
- * cannot be reached is the model's failure: the wake is kept as pending and run again
- * after the next of `driver.retryMs`, up to MAX_ATTEMPTS calls, then settled. Anything
- * else that throws (the room, the record) propagates, and the room's outbox delivers the
- * wake again, which `lastCause` makes safe.
+ * Settled, meaning `lastCause` raised to the wake's cursor and the attempts cleared, when
+ * the room is gone, `decide` skips, the month cannot pay, the model's answer is
+ * unreadable, or the room refuses the write. The meter is read before the model is
+ * called, so a wake the month cannot pay for costs no call; the room charges again in the
+ * write's own transaction, and that charge is the one that counts. A 429, a 5xx or a
+ * model that cannot be reached is the model's failure: the attempt is counted and the
+ * next of `driver.retryMs` returned, up to MAX_ATTEMPTS calls, then settled. Anything
+ * else that throws (the room, the record) propagates and leaves the wake queued, for the
+ * driver to run again; `lastCause` makes a second run of a handled wake a skip.
  */
-export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<void> {
+export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<number | null> {
   const record = await driver.load(wake.sessionId);
-  const settle = (r: HostRecord) =>
-    driver.save(wake.sessionId, { ...r, lastCause: Math.max(r.lastCause, wake.cursor), pending: null, attempts: 0 });
+  const settle = async (r: HostRecord): Promise<null> => {
+    await driver.save(wake.sessionId, { ...r, lastCause: Math.max(r.lastCause, wake.cursor), attempts: 0 });
+    return null;
+  };
 
   const { room, events } = await driver.read(wake.sessionId);
   if (!room) return settle(record);
@@ -287,8 +302,8 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
   const res = await driver.callModel(messagesBody(host.model, prompt)).catch(() => null);
   if (res === null || res.status === 429 || res.status >= 500) {
     if (record.attempts + 1 >= MAX_ATTEMPTS) return settle(record);
-    await driver.save(wake.sessionId, { ...record, pending: wake, attempts: record.attempts + 1 });
-    return driver.schedule(wake.sessionId, driver.retryMs[record.attempts]);
+    await driver.save(wake.sessionId, { ...record, attempts: record.attempts + 1 });
+    return driver.retryMs[record.attempts];
   }
   const text = parseModelText(res.json);
   if (text === null) return settle(record);
@@ -300,5 +315,6 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
   }, units, now);
   if (!written.ok) return settle(written.reason === "units" ? await notice(written.used, written.allowed) : record);
   const next = applyDecision(record, decision, { cursor: written.event.cursor, text }, now);
-  await driver.save(wake.sessionId, { ...record, ...next, pending: null, attempts: 0 });
+  await driver.save(wake.sessionId, { ...record, ...next, attempts: 0 });
+  return null;
 }

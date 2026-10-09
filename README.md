@@ -131,6 +131,8 @@ Max and team buy a hosted seat: a member Bellman runs, labelled `host@bellman` w
 
 A hosted seat is metered in wakes, one model call each, weighted by the model: Haiku 1, Sonnet 3, Opus 5. A hosted room spends up to 3,000 units a month and ticks no faster than once an hour; an Opus host at an hourly beat, in a room that replies to every question, is quiet after six days, and at a daily beat it lasts the month. It sends eight times an hour at most. A plan's hosted rooms are the most its holder has open at once: a hosted room takes a slot when it is created and gives it back when it closes, so a creator on max can start a fourth once one of three has ended. A room's units for each month come from its creator's plan as it is when the month begins: a creator still on max or team gets the month's 3,000, and one whose plan no longer includes a hosted seat gets none, so the host posts one notice saying it is paused and calls no model until a month begins on a plan that includes it again. A month that runs out gets one notice from the host, outside the meter, and then quiet until the month turns. A wake the meter would refuse costs no model call, and an answer the model cut off at its token cap, or declined, is never posted or charged.
 
+The hosted seat is off unless `BELLMAN_HOSTED_SEAT = "on"`. Off, `bellman_start` refuses any room that declares a host, however it was declared, with `hosted seats are not available yet`, and a hosted room that already exists is never woken to the model. To turn it on, set the var under `[vars]` in `wrangler.toml`, a commit rather than a secret so that turning it on is reviewed, and set the model key with `npx wrangler secret put ANTHROPIC_API_KEY`. Anything but `on` is off, and a value that is neither `on` nor `off` is logged.
+
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
 A room's blob ceiling is stamped on the room when it is created, from the plan that creates it, so every member shares it whatever their own plan, and it never counts against the monthly figure. The local Node server (`npm start`) serves the upload and download routes too, over an in-memory blob store.
@@ -151,7 +153,7 @@ npm run smoke              # end-to-end two-provider simulation (server must be 
 
 **Local-dev bearer keys**, live only while `BELLMAN_KEYS` is unset: `qk_dev_jesse` (team admin, org_codenerd), `qk_dev_peer` (free, org_codenerd), `qk_dev_outsider` (free, no org).
 
-**A hosted seat runs locally too.** `npm start` points it at a fake model the server serves itself, `POST /__fake-model`, so it needs no key and spends none, even with `ANTHROPIC_API_KEY` exported; set `BELLMAN_REAL_MODEL=1` beside the key to call Anthropic's Messages API, or `MODEL_URL` to send the calls somewhere else. It prints which one it chose at startup. `qk_dev_jesse` is on team, so it can start a `social` room, which asks its first question an hour after it is created.
+**A hosted seat runs locally too, once it is switched on.** It is off here as it is in production: `BELLMAN_HOSTED_SEAT=on npm start` points it at a fake model the server serves itself, `POST /__fake-model`, so it needs no key and spends none, even with `ANTHROPIC_API_KEY` exported; set `BELLMAN_REAL_MODEL=1` beside the key to call Anthropic's Messages API, or `MODEL_URL` to send the calls somewhere else. It prints which one it chose at startup, or that the seat is off. `qk_dev_jesse` is on team, so it can start a `social` room, which asks its first question an hour after it is created.
 
 Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** source of truth — the dev table stops resolving, and a malformed map rejects every request rather than falling back. **Every deployment must set it.**
 
@@ -353,8 +355,9 @@ which the server appends a `heartbeat` tick saying who has reported and who has
 gone quiet, and `reports: true` on a role says members in that seat must answer
 it, by sending `progress` — so that role must hold `send`, and a manifest that
 asks a verbless seat for reports is refused. With no `heartbeat_on` there is
-no tick and `reports` asks for nothing. No preset sets `reports`, and only
-`social` sets `heartbeat_on`, for its host; a cite may set `heartbeat_on` only for
+no tick and `reports` asks for nothing. No built-in preset sets `reports`, and only
+`social` sets `heartbeat_on`, for its host; a saved preset carries either, as an
+authored manifest does. A cite may set `heartbeat_on` only for
 a preset with a host, `social` or a saved preset carrying a `host` block, and a
 cite of any other preset that sets it is refused, since nothing there would tick
 or the preset already holds its author's cadence. A joiner sees both before it
@@ -399,6 +402,42 @@ for the host in its prompt, which ends saying those rules outrank them; they
 cannot give it a tool or a verb, or a name: the host is `host@bellman` whatever
 its role is called.
 
+A room can also ask the server to notice when it has gone quiet. A top-level
+`housekeeping` block, beside authored roles or a cited preset, sets up to three
+thresholds and an optional repeat window:
+
+```yaml
+housekeeping:
+  quiet_after: 2h       # a member has sent nothing for this long
+  answer_within: 30m    # an action request is still unanswered after this long
+  idle_after: 1d        # no member has sent anything for this long
+  repeat_after: 4h      # optional: how long before a finding that still holds is named again
+```
+
+Each value is a whole number of `s`, `m`, `h` or `d`, from 5 minutes to 7 days.
+A threshold left out turns its finding off, a block with no threshold turns
+housekeeping off, and no built-in preset sets it. When a threshold passes the server
+appends a `housekeeping` event naming the member, the request's cursor or the
+room, once per window: `repeat_after` is the window for a finding that still
+holds, and defaults to the threshold that raised it, so a `repeat_after` shorter
+than a threshold repeats that often, by design. Of one member's unanswered
+requests the three oldest are named, and the next once an older one is answered, so
+a member cannot fill every window by asking more. A finding ends with its
+condition: the member sends, the request is answered or its sender leaves, a
+member writes to the room. A thaw restarts the clocks, because nobody can send
+in a frozen room and a freeze is never counted as silence. The server proposes
+and never acts: nothing is sent, answered, closed or removed, and what to do
+about a finding is a member's call, under the verb that member already holds. A
+joiner sees the thresholds before accepting a seat: the connect preview carries
+`housekeeping`, each threshold in seconds (`null` where off, and the whole block
+`null` when the room names no one), and the join page says so in a line.
+
+Housekeeping counts people. A hosted seat is never named quiet, what it says is not
+activity (a room only the host speaks in reads idle), and a proposal never wakes it. The Node
+server (`npm start`) keeps the books these findings are read from and raises nothing: its tick
+loop does not run housekeeping, so a housekeeping room shows no proposal there. Run the room
+under `npm run dev:worker` to see one.
+
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it
@@ -418,7 +457,7 @@ a `default_role` naming no role are all reported by the server, which
 means that request does cross the wire and comes back an error. Only the
 parsed object reaches the server, which has no YAML parser.
 
-**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset may carry a `host` block, as a clone of `social` does; a room started from it meets the plan a hosted seat needs and takes one of your hosted rooms, exactly as a manifest that declares one does. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
+**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. A saved preset can carry a cadence and a `housekeeping` block as an authored manifest does; a `housekeeping` block beside the cite replaces the preset's whole, an empty one turns it off, and a cite with none, or a null one, keeps the preset's own. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset may carry a `host` block, as a clone of `social` does; a room started from it meets the plan a hosted seat needs and takes one of your hosted rooms, exactly as a manifest that declares one does. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
 
 ### When a plan lapses
 

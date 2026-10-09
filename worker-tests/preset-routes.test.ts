@@ -5,6 +5,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
 import worker from "../src/worker.js";
+import { DurableObjectStore } from "../src/store-do.js";
+import type { SavedPreset } from "../src/types.js";
 
 const ORIGIN = "https://mcp.example.test";
 const KEY = "qk_ws_test";
@@ -30,5 +32,36 @@ describe("the preset routes through the Worker", () => {
     expect(saved.status, await saved.clone().text()).toBe(200);
     const mine = ((await (await call("/presets", { headers: auth })).json()) as { mine: { name: string }[] }).mine;
     expect(mine.map((p) => p.name)).toEqual(["solo_lead"]);
+  });
+});
+
+// Housekeeping (#66). The registry keeps a row for as long as its owner does, so a preset saved
+// before the field existed has no such key. Both reads hand it back as it was written, as they do a
+// row saved before hosted seats reached the presets and has no `host`: the key is optional, and an
+// absent one is read as none where it is used (`asManifest`), not invented here.
+describe("a preset saved before housekeeping existed", () => {
+  const legacy = (): SavedPreset => ({
+    name: "old_review",
+    description: null,
+    mode: "pair",
+    heartbeat_on: "5m",
+    roles: { lead: { can: ["send"], description: null, reports: false } },
+    default_role: "lead",
+    creator_role: "lead",
+    updated_at: "2026-10-09T12:00:00.000Z",
+  });
+
+  it("reads as it was written, by get and by list, with no key invented for it", async () => {
+    const store = new DurableObjectStore(env as never);
+    await store.putPreset("u_old", legacy(), 20);
+    expect(await store.getPreset("u_old", "old_review")).toEqual(legacy());
+    expect(await store.listPresets("u_old")).toEqual([legacy()]);
+  });
+
+  it("keeps a block a row does hold", async () => {
+    const store = new DurableObjectStore(env as never);
+    await store.putPreset("u_new", { ...legacy(), housekeeping: { quiet_after: "2h" } }, 20);
+    expect((await store.getPreset("u_new", "old_review"))!.housekeeping).toEqual({ quiet_after: "2h" });
+    expect((await store.listPresets("u_new")).map((p) => p.housekeeping)).toEqual([{ quiet_after: "2h" }]);
   });
 });

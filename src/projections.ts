@@ -93,8 +93,9 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  *
  * The spine (preset, mode, role keys, verbs, cadence, whether this seat reports)
  * is server-validated — role keys match a short snake_case regex, verbs come
- * from a closed enum, and the cadence is a parsed number — so it ships as fact,
- * and all it can carry is identifiers, enum values, a number and a boolean. The skin
+ * from a closed enum, and the cadence and the housekeeping thresholds are parsed
+ * numbers — so it ships as fact, and all it can carry is identifiers, enum values,
+ * numbers and a boolean. The skin
  * (room, purpose, descriptions) is creator-authored prose and goes inside the
  * same untrusted envelope as a brief, because it reaches the joiner's model
  * before their human has approved anything.
@@ -131,6 +132,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  */
 export function roomPreview(session: StoredSession, viewerRole: string | null) {
   const m = session.manifest;
+  const seconds = (ms: number | null): number | null => (ms === null ? null : Math.round(ms / 1000));
   const creator = session.members[0];
   /**
    * Whether a seat is asked to report. Shown before a joiner's human accepts
@@ -167,7 +169,18 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
     mode: m.mode,
     your_role: viewerRole,
     your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
-    heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
+    heartbeat_on_seconds: seconds(m.heartbeatOnMs),
+    // What the room names its members for (#66): the thresholds past which the server proposes that a
+    // member is quiet, a request unanswered or the room idle, in seconds as the cadence is, and null
+    // for a room that names nothing. Shown here for the cadence's reason, as this is the consent point:
+    // a member that will be named quiet every two hours while it sends nothing has to be able to see
+    // that before its human accepts the seat. Numbers the server parsed, so nothing authored rides in it.
+    housekeeping: m.housekeeping === null ? null : {
+      quiet_after_seconds: seconds(m.housekeeping.quietAfterMs),
+      answer_within_seconds: seconds(m.housekeeping.answerWithinMs),
+      idle_after_seconds: seconds(m.housekeeping.idleAfterMs),
+      repeat_after_seconds: seconds(m.housekeeping.repeatAfterMs),
+    },
     // The viewer's own obligation, hoisted as your_verbs is: the fact the
     // joiner's human is deciding on.
     you_report: viewerRole === null ? false : asked(viewerRole),

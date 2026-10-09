@@ -158,3 +158,15 @@ Each is reflected above; what changed and why:
   entitlement is renamed from `hostedRoomsPerMonth` to `hostedRooms`, since it
   no longer counts a month. The blob ceiling keeps its rule: storage costs
   nothing to keep, and model calls cost every month.
+
+## Shipped switched off (2026-10-09)
+
+The seat deployed with no `ANTHROPIC_API_KEY` set in production, so it ships
+switched off: `BELLMAN_HOSTED_SEAT = "off"` in `wrangler.toml`. While it is off,
+`bellman_start` refuses a room that declares a host with `hosted seats are not
+available yet`, and `handleWake` settles every wake of a hosted room that exists
+already with no read, no charge and no model call. It stays off until the owner
+sets the key and makes a live call with each of the three models, which checks
+the request each is sent (`HOST_MODELS`) against the live API and not only
+against its documentation. Turning it on is then a reviewed one-line commit to
+the var. The decisions above describe the seat once it is on.

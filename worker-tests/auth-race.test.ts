@@ -362,7 +362,7 @@ describe("a session method, the first call held between its read and its write",
 
   const touch = async (name: string, now: number) => auth(name).touchSession("sid", now);
   const replan = async (name: string, now: number) =>
-    auth(name).replanSession("sid", REPLANNED, "grant", now);
+    auth(name).replanSession("sid", REPLANNED, "grant", "github:4242", now);
   const storedSession = (name: string) =>
     runInDurableObject<AuthDO, PanelSession | undefined>(auth(name), (_instance, ctx) =>
       ctx.storage.get<PanelSession>("sess:sid"));

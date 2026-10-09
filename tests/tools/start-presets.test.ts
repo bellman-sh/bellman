@@ -24,6 +24,7 @@ const saved = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
   description: null,
   mode: "pair",
   heartbeat_on: null,
+  housekeeping: null,
   roles: {
     author: { can: ["send", "invite", "revoke", "write_surface"], description: "Brought the work.", reports: false },
     reviewer: { can: ["send", "request_actions"], description: null, reports: false },
@@ -34,7 +35,8 @@ const saved = (name: string, over: Partial<SavedPreset> = {}): SavedPreset => ({
   ...over,
 });
 
-const start = (preset: string) => jesse.call("bellman_start", { manifest: { room: "Q3 review", preset }, brief: brief() });
+const start = (preset: string, extra: Record<string, unknown> = {}) =>
+  jesse.call("bellman_start", { manifest: { room: "Q3 review", preset, ...extra }, brief: brief() });
 
 describe("bellman_start citing a saved preset", () => {
   it("starts a room whose roles are the preset's, recorded as authored", async () => {
@@ -193,5 +195,80 @@ describe("bellman_start citing a saved preset with a host", () => {
     const tooFast = await creator.call("bellman_start", cite("mornings", { heartbeat_on: "30m" }));
     expect(tooFast.text).toContain('a room with a host must tick no faster than 1h (got "30m")');
     expect(await h.store.countCreatesThisMonth(max.userId)).toBe(2);
+  });
+});
+
+// Housekeeping (#66), integration ruling M1: a saved preset's block reaches the room it
+// starts exactly as its heartbeat_on does, because it is expanded here like every other
+// field. What the room recorded is read from the store, the truth the alarm derives from.
+describe("bellman_start citing a saved preset that carries housekeeping", () => {
+  const recorded = async (out: { data: Record<string, unknown> }) => {
+    const m = (await h.store.getSession(String(out.data.session_id)))!.manifest;
+    return { heartbeatOnMs: m.heartbeatOnMs, housekeeping: m.housekeeping };
+  };
+  const WATCHFUL = { heartbeat_on: "5m", housekeeping: { quiet_after: "2h", answer_within: "30m" } } satisfies Partial<SavedPreset>;
+
+  it("starts a room with the preset's thresholds, as it starts one with the preset's cadence", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    const out = await start("watchful");
+    expect(out.isError, out.text).toBe(false);
+    expect(await recorded(out)).toEqual({
+      heartbeatOnMs: 300_000,
+      housekeeping: { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: null, repeatAfterMs: null },
+    });
+  });
+
+  // The cite's own block is the caller's say for this room, so it replaces the preset's whole
+  // rather than being merged into it, and it is never dropped without a word.
+  it("starts the room with the cite's own block instead, when the cite carries one", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    const out = await start("watchful", { housekeeping: { idle_after: "1d" } });
+    expect(out.isError, out.text).toBe(false);
+    expect((await recorded(out)).housekeeping).toEqual({
+      quietAfterMs: null, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null,
+    });
+  });
+
+  // A cite follows the rule its heartbeat_on follows: absent or null, the preset's own stands. A caller who
+  // wants a preset's block off says so with an empty one, which resolves to none as it does in an authored manifest.
+  it("keeps the preset's block when the cite's housekeeping is absent or null", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    for (const unset of [undefined, null]) {
+      const out = await start("watchful", { housekeeping: unset });
+      expect(out.isError, out.text).toBe(false);
+      expect((await recorded(out)).housekeeping, String(unset)).toEqual({
+        quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: null, repeatAfterMs: null,
+      });
+    }
+  });
+
+  it("starts the room with none when the cite carries an empty block", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    const out = await start("watchful", { housekeeping: {} });
+    expect(out.isError, out.text).toBe(false);
+    expect((await recorded(out)).housekeeping).toBeNull();
+  });
+
+  it("refuses a cite's block the validator refuses, in the validator's words", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    const out = await start("watchful", { housekeeping: { quiet_after: "1m" } });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('invalid manifest — housekeeping.quiet_after must be between 5m and 7d (got "1m")');
+  });
+
+  it("refuses a saved block the validator no longer accepts, as it refuses a stale role", async () => {
+    await h.store.putPreset("u_jesse", saved("stale_block", { housekeeping: { idle_after: "8d" } }), 20);
+    const out = await start("stale_block");
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('invalid manifest — housekeeping.idle_after must be between 5m and 7d (got "8d")');
+  });
+
+  // A preset saved before the field existed has no such key at all, in the registry's storage.
+  it("starts a room with none from a preset saved before the field existed", async () => {
+    const { housekeeping: _gone, ...legacy } = saved("old_review");
+    await h.store.putPreset("u_jesse", legacy, 20);
+    const out = await start("old_review");
+    expect(out.isError, out.text).toBe(false);
+    expect((await recorded(out)).housekeeping).toBeNull();
   });
 });

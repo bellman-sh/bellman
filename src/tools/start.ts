@@ -15,7 +15,7 @@ import { JOIN_CODE_TTL } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 
-export function registerStart(server: McpServer, identity: Identity, s: BellmanStore): void {
+export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean }): void {
   // -------------------------------------------------------------- bellman_start
   server.registerTool(
     "bellman_start",
@@ -41,7 +41,7 @@ Args:
   - capabilities: what you allow peers to do to you (default: read_context, receive_messages). Grant request_actions only if you want peers to be able to ask your session to do things.
   - org_only (boolean): restrict joining to members of your org (team plan)
 
-Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), text (untrusted envelope)} }
+Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, plan, room: {preset, mode, your_role, your_verbs, heartbeat_on_seconds, you_report, creator_role, roles, reports (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)} }
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
@@ -78,13 +78,22 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
           }
           // The rule resolveManifest holds a built-in cite to, held here for a saved one.
           checkCiteCadence(manifestInput.preset, saved.host != null, manifestInput.heartbeat_on);
-          input = asManifest(saved, manifestInput.room, manifestInput.purpose, manifestInput.heartbeat_on);
+          // A block the cite carries (#66, D5) replaces the preset's whole; asManifest says how.
+          input = asManifest(
+            saved, manifestInput.room, manifestInput.purpose, manifestInput.heartbeat_on, manifestInput.housekeeping,
+          );
         }
         manifest = resolveManifest(input);
       } catch (e) {
         if (e instanceof ManifestError) return fail(`invalid manifest — ${e.message}`);
         throw e;
       }
+
+      // The hosted seat's switch (BELLMAN_HOSTED_SEAT), ahead of every other host check: while
+      // it is off no plan has a seat, and the plan refusal below would send a caller to buy
+      // one. Read from the resolved manifest, so an inline block, `social` and a saved preset
+      // meet it the same way.
+      if (manifest.host !== null && !features.hostedSeat) return fail("hosted seats are not available yet");
 
       const ent = entitlementsFor(identity);
       // Before the mode check: a hosted room is always a swarm room, and on free the
@@ -155,6 +164,12 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         closedAt: null,
         purgeAt: null,
         blobsSwept: false,
+        // Housekeeping's books (#66), empty at birth: the stores keep them at the write, for a
+        // room whose manifest declared housekeeping.
+        raised: {},
+        openRequests: {},
+        lastMemberEventAt: null,
+        thawedAt: null,
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

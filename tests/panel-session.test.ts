@@ -9,7 +9,7 @@ import {
   MemoryAuthStore, SESSION_IDLE_MS, SESSION_TOUCH_MS, SESSION_TTL_MS,
   replannedAt, sessionDead, type AuthStorage, type PanelSession,
 } from "../src/oauth/storage.js";
-import type { Identity } from "../src/types.js";
+import type { Identity, PlanGrant } from "../src/types.js";
 
 // The identities are frozen. MemoryAuthStore keeps the objects it is given, so a
 // method that changed a nested identity in place would change a shared constant,
@@ -311,16 +311,28 @@ describe("MemoryAuthStore sessions", () => {
 const fresh = (): AuthStorage => new MemoryAuthStore();
 
 describe("replanSession", () => {
-  it("merges the identity, plan source and time into the stored record, and nothing else", async () => {
+  it("merges the identity, plan source, plan key and time into the stored record, and nothing else", async () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 5);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 5);
 
     expect(merged).toBe(true);
     expect(await store.touchSession("sid", T0 + 5)).toEqual(
-      panelSession({ identity: REPLANNED, plan_source: "grant", replanned_at: T0 + 5 })
+      panelSession({ identity: REPLANNED, plan_source: "grant", plan_key: "github:4242", replanned_at: T0 + 5 })
     );
+  });
+
+  // Null is "nothing matched" and has to land as null over an older key: a merge
+  // that skipped a falsy key would leave the panel warning about a grant that is
+  // already gone.
+  it("writes a null plan key over the one before it", async () => {
+    const store = fresh();
+    await store.putSession("sid", panelSession({ plan_key: "email:jesse@example.dev" }));
+
+    await store.replanSession("sid", IDENTITY, "default", null, T0 + 5);
+
+    expect((await store.touchSession("sid", T0 + 5))?.plan_key).toBeNull();
   });
 
   // The race this method exists for: a request touches the session, spends a
@@ -328,7 +340,7 @@ describe("replanSession", () => {
   // out in between. An upsert would recreate the session they just ended.
   //
   // The answer is what pins the absence guard in this store. Without the guard it
-  // would write a record holding only the three merged fields and answer true,
+  // would write a record holding only the four merged fields and answer true,
   // and the touch below would still find nothing, because sessionDead reads that
   // record as dead. The workerd twin also reads storage.
   it("leaves a session dead when the sign-out landed between the touch and the replan", async () => {
@@ -337,7 +349,7 @@ describe("replanSession", () => {
     await store.touchSession("sid", T0);
     await store.deleteSession("sid");
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1);
 
     expect(merged).toBe(false);
     expect(await store.touchSession("sid", T0 + 1)).toBeUndefined();
@@ -351,7 +363,7 @@ describe("replanSession", () => {
     const store = fresh();
     await store.putSession("sid", panelSession());
 
-    const replanning = store.replanSession("sid", REPLANNED, "grant", T0 + 1);
+    const replanning = store.replanSession("sid", REPLANNED, "grant", "github:4242", T0 + 1);
     await store.deleteSession("sid");
     await replanning;
 
@@ -370,7 +382,7 @@ describe("replanSession", () => {
     const theirs = mine + SESSION_TOUCH_MS + 1;
     await store.touchSession("sid", theirs); // another request, later
 
-    const merged = await store.replanSession("sid", REPLANNED, "grant", mine);
+    const merged = await store.replanSession("sid", REPLANNED, "grant", "github:4242", mine);
 
     expect(merged).toBe(true);
     expect(await store.touchSession("sid", theirs + SESSION_IDLE_MS)).toBeDefined();
@@ -411,7 +423,7 @@ describe("a method touches only the session it names", () => {
 
     const later = T0 + SESSION_TOUCH_MS + 1; // stale, so this touch writes
     await store.touchSession("mine", later);
-    expect(await store.replanSession("mine", REPLANNED, "grant", later)).toBe(true);
+    expect(await store.replanSession("mine", REPLANNED, "grant", "github:4242", later)).toBe(true);
 
     // Not due at T0, so this hands back what is stored.
     expect(await store.touchSession("yours", T0)).toEqual(yours());
@@ -539,6 +551,32 @@ describe("caller, over a cookie", () => {
 
     expect(((await res.json()) as { user_id: string }).user_id).toBe("u_from_bearer");
   });
+
+  it("tells a session signed in before plan keys its stable key, and no plan key", async () => {
+    const sid = await seedSession(cfg); // as written before this change: no plan_key
+
+    const body = (await (await route(withCookie("/account", sid, {
+      headers: { accept: "application/json" },
+    }))).json()) as Record<string, unknown>;
+
+    expect(body.subject_key).toBe("github:4242");
+    expect(body).not.toHaveProperty("plan_key");
+  });
+
+  it("tells a bearer caller neither key", async () => {
+    const token = await signJwt(
+      { iss: ISSUER, sub: PANEL_IDENTITY.userId, aud: RESOURCE, bellman: PANEL_IDENTITY, plan_source: "default" },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS
+    );
+
+    const body = (await (await route(new Request(`${ISSUER}/account`, {
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+    }))).json()) as Record<string, unknown>;
+
+    expect(body.user_id).toBe(PANEL_IDENTITY.userId);
+    expect(body).not.toHaveProperty("subject_key");
+    expect(body).not.toHaveProperty("plan_key");
+  });
 });
 
 describe("the cookie's plan is re-resolved on the token's bound", () => {
@@ -621,7 +659,8 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     const res = await route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
 
     expect(res.status).toBe(200);
-    expect(((await res.json()) as { plan: string }).plan).toBe("free");
+    // The key comes from the re-check itself, so it is right without the write.
+    expect(await res.json()).toMatchObject({ plan: "free", plan_key: null });
   });
 
   // Review Focus 5 — a record whose replanned_at is absent or non-finite.
@@ -643,6 +682,22 @@ describe("the cookie's plan is re-resolved on the token's bound", () => {
     }));
 
     expect(((await res.json()) as { plan: string }).plan).toBe("free");
+  });
+
+  it("writes the plan key at the re-check, for a session that had none", async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const sid = await seedSession(cfg, "keyless", { replanned_at: now });
+    await cfg.plans!.putGrant({
+      key: "github:4242", plan: "pro", role: "member", orgId: null,
+      source: "operator", grantedAt: now, grantedBy: "test", expiresAt: null,
+    });
+
+    vi.setSystemTime(now + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+    const res = await route(withCookie("/account", sid, { headers: { accept: "application/json" } }));
+
+    expect(await res.json()).toMatchObject({ plan: "pro", plan_source: "grant", plan_key: "github:4242" });
+    expect((await cfg.store.touchSession(sid, Date.now()))?.plan_key).toBe("github:4242");
   });
 });
 
@@ -780,6 +835,64 @@ describe("signing in to the panel", () => {
     cfg.panelOrigins = [];
 
     expect((await route(new Request(`${ISSUER}/auth/signin`))).status).toBe(503);
+  });
+
+  describe("which key the plan resolved through", () => {
+    const PRO: Identity = { ...PANEL_IDENTITY, plan: "pro" };
+    const ADDRESS = "email:jesse@example.dev";
+    const grantUnder = (key: string): PlanGrant => ({
+      key, plan: "pro", role: "member", orgId: null,
+      source: "operator", grantedAt: Date.now(), grantedBy: "test", expiresAt: null,
+    });
+
+    /** Sign in through the real flow, then read /account with the cookie it set. */
+    async function signedInAccount(): Promise<{ id: string; body: Record<string, unknown> }> {
+      const res = await signIn(PANEL);
+      const id = /__Host-bellman_session=([^;]+)/.exec(res.headers.get("set-cookie")!)![1];
+      const account = await route(withCookie("/account", id, { headers: { accept: "application/json" } }));
+      return { id, body: (await account.json()) as Record<string, unknown> };
+    }
+
+    it.each<[string, () => unknown, Record<string, unknown>]>([
+      ["an override under the subject, with an id of the operator's choosing",
+        () => { cfg.overrides = { "github:4242": { ...PRO, userId: "u_jesse" } }; },
+        { user_id: "u_jesse", plan_source: "operator", plan_key: "github:4242" }],
+      ["an override under an address",
+        () => { cfg.overrides = { [ADDRESS]: PRO }; },
+        { plan_source: "operator", plan_key: ADDRESS }],
+      ["a grant under the subject",
+        () => cfg.plans!.putGrant(grantUnder("github:4242")),
+        { plan_source: "grant", plan_key: "github:4242" }],
+      ["a grant under an address, which sign-in moves onto the subject",
+        () => cfg.plans!.putGrant(grantUnder(ADDRESS)),
+        { plan_source: "grant", plan_key: "github:4242" }],
+      // claimGrant logs the failed move: a "could not pin a grant" line is expected.
+      ["a grant under an address that could not be moved",
+        async () => {
+          await cfg.plans!.putGrant(grantUnder(ADDRESS));
+          cfg.plans!.moveGrant = () => Promise.reject(new Error("registry unreachable"));
+        },
+        { plan_source: "grant", plan_key: ADDRESS }],
+      ["nothing", () => undefined, { plan: "free", plan_source: "default", plan_key: null }],
+    ])("reports the stable key, and the key for %s", async (_what, arrange, expected) => {
+      await arrange();
+
+      const { body } = await signedInAccount();
+
+      expect(body).toMatchObject({ subject_key: "github:4242", ...expected });
+    });
+
+    it("reports an address override until the first re-check, then that nothing matched", async () => {
+      cfg.overrides = { [ADDRESS]: PRO };
+      const { id, body } = await signedInAccount();
+      expect(body).toMatchObject({ plan: "pro", plan_key: ADDRESS });
+
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + ACCESS_TOKEN_TTL_SECONDS * 1000 + 1_000);
+      const later = await route(withCookie("/account", id, { headers: { accept: "application/json" } }));
+
+      expect(await later.json()).toMatchObject({ plan: "free", plan_source: "default", plan_key: null });
+    });
   });
 });
 

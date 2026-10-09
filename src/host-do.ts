@@ -21,7 +21,7 @@ import { signedInPlan } from "./oauth/routes.js";
 /** What the seat reads beyond the room's own bindings: what resolving a room creator's plan needs (I7). */
 type HostEnv = BellmanEnv & BillingEnv & { BELLMAN_USERS?: string };
 import {
-  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, joinsQueue, runWake,
+  ANTHROPIC_MESSAGES_URL, RETRY_MS, callMessages, emptyHostRecord, hostedSeatOn, joinsQueue, runWake,
   type HostDriver, type HostRecord, type HostWake,
 } from "./host.js";
 
@@ -42,6 +42,9 @@ export class HostDO extends DurableObject<HostEnv> {
    * seat's record.
    */
   readonly #driver: HostDriver = {
+    // Read as the object is made: the var is fixed for a deployed version, and a value that
+    // is a typo is logged once here and not on every wake. Off, every wake settles unread.
+    enabled: hostedSeatOn(this.env.BELLMAN_HOSTED_SEAT),
     retryMs: RETRY_MS,
     read: async (sessionId) => {
       const room = this.#room(sessionId);

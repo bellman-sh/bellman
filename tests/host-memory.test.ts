@@ -66,12 +66,12 @@ class FlakyStore extends MemoryStore {
 afterEach(() => { vi.restoreAllMocks(); });
 
 /** With `deliver: false` the store's wakes are kept in `woken`, for the test to deliver itself. */
-async function hostedStore(replies: Reply[], { deliver = true } = {}) {
+async function hostedStore(replies: Reply[], { deliver = true, enabled = true } = {}) {
   const { f, calls } = fakeModel(replies);
   let host!: MemoryHost;
   const woken: HostWake[] = [];
   const store = new FlakyStore({ host: (w) => { if (deliver) void host.wake(w); else woken.push(w); } });
-  host = new MemoryHost(store, { modelUrl: "http://fake", fetch: f, retryMs: [5, 5, 5] });
+  host = new MemoryHost(store, { modelUrl: "http://fake", fetch: f, retryMs: [5, 5, 5], enabled });
   const m = hosted();
   const now = Date.now();
   const s = session({ manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], hostUnitsPerMonth: 10,
@@ -130,6 +130,20 @@ describe("MemoryHost", () => {
     expect(calls).toHaveLength(1);
     expect(await hostSaid(store, id, q.cursor)).toEqual([]);
     expect((await store.getSession(id))!.hostUnits.used).toBe(1);
+  });
+
+  /**
+   * The switch (BELLMAN_HOSTED_SEAT) off. A hosted room made before it was switched off is
+   * woken as ever; the seat settles each wake with no model call, posts nothing and spends
+   * no unit. The control is the first case in this suite, the same flow with the seat on.
+   */
+  it("switched off, a heartbeat wakes the seat and it settles: no model call, nothing posted, no unit spent", async () => {
+    const { store, host, id, calls } = await hostedStore([{ status: 200, text: "What shipped?" }], { enabled: false });
+    await store.appendEvent(id, heartbeat);
+    await host.settled();
+    expect(calls).toHaveLength(0);
+    expect(await hostSaid(store, id)).toEqual([]);
+    expect((await store.getSession(id))!.hostUnits.used).toBe(0);
   });
 
   /**
@@ -204,10 +218,10 @@ describe("MemoryHost", () => {
     let host!: MemoryHost;
     const store = new MemoryStore({ host: (w) => void host.wake(w) });
     const http = await new Promise<Server>((resolve) => {
-      const s = createApp(store, new MemoryBlobStore()).listen(0, () => resolve(s));
+      const s = createApp(store, new MemoryBlobStore(), { hostedSeat: true }).listen(0, () => resolve(s));
     });
     try {
-      host = new MemoryHost(store, { modelUrl: `http://127.0.0.1:${(http.address() as AddressInfo).port}/__fake-model` });
+      host = new MemoryHost(store, { modelUrl: `http://127.0.0.1:${(http.address() as AddressInfo).port}/__fake-model`, enabled: true });
       const m = hosted();
       const now = Date.now();
       const s = session({ manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], hostUnitsPerMonth: 10,

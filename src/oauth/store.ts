@@ -513,7 +513,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
    * another request's touch cannot land between them and be reverted. It awaits nothing but
    * storage, which is what let the input gate cover it before, as it did touchSession.
    *
-   * It writes its three fields onto the record as it is stored now, and onto
+   * It writes its four fields onto the record as it is stored now, and onto
    * nothing when there is none, and says which it did. The caller read its copy
    * before the plan was resolved, which can be a while ago, and putting that copy
    * back with putSession would recreate a session that was signed out in the
@@ -523,6 +523,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
     id: string,
     identity: Identity,
     planSource: string,
+    planKey: string | null,
     now: number
   ): Promise<boolean> {
     const key = `${SESSION}${id}`;
@@ -532,7 +533,7 @@ export class AuthDO extends DurableObject<BellmanEnv> {
       // Typed, as touchSession's record is, so that a field written under the
       // wrong name fails typecheck:worker instead of being stored as an extra one.
       const replanned: PanelSession = {
-        ...stored, identity, plan_source: planSource, replanned_at: now,
+        ...stored, identity, plan_source: planSource, plan_key: planKey, replanned_at: now,
       };
       await txn.put(key, replanned);
       return true;
@@ -652,8 +653,8 @@ export class AuthStore implements AuthStorage, BillingStorage {
   touchSession(id: string, now: number): Promise<PanelSession | undefined> {
     return this.object.touchSession(id, now);
   }
-  replanSession(id: string, identity: Identity, planSource: string, now: number): Promise<boolean> {
-    return this.object.replanSession(id, identity, planSource, now);
+  replanSession(id: string, identity: Identity, planSource: string, planKey: string | null, now: number): Promise<boolean> {
+    return this.object.replanSession(id, identity, planSource, planKey, now);
   }
   deleteSession(id: string): Promise<void> {
     return this.object.deleteSession(id);

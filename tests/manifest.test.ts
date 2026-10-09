@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
-  MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS,
+  MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -576,6 +576,201 @@ describe("heartbeat_on", () => {
     // 501 characters. Throwing is not enough; what the message carries is the claim.
     expect(message).toMatch(/^heartbeat_on: /);
     expect(message).not.toContain("9999");
+  });
+});
+
+describe("housekeeping (#66)", () => {
+  const FIELDS = ["quiet_after", "answer_within", "idle_after", "repeat_after"] as const;
+
+  const withHousekeeping = (housekeeping: unknown) => authored({ housekeeping });
+
+  /**
+   * The message a refused manifest throws, whole. These tests pin the sentence an
+   * author reads, not a fragment of it that some other refusal could also contain.
+   */
+  const refusal = (manifest: unknown): string => {
+    try {
+      resolveManifest(manifest);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ManifestError);
+      return (e as Error).message;
+    }
+    throw new Error("expected resolveManifest to refuse this manifest");
+  };
+
+  it("resolves an authored manifest's thresholds to milliseconds", () => {
+    const m = resolveManifest(withHousekeeping({ quiet_after: "2h", answer_within: "30m", idle_after: "1d" }));
+    expect(m.housekeeping).toEqual({
+      quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null,
+    });
+  });
+
+  it("resolves a cited preset's housekeeping too, and still expands the preset", () => {
+    const m = resolveManifest({ room: "r", preset: "swarm", housekeeping: { quiet_after: "2h" } });
+    expect(m.preset).toBe("swarm");
+    expect(m.roles.lead).toBeDefined();
+    expect(m.housekeeping).toEqual({
+      quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: null, repeatAfterMs: null,
+    });
+  });
+
+  it("is null when the manifest does not mention it, and for every preset in the catalog", () => {
+    expect(resolveManifest(authored()).housekeeping).toBeNull();
+    for (const preset of PRESET_NAMES) {
+      expect(resolveManifest({ room: "r", preset }).housekeeping, preset).toBeNull();
+    }
+  });
+
+  // The catalog has a second face: the listing the panel shows and clones (designer D5).
+  // A built-in that carried a block there would start rooms that name members quiet for
+  // everyone who cloned it, which is why no preset sets one (D5).
+  it("is null in the saved-preset form of every built-in too", () => {
+    const listed = builtinPresets();
+    expect(listed.map((p) => p.name)).toEqual([...PRESET_NAMES]);
+    for (const p of listed) expect(p.housekeeping, p.name).toBeNull();
+  });
+
+  // An empty object disables every finding exactly as an absent one does. Both are null,
+  // so the rules and the stored row have one representation of "off" to read.
+  it("is null for an empty object and for an explicit null", () => {
+    expect(resolveManifest(withHousekeeping({})).housekeeping).toBeNull();
+    expect(resolveManifest(withHousekeeping(null)).housekeeping).toBeNull();
+  });
+
+  it("is null when only repeat_after is given, because there is no finding to repeat", () => {
+    expect(resolveManifest(withHousekeeping({ repeat_after: "1h" })).housekeeping).toBeNull();
+  });
+
+  it("still refuses a bad repeat_after when it stands alone", () => {
+    expect(refusal(withHousekeeping({ repeat_after: "soon" })))
+      .toBe('housekeeping.repeat_after must be a duration like "30s", "5m", "1h" or "2d" (got "soon")');
+  });
+
+  // Review Focus 4: repeating faster than the threshold is a choice, not a mistake.
+  it("accepts a repeat_after shorter than the threshold it repeats", () => {
+    const m = resolveManifest(withHousekeeping({ quiet_after: "2h", repeat_after: "5m" }));
+    expect(m.housekeeping).toEqual({
+      quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: null, repeatAfterMs: 300_000,
+    });
+  });
+
+  // A valueless `idle_after:` in YAML is null. heartbeat_on reads that as off, and an
+  // author who comments a value out leaves exactly that behind.
+  it("reads a valueless key as off, as heartbeat_on does", () => {
+    const m = resolveManifest(withHousekeeping({ quiet_after: "2h", idle_after: null }));
+    expect(m.housekeeping).toEqual({
+      quietAfterMs: 7_200_000, answerWithinMs: null, idleAfterMs: null, repeatAfterMs: null,
+    });
+  });
+
+  it("is declared beside heartbeat_on without either changing the other", () => {
+    const m = resolveManifest(authored({ heartbeat_on: "5m", housekeeping: { idle_after: "1d" } }));
+    expect(m.heartbeatOnMs).toBe(300_000);
+    expect(m.housekeeping?.idleAfterMs).toBe(86_400_000);
+  });
+
+  it("refuses a key it does not know, so a misspelt threshold is not silently off", () => {
+    expect(refusal(withHousekeeping({ quiet_after: "2h", quite_after: "1h" })))
+      .toMatch(/Unrecognized key.*quite_after/);
+  });
+
+  describe("the bounds", () => {
+    it("names the floor and the ceiling in the notation the author writes", () => {
+      expect(refusal(withHousekeeping({ quiet_after: "1m" })))
+        .toBe('housekeeping.quiet_after must be between 5m and 7d (got "1m")');
+      expect(refusal(withHousekeeping({ idle_after: "8d" })))
+        .toBe('housekeeping.idle_after must be between 5m and 7d (got "8d")');
+    });
+
+    // Each key goes through the one parser with the one pair of bounds. The two cases
+    // above would pass for a key wired to other bounds, or to none.
+    const outside = FIELDS.flatMap((field) => ["1m", "8d"].map((raw) => [field, raw] as [string, string]));
+    it.each(outside)("refuses %s at %s", (field, raw) => {
+      expect(refusal(withHousekeeping({ [field]: raw })))
+        .toBe(`housekeeping.${field} must be between 5m and 7d (got "${raw}")`);
+    });
+
+    it("holds the constants the messages are rendered from", () => {
+      expect(MIN_HOUSEKEEPING_MS).toBe(300_000);
+      expect(MAX_HOUSEKEEPING_MS).toBe(604_800_000);
+    });
+
+    it("accepts the floor and the ceiling exactly, in any unit that reaches them", () => {
+      const cases: Array<[string, number]> = [
+        ["5m", MIN_HOUSEKEEPING_MS], ["300s", MIN_HOUSEKEEPING_MS],
+        ["7d", MAX_HOUSEKEEPING_MS], ["168h", MAX_HOUSEKEEPING_MS],
+      ];
+      for (const [raw, ms] of cases) {
+        expect(resolveManifest(withHousekeeping({ quiet_after: raw })).housekeeping?.quietAfterMs, raw).toBe(ms);
+      }
+    });
+
+    it("refuses a step past either", () => {
+      for (const raw of ["299s", "4m", "169h", "8d"]) {
+        expect(refusal(withHousekeeping({ quiet_after: raw })), raw).toMatch(/must be between 5m and 7d/);
+      }
+    });
+
+    // The same argument as heartbeat_on's: pinning the literal text lets a bound change
+    // leave the message lying, so read the bounds back OUT of it and let the parser judge.
+    it("names bounds the parser itself accepts, so the message cannot outlive them", () => {
+      const named = /between (\S+) and (\S+) /.exec(refusal(withHousekeeping({ quiet_after: "1m" })));
+      expect(named).not.toBeNull();
+      const [, low, high] = named!;
+      expect(resolveManifest(withHousekeeping({ quiet_after: low })).housekeeping?.quietAfterMs)
+        .toBe(MIN_HOUSEKEEPING_MS);
+      expect(resolveManifest(withHousekeeping({ quiet_after: high })).housekeeping?.quietAfterMs)
+        .toBe(MAX_HOUSEKEEPING_MS);
+    });
+  });
+
+  describe("the form", () => {
+    it("names the form, with days among the examples", () => {
+      expect(refusal(withHousekeeping({ quiet_after: "soon" })))
+        .toBe('housekeeping.quiet_after must be a duration like "30s", "5m", "1h" or "2d" (got "soon")');
+    });
+
+    // Eight characters at most: anything longer is refused by the shape before the parser
+    // sees it, which the test after this one covers.
+    it.each(["5 min", "", "5", "m", "5M", "-5m", "1.5h"])("refuses %o as a shape, not a bound", (raw) => {
+      expect(refusal(withHousekeeping({ answer_within: raw })))
+        .toMatch(/^housekeeping\.answer_within must be a duration like /);
+    });
+
+    it("bounds the echoed value so a long string cannot reach the audit log", () => {
+      const message = refusal(withHousekeeping({ quiet_after: "9".repeat(500) + "m" }));
+      expect(message).toMatch(/^housekeeping\.quiet_after: /);
+      expect(message).not.toContain("9999");
+    });
+  });
+
+  // The parser is shared and the units are not: a field reads, and prints its bounds in, the units it has
+  // always been written in. A housekeeping threshold's ceiling is a week, so it takes days; heartbeat_on has
+  // always been written in seconds, minutes and hours, and its ceiling, a day since the hosted seat (D3), prints "24h".
+  describe("the parser it shares with heartbeat_on", () => {
+    it("leaves heartbeat_on's shape message as it was, without days among the examples", () => {
+      expect(refusal(authored({ heartbeat_on: "soon" })))
+        .toBe('heartbeat_on must be a duration like "30s", "5m" or "1h" (got "soon")');
+    });
+
+    it.each(["1d", "2d"])("refuses %s for heartbeat_on as a shape: a daily beat is 24h", (raw) => {
+      expect(refusal(authored({ heartbeat_on: raw })))
+        .toBe(`heartbeat_on must be a duration like "30s", "5m" or "1h" (got "${raw}")`);
+    });
+
+    it("prints each field's bounds in that field's own largest unit: hours for heartbeat_on, days for housekeeping", () => {
+      expect(refusal(authored({ heartbeat_on: "25h" }))).toBe('heartbeat_on must be between 30s and 24h (got "25h")');
+      expect(refusal(withHousekeeping({ quiet_after: "8d" })))
+        .toBe('housekeeping.quiet_after must be between 5m and 7d (got "8d")');
+    });
+
+    it("still reads 24h for heartbeat_on and 7d, 168h and 2d for housekeeping", () => {
+      expect(resolveManifest(authored({ heartbeat_on: "24h" })).heartbeatOnMs).toBe(86_400_000);
+      for (const written of ["7d", "168h", "2d"]) {
+        expect(resolveManifest(withHousekeeping({ idle_after: written })).housekeeping?.idleAfterMs, written)
+          .toBe(Number(written.slice(0, -1)) * (written.endsWith("d") ? 86_400_000 : 3_600_000));
+      }
+    });
   });
 });
 

@@ -23,7 +23,7 @@ let base: string;
 
 beforeAll(async () => {
   store = new MemoryStore();
-  const app = createApp(store, new MemoryBlobStore());
+  const app = createApp(store, new MemoryBlobStore(), { hostedSeat: true });
   http = await new Promise<Server>((resolve) => {
     const s = app.listen(0, () => resolve(s));
   });
@@ -308,5 +308,42 @@ describe("the room routes over the Node server (#183)", () => {
       throwing.mockRestore();
       log.mockRestore();
     }
+  });
+});
+
+/**
+ * The hosted seat's switch, over the wire: `createApp` hands its `features` to the tools it
+ * serves, so the same request is refused by an app built with the seat off and served by one
+ * built with it on. The second case is the control for the first.
+ */
+describe("the hosted seat's switch over /mcp", () => {
+  const social = { room: "the square", preset: "social" };
+
+  async function startSocial(hostedSeat: boolean): Promise<Outcome> {
+    const server = await new Promise<Server>((resolve) => {
+      const s = createApp(new MemoryStore(), new MemoryBlobStore(), { hostedSeat }).listen(0, () => resolve(s));
+    });
+    const client = new Client({ name: "http-switch", version: "0.0.1" });
+    try {
+      await client.connect(new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`),
+        { requestInit: { headers: { Authorization: "Bearer qk_dev_jesse" } } },
+      ));
+      return await call(client, "bellman_start", { manifest: social, brief: brief() });
+    } finally {
+      await client.close();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("refuses a hosted room from an app built with the seat off", async () => {
+    const out = await startSocial(false);
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("hosted seats are not available yet");
+  });
+
+  it("starts it from an app built with the seat on", async () => {
+    const out = await startSocial(true);
+    expect(out.isError, out.text).toBe(false);
   });
 });

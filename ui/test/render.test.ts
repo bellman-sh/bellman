@@ -49,6 +49,42 @@ describe("renderJoin", () => {
     expect([...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent)).toEqual(["yes", "no"]);
   });
 
+  // Housekeeping (#66, review m2). The page is the consent point: the human decides on the seat from it,
+  // and a member of this room is named quiet while it sends nothing. Each threshold is shown exactly, since
+  // 90m rounded to 2h would be a number the human did not agree to.
+  it("says what the room names its members for, each threshold exactly", () => {
+    const r = connectFixture();
+    r.room.housekeeping = { quiet_after_seconds: 5_400, answer_within_seconds: 1_800, idle_after_seconds: 86_400, repeat_after_seconds: 14_400 };
+
+    const text = renderJoin(r, () => {}, NOW).textContent!;
+
+    expect(text).toContain(
+      "Bellman names a member quiet after 90m without a send, a request unanswered after 30m and the room idle after 1d, " +
+      "and names each again every 4h while it holds.",
+    );
+  });
+
+  it("names only what the room turns on, and says each is named again after its own time when no repeat is set", () => {
+    const r = connectFixture();
+    r.room.housekeeping = { quiet_after_seconds: 7_200, answer_within_seconds: null, idle_after_seconds: null, repeat_after_seconds: null };
+
+    const text = renderJoin(r, () => {}, NOW).textContent!;
+
+    expect(text).toContain("Bellman names a member quiet after 2h without a send, and names each again after the same time while it holds.");
+    expect(text).not.toContain("unanswered");
+    expect(text).not.toContain("idle");
+  });
+
+  it("says nothing of it when the room names no member for anything", () => {
+    const none = renderJoin(connectFixture(), () => {}, NOW).textContent!;
+    expect(none).not.toContain("Bellman names");
+
+    // A block with every threshold off is the same room, whichever way the server spelled it.
+    const r = connectFixture();
+    r.room.housekeeping = { quiet_after_seconds: null, answer_within_seconds: null, idle_after_seconds: null, repeat_after_seconds: 3_600 };
+    expect(renderJoin(r, () => {}, NOW).textContent).not.toContain("Bellman names");
+  });
+
   it("renders creator prose as text, never as markup", () => {
     const r = connectFixture();
     r.room.text.data.room = HOSTILE;

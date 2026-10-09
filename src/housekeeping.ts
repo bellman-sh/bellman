@@ -16,7 +16,7 @@
  * This module must stay importable by both builds: no `cloudflare:workers`, directly or
  * transitively. `SessionDO` imports it, and so do both test programs.
  */
-import type { HousekeepingFinding, HousekeepingPayload, Member, SessionEvent } from "./types.js";
+import type { HousekeepingFinding, HousekeepingPayload, Member } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 // `isActivePerson` and `isRemovedMember` live in store.ts beside the other member rules, and
 // store.ts applies `noteAppend` inside both stores, so this module imports that one and not
@@ -186,18 +186,27 @@ export function clearedKeys(s: StoredSession, now: number): string[] {
 }
 
 /**
- * Whether appending `e` starts a clock the alarm already armed cannot know of: an
- * `action_request` in a room that declares `answer_within`. Its anchor, the request's time
- * plus `answer_within`, can fall before the time armed, and no other append can: a send only
- * moves a member's quiet clock later, a response only removes an anchor, and a join re-arms
- * where it is written. The room's store asks this after a commit and re-arms if it is true.
+ * Whether writing `after` over `before` brings the soonest housekeeping time forward (I1): the
+ * record afterwards names a moment, and the record before named none or a later one. A null before
+ * counts as later, because a room with nothing to wait on had no time to be earlier than.
  *
- * Shared by both appends so the "when" is written once.
+ * The room's store asks it inside every append's transaction, of the record it read and the
+ * record it is writing, and re-arms the alarm after the commit when it is true. It is the general
+ * rule, where R6 named one event kind. An `action_request` adds an anchor, but a send can bring
+ * the time forward too, when it ends a raised condition: R8 makes the new condition due at its
+ * own anchor, which falls before the old raise's window whenever `repeat_after` is the longer of
+ * the two. A response does the same for the member who answers, and a member event does for a
+ * raised `room_idle`. An append that moves the time later, or not at all, asks for nothing: the
+ * armed alarm is early at worst, and the re-arm that ends `alarm()` corrects it.
+ *
+ * Both readings are `nextHousekeepAt`'s, so this agrees with the time the alarm would be armed for.
  */
-export const startsAnswerClock = (
-  s: Pick<StoredSession, "manifest">,
-  e: Pick<SessionEvent, "type">,
-): boolean => e.type === "action_request" && (s.manifest.housekeeping?.answerWithinMs ?? null) !== null;
+export function bringsForward(before: StoredSession, after: StoredSession, now: number): boolean {
+  const next = nextHousekeepAt(after, now);
+  if (next === null) return false;
+  const was = nextHousekeepAt(before, now);
+  return was === null || next < was;
+}
 
 /**
  * The soonest moment a condition is due, or null when nothing can become due: no housekeeping,

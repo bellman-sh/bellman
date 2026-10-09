@@ -429,6 +429,136 @@ it("does not re-arm for any other append, nor for a request in a room that decla
 });
 
 // ---------------------------------------------------------------------------
+// An append that ends a raised finding (I1)
+//
+// After a raise the armed time is the raise plus the repeat window. A member who then sends and goes
+// quiet again has a new anchor, `send + quiet_after`, and R8 makes that condition due at its own anchor
+// and not at the old raise's window. The anchor is the earlier whenever the window is the longer, so an
+// alarm left at the later time names the member late. The rule that follows is the general one: the
+// soonest housekeeping time of the record the append wrote, against the one it read. It is not a list of
+// event kinds, which is why a send, a keyed send, a response and a room's idle clock each have a case.
+// ---------------------------------------------------------------------------
+
+it("brings the alarm forward when a send ends a raised quiet finding whose repeat window is the longer", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  setClock(T0);
+  await store.createSession(room("qs_i1_quiet", T0, { quietAfterMs: 5 * MIN, repeatAfterMs: HOUR }));
+
+  setClock(T0 + 5 * MIN);
+  await fire("qs_i1_quiet");
+  expect(await armed("qs_i1_quiet"), "armed a repeat window after the raise").toBe(T0 + 5 * MIN + HOUR);
+
+  setClock(T0 + 6 * MIN);
+  const sent = (await store.appendEvent("qs_i1_quiet", message()))!;
+  expect(await armed("qs_i1_quiet"), "armed at the new condition's anchor, and not at the old raise's window")
+    .toBe(sent.at + 5 * MIN);
+
+  // And the member is named when that anchor comes, as a condition of its own.
+  setClock(sent.at + 5 * MIN);
+  await fire("qs_i1_quiet");
+  expect((await proposals("qs_i1_quiet")).map((e) => e.payload)).toEqual([
+    { finding: "member_quiet", about: { member_id: "m_a" }, since: T0 + 5 * MIN, repeat: 1 },
+    { finding: "member_quiet", about: { member_id: "m_a" }, since: sent.at + 5 * MIN, repeat: 1 },
+  ]);
+});
+
+it("brings it forward through a keyed send too", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  setClock(T0);
+  await store.createSession(room("qs_i1_once", T0, { quietAfterMs: 5 * MIN, repeatAfterMs: HOUR }));
+  setClock(T0 + 5 * MIN);
+  await fire("qs_i1_once");
+
+  setClock(T0 + 6 * MIN);
+  const sent = await store.appendEventOnce("qs_i1_once", message(), "say-1");
+  if (sent.outcome !== "appended") throw new Error(`send said ${sent.outcome}`);
+
+  expect(await armed("qs_i1_once")).toBe(sent.event.at + 5 * MIN);
+});
+
+it("brings it forward when a response ends a raised quiet finding for the member who answers", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  setClock(T0);
+  await store.createSession(room("qs_i1_answer", T0, { quietAfterMs: 5 * MIN, repeatAfterMs: HOUR }, { members: [
+    member({ memberId: "m_a", userId: "u_a", label: "a@x", joinedAt: T0, lastSeenAt: T0, lastSentAt: T0 }),
+    peerB(T0),
+  ] }));
+  const asked = (await store.appendEvent("qs_i1_answer", request("m_a")))!;
+  setClock(T0 + 5 * MIN);
+  await fire("qs_i1_answer");
+  expect((await proposals("qs_i1_answer")).map((e) => (e.payload as { about: unknown }).about), "both are named")
+    .toEqual([{ member_id: "m_a" }, { member_id: "m_b" }]);
+
+  setClock(T0 + 6 * MIN);
+  const answered = (await store.appendEvent("qs_i1_answer", answer(asked.cursor)))!;
+
+  expect(await armed("qs_i1_answer"), "m_b's new anchor, not the repeat window of either raise").toBe(answered.at + 5 * MIN);
+});
+
+it("brings it forward when a member event ends a raised idle finding whose repeat window is the longer", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  setClock(T0);
+  await store.createSession(room("qs_i1_idle", T0, { quietAfterMs: null, idleAfterMs: 5 * MIN, repeatAfterMs: HOUR }));
+  setClock(T0 + 5 * MIN);
+  await fire("qs_i1_idle");
+  expect(await armed("qs_i1_idle")).toBe(T0 + 5 * MIN + HOUR);
+
+  setClock(T0 + 6 * MIN);
+  const sent = (await store.appendEvent("qs_i1_idle", message()))!;
+
+  expect(await armed("qs_i1_idle"), "the idle clock starts again at the member event").toBe(sent.at + 5 * MIN);
+});
+
+// ---------------------------------------------------------------------------
+// A firing later than its anchors (I2)
+//
+// The handler records each raise with the payload's `since`, and the rules continue a raise only when its
+// `since` is the condition's. That line is what ties the rules' no-spin proof to the alarm: a handler that
+// recorded any other value would leave every raise looking like a condition that came back, due again at
+// its own anchor, which is already past. In every case above the firing lands exactly on an anchor, where
+// `now` and the payload's `since` are one number, so none of them can tell. These fire late.
+// ---------------------------------------------------------------------------
+
+/** Four keys due at once: two quiet members (5m), a request (10m) and an idle room (20m), fired at T0 + 30m. */
+const fireLate = async (id: string) => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room(id, T0, { quietAfterMs: 5 * MIN, answerWithinMs: 10 * MIN, idleAfterMs: 20 * MIN }, {
+    members: [
+      member({ memberId: "m_a", userId: "u_a", label: "a@x", joinedAt: T0, lastSeenAt: T0, lastSentAt: T0 }),
+      peerB(T0),
+    ],
+  }));
+  setClock(T0);
+  await store.appendEvent(id, request("m_a"));
+  setClock(T0 + 30 * MIN);
+  await fire(id);
+  expect(await proposals(id), "setup: all four were due, and raised").toHaveLength(4);
+  return T0;
+};
+
+it("arms a window after a firing that came late, and not at the anchors it passed", async () => {
+  const T0 = await fireLate("qs_late_armed");
+
+  // Each key is next due one window after this raise: 5m, 10m and 20m on. The soonest is the quiet one.
+  expect(await armed("qs_late_armed"), "the firing plus the shortest window").toBe(T0 + 30 * MIN + 5 * MIN);
+});
+
+it("finds nothing due a millisecond after a firing that came late", async () => {
+  const T0 = await fireLate("qs_late_again");
+
+  // Named, so the handler is put on trial whatever the alarm says is due.
+  setClock(T0 + 30 * MIN + 1);
+  await fireNamed("qs_late_again");
+
+  expect(await proposals("qs_late_again"), "no second round of proposals").toHaveLength(4);
+});
+
+// ---------------------------------------------------------------------------
 // A read brings back an alarm the runtime gave up on (R7)
 // ---------------------------------------------------------------------------
 

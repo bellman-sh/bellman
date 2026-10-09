@@ -6,7 +6,7 @@
  * kept its own copy could disagree with the other about them.
  */
 import { describe, expect, it } from "vitest";
-import { clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "../src/housekeeping.js";
+import { bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../src/housekeeping.js";
 import { noteAppend } from "../src/store.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import type { StoredSession } from "../src/stored-session.js";
@@ -564,24 +564,114 @@ describe("a thaw restarts the clocks", () => {
   });
 });
 
-// R6. The one append that can bring the soonest due time forward; the room's store re-arms after it.
-describe("startsAnswerClock", () => {
-  const declares = (hk: Partial<Thresholds> | null) =>
-    stored({}, hk === null ? null : rules(hk));
+// I1. The room's store asks this inside the append's transaction, of the record it read and the record
+// it is writing, and re-arms after the commit when it is true. It replaces R6's list of one event kind:
+// a request is not the only append that can bring the soonest due time forward, a send can too, when it
+// ends a raised condition whose repeat window is longer than the threshold it starts again from.
+describe("bringsForward", () => {
+  /** The record after an append, as the stores write it: the books laid over what was read. */
+  const afterAppend = (s: StoredSession, e: SessionEvent): StoredSession => ({ ...s, ...noteAppend(s, e) });
+  const raisedQuiet: Raised = { "member_quiet:m_a": { at: T0 + H2, repeat: 1, since: T0 + H2 } };
 
-  it("is true for an action_request in a room that declares answer_within", () => {
-    expect(startsAnswerClock(declares({}), { type: "action_request" })).toBe(true);
+  it("is true when a send ends a raised quiet finding and the repeat window is the longer", () => {
+    // Named at T0 + 2h, so the next raise would be at T0 + 2h + 1d. The member sends ten minutes later and
+    // goes quiet again: the new condition is due two hours after that send, a day before the old window ends.
+    const before = stored({ members: [who("m_a", { lastSentAt: T0 })], raised: raisedQuiet }, quietOnly({ repeatAfterMs: D1 }));
+    const sentAt = T0 + H2 + 600_000;
+    expect(nextHousekeepAt(before, sentAt)).toBe(T0 + H2 + D1);
+
+    const after = afterAppend(before, ev({ at: sentAt }));
+
+    expect(nextHousekeepAt(after, sentAt)).toBe(sentAt + H2);
+    expect(bringsForward(before, after, sentAt)).toBe(true);
   });
 
-  it("is false for every other kind of event, however the room is declared", () => {
-    for (const type of ["message", "action_response", "progress", "member_joined", "member_left", "surface"] as const) {
-      expect(startsAnswerClock(declares({}), { type }), type).toBe(false);
-    }
+  it("is true when a member event ends a raised idle finding and the repeat window is the longer", () => {
+    const before = stored({
+      members: [who("m_a")], lastMemberEventAt: T0,
+      raised: { room_idle: { at: T0 + D1, repeat: 1, since: T0 + D1 } },
+    }, idleOnly({ repeatAfterMs: 3 * D1 }));
+    const sentAt = T0 + D1 + 600_000;
+
+    const after = afterAppend(before, ev({ at: sentAt }));
+
+    expect(nextHousekeepAt(before, sentAt)).toBe(T0 + 4 * D1);
+    expect(nextHousekeepAt(after, sentAt)).toBe(sentAt + D1);
+    expect(bringsForward(before, after, sentAt)).toBe(true);
   });
 
-  it("is false for a request when the room declares no answer_within, or no housekeeping at all", () => {
-    expect(startsAnswerClock(declares({ answerWithinMs: null }), { type: "action_request" })).toBe(false);
-    expect(startsAnswerClock(declares(null), { type: "action_request" })).toBe(false);
+  it("is true for a response too, when the member who answers holds a raised quiet finding", () => {
+    const before = stored({
+      members: [who("m_a", { lastSentAt: T0 }), who("m_b", { lastSentAt: T0 })],
+      openRequests: { "7": { at: T0, fromMemberId: "m_a" } },
+      raised: { "member_quiet:m_a": { at: T0 + H2, repeat: 1, since: T0 + H2 }, "member_quiet:m_b": { at: T0 + H2, repeat: 1, since: T0 + H2 } },
+    }, quietOnly({ repeatAfterMs: D1 }));
+    const sentAt = T0 + H2 + 600_000;
+
+    const after = afterAppend(before, ev({ cursor: 9, type: "action_response", fromMemberId: "m_b", refId: "7", at: sentAt }));
+
+    expect(bringsForward(before, after, sentAt)).toBe(true);
+  });
+
+  // The case R6 named: a request adds an anchor, and it may fall before everything already waited on.
+  it("is true for an action_request whose time falls before the soonest one", () => {
+    const before = stored({ members: [who("m_a", { lastSentAt: T0 })] }, rules());
+    const after = afterAppend(before, ev({ cursor: 7, type: "action_request", at: T0 + 1_000 }));
+
+    // The soonest anchor before the request is the quiet clock, two hours out.
+    expect(nextHousekeepAt(before, T0)).toBe(T0 + H2);
+    expect(nextHousekeepAt(after, T0)).toBe(T0 + 1_000 + M30);
+    expect(bringsForward(before, after, T0 + 1_000)).toBe(true);
+  });
+
+  // A null before counts as later: a room with nothing to wait on had no housekeeping time to be earlier than.
+  it("is true when the room had nothing to wait on and the append gives it something", () => {
+    const before = stored({ members: [who("m_a", { lastSentAt: T0 })] }, requestsOnly());
+    expect(nextHousekeepAt(before, T0)).toBeNull();
+
+    const after = afterAppend(before, ev({ cursor: 7, type: "action_request", at: T0 + 1_000 }));
+
+    expect(bringsForward(before, after, T0 + 1_000)).toBe(true);
+  });
+
+  it.each([
+    ["a send in a room with nothing raised, which only moves the sender's clock later", () => {
+      const before = stored({ members: [who("m_a", { lastSentAt: T0 })] });
+      return [before, afterAppend(before, ev({ at: T0 + 600_000 }))] as const;
+    }],
+    ["a send when the repeat window is the shorter, so the old raise falls due first", () => {
+      const before = stored({ members: [who("m_a", { lastSentAt: T0 })], raised: raisedQuiet }, quietOnly({ repeatAfterMs: M5 }));
+      return [before, afterAppend(before, ev({ at: T0 + H2 + 600_000 }))] as const;
+    }],
+    ["an action_request in a room that declares no answer_within", () => {
+      const before = stored({ members: [who("m_a", { lastSentAt: T0 })] }, quietOnly());
+      return [before, afterAppend(before, ev({ cursor: 7, type: "action_request", at: T0 + 1_000 }))] as const;
+    }],
+    ["a response that closes the only request, which takes an anchor away", () => {
+      const before = stored({
+        members: [who("m_a", { lastSentAt: T0 }), who("m_b", { lastSentAt: T0 })],
+        openRequests: { "7": { at: T0, fromMemberId: "m_a" } },
+      }, requestsOnly());
+      return [before, afterAppend(before, ev({ cursor: 9, type: "action_response", fromMemberId: "m_b", refId: "7", at: T0 + 1_000 }))] as const;
+    }],
+    ["a server event, which the books do not count", () => {
+      const before = stored({ members: [who("m_a", { lastSentAt: T0 })], raised: raisedQuiet }, quietOnly({ repeatAfterMs: D1 }));
+      return [before, afterAppend(before, ev({ type: "heartbeat", fromMemberId: "system", at: T0 + H2 + 600_000 }))] as const;
+    }],
+  ])("is false for %s", (_what, build) => {
+    const [before, after] = build();
+    expect(bringsForward(before, after, T0 + H2 + 600_000)).toBe(false);
+  });
+
+  it("is false when the append leaves nothing to wait on, and for a record that did not change", () => {
+    const before = stored({
+      members: [who("m_a", { lastSentAt: T0 }), who("m_b", { lastSentAt: T0 })],
+      openRequests: { "7": { at: T0, fromMemberId: "m_a" } },
+    }, requestsOnly());
+    const closed = afterAppend(before, ev({ cursor: 9, type: "action_response", fromMemberId: "m_b", refId: "7", at: T0 + 1_000 }));
+    expect(nextHousekeepAt(closed, T0)).toBeNull();
+    expect(bringsForward(before, closed, T0 + 1_000)).toBe(false);
+    expect(bringsForward(before, before, T0)).toBe(false);
   });
 });
 

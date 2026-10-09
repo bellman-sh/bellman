@@ -29,7 +29,7 @@ import {
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
 import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
-import { HOUSEKEEP_HANDLER, clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "./housekeeping.js";
+import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { liftPreset } from "./presets.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
@@ -471,6 +471,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * tick's clock, which a books row built from `s` alone would overwrite. Nothing is added
    * to the put when the room keeps no books, or the event moves none.
    *
+   * **It answers whether the write brought housekeeping's soonest time forward** (I1): the
+   * record it put against the record the caller read, by `bringsForward`. The two public
+   * member appends re-arm the alarm after their commit when it is true, so the rule is
+   * "the soonest time moved earlier" and not a list of the event kinds that can do it. The
+   * hosted seat's append and the alarm's own writers ignore it: the books do nothing for the
+   * seat (H3) or for a server event, and `alarm()` ends with a re-arm of its own. `removeMember`
+   * runs the books in its own put and re-arms whenever a member left.
+   *
    * `#private`, because it writes the event and any extra rows its caller supplies, and a
    * Durable Object answers RPC for every method on its class: TypeScript's `private` is
    * erased at compile time.
@@ -481,16 +489,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     e: SessionEvent,
     extra: Record<string, unknown> = {},
     deletes: readonly string[] = [],
-  ): Promise<void> {
+  ): Promise<boolean> {
     const base = (extra.session as StoredSession | undefined) ?? s;
     const books = noteAppend(base, e);
-    const rows = books === base ? extra : { ...extra, session: { ...base, ...books } };
+    const kept = books === base ? base : { ...base, ...books };
+    const rows = books === base ? extra : { ...extra, session: kept };
     await txn.put<unknown>({
       [eventKey(e.cursor)]: e, cursor: e.cursor, ...rows,
     });
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
     for (const key of deletes) await txn.delete(key);
+    return kept !== s && bringsForward(s, kept, e.at);
   }
 
   async createSession(s: Session): Promise<void> {
@@ -1538,7 +1548,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     e: Omit<SessionEvent, "cursor" | "at">,
     extras: AppendExtras = {},
   ): Promise<SessionEvent | null> {
-    let asksForAnswer = false as boolean;
+    let broughtForward = false as boolean;
     let wakesHost = false;
     const event = await this.ctx.storage.transaction<SessionEvent | null>(async (txn) => {
       const s = await this.stored(txn);
@@ -1548,8 +1558,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const owed = await extraRows(txn, s, next, extras);
       const wake = await this.#replyWakeRows(txn, s, next);
       wakesHost = Object.keys(wake).length > 0;
-      await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
-      asksForAnswer = startsAnswerClock(s, e);
+      broughtForward = await this.#writeEvent(txn, s, next, { ...owed.puts, ...wake }, owed.deletes);
       return next;
     });
     if (event) this.#wake(event);
@@ -1558,7 +1567,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (event && extras.markRemoved !== undefined) await this.#closeCutSockets();
     // After the commit and the wake, as addMember's is: the append has landed, and
     // reArm() reads the record it landed in.
-    if (event && asksForAnswer) await this.driver.reArm();
+    if (event && broughtForward) await this.driver.reArm();
     // Last, so nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return event;
@@ -1655,7 +1664,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     key: string,
     extras: AppendExtras = {},
   ): Promise<EventWrite> {
-    let asksForAnswer = false as boolean;
+    let broughtForward = false as boolean;
     let wakesHost = false;
     const result = await this.ctx.storage.transaction<EventWrite>(async (txn) => {
       const s = await this.stored(txn);
@@ -1707,8 +1716,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // Appended only: a replay's wake went out with the first attempt's event.
       const wake = await this.#replyWakeRows(txn, s, event);
       wakesHost = Object.keys(wake).length > 0;
-      await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts, ...wake }, owed.deletes);
-      asksForAnswer = startsAnswerClock(s, e);
+      broughtForward = await this.#writeEvent(txn, s, event, { [storageKey]: stored, ...owed.puts, ...wake }, owed.deletes);
       return { outcome: "appended", event };
     });
     if (result.outcome === "appended") this.#wake(result.event);
@@ -1723,7 +1731,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     ) {
       await this.#closeCutSockets();
     }
-    if (result.outcome === "appended" && asksForAnswer) await this.driver.reArm();
+    if (result.outcome === "appended" && broughtForward) await this.driver.reArm();
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return result;

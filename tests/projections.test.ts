@@ -157,12 +157,12 @@ describe("roomPreview for a viewer with no seat", () => {
   const room = session();
 
   it("names no role, grants no verb, and asks nothing of the viewer", () => {
-    expect(roomPreview(room, null)).toMatchObject({ your_role: null, your_verbs: [], you_report: false });
+    expect(roomPreview(room, null)).toMatchObject({ your_role: null, your_verbs: [], your_heartbeat_on: false });
   });
 
   it("is otherwise the preview a seat sees", () => {
-    const { your_role: _a, your_verbs: _b, you_report: _c, ...seated } = roomPreview(room, "peer_a");
-    const { your_role: _d, your_verbs: _e, you_report: _f, ...seatless } = roomPreview(room, null);
+    const { your_role: _a, your_verbs: _b, your_heartbeat_on: _c, ...seated } = roomPreview(room, "peer_a");
+    const { your_role: _d, your_verbs: _e, your_heartbeat_on: _f, ...seatless } = roomPreview(room, null);
     expect(seatless).toEqual(seated);
     // Control: the three fields really are the ones a seat fills in.
     expect(roomPreview(room, "peer_a")).toMatchObject({ your_role: "peer_a" });

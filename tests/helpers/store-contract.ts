@@ -3685,13 +3685,30 @@ export function describeStoreContract(
         name,
         description: null,
         mode: "pair",
-        heartbeat_on: null,
+        heartbeat: null,
         housekeeping: null,
-        roles: { lead: { can: ["send"], description: null, reports: false } },
+        roles: { lead: { can: ["send"], description: null, heartbeat_on: false } },
         default_role: "lead",
         creator_role: "lead",
         updated_at: "2026-03-15T12:00:00.000Z",
         ...over,
+      });
+
+      // Review Focus 2: a row saved before the vocabulary changed is read in its new words.
+      it("reads a preset saved in the heartbeat's old words back in its new ones", async () => {
+        const old = {
+          name: "old_words", description: null, mode: "pair", heartbeat_on: "5m", housekeeping: null,
+          roles: { lead: { can: ["send"], description: null, reports: true, report: "What shipped" }, quiet: { can: [], description: null, reports: false } },
+          default_role: "quiet", creator_role: "lead", host: null, updated_at: "2026-03-15T12:00:00.000Z",
+        };
+        expect(await store.putPreset("u_jesse", old as unknown as SavedPreset, 20)).toBe("saved");
+        const { heartbeat_on: _old, ...rest } = old;
+        const now = {
+          ...rest, heartbeat: "5m",
+          roles: { lead: { can: ["send"], description: null, heartbeat_on: "What shipped" }, quiet: { can: [], description: null, heartbeat_on: false } },
+        };
+        expect(await store.getPreset("u_jesse", "old_words")).toEqual(now);
+        expect((await store.listPresets("u_jesse")).find((p) => p.name === "old_words")).toEqual(now);
       });
 
       it("lists a person's presets in name order, and none for a person with none", async () => {
@@ -3725,8 +3742,8 @@ export function describeStoreContract(
       // that dropped it would turn a hosted preset into a room with nobody in its host role.
       it("keeps a preset's host block, and gives back one saved without the key as it was saved", async () => {
         const hosted = preset("h", {
-          mode: "swarm", heartbeat_on: "1h",
-          roles: { lead: { can: ["send"], description: null, reports: false }, emcee: { can: ["send"], description: null, reports: false } },
+          mode: "swarm", heartbeat: "1h",
+          roles: { lead: { can: ["send"], description: null, heartbeat_on: false }, emcee: { can: ["send"], description: null, heartbeat_on: false } },
           host: { role: "emcee", model: "sonnet", instructions: "Ask one thing." },
         });
         await store.putPreset("u_jesse", hosted, 20);

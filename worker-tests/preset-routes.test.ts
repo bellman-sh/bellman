@@ -40,6 +40,7 @@ describe("the preset routes through the Worker", () => {
 // row saved before hosted seats reached the presets and has no `host`: the key is optional, and an
 // absent one is read as none where it is used (`asManifest`), not invented here.
 describe("a preset saved before housekeeping existed", () => {
+  // In the words it was saved in, before the heartbeat's vocabulary changed: read in the new ones.
   const legacy = (): SavedPreset => ({
     name: "old_review",
     description: null,
@@ -49,13 +50,15 @@ describe("a preset saved before housekeeping existed", () => {
     default_role: "lead",
     creator_role: "lead",
     updated_at: "2026-10-09T12:00:00.000Z",
-  });
+  }) as unknown as SavedPreset;
 
-  it("reads as it was written, by get and by list, with no key invented for it", async () => {
+  it("reads in the heartbeat's new words, by get and by list, with no housekeeping key invented for it", async () => {
     const store = new DurableObjectStore(env as never);
     await store.putPreset("u_old", legacy(), 20);
-    expect(await store.getPreset("u_old", "old_review")).toEqual(legacy());
-    expect(await store.listPresets("u_old")).toEqual([legacy()]);
+    const { heartbeat_on: _old, ...rest } = legacy() as unknown as Record<string, unknown>;
+    const now = { ...rest, heartbeat: "5m", roles: { lead: { can: ["send"], description: null, heartbeat_on: false } } };
+    expect(await store.getPreset("u_old", "old_review")).toEqual(now);
+    expect(await store.listPresets("u_old")).toEqual([now]);
   });
 
   it("keeps a block a row does hold", async () => {

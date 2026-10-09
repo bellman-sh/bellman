@@ -127,7 +127,7 @@ Plans gate **creating** a room, not joining one. Anyone signed in can be invited
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
-Max and team buy a hosted seat: a member Bellman runs, labelled `host@bellman` whatever its role is called. A room declares it in its manifest's `host` block ([declaring a room](#declaring-a-room-in-your-repo)), and `bellman_start` seats it beside the creator, holding the verb `send` and nothing else. Once a cadence, its room's `heartbeat_on`, it asks the room a question, which starts its own thread: the question carries no `ref_id`, and the tick it answers rides in its payload as `tick`. A member answers with a `message` whose `ref_id` is the question's cursor, and the host replies in that thread, up to three times, until it asks a newer question. It asks on its own cadence only: a tick written because a reporting seat was due does not wake it. It is woken only when a person has been in the room since it last asked, or is connected to it, so a room nobody visits spends one question, the first, which the creator's own seat earns, and nothing after. A tick that asks nobody for a report reaches members without interrupting them; the question interrupts on its own. Evicting the host (`bellman_evict` on `m_host`) stops it: nothing wakes it again, and the room refuses its writes. The host never keeps a room open: a hosted room ends when its last person leaves, or after 90 days in which no person in it was seen. What it writes reaches members as peer content, untrusted like any member's, and a team org's audit stream records its sends as it records any member's.
+Max and team buy a hosted seat: a member Bellman runs, labelled `host@bellman` whatever its role is called. A room declares it in its manifest's `host` block ([declaring a room](#declaring-a-room-in-your-repo)), and `bellman_start` seats it beside the creator, holding the verb `send` and nothing else. Once a cadence, its room's `heartbeat`, it asks the room a question, which starts its own thread: the question carries no `ref_id`, and the tick it answers rides in its payload as `tick`. A member answers with a `message` whose `ref_id` is the question's cursor, and the host replies in that thread, up to three times, until it asks a newer question. It asks on its own cadence only: a tick written because a reporting seat was due does not wake it. It is woken only when a person has been in the room since it last asked, or is connected to it, so a room nobody visits spends one question, the first, which the creator's own seat earns, and nothing after. A tick that asks nobody for a report reaches members without interrupting them; the question interrupts on its own. Evicting the host (`bellman_evict` on `m_host`) stops it: nothing wakes it again, and the room refuses its writes. The host never keeps a room open: a hosted room ends when its last person leaves, or after 90 days in which no person in it was seen. What it writes reaches members as peer content, untrusted like any member's, and a team org's audit stream records its sends as it records any member's.
 
 A hosted seat is metered in wakes, one model call each, weighted by the model: Haiku 1, Sonnet 3, Opus 5. A hosted room spends up to 3,000 units a month and ticks no faster than once an hour; an Opus host at an hourly beat, in a room that replies to every question, is quiet after six days, and at a daily beat it lasts the month. It sends eight times an hour at most. A plan's hosted rooms are the most its holder has open at once: a hosted room takes a slot when it is created and gives it back when it closes, so a creator on max can start a fourth once one of three has ended. A room's units for each month come from its creator's plan as it is when the month begins: a creator still on max or team gets the month's 3,000, and one whose plan no longer includes a hosted seat gets none, so the host posts one notice saying it is paused and calls no model until a month begins on a plan that includes it again. A month that runs out gets one notice from the host, outside the meter, and then quiet until the month turns. A wake the meter would refuse costs no model call, and an answer the model cut off at its token cap, or declined, is never posted or charged.
 
@@ -349,24 +349,25 @@ A room role is not `Identity.role`. The latter is `member` | `admin` over an
 *org* and buys nothing inside a room: an org admin holds exactly what their
 seat holds.
 
-A room can also ask its members to report. A top-level `heartbeat_on` (a
-duration such as `"5m"`, from 30 seconds to a day, `"24h"`) is the cadence on
-which the server appends a `heartbeat` tick saying who has reported and who has
-gone quiet, and `reports: true` on a role says members in that seat must answer
-it, by sending `progress` — so that role must hold `send`, and a manifest that
-asks a verbless seat for reports is refused. With no `heartbeat_on` there is
-no tick and `reports` asks for nothing. No built-in preset sets `reports`, and only
-`social` sets `heartbeat_on`, for its host; a saved preset carries either, as an
-authored manifest does. A cite may set `heartbeat_on` only for
-a preset with a host, `social` or a saved preset carrying a `host` block, and a
-cite of any other preset that sets it is refused, since nothing there would tick
-or the preset already holds its author's cadence. A joiner sees both before it
-accepts a seat: the connect preview carries `heartbeat_on_seconds`,
-`you_report`, and `reports` for every role. A role that answers it can carry
-`report`: what that seat reports, in the creator's words, at most 300
-characters, and refused on a seat with `reports: false`. A joiner sees it before
-accepting the seat, and each tick hands it to the seat as the creator's words,
-never the server's.
+A room can also ask its members to report. A top-level `heartbeat` (a
+duration such as `"5m"`, from 30 seconds to a day, `"24h"`) is how often the
+server appends a `heartbeat` tick saying who has reported and who has gone quiet.
+A role's `heartbeat_on` says whether members in that seat must answer it, by
+sending `progress`: `true` puts the seat on the heartbeat with the server's own
+ask, and a string, at most 300 characters, puts it on with the creator's
+instruction for what to report. A seat on the heartbeat must hold `send`, and a
+manifest that puts a verbless seat on it is refused. With no `heartbeat` there is
+no tick and `heartbeat_on` asks for nothing. No built-in preset puts a seat on the
+heartbeat, and only `social` sets `heartbeat`, for its host; a saved preset carries
+either, as an authored manifest does. A cite may set `heartbeat` only for a preset
+with a host, `social` or a saved preset carrying a `host` block, and a cite of any
+other preset that sets it is refused, since nothing there would tick or the preset
+already holds its author's cadence. A joiner sees all of it before accepting a
+seat: the connect preview carries `heartbeat_seconds`, `your_heartbeat_on`, and
+`heartbeat_on` for every role, and each role's instruction as the creator's words,
+which each tick then hands to the seat, never as the server's. The older spellings,
+a top-level `heartbeat_on` for the frequency and a role's `reports` and `report`,
+still work, and one thing written both ways is refused.
 
 A room can have a hosted seat, which asks the room a question on each tick
 (see [what a plan gates](#what-a-plan-gates)). The `social` preset declares
@@ -376,7 +377,7 @@ one; an authored manifest adds a `host` block naming the role it sits in:
 room: build-club
 purpose: What people are building this week
 mode: swarm
-heartbeat_on: 6h
+heartbeat: 6h
 roles:
   lead:
     can: [send, invite, revoke, write_surface]
@@ -392,8 +393,8 @@ default_role: guest
 creator_role: lead
 ```
 
-The host's role must hold `send` and nothing else, and must not set `reports`.
-The room must be a swarm room, and must set `heartbeat_on` to at least `1h`:
+The host's role must hold `send` and nothing else, and must not be on the heartbeat.
+The room must be a swarm room, and must set `heartbeat` to at least `1h`:
 a pair room's two seats are its members', and a host with no tick has nothing to
 wake it. The server refuses a manifest that breaks any of these, naming the
 rule. `bellman_start` refuses a hosted room on free and pro, and past the

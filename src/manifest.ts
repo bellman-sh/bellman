@@ -111,8 +111,54 @@ function parseDuration(field: string, raw: string, min: number, max: number, uni
   return ms;
 }
 
-const parseHeartbeatOn = (raw: string): number =>
-  parseDuration("heartbeat_on", raw, MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, BEAT_UNITS);
+const parseHeartbeatOn = (raw: string, field: "heartbeat" | "heartbeat_on" = "heartbeat_on"): number =>
+  parseDuration(field, raw, MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, BEAT_UNITS);
+
+/**
+ * The room's frequency from either spelling (vocabulary spec D1, D3, D4): `heartbeat`, or the
+ * top-level `heartbeat_on` it replaced. Both is refused, naming the old one to drop. `word` is the
+ * spelling given, or null for neither, so a refusal can speak the author's words (D5).
+ */
+export function roomBeat(v: { heartbeat?: string | null; heartbeat_on?: string | null }): {
+  raw: string | null | undefined; word: "heartbeat" | "heartbeat_on" | null;
+} {
+  if (v.heartbeat !== undefined && v.heartbeat_on !== undefined) {
+    throw new ManifestError("heartbeat_on: drop it; it is the old name of heartbeat, which this manifest also sets");
+  }
+  if (v.heartbeat !== undefined) return { raw: v.heartbeat, word: "heartbeat" };
+  if (v.heartbeat_on !== undefined) return { raw: v.heartbeat_on, word: "heartbeat_on" };
+  return { raw: undefined, word: null };
+}
+
+/**
+ * A role's place on the heartbeat from either spelling, as the model holds it (vocabulary spec
+ * D1 to D4): `heartbeat_on` true, false or the instruction; or the old `reports` and `report`,
+ * with #229's rule in its own words. Both spellings is refused, naming the old field to drop.
+ * An instruction is trimmed: a blank new one is refused, and a blank old one reads as none.
+ */
+export function roleBeat(
+  key: string,
+  def: { heartbeat_on?: boolean | string | null; reports?: boolean | null; report?: string | null },
+): { reports: boolean; report: string | null; word: "heartbeat_on" | "reports" } {
+  if (def.heartbeat_on !== undefined) {
+    const old = def.reports !== undefined ? "reports" : def.report !== undefined ? "report" : null;
+    if (old) {
+      throw new ManifestError(`role "${key}": drop ${old}; heartbeat_on says whether this seat is on the heartbeat and what it reports`);
+    }
+    if (typeof def.heartbeat_on === "string") {
+      const report = def.heartbeat_on.trim();
+      if (report === "") throw new ManifestError(`role "${key}": heartbeat_on: give true, false, or what this seat reports`);
+      return { reports: true, report, word: "heartbeat_on" };
+    }
+    return { reports: def.heartbeat_on === true, report: null, word: "heartbeat_on" };
+  }
+  // An instruction for a seat that is never asked would be read by nobody, and shown at join as
+  // if it were (#229, heartbeat instructions spec D2).
+  if (def.report != null && !(def.reports ?? false)) {
+    throw new ManifestError(`role "${key}" sets a report instruction but does not answer the heartbeat (reports is false)`);
+  }
+  return { reports: def.reports ?? false, report: def.report?.trim() || null, word: "reports" };
+}
 
 /** Bounded before interpolation. See parseDuration. */
 const DurationShape = z.string().max(8);
@@ -164,6 +210,9 @@ export const PresetNameShape = slugShape("preset names");
 const RoleDefShape = z.strictObject({
   can: z.array(z.enum(VERBS)).max(VERBS.length),
   description: z.string().max(300).nullish(),
+  // Whether this seat is on the heartbeat, and what it reports (vocabulary spec D1): true,
+  // false, or the instruction. `reports` and `report` below are the old words (D3).
+  heartbeat_on: z.union([z.boolean(), z.string().max(300)]).nullish(),
   // Absent means not asked. A role has to opt in to being expected to report,
   // for the same reason no preset does (D3): a tick that names members silent
   // who were never asked for anything is how the signal gets ignored.
@@ -231,7 +280,9 @@ const CiteShape = z.strictObject({
   purpose: z.string().max(300).nullish(),
   preset: PresetNameShape,
   // A cite may set the beat of a preset with a host, built-in or saved (checkCiteCadence); for
-  // `social` that is how a room has its host ask less often than hourly.
+  // `social` that is how a room has its host ask less often than hourly. `heartbeat` is its name
+  // (vocabulary spec D1), and the `heartbeat_on` below the old one (D3).
+  heartbeat: DurationShape.nullish(),
   heartbeat_on: DurationShape.nullish(),
   // Housekeeping is not part of what a preset is (D5), so a citation may add it.
   housekeeping: HousekeepingShape.nullish(),
@@ -241,6 +292,8 @@ const AuthorShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
   mode: z.enum(["pair", "swarm"]),
+  // The room's frequency (vocabulary spec D1); the `heartbeat_on` below is its old name (D3).
+  heartbeat: DurationShape.nullish(),
   heartbeat_on: DurationShape.nullish(),
   housekeeping: HousekeepingShape.nullish(),
   roles: RolesShape,
@@ -402,10 +455,12 @@ export function builtinPresets(): SavedPreset[] {
       name,
       description: BUILTIN_DESCRIPTIONS[name],
       mode: body.mode,
-      heartbeat_on: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs, BEAT_UNITS),
+      heartbeat: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs, BEAT_UNITS),
       // No built-in sets housekeeping, `social` included (D5), and PresetBody cannot say it does.
       housekeeping: null,
-      roles: structuredClone(body.roles),
+      roles: Object.fromEntries(Object.entries(body.roles).map(([key, def]) => [
+        key, { can: [...def.can], description: def.description, heartbeat_on: def.report ?? def.reports },
+      ])),
       default_role: body.defaultRole,
       creator_role: body.creatorRole,
       host: structuredClone(body.host),
@@ -452,7 +507,8 @@ export function resolveManifest(input: unknown): RoomManifest {
 
   if ("preset" in v) {
     const body = PRESETS[v.preset as PresetName];
-    checkCiteCadence(v.preset, body.host !== null, v.heartbeat_on);
+    const beat = roomBeat(v);
+    checkCiteCadence(v.preset, body.host !== null, beat.raw, beat.word ?? "heartbeat_on");
     const manifest: RoomManifest = {
       room: v.room,
       purpose: v.purpose ?? null,
@@ -465,11 +521,11 @@ export function resolveManifest(input: unknown): RoomManifest {
       host: structuredClone(body.host),
       // A cite may set the beat. Absent, it takes the preset's own, which is null for
       // every preset but one with a host (see PresetBody).
-      heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : (body.heartbeatOnMs ?? null),
+      heartbeatOnMs: beat.raw != null ? parseHeartbeatOn(beat.raw, beat.word ?? "heartbeat_on") : (body.heartbeatOnMs ?? null),
       // A cite may add housekeeping to any preset, the host's included (#66, D5).
       housekeeping: resolveHousekeeping(v.housekeeping),
     };
-    checkHost(manifest);
+    checkHost(manifest, { cadence: beat.word ?? "heartbeat_on", hostRole: "reports" });
     return manifest;
   }
 
@@ -485,6 +541,12 @@ export function resolveManifest(input: unknown): RoomManifest {
     );
   }
 
+  const beat = roomBeat(v);
+  // The word a refusal about the frequency speaks when the author wrote neither spelling: today's
+  // only for a manifest written in the old words, a role's `reports` or `report`, else the new
+  // one, which the tools teach (vocabulary plan ruling R2, amended).
+  const spelledOld = Object.values(v.roles).some((d) => d.reports !== undefined || d.report !== undefined);
+  const roleWords: Record<string, "heartbeat_on" | "reports"> = {};
   const roles: Record<string, RoleDef> = {};
   for (const [key, def] of Object.entries(v.roles)) {
     const seen = new Set<Verb>();
@@ -503,28 +565,18 @@ export function resolveManifest(input: unknown): RoomManifest {
     // Refused whether or not the room declares a cadence, because the seat is
     // what cannot answer. A room with no `heartbeat_on` never ticks, so such a
     // manifest asks nothing of anybody today — but it is still unanswerable the
-    // day a cadence is added, and the author is here now. `you_report` in the
+    // day a cadence is added, and the author is here now. `your_heartbeat_on` in the
     // connect preview is the other half of that split: it reads the cadence AND
     // the seat, so a room that never ticks promises nothing.
-    if ((def.reports ?? false) && !def.can.includes("send")) {
+    const onBeat = roleBeat(key, def);
+    roleWords[key] = onBeat.word;
+    if (onBeat.reports && !def.can.includes("send")) {
       const holds = def.can.length > 0 ? def.can.join(", ") : "none";
-      throw new ManifestError(
-        `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`,
-      );
+      throw new ManifestError(onBeat.word === "heartbeat_on"
+        ? `role "${key}" sets heartbeat_on but does not hold the verb "send" (it holds: ${holds})`
+        : `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`);
     }
-    // An instruction for a seat that is never asked would be read by nobody, and
-    // shown at join as if it were (heartbeat instructions spec D2).
-    if (def.report != null && !(def.reports ?? false)) {
-      throw new ManifestError(
-        `role "${key}" sets a report instruction but does not answer the heartbeat (reports is false)`,
-      );
-    }
-    roles[key] = {
-      can: [...def.can],
-      description: def.description ?? null,
-      reports: def.reports ?? false,
-      report: def.report ?? null,
-    };
+    roles[key] = { can: [...def.can], description: def.description ?? null, reports: onBeat.reports, report: onBeat.report };
   }
 
   const host: HostConfig | null = v.host == null ? null : {
@@ -541,11 +593,14 @@ export function resolveManifest(input: unknown): RoomManifest {
     creatorRole: v.creator_role,
     // `!= null`, not truthiness: an authored "" is a mistake to refuse, not an
     // absent key. A valueless `heartbeat_on:` in YAML is null and means no cadence.
-    heartbeatOnMs: v.heartbeat_on != null ? parseHeartbeatOn(v.heartbeat_on) : null,
+    heartbeatOnMs: beat.raw != null ? parseHeartbeatOn(beat.raw, beat.word ?? "heartbeat_on") : null,
     housekeeping: resolveHousekeeping(v.housekeeping),
     host,
   };
-  checkHost(manifest);
+  checkHost(manifest, {
+    cadence: beat.word ?? (spelledOld ? "heartbeat_on" : "heartbeat"),
+    hostRole: (v.host && roleWords[v.host.role]) ?? "reports",
+  });
   return manifest;
 }
 
@@ -556,10 +611,12 @@ export function resolveManifest(input: unknown): RoomManifest {
  * already carries the cadence its author chose. bellman_start meets it for a saved
  * preset, which resolveManifest never sees cited.
  */
-export function checkCiteCadence(preset: string, hasHost: boolean, heartbeatOn: unknown): void {
+export function checkCiteCadence(
+  preset: string, hasHost: boolean, heartbeatOn: unknown, word: "heartbeat" | "heartbeat_on" = "heartbeat_on",
+): void {
   if (heartbeatOn !== undefined && !hasHost) {
     throw new ManifestError(
-      `heartbeat_on: the "${preset}" preset has no host, so a cite of it cannot set a cadence; author the roles to set one`,
+      `${word}: the "${preset}" preset has no host, so a cite of it cannot set a cadence; author the roles to set one`,
     );
   }
 }
@@ -568,7 +625,11 @@ export function checkCiteCadence(preset: string, hasHost: boolean, heartbeatOn: 
  * The cross-field rules a hosted seat adds (hosted seat spec, D1). One function for
  * both arms, so a preset and an authored manifest cannot be refused differently.
  */
-function checkHost(m: RoomManifest): void {
+function checkHost(
+  m: RoomManifest,
+  // The words its two messages name, today's unless the author wrote the new ones (vocabulary spec D5).
+  words: { cadence: "heartbeat" | "heartbeat_on"; hostRole: "heartbeat_on" | "reports" } = { cadence: "heartbeat_on", hostRole: "reports" },
+): void {
   if (m.host === null) return;
   const defined = Object.keys(m.roles);
   if (!defined.includes(m.host.role)) {
@@ -582,12 +643,16 @@ function checkHost(m: RoomManifest): void {
     const holds = def.can.length > 0 ? def.can.join(", ") : "none";
     throw new ManifestError(`host role "${m.host.role}" must hold exactly the verb "send" (it holds: ${holds})`);
   }
-  if (def.reports) throw new ManifestError(`host role "${m.host.role}" must not report`);
+  if (def.reports) {
+    throw new ManifestError(words.hostRole === "heartbeat_on"
+      ? `host role "${m.host.role}" must not be on the heartbeat`
+      : `host role "${m.host.role}" must not report`);
+  }
   // Rendered from the constant, as parseHeartbeatOn renders its bounds: a floor change
   // would otherwise leave these messages naming a floor that no longer exists.
   const floor = duration(MIN_HOST_HEARTBEAT_MS, BEAT_UNITS);
   if (m.heartbeatOnMs === null) {
-    throw new ManifestError(`a room with a host must set heartbeat_on (at least ${floor})`);
+    throw new ManifestError(`a room with a host must set ${words.cadence} (at least ${floor})`);
   }
   if (m.heartbeatOnMs < MIN_HOST_HEARTBEAT_MS) {
     throw new ManifestError(`a room with a host must tick no faster than ${floor} (got "${duration(m.heartbeatOnMs, BEAT_UNITS)}")`);

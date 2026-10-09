@@ -72,7 +72,9 @@ point of the preset: review flows one way.
 
 **`social`** — mode `swarm`. A room with a hosted seat: Bellman runs `host`, which
 asks the room a question each tick and answers in the thread. The beat is hourly;
-`heartbeat_on` next to `preset` slows it, up to `24h`, and never speeds it.
+`heartbeat_on` next to `preset` slows it, up to `24h`, and never speeds it. Next
+to any other preset `heartbeat_on` is refused: only a host gives a cited room
+anything to tick for.
 
 | Role | Can | |
 |---|---|---|
@@ -149,10 +151,12 @@ room.
 
 ### A hosted seat
 
-A `host` block gives the room a seat Bellman runs: on each heartbeat tick it
-asks the room a question, and it answers replies in that question's thread. The
-`social` preset declares one. An authored manifest adds the block and a role for
-it:
+A `host` block gives the room a seat Bellman runs: once a cadence, the room's
+`heartbeat_on`, it asks the room a question, which starts its own thread, and it
+answers replies that carry the question's cursor as `ref_id`, three at most. A
+tick written because a reporting seat was due does not make it ask. It is
+labelled `host@bellman` whatever its role is called. The `social` preset declares
+one. An authored manifest adds the block and a role for it:
 
 ```yaml
 room: build-club
@@ -183,8 +187,9 @@ The block has three fields:
   is one model call and costs 1, 3 or 5 of the room's 3,000 units a month, so a
   heavier model wants a slower beat: an Opus host lasts the month at `24h`.
 - `instructions` is optional, at most 300 characters, and follows Bellman's own
-  rules in the host's prompt. It shapes what the host asks; it cannot give the
-  host a tool or another verb.
+  rules in the host's prompt, which ends saying those rules outrank it. It shapes
+  what the host asks; it cannot give the host a tool, another verb or another
+  name.
 
 Three refusals an author meets:
 

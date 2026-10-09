@@ -43,14 +43,18 @@ the list, or whose room sets `heartbeat_on` under one hour (D3). A room with a
 is a mistake, not a quiet room.
 
 `createSession` seats the host beside the creator: `memberId: "m_host"`,
-`userId: "u_bellman_host"`, `label: "<role>@bellman"`, `roomRole: host.role`.
+`userId: "u_bellman_host"`, `label: "host@bellman"` whatever the role is called
+(a label built from the role would lend Bellman's name to a creator's choice of
+word), `roomRole: host.role`.
 It never joins by code, never holds a socket, and leaves only when the room
 ends. `connectedAmong` widens socket ids by user, and this user never has one.
 
 The `social` preset declares a `host` role (`can: ["send"]`) and a default
 `host` block with Bellman's instructions ("ask one question each tick about the
 room's purpose; answer briefly in the thread"), so a creator writes a `purpose`
-and gets a host. The preset's other roles are the swarm preset's.
+and gets a host. The preset's other roles are the swarm preset's. (As built, the
+preset gives a send-only `guest` default seat and no `observer`; ADR 0002 records
+the departure and why.)
 
 ### D2. Whose plan, and what it buys
 
@@ -87,8 +91,13 @@ the count is the meter. Token-exact metering would cost a registry hop on every
 wake to bill nobody by tokens.
 
 A wake costs its model's weight in units, from a table in code beside the model
-names: `haiku: 1`, `sonnet: 3`, `opus: 5`, the list-price ratios. The dollar
-ceiling of a room's month is then the same whatever the creator picks:
+names: `haiku: 1`, `sonnet: 3`, `opus: 5`. (Corrected after review: these were
+described as the list-price ratios, which would give every model's month the
+same dollar ceiling. At list the three models stand 1:2:4, Haiku 4.5 at $1 and
+$5 per million input and output tokens, Sonnet 5.5 at $2 and $10, Opus 5.5 at $4
+and $20, so the weights are a pricing choice: a sonnet room's month buys about
+two-thirds of a haiku room's dollars at list, an opus room's about four-fifths.)
+What each model's month holds:
 
 | host | beat | units a month | within 3,000 |
 |---|---|---|---|
@@ -130,20 +139,30 @@ The room wakes the seat through the outbox it already has, the path that
 delivers audit rows: a `host` row `{ cause: "tick" | "reply", cursor }` is queued
 in the same transaction as the event that caused it, and the outbox driver
 delivers it to `HostDO` by RPC at least once. Two causes queue a wake: a
-`heartbeat` event, and a reply (a `message` or `progress` event whose `ref_id` is
-one of the seat's open questions). Nothing else wakes the seat.
+`heartbeat` event that wakes the host, which is one on the host's own cadence,
+anchored on `lastHostTickAt`, never one written only for a due reporter; and a
+reply (a `message` or `progress` event whose `ref_id` is one of the seat's open
+questions). Nothing else wakes the seat, and nothing wakes a host the room has
+evicted.
 
-On a tick wake the seat composes a question and sends a `message` with `ref_id`
-set to the tick's cursor and payload `{ kind: "question", text }`. That message
-is the thread's root: replies and the seat's answers carry `ref_id` set to its
-cursor. A human host can do exactly this by hand, which is why the public room
-needs no seat to work. The seat keeps its last five questions in the prompt so a
-room does not hear the same one twice.
+On a tick wake the seat composes a question and sends a `message` with no
+`ref_id` and payload `{ kind: "question", text, tick }`, `tick` being the tick's
+cursor. That message is the thread's root: replies and the seat's answers carry
+`ref_id` set to its cursor. (Changed after review: the question carried the
+tick's cursor as its `ref_id`, so an agent that threaded by copying the ref it
+saw replied to the heartbeat, which woke nothing. ADR 0002 records it.) A human
+host can do exactly this by hand, which is why the public room needs no seat to
+work. The seat keeps its last five questions in the prompt so a room does not
+hear the same one twice.
 
-On a reply wake the seat reads the room's events after its cursor by RPC
-(`eventsAfter`, bounded), keeps the replies to its open questions, and sends one
-answer in the thread. A question is open until it has drawn three answers or the
-next tick lands; after that its replies no longer wake the seat.
+On a reply wake the seat first checks what it can without the log: that a
+question is open with answers left, and the whole meter. Then it reads the
+room's events by RPC (`eventsAfter`, bounded: at most `READ_LIMIT` events, a
+window ending past the reply that woke it), keeps the replies to its open
+question, and sends one answer in the thread. After an answer its cursor is the
+last reply it read, so a reply that landed during the model call is read by its
+own wake. A question is open until it has drawn three answers or the next tick
+lands; after that its replies no longer wake the seat.
 
 ### D5. The call and the boundary
 
@@ -156,8 +175,11 @@ content in, with `<` escaped, so a reply can carry any text and never an
 instruction the model is told to follow.
 
 The seat has no tools and no network beyond the model. Its one act is a `send`
-through the room's append path with its own `member_id`, so `denyVerb`, the
-audit log and every reader see a member. Its output enters the room as peer
+through the room's append path with its own `member_id`, so the audit log and
+every reader see a member: `appendHostEvent` queues the send's `sent_message`
+audit row in its own transaction. `denyVerb` has nothing to refuse it, because
+`resolveManifest` fixes its role to `send` and the manifest is immutable. The
+system prompt ends saying Bellman's rules outrank the creator's instructions. Its output enters the room as peer
 content, untrusted to everyone else as any member's is. It cannot hold
 `respond_actions`, so an action request addressed to it is refused by `denyVerb`
 like any seat without the verb, and it never approves anything.
@@ -171,15 +193,25 @@ for the roster's sake, and nothing reads it for liveness.
 
 Wakes are at-least-once, so they are idempotent: a wake whose cause cursor is at
 or below the seat's last answered cause is acknowledged and dropped, as is one
-for a room that has closed or frozen since it was queued.
+for a room that has closed or frozen since it was queued, or that has evicted its
+host. Each write carries the wake's intent id (`host:<cause>:<cursor>`), and a
+second write under it returns the first and charges nothing, so a wake run again
+after its write's response was lost neither posts nor charges twice; the seat
+looks the id up before it calls the model.
 
-The model fails in two ways. A 429 or a 5xx re-arms the seat's own alarm at 1,
-5 and 15 minutes, three attempts, then the wake is dropped: a tick with no
-question is still a tick, and the room is truth. A refusal from the room (month
-spent, hourly cap, verb denied) is final for that wake. The spent month gets one
+The model fails in two ways. A 429, a 5xx, a model that cannot be reached or a
+call past 30 seconds re-arms the seat's own alarm at 1, 5 and 15 minutes, three
+attempts, then the wake is dropped and logged: a tick with no question is still a
+tick, and the room is truth. Any other failed call is not retried, and is logged
+with its status and the API's error type, never a header, the key or the prompt.
+A response that stopped at `max_tokens` or `refusal` is never posted, so never
+charged; any `stop_reason` but `end_turn` is logged. A throw from the room's read
+or write counts as an attempt the same way, and at the fourth the wake is dropped
+and logged, so the queue behind it is handled. A refusal from the room (month
+spent, hourly cap, host evicted) is final for that wake. The spent month gets one
 message, "the host has used its 3,000 units this month; an opus wake costs 5",
-sent outside the metered path so it cannot itself be refused, and then silence
-until the month turns.
+sent outside the metered path, past both caps, so it cannot itself be refused,
+recorded only once it lands, and then silence until the month turns.
 
 ### D7. The Node server runs the same seat
 
@@ -187,8 +219,10 @@ The loop is a runtime-free module, `src/host.ts`: compose the prompt, escape the
 envelope, decide what a wake does from the events it reads, parse the answer,
 and name the charge. `HostDO` and a `MemoryHost` in the Node program both call
 it. The model endpoint is `MODEL_URL`, a variable that defaults to Anthropic's
-and points at a fake for `npm start`, the smoke test and the worker tests, so a
-host runs locally with no key.
+and points at a fake for the smoke test and the worker tests. The Node server
+calls the real Messages API only with `BELLMAN_REAL_MODEL=1` beside
+`ANTHROPIC_API_KEY`, and otherwise its own fake, so `npm start` runs a host with
+no key and spends none even with a key exported; it says at startup which.
 
 ## Errors
 
@@ -200,8 +234,13 @@ host runs locally with no key.
 | `host` on a plan with `hostedRoomsPerMonth: 0` | `bellman_start` refuses, naming the plan |
 | fourth hosted room on max in a month | `bellman_start` refuses, as for the create limit |
 | wake would cross `hostUnitsPerMonth` | the send is refused in the transaction; one message outside metering; quiet until the month turns |
-| ninth wake in an hour | refused; the wake is dropped; the next tick wakes it again |
-| model 429 or 5xx | backoff 1, 5, 15 min; dropped after three |
+| ninth wake in an hour | refused before the model is called; the wake is dropped; the next tick wakes it again |
+| host evicted | nothing wakes it; a wake already queued is dropped with no model call; the room refuses its writes |
+| model 429, 5xx, unreachable or past 30 s | backoff 1, 5, 15 min; dropped and logged after three |
+| model 400, 401, 403 or 404 | dropped, with the status and the error type logged |
+| `stop_reason` `max_tokens` or `refusal` | logged; nothing posted, nothing charged |
+| the room's read or write throws | retried as a failed call; dropped and logged after three, and the queue goes on |
+| write's response lost after it committed | the wake runs again, finds its post by intent id, and calls no model |
 | model answers with nothing usable | the wake is dropped; no empty message |
 | duplicate wake delivered | acknowledged and dropped by cause cursor |
 | room closed or frozen before the wake lands | dropped |
@@ -223,9 +262,10 @@ Every new assertion is run against a broken implementation before it counts.
 - Registry: hosted creations a month counted and refused at the plan's number.
 - Tools: `bellman_start` refusals; the preview shows the host as a member.
 - Worker tests with a stubbed `MODEL_URL`: one tick wake end to end, the
-  question lands with the tick's cursor as `ref_id`; one reply wake answers in
-  the thread; backoff on 429; a redelivered wake is dropped; a frozen room's
-  wake is dropped.
+  question lands as a thread root with the tick's cursor in its payload; one
+  reply wake answers in the thread; backoff on 429; a redelivered wake is
+  dropped; a frozen room's wake is dropped; an evicted host is woken by
+  nothing.
 - `wrangler deploy --dry-run` in the plan, before merge: a new binding and a
   new migration are what the check path does not exercise.
 

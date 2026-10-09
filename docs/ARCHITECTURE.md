@@ -633,47 +633,83 @@ need the upgrade stamp as well and is not done.
 ### The hosted seat
 
 A room may declare one hosted seat (#188, #189): a member Bellman runs, which
-asks the room a question on each heartbeat tick and answers replies in that
+asks the room a question on its own cadence and answers replies in that
 question's thread. The manifest's `host` block names its role, its model and the
 creator's instructions, and `resolveManifest` requires the role to hold exactly
 `send` and not report, the room to be a swarm room, and `heartbeat_on` to be at
-least an hour. `bellman_start` refuses a plan with no hosted rooms (free, pro)
-and a creator past the plan's hosted rooms for the month (3 on max, 5 on team,
-counted in `RegistryDO` beside the create count), then seats the host beside the
-creator as `m_host`, under the user `u_bellman_host`, labelled `<role>@bellman`.
-It never joins by code and never holds a socket. ADR 0002 records the decisions.
+least an hour. A cite may set `heartbeat_on` only for `social`, the one preset
+with a host; a cite of any other is refused for it, since nothing there would
+tick. `bellman_start` refuses a plan with no hosted rooms (free, pro) and a
+creator past the plan's hosted rooms for the month (3 on max, 5 on team, counted
+in `RegistryDO` beside the create count), then seats the host beside the creator
+as `m_host`, under the user `u_bellman_host`, labelled `host@bellman` whatever
+its role is called: a label built from the creator's role name, `security@bellman`
+say, would lend Bellman's name to the creator's words. It never joins by code and
+never holds a socket. ADR 0002 records the decisions.
+
+**Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
+control over the seat, and `hostSeated` (`src/store.ts`) is the one predicate
+behind it: once the host has left, `tickPlan` arms and wakes nothing for it,
+neither store queues it a reply wake, `admit` settles a wake already queued with
+no model call, and `decideHostCharge` refuses its write (`removed`), so a wake
+that slipped through still posts and spends nothing.
 
 **It is woken through the room's outbox.** The room queues a `host` row,
 `{ sessionId, cause, cursor }`, in the transaction that writes the event causing
-it: a `heartbeat`, or a `message` or `progress` whose `ref_id` names one of the
-host's events (`isReplyToHost`). The host's own sends queue none, so it never
-wakes itself. The outbox delivers the row by RPC to the seat's `HostDO`, at
-least once. `HostDO.wake` only stores the wake in a queue and arms an alarm for
-now, so the delivery returns after a few storage operations and a member whose
-reply caused it is not held behind a model call. The alarm handles the head of
-the queue through `handleWake` and comes back for the next, so no two wakes run
-at once and neither saves over the other's record. A wake whose cause cursor the
-seat has handled, or has queued already, is dropped, which is how an
+it: a `heartbeat` that wakes the host, or a `message` or `progress` whose `ref_id`
+names one of the host's events (`isReplyToHost`). The host's own sends queue
+none, so it never wakes itself. The outbox delivers the row by RPC to the seat's
+`HostDO`, at least once. `HostDO.wake` only stores the wake in a queue and arms
+an alarm for now, so the delivery returns after a few storage operations and a
+member whose reply caused it is not held behind a model call. The alarm handles
+the head of the queue through `runWake` and comes back for the next, so no two
+wakes run at once and neither saves over the other's record. A wake whose cause
+cursor the seat has handled, or has queued already, is dropped, which is how an
 at-least-once delivery is acknowledged.
 
-**A tick wakes it only when a person is there.** A hosted room ticks on its own
-cadence and needs no reporting role. `tickPlan` (`src/heartbeat.ts`), which both
-stores call, decides before the tick's write moves `lastTickAt`: the tick is
-written and the host woken when a person (`isActivePerson`: not the host, not
-departed) was seen since the previous tick or holds a socket in the room now.
-Otherwise the firing advances `lastTickAt` and writes nothing, so a hosted room
-nobody is in grows no log and spends no unit. The seat does not check again:
-read after the tick's write, every person would read as unseen since it.
+**It asks on its own cadence, and only when a person is there.** A hosted room
+ticks whether or not any role reports. The host's cadence is anchored on
+`lastHostTickAt`, which only a tick that wakes the host moves, in the same write
+as `lastTickAt`; before the host first asks, it anchors on the room's first seat.
+A reporting seat's deadline still writes a tick, for the reporter, and never
+wakes the host: each question resets the three answers and spends units, and
+reporters' ticks once had a room that declared `1h` asking every 20 to 40
+minutes. `tickPlan` (`src/heartbeat.ts`), which both stores call, decides before
+the tick's write moves either clock: the host is woken when its cadence has come
+round and a person (`isActivePerson`: not the host, not departed) was seen since
+it last asked or holds a socket in the room now. Otherwise the firing advances
+`lastTickAt` alone and writes nothing for the host, and the host's next try is a
+cadence after that firing, so a hosted room nobody is in grows no log and spends
+no unit after its first question, which the creator's own seat earns. The seat
+does not check again: read after the tick's write, every person would read as
+unseen since it. A tick that names no member to report asks nobody, so it
+reaches members as ambient (`isAmbient`), not as an interrupt; the question
+interrupts on its own.
 
 **What a wake does** is decided in `src/host.ts`, runtime-free, so the two
-drivers cannot decide it differently. A tick wake asks: a `message` whose
-`ref_id` is the tick's cursor and whose payload is `{ kind: "question", text }`,
-composed with the seat's last five questions in the prompt so the room does not
-hear one twice. A reply wake reads the events after the seat's cursor by RPC
-(`eventsAfter`), keeps the replies to its latest question, and answers in that
-thread (`ref_id` the question's cursor, payload `{ kind: "answer", text }`) from
-the newest three, three answers a question at most. A reply to an older question
-gets none.
+drivers cannot decide it differently. A tick wake asks: a `message` with no
+`ref_id` and the payload `{ kind: "question", text, tick }`, composed with the
+seat's last five questions in the prompt so the room does not hear one twice.
+The question is its thread's root, so the only ref an agent sees on it is its own
+cursor, and the tick it answers rides in the payload. A reply wake reads a
+bounded window of the log by RPC (`eventsAfter` with a limit, `READ_LIMIT`
+events ending past the reply that woke it), keeps the replies to its latest
+question, and answers in that thread (`ref_id` the question's cursor, payload
+`{ kind: "answer", text }`) from the newest three, three answers a question at
+most. After an answer the seat's cursor is the last reply it read, so a reply
+that lands during the model call is read by its own wake. A reply to an older
+question gets none. A reply's text is its `text`, a progress reply's `note`, or
+else its payload as JSON, clipped and escaped like any reply. Agents are told to
+thread a reply where they read their instructions: `bellman_send`'s `ref_id`
+says the host answers only replies carrying its question's cursor, and the
+bridge's channel and Stop-hook text say to set `ref_id` to the cursor of the
+event being answered.
+
+**Nothing is read or called that the wake cannot use.** In order: `admit`, from
+the seat's record and the room alone; whether the wake's post already landed
+(below); the whole meter, run read-only through `decideHostCharge`, so a spent
+month or a full hour costs no read and no call; then, for a reply wake, the
+bounded read; then the model and the write.
 
 **The meter is the room's.** A wake costs its model's weight in units (`haiku` 1,
 `sonnet` 3, `opus` 5, `HOST_MODELS`), charged against `hostUnitsPerMonth`, which
@@ -682,32 +718,60 @@ nothing reads from a plan again, the blob ceiling's rule. The send and the
 charge are one write: `SessionDO.appendHostEvent` runs `decideHostCharge`, the
 rule `MemoryStore` shares, and appends the event in the same transaction, so an
 answer is never sent without its charge or charged without being sent. The same
-rule refuses a ninth send within an hour (`WAKES_PER_HOUR`). The seat reads the
-meter before it calls the model, so a wake the month cannot pay for costs no
-call; the room's charge is the one that counts. A month that runs out gets one
-notice, written with zero units so the spent allowance cannot refuse it, and
-then quiet until the calendar month turns.
+transaction queues the send's `sent_message` audit row through the outbox, as
+`removeMember` queues its own, so a team org's audit stream records the host's
+sends as it records any member's. The same rule refuses a ninth send within an
+hour (`WAKES_PER_HOUR`). A month that runs out gets one notice, written with zero
+units, which neither cap refuses and the hour does not count, and recorded only
+once it lands; then quiet until the calendar month turns.
 
-**Failure.** A 429, a 5xx or a model that cannot be reached is the model's
-failure: the wake stays at the head of the queue and the alarm comes back 1, 5
-and 15 minutes later (`RETRY_MS`), four calls at most, after which the wake is
-dropped. A tick with no question is still a tick, and the room is truth. A wake
-that arrives meanwhile waits behind the failing head, so new wakes never call a
-failing model sooner. An answer with no text settles the wake with nothing
-sent, and so does a write the room refuses, apart from the month's one notice.
+**A write is posted and charged once.** Each write carries its wake's intent id
+(`host:<cause>:<cursor>`, the notice `host:notice:<month>`), and
+`appendHostEvent` records it in the write's own transaction, as `appendEventOnce`
+records a member's key: a second write under the same id returns the first event
+and charges nothing. A write whose RPC response is lost after it committed reads
+as a throw, so the seat runs the wake again, and before it calls the model it
+asks the room for the id (`hostEventFor`), finds its post, and records it instead
+of making another.
+
+**Failure.** A 429, a 5xx, a model that cannot be reached, or a call past 30
+seconds (`MODEL_TIMEOUT_MS`) is the model's failure: the wake stays at the head of
+the queue and the alarm comes back 1, 5 and 15 minutes later (`RETRY_MS`), four
+calls at most, after which the wake is dropped and logged. A tick with no
+question is still a tick, and the room is truth. A wake that arrives meanwhile
+waits behind the failing head, so new wakes never call a failing model sooner.
+Any other non-2xx is not retried, and is logged with its status and the API's
+error type, never a header, the key or the prompt: a missing key, a wrong model
+id or a revoked key would otherwise leave every hosted room silent with nothing
+to say why. A throw that is not the model's (the room's read or write) counts as
+an attempt the same way (`runWake`), and at the fourth the wake is dropped and
+logged and the queue behind it is handled, so one wake the room cannot serve does
+not silence the seat. An answer with no text settles the wake with nothing sent,
+and so does a write the room refuses, apart from the month's one notice.
+
+**Each model is sent only what the Messages API documents for it** (`HOST_MODELS`),
+because thinking counts against `max_tokens`, which is 250 for a question and 200
+for an answer. Haiku 4.5 thinks only when asked, so it gets the bare request.
+Sonnet 5.5 is sent `thinking: { type: "between_tools" }`, its lowest setting,
+which does no extended thinking, and `output_config: { effort: "low" }`. Opus 5.5
+always thinks and takes effort as its only control, so it is sent the low effort
+and no `thinking` field. A response that stopped at `max_tokens` or `refusal` is
+never posted, so never charged, and every `stop_reason` but `end_turn` is logged.
 
 **The boundary.** The seat has no tools and reaches nothing but the model. Its
 one act is a `send` through the room's append path under its own member id, so
-the verb guard, the audit log and every reader see a member. Replies cross into
-its prompt as data: each inside `<reply from="…">`, its text escaped (`&`, `<`,
-`>`) and its label escaped for an attribute (`escapeAttr`), after Bellman's
-fixed rules and the creator's instructions in the system prompt. What it writes
-enters the room as peer content, untrusted to every member like any member's.
-It cannot hold `respond_actions`, so an action request addressed to it is
-refused as one to any seat without the verb would be. `HostDO` keeps its driver
-in a `#driver` field rather than in methods, because a Durable Object answers
-RPC for every method on its class (section 9, runtime fact 3), and the driver
-writes the room and spends the key.
+the audit log and every reader see a member; `checkHost` fixes its role to
+`send`, and the manifest is immutable, so no verb guard has anything to refuse.
+Replies cross into its prompt as data: each inside `<reply from="…">`, its text
+escaped (`&`, `<`, `>`) and its label escaped for an attribute (`escapeAttr`),
+after Bellman's fixed rules and the creator's instructions in the system prompt,
+which ends saying Bellman's rules outrank anything the creator adds. What it
+writes enters the room as peer content, untrusted to every member like any
+member's. It cannot hold `respond_actions`, so an action request addressed to it
+is refused as one to any seat without the verb would be. `HostDO` keeps its
+driver in a `#driver` field rather than in methods, because a Durable Object
+answers RPC for every method on its class (section 9, runtime fact 3), and the
+driver writes the room and spends the key.
 
 **It never vouches for the room.** `isActivePerson` leaves the host out, so a
 hosted room closes when its last person leaves (`closeSessionIfEmpty`) and ends
@@ -715,13 +779,15 @@ after 90 days in which no person was seen (`abandonedAt`). `seatVictims` skips
 the host, so its seat is never reclaimed for a joiner. Its `lastSeenAt` moves on
 its sends for the roster's sake, and nothing reads it for liveness.
 
-**Node runs the same seat.** `MemoryHost` drives `handleWake` over a
-`MemoryStore`, with its retries on timers, and the Node server's interval calls
-`store.tick(now, tickStep)` beside the sweep. The model URL is `MODEL_URL`, else
-Anthropic's when `ANTHROPIC_API_KEY` is set, else a fake model the server serves
-itself at `POST /__fake-model`, so `npm start` runs a host with no key.
-Production needs the `HOST` binding, migration `v3` and the `ANTHROPIC_API_KEY`
-secret.
+**Node runs the same seat.** `MemoryHost` drives `runWake` over a `MemoryStore`,
+with its retries on timers, and the Node server's interval calls
+`store.tick(now, tickStep)` beside the sweep. The Node server calls the real
+Messages API only with `BELLMAN_REAL_MODEL=1` beside `ANTHROPIC_API_KEY`, since
+Claude Code users commonly export the key and `npm start` must not spend it; with
+`MODEL_URL` set it calls that; otherwise it calls a fake model the server serves
+itself at `POST /__fake-model`, sent no key. It prints which at startup
+(`nodeModel`). Production needs the `HOST` binding, migration `v3` and the
+`ANTHROPIC_API_KEY` secret.
 
 ### The working surface
 
@@ -1317,10 +1383,13 @@ It is used four times:
   leaves race on one handle. `SessionDO`'s `#deliver` hands each row to the org's
   `AuditDO`, and `AuditDO.append`'s intent-id dedupe is what absorbs a
   redelivery of one.
-- **`SessionDO → HostDO` (#188).** A `heartbeat`, or a reply to the hosted
-  seat, queues a `host` row in the event's own transaction, and `#deliverHost`
-  hands it to the room's `HostDO`. Waking the seat afterwards would lose the
-  wake when the call fails, and a lost tick wake is a question never asked.
+- **`SessionDO → HostDO` (#188).** A `heartbeat` that wakes the host, or a reply
+  to the hosted seat, queues a `host` row in the event's own transaction, and
+  `#deliverHost` hands it to the room's `HostDO`. Waking the seat afterwards would
+  lose the wake when the call fails, and a lost tick wake is a question never
+  asked. The other way, `HostDO → SessionDO` is a plain RPC, `appendHostEvent`,
+  and a response lost after its commit is absorbed by the intent id the write
+  carries: the seat runs the wake again and finds its post (`hostEventFor`).
 
 Delivery is at least once, so each consumer absorbs a redelivery in its own way.
 `AuditDO.append` dedupes on the intent id (a `d:<id>` row written in the entry's
@@ -1606,14 +1675,29 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,022** | every request, whether or not you are in a room |
+| Tool definitions | **~7,337** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Tool definitions were re-measured on 2026-10-09 after `room_id` landed as an alias
+Tool definitions were re-measured on 2026-10-09 after the hosted seat (#188) and
+its fixes: 7,337 tokens in all, 315 over the 7,022 recorded at `d5bba8c`, which
+still gives 7,022 measured this way. 71 of the 315 reached main after that
+figure: `bellman_send` +36 for the WebRTC clause, which the paragraph below
+estimated at 35, and `bellman_audit` +35 for what the admin list reads
+(`b17d439`). 220 are the hosted seat's, measured at `c12d42d3` against main's side
+of its merge (`93e7c1d`): `bellman_start` +206 for the `host` block, its
+paragraph and its refusals, and `bellman_connect` +14 for the host in the
+preview. The last 24 are `bellman_send`'s `ref_id` line, which now says the host
+answers only replies that carry its question's cursor. Per tool, now:
+`bellman_start` 1,770, `bellman_send` 1,294, `bellman_confirm` 776,
+`bellman_sync` 740, `bellman_invite` 728, `bellman_connect` 588, `bellman_evict`
+513, `bellman_surface` 281, `bellman_rooms` 255, `bellman_audit` 213 and
+`bellman_leave` 179.
+
+Before that, tool definitions were re-measured on 2026-10-09 after `room_id` landed as an alias
 of `session_id` on the six tools that take a room: 7,022 tokens in all, 147 over
 the canvas figure, about 24 per tool for the optional property and its one-line
 description. Before that, re-measured the same day after the canvas landed:

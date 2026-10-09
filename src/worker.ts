@@ -29,6 +29,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
  */
 export { SessionDO, RegistryDO, AuditDO } from "./store-do.js";
 export { AuthDO } from "./oauth/store.js";
+export { HostDO } from "./host-do.js";
 
 /** Worker bindings: the session stores, plus the authorization server's. */
 export interface WorkerEnv extends BellmanEnv {

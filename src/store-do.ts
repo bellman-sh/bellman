@@ -15,7 +15,8 @@ import {
   decideHostCharge, isAbandoned, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost,
   markRemoved, seatVictims, stampSeen,
 } from "./store.js";
-import { hostWakeIntent } from "./host.js";
+import { hostWakeIntent, type HostWake } from "./host.js";
+import type { HostDO } from "./host-do.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
@@ -1777,11 +1778,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * A wake for the hosted seat (hosted seat spec, D4). Delivered to HostDO in Task 4
-   * of the hosted-seat plan; until then the row is acknowledged and dropped, so the
-   * rows queued behind it still go.
+   * A wake for the hosted seat (hosted seat spec, D4), delivered to the room's own
+   * `HostDO` by RPC. The row's id goes with it, as an audit row's does. A throw here
+   * leaves the row queued, so the outbox redelivers it, and the seat drops a wake whose
+   * cause it has already handled.
    */
-  async #deliverHost(_row: OutboxRow): Promise<void> {}
+  async #deliverHost(row: OutboxRow): Promise<void> {
+    const wake = row.payload as HostWake;
+    await this.env.HOST.get(this.env.HOST.idFromName(wake.sessionId)).wake(wake, row.id);
+  }
 
   /**
    * The object's single alarm, shared by name: the driver reports which handlers
@@ -2580,7 +2585,13 @@ export interface BellmanEnv {
   SESSION: DurableObjectNamespace<SessionDO>;
   REGISTRY: DurableObjectNamespace<RegistryDO>;
   AUDIT: DurableObjectNamespace<AuditDO>;
+  /** One per hosted room, keyed by session id (hosted seat spec, D4). */
+  HOST: DurableObjectNamespace<HostDO>;
   BELLMAN_KEYS?: string;
+  /** A Worker secret. Absent, the seat's model calls go out unauthenticated and are refused. */
+  ANTHROPIC_API_KEY?: string;
+  /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */
+  MODEL_URL?: string;
 }
 
 export class DurableObjectStore implements BellmanStore {

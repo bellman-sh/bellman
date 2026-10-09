@@ -102,6 +102,35 @@ describe("the preset routes", () => {
     });
   });
 
+  // Housekeeping (#66), integration ruling M1: saved and listed as heartbeat_on is, and
+  // refused by the one validator an authored manifest meets.
+  it("save a preset's housekeeping as stored, only the keys it sets, and list it back", async () => {
+    const res = (await put(DEV_KEY.jesse, "watchful", preset({ heartbeat_on: "5m", housekeeping: { quiet_after: "2h", idle_after: null } })))!;
+    expect(res.status).toBe(200);
+    const saved = await bodyOf(res);
+    expect(saved).toMatchObject({ heartbeat_on: "5m" });
+    expect(saved.housekeeping).toEqual({ quiet_after: "2h" });
+    expect(await store.getPreset("u_jesse", "watchful")).toEqual(saved);
+    const mine = (await bodyOf(await call(DEV_KEY.jesse, "/presets"))).mine as { name: string; housekeeping: unknown }[];
+    expect(mine.map((p) => [p.name, p.housekeeping])).toEqual([["watchful", { quiet_after: "2h" }]]);
+  });
+
+  it("list a preset that sets no housekeeping with it null, and the built-ins likewise", async () => {
+    await put(DEV_KEY.jesse, "plain");
+    const body = await bodyOf(await call(DEV_KEY.jesse, "/presets"));
+    expect((body.mine as { housekeeping: unknown }[]).map((p) => p.housekeeping)).toEqual([null]);
+    expect((body.builtin as { housekeeping: unknown }[]).map((p) => p.housekeeping)).toEqual([null, null, null]);
+  });
+
+  it("refuse housekeeping the room validator refuses, in its words", async () => {
+    const res = (await put(DEV_KEY.jesse, "watchful", preset({ housekeeping: { quiet_after: "1m" } })))!;
+    expect(res.status).toBe(400);
+    expect(await bodyOf(res)).toEqual({
+      error: "invalid_manifest",
+      error_description: 'housekeeping.quiet_after must be between 5m and 7d (got "1m")',
+    });
+  });
+
   it("refuse a name outside the grammar, a built-in's name, and a body naming another preset", async () => {
     expect((await put(DEV_KEY.jesse, "My-Review"))!.status).toBe(400);
     const builtin = (await put(DEV_KEY.jesse, "review"))!;

@@ -4,6 +4,7 @@
  * manifest.ts, so the routes, the tool and both test programs import it.
  */
 import { ManifestError, PRESET_NAMES, PresetNameShape, PresetShape, describeIssue, resolveManifest } from "./manifest.js";
+import type { HousekeepingInput } from "./manifest.js";
 import type { SavedPreset } from "./types.js";
 
 // ponytail: twenty a person, not tuned. The first person past it wants a reason, not a bigger number.
@@ -20,10 +21,29 @@ export function asManifest(p: SavedPreset, room: string, purpose: string | null 
     purpose: purpose ?? null,
     mode: p.mode,
     heartbeat_on: p.heartbeat_on,
+    housekeeping: p.housekeeping,
     roles: p.roles,
     default_role: p.default_role,
     creator_role: p.creator_role,
   };
+}
+
+/**
+ * A row read back from the registry, in the form the type promises. Stored rows outlive
+ * the code that wrote them: one saved before `housekeeping` existed has no such key, and
+ * is a preset that sets none.
+ */
+export const liftPreset = (p: SavedPreset): SavedPreset => ({ ...p, housekeeping: p.housekeeping ?? null });
+
+/**
+ * The block as saved (#66): the keys it sets, durations as written, and null when it sets
+ * none, so "no housekeeping" has one spelling in a row as it has in a resolved manifest.
+ * A bound is not checked here. checkPreset resolves the preset the way a room would, and the
+ * validator refuses what is out of range, in its own words.
+ */
+function savedHousekeeping(h: HousekeepingInput | null | undefined): SavedPreset["housekeeping"] {
+  const set = Object.entries(h ?? {}).filter(([, duration]) => duration != null);
+  return set.length > 0 ? (Object.fromEntries(set) as NonNullable<SavedPreset["housekeeping"]>) : null;
 }
 
 /**
@@ -53,6 +73,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
     description: v.description ?? null,
     mode: v.mode,
     heartbeat_on: v.heartbeat_on ?? null,
+    housekeeping: savedHousekeeping(v.housekeeping),
     roles,
     default_role: v.default_role,
     creator_role: v.creator_role,

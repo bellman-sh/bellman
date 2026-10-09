@@ -352,6 +352,8 @@ export function builtinPresets(): SavedPreset[] {
       description: BUILTIN_DESCRIPTIONS[name],
       mode: body.mode,
       heartbeat_on: null,
+      // No built-in sets housekeeping (D5), and PresetBody cannot say it does.
+      housekeeping: null,
       roles: structuredClone(body.roles),
       default_role: body.defaultRole,
       creator_role: body.creatorRole,

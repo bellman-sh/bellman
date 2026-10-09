@@ -71,7 +71,12 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
               `unknown preset "${manifestInput.preset}" (built-in: ${PRESET_NAMES.join(", ")}; yours: ${yours.length > 0 ? yours.join(", ") : "none"})`,
             );
           }
-          input = asManifest(saved, manifestInput.room, manifestInput.purpose);
+          // A block the cite carries is the caller's say for this room (#66, D5), so it replaces
+          // the preset's whole. Null or {} says none, as it does in an authored manifest.
+          input = {
+            ...asManifest(saved, manifestInput.room, manifestInput.purpose),
+            ...(manifestInput.housekeeping !== undefined && { housekeeping: manifestInput.housekeeping }),
+          };
         }
         manifest = resolveManifest(input);
       } catch (e) {

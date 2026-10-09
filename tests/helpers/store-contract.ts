@@ -3339,6 +3339,7 @@ export function describeStoreContract(
         description: null,
         mode: "pair",
         heartbeat_on: null,
+        housekeeping: null,
         roles: { lead: { can: ["send"], description: null, reports: false } },
         default_role: "lead",
         creator_role: "lead",
@@ -3359,6 +3360,18 @@ export function describeStoreContract(
         got.roles.lead.can.push("invite");
         expect((await store.getPreset("u_jesse", "a"))!.roles.lead.can).toEqual(["send"]);
         expect(await store.getPreset("u_jesse", "b")).toBeUndefined();
+      });
+
+      // Housekeeping (#66), integration ruling M1: the block is part of what a preset is, so a
+      // store keeps it whole through get and list, and hands out a copy of it like the roles.
+      it("keeps a preset's housekeeping through get and list, as a copy the caller cannot change in the store", async () => {
+        const block = { quiet_after: "2h", idle_after: "1d" };
+        await store.putPreset("u_jesse", preset("a", { housekeeping: block }), 20);
+        const got = (await store.getPreset("u_jesse", "a"))!;
+        expect(got.housekeeping).toEqual(block);
+        got.housekeeping!.quiet_after = "5m";
+        expect((await store.getPreset("u_jesse", "a"))!.housekeeping).toEqual(block);
+        expect((await store.listPresets("u_jesse")).map((p) => p.housekeeping)).toEqual([block]);
       });
 
       it("replaces by name", async () => {

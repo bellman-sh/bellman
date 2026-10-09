@@ -5,7 +5,7 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveManifest, ManifestError, ManifestShape, PRESET_NAMES, RoleKeyShape, VERBS,
-  MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS,
+  MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, builtinPresets,
 } from "../src/manifest.js";
 import * as manifestModule from "../src/manifest.js";
 import type { PresetName } from "../src/types.js";
@@ -614,6 +614,15 @@ describe("housekeeping (#66)", () => {
     for (const preset of PRESET_NAMES) {
       expect(resolveManifest({ room: "r", preset }).housekeeping, preset).toBeNull();
     }
+  });
+
+  // The catalog has a second face: the listing the panel shows and clones (designer D5).
+  // A built-in that carried a block there would start rooms that name members quiet for
+  // everyone who cloned it, which is why no preset sets one (D5).
+  it("is null in the saved-preset form of every built-in too", () => {
+    const listed = builtinPresets();
+    expect(listed.map((p) => p.name)).toEqual([...PRESET_NAMES]);
+    for (const p of listed) expect(p.housekeeping, p.name).toBeNull();
   });
 
   // An empty object disables every finding exactly as an absent one does. Both are null,

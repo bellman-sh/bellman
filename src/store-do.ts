@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, PurgeSchedule, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -151,6 +151,16 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
 });
+
+/**
+ * A hosted room gives its creator's slot back as it closes (I7), however it closes: queued
+ * in the close's own transaction and delivered to the registry by the outbox. None for a
+ * room with no host, or one already closed.
+ */
+const hostedReleaseIntents = (s: StoredSession): OutboxIntent[] =>
+  s.manifest.host !== null && !s.closed
+    ? [{ id: crypto.randomUUID(), kind: "hosted_release", payload: { userId: s.createdBy, sessionId: s.id } }]
+    : [];
 
 /**
  * An audit entry as an outbox intent, for an object that earns the entry in a
@@ -1295,15 +1305,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   async closeSession(): Promise<void> {
-    const s = await this.stored();
-    if (!s) return;
-    // `closedAt` once (#65): the window starts at the first close, and a second one
-    // does not move it.
-    await this.ctx.storage.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
+    let released = false;
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      // A hosted room's slot goes back with the close, in its transaction (I7).
+      const intents = hostedReleaseIntents(s);
+      released = intents.length > 0;
+      const rows = released ? await this.driver.enqueue(txn, intents) : {};
+      // `closedAt` once (#65): the window starts at the first close, and a second one
+      // does not move it.
+      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
+    });
     // The purge is due from the close, and the alarm may be pointing at an abandonment
     // time months off: nothing else re-arms it for a room with no code to retire and
     // no audit row to queue. See derivedDue().
     await this.driver.reArm();
+    if (released) await this.driver.deliverNow();
   }
 
   /**
@@ -1325,16 +1343,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * between finds them still listed and finishes the job.
    */
   async closeSessionIfEmpty(): Promise<boolean> {
+    let released = false;
     const closed = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
       if (s.members.some(isActivePerson)) return false;
-      await txn.put("session", { ...s, closed: true, closedAt: s.closedAt ?? Date.now() });
+      // A hosted room's slot goes back with the close, in its transaction (I7).
+      const intents = hostedReleaseIntents(s);
+      released = intents.length > 0;
+      const rows = released ? await this.driver.enqueue(txn, intents) : {};
+      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
       return true;
     });
     // After the commit, never inside the closure (see stored()), and for closeSession's reason.
     if (closed) await this.driver.reArm();
+    if (released) await this.driver.deliverNow();
     return closed;
   }
 
@@ -1903,6 +1927,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(entry.orgId)).append(entry, row.id);
     } else if (row.kind === "host") {
       await this.#deliverHost(row);
+    } else if (row.kind === "hosted_release") {
+      const { userId, sessionId } = row.payload as { userId: string; sessionId: string };
+      await registry().releaseHostedRoom(userId, sessionId);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
@@ -2095,7 +2122,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // with it, in the same transaction. Otherwise an abandoned room's codes stay there
     // for good. They are already inert, because getSessionByJoinCode refuses a closed
     // session; this is about not leaking rows.
-    const intents = Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code));
+    // And a hosted room gives its creator's slot back (I7), by the same outbox.
+    const intents = [...Object.values(s.joinCodes).map((rec) => dropCodeIntent(rec.code)), ...hostedReleaseIntents(s)];
     // The cursor is read in the transaction that writes the event (see nextCursor), and
     // every write is to this object's own storage, so a transaction is enough and no
     // outbox is needed for the event.
@@ -2250,6 +2278,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await new R2BlobStore(this.env.BLOBS).deleteAll(s.id);
     const registry = this.env.REGISTRY.get(this.env.REGISTRY.idFromName("registry"));
     await registry.dropCreatedIndex(s.createdBy, s.id);
+    // The close gave the slot back already (I7); a purge makes sure, and the delete is idempotent.
+    if (s.manifest.host !== null) await registry.releaseHostedRoom(s.createdBy, s.id);
     for (const userId of new Set(s.members.map((m) => m.userId))) {
       await registry.dropMembershipIndex(userId, s.id);
     }
@@ -2727,9 +2757,27 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return this.#countMonth(`cr:${userId}`);
   }
 
-  /** Hosted rooms this person created this month (hosted seat spec, D2): `hc:`, counted apart from `cr:`. */
-  async countHostedCreatesThisMonth(userId: string): Promise<number> {
-    return this.#countMonth(`hc:${userId}`);
+  /**
+   * `ho:<userId>:<sessionId>` — the hosted rooms a person holds open (I7), one row a
+   * slot. The count and the record are one transaction, so two starts at the limit
+   * cannot both pass, and a room's close gives its row back through its outbox
+   * (`hosted_release`). Neither segment can contain the separator, for the `us:` index's
+   * reason below. A plan's hosted rooms are the most a person holds open at once, not a
+   * count of creations a month: each room's allowance renews monthly, so a monthly count
+   * let a creator's spend grow every month they kept rooms open.
+   */
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const held = await txn.list({ prefix: `ho:${userId}:` });
+      if (held.has(`ho:${userId}:${sessionId}`)) return { ok: true };
+      if (held.size >= limit) return { ok: false, open: held.size };
+      await txn.put(`ho:${userId}:${sessionId}`, Date.now());
+      return { ok: true };
+    });
+  }
+
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`ho:${userId}:${sessionId}`);
   }
 
   /**
@@ -2882,12 +2930,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     await this.#recordMonth(`cr:${userId}`);
   }
 
-  async recordHostedCreate(userId: string): Promise<void> {
-    await this.#recordMonth(`hc:${userId}`);
-  }
-
   /**
-   * One rule for both monthly counts, `cr:` and `hc:`, so the two cannot drift.
+   * The monthly create count's rule, `cr:`, shared by its count and its record.
    * `#private`, as `#deliver` is: a Durable Object answers RPC for every method on
    * its class, and these read and write any key they are handed.
    */
@@ -3348,12 +3392,12 @@ export class DurableObjectStore implements BellmanStore {
     await this.registry.recordCreate(userId);
   }
 
-  async countHostedCreatesThisMonth(userId: string): Promise<number> {
-    return this.registry.countHostedCreatesThisMonth(userId);
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    return this.registry.reserveHostedRoom(userId, sessionId, limit);
   }
 
-  async recordHostedCreate(userId: string): Promise<void> {
-    await this.registry.recordHostedCreate(userId);
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    await this.registry.releaseHostedRoom(userId, sessionId);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

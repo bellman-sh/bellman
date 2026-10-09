@@ -51,21 +51,43 @@ describe("bellman_start with a host", () => {
     expect(s.members.find((m) => m.memberId === HOST_MEMBER_ID)!.roomRole).toBe("host");
     expect(s.hostUnitsPerMonth).toBe(3000);
     expect((r.data.room as Record<string, unknown>).host).toEqual({ role: "host", model: "haiku" });
-    expect(await h.store.countHostedCreatesThisMonth(max.userId)).toBe(1);
+    // The room holds one of the creator's hosted slots.
+    expect(await h.store.reserveHostedRoom(max.userId, "qs_probe", 1)).toEqual({ ok: false, open: 1 });
   });
 
-  it("refuses the fourth hosted room in a month on max, and still allows a room without a host", async () => {
+  /**
+   * A plan's hosted rooms are the most open at once (I7): a fourth is refused on max,
+   * naming the count open and the plan, and a hosted room that closes gives its slot back.
+   */
+  it("refuses a fourth hosted room open at once on max, admits one once a room closes, and still allows a room without a host", async () => {
     const creator = await h.connectAs(max);
+    const opened: { session_id: string; member_id: string }[] = [];
     for (let i = 0; i < 3; i++) {
       const r = await creator.call("bellman_start", { manifest: social, brief: brief() });
       expect(r.isError, r.text).toBe(false);
+      opened.push({ session_id: String(r.data.session_id), member_id: String(r.data.member_id) });
     }
     const fourth = await creator.call("bellman_start", { manifest: social, brief: brief() });
     expect(fourth.isError).toBe(true);
-    expect(fourth.text).toMatch(/monthly hosted room limit reached \(3 on the "max" plan\)/);
+    expect(fourth.text).toMatch(/hosted room limit reached: 3 hosted rooms open, the most the "max" plan allows/);
     const plain = await creator.call("bellman_start", { manifest: { room: "r", preset: "swarm" }, brief: brief() });
     expect(plain.isError, plain.text).toBe(false);
     expect((plain.data.room as Record<string, unknown>).host).toBeNull();
+
+    // The creator leaves one: its last person gone, the room closes and its slot is free.
+    expect((await creator.call("bellman_leave", opened[0])).isError).toBe(false);
+    const again = await creator.call("bellman_start", { manifest: social, brief: brief() });
+    expect(again.isError, again.text).toBe(false);
+  });
+
+  it("gives the slot back when the room cannot be created, so a failed start costs none", async () => {
+    const creator = await h.connectAs(max);
+    const create = h.store.createSession.bind(h.store);
+    h.store.createSession = async () => { throw new Error("storage refused the room"); };
+    const failed = await creator.call("bellman_start", { manifest: social, brief: brief() });
+    expect(failed.isError).toBe(true);
+    h.store.createSession = create;
+    expect(await h.store.reserveHostedRoom(max.userId, "qs_probe", 1)).toEqual({ ok: true });
   });
 
   it("records in the audit log whether a room was created with a host", async () => {

@@ -16,7 +16,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     // ponytail: per-room blob ceilings (#183), not tuned: 50 MB, 500 MB, 5 GB.
     // A room is what a plan already rations, so nothing here is monthly.
     blobBytesPerRoom: 50 * 1024 * 1024,
-    hostedRoomsPerMonth: 0,
+    hostedRooms: 0,
     hostUnitsPerRoom: 0,
     // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
     // max and team until someone with the right to delete it does.
@@ -28,12 +28,12 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 500 * 1024 * 1024,
-    hostedRoomsPerMonth: 0,
+    hostedRooms: 0,
     hostUnitsPerRoom: 0,
     retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
   },
-  // Max sells the hosted seat: three hosted rooms a month, 3,000 units each
-  // (the hosted seat spec, D2 and D3), over pro's creates, blob ceiling and how
+  // Max sells the hosted seat: three hosted rooms open at once, 3,000 units each a
+  // month (the hosted seat spec, D2 and D3, and ADR 0002), over pro's creates, blob ceiling and how
   // long a closed room is kept (#65). tests/auth.test.ts pins the five
   // differences. Not on sale yet: no Stripe price names it and
   // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404
@@ -44,7 +44,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: false,
     audit: false,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
-    hostedRoomsPerMonth: 3,
+    hostedRooms: 3,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
   },
@@ -54,7 +54,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     orgScoping: true,
     audit: true,
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
-    hostedRoomsPerMonth: 5,
+    hostedRooms: 5,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
   },

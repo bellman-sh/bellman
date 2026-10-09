@@ -214,9 +214,17 @@ export interface Entitlements {
    * a plan already rations.
    */
   blobBytesPerRoom: number;
-  /** Rooms with a hosted seat a person may create a month (spec D2). */
-  hostedRoomsPerMonth: number;
-  /** Units a hosted room may spend a month, stamped on the room at creation (spec D3). */
+  /**
+   * Rooms with a hosted seat a person may hold open at once (spec D2 as ruled on I7): a
+   * slot is taken when one is created and given back when it closes. 0 means the plan
+   * includes no hosted seat.
+   */
+  hostedRooms: number;
+  /**
+   * Units a hosted room may spend a month (spec D3): stamped on the room at creation, and
+   * read again from its creator's plan at each month turn (I7), 0 once that plan includes
+   * no hosted seat.
+   */
   hostUnitsPerRoom: number;
   /**
    * How long a closed room's record and bytes are kept before the purge (#65,

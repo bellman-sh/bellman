@@ -44,7 +44,7 @@ Returns: { session_id, member_id, join_code, join_url, join_code_expires_at, pla
 Keep member_id — every subsequent call needs it. The room has no lifetime: it ends when its last member leaves, or after 90 days in which nobody in it was seen. room is the manifest as the server recorded it: a preset comes back expanded, and your_role / your_verbs are yours. Read it back to check it says what you meant.
 
 Plan gating applies to CREATING sessions only; joining is free on every plan.
-Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "org_only sessions require..." (plan), "org_only was set but..." (no org), "monthly hosted room limit..." (quota), "monthly session limit..." (quota).`,
+Errors: "invalid manifest — ..." (a default_role or creator_role that names no role, or a verb repeated within a role) or an input validation error naming the field (a malformed manifest) — either way nothing is created and no quota is spent; "a hosted seat requires..." (plan), "swarm mode requires..." (plan), "org_only sessions require..." (plan), "org_only was set but..." (no org), "hosted room limit reached: ... open" (your plan's hosted rooms are all open; one that closes frees its slot), "monthly session limit..." (quota).`,
       inputSchema: {
         manifest: ManifestShape,
         brief: BriefShape,
@@ -69,7 +69,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       const ent = entitlementsFor(identity);
       // Before the mode check: a hosted room is always a swarm room, and on free the
       // swarm refusal would point at pro, which has no hosted seat either.
-      if (manifest.host !== null && ent.hostedRoomsPerMonth === 0) {
+      if (manifest.host !== null && ent.hostedRooms === 0) {
         return fail(`a hosted seat requires the max or team plan (you are on "${identity.plan}").`);
       }
       if (!ent.modes.includes(manifest.mode)) {
@@ -81,15 +81,20 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       if (org_only && !identity.orgId) {
         return fail("org_only was set but your identity has no org.");
       }
-      if (manifest.host !== null) {
-        const hostedUsed = await s.countHostedCreatesThisMonth(identity.userId);
-        if (hostedUsed >= ent.hostedRoomsPerMonth) {
-          return fail(`monthly hosted room limit reached (${ent.hostedRoomsPerMonth} on the "${identity.plan}" plan).`);
-        }
-      }
       const used = await s.countCreatesThisMonth(identity.userId);
       if (used >= ent.monthlyCreates) {
         return fail(`monthly session limit reached (${ent.monthlyCreates} on the "${identity.plan}" plan).`);
+      }
+
+      // Last of the refusals, because it is the only one that writes: a hosted room takes
+      // one of the creator's slots, counted and recorded in one call (I7), and gives it
+      // back if the room is not created after all.
+      const sessionId = generateSessionId();
+      if (manifest.host !== null) {
+        const slot = await s.reserveHostedRoom(identity.userId, sessionId, ent.hostedRooms);
+        if (!slot.ok) {
+          return fail(`hosted room limit reached: ${slot.open} hosted rooms open, the most the "${identity.plan}" plan allows. A hosted room that closes frees its slot.`);
+        }
       }
 
       const now = Date.now();
@@ -111,7 +116,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         expiresAt: now + JOIN_CODE_TTL,
       };
       const session: Session = {
-        id: generateSessionId(),
+        id: sessionId,
         manifest,
         createdBy: identity.userId,
         orgId: identity.orgId,
@@ -120,9 +125,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // The room's own byte ceiling (#183), from the plan creating it. Nothing
         // downstream asks a plan again.
         blobBytesCeiling: ent.blobBytesPerRoom,
-        // The hosted seat's allowance (hosted seat spec, D2), from the plan creating the
-        // room and stamped once, as the blob ceiling is: a later change of plan does not
-        // reach into it. The meter starts empty in this month.
+        // The hosted seat's allowance for this month (hosted seat spec, D2), from the plan
+        // creating the room. Each later month's is read from the creator's plan then (I7).
         hostUnitsPerMonth: manifest.host === null ? 0 : ent.hostUnitsPerRoom,
         hostUnits: { month: monthKey(now), used: 0, wakes: [] },
         // The window a closed room is kept for (#65, D1), stamped as the ceiling above is: a plan
@@ -137,9 +141,13 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         closed: false,
         frozenAt: null,
       };
-      await s.createSession(session);
+      try {
+        await s.createSession(session);
+      } catch (err) {
+        if (manifest.host !== null) await s.releaseHostedRoom(identity.userId, sessionId);
+        throw err;
+      }
       await s.recordCreate(identity.userId);
-      if (manifest.host !== null) await s.recordHostedCreate(identity.userId);
       await audit(s, session, identity, "session_created", {
         mode: manifest.mode, org_only, preset: manifest.preset, hosted: manifest.host !== null,
       });

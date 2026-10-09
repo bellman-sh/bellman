@@ -160,11 +160,11 @@ describe("plan entitlements", () => {
   it("gives max creates, the blob ceiling, the retention window and the hosted seat over pro, and nothing else", () => {
     const {
       monthlyCreates: mc, blobBytesPerRoom: mb, retainAfterCloseMs: mk,
-      hostedRoomsPerMonth: mh, hostUnitsPerRoom: mu, ...maxRest
+      hostedRooms: mh, hostUnitsPerRoom: mu, ...maxRest
     } = ENTITLEMENTS.max;
     const {
       monthlyCreates: pc, blobBytesPerRoom: pb, retainAfterCloseMs: pk,
-      hostedRoomsPerMonth: ph, hostUnitsPerRoom: pu, ...proRest
+      hostedRooms: ph, hostUnitsPerRoom: pu, ...proRest
     } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
     expect([mc, pc]).toEqual([2000, 500]);
@@ -176,9 +176,9 @@ describe("plan entitlements", () => {
   });
 
   it("gives the hosted seat to max and team only", () => {
-    expect(ENTITLEMENTS.free.hostedRoomsPerMonth).toBe(0);
-    expect(ENTITLEMENTS.pro.hostedRoomsPerMonth).toBe(0);
-    expect(ENTITLEMENTS.team.hostedRoomsPerMonth).toBe(5);
+    expect(ENTITLEMENTS.free.hostedRooms).toBe(0);
+    expect(ENTITLEMENTS.pro.hostedRooms).toBe(0);
+    expect(ENTITLEMENTS.team.hostedRooms).toBe(5);
     expect(ENTITLEMENTS.team.hostUnitsPerRoom).toBe(3000);
   });
 
@@ -205,13 +205,13 @@ describe("plan entitlements", () => {
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
    * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
-   * room is kept; `hostedRoomsPerMonth` and `hostUnitsPerRoom` (#188) bound what
-   * a person creates and what a hosted room spends. None says who may join it.
+   * room is kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
+   * hosted rooms a person holds open and what each spends. None says who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
       "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
-      "hostedRoomsPerMonth", "hostUnitsPerRoom",
+      "hostedRooms", "hostUnitsPerRoom",
     ].sort();
 
     for (const plan of plans) {

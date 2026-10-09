@@ -567,6 +567,9 @@ export function decideBlobCharge(
   return { ok: true, used: used + bytes };
 }
 
+/** Whether a hosted-room slot was taken (I7), and when refused, how many the person holds open. */
+export type HostedSlot = { ok: true } | { ok: false; open: number };
+
 /**
  * What the hosted seat's write did (hosted seat spec, D3). A refusal says what
  * the room's month has spent (`used`) and may spend (`allowed`), so the seat can
@@ -1125,9 +1128,16 @@ export interface BellmanStore {
 
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
-  /** Hosted rooms this person created this month, counted apart from creations (spec D2). */
-  countHostedCreatesThisMonth(userId: string): Promise<number>;
-  recordHostedCreate(userId: string): Promise<void>;
+  /**
+   * Take one of this person's hosted-room slots for `sessionId`, unless `limit` are held
+   * already (I7): the count and the record are one operation, so two starts at the limit
+   * cannot both pass. A plan's hosted rooms are the most a person holds open at once; a
+   * slot is given back when the room closes, which both stores do inside their closes,
+   * or is purged. Taking a slot the room already holds is not a second room.
+   */
+  reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot>;
+  /** Give the slot back. Idempotent. `bellman_start` calls it when the room it reserved for was not created. */
+  releaseHostedRoom(userId: string, sessionId: string): Promise<void>;
 
   /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
   getGrant(key: string): Promise<PlanGrant | undefined>;
@@ -1205,7 +1215,7 @@ export class MemoryStore implements BellmanStore {
   private byOrg = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
-  private hostedCreates = new Map<string, number[]>(); // userId -> timestamps, hosted rooms only
+  private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
@@ -1589,6 +1599,8 @@ export class MemoryStore implements BellmanStore {
     s.closedAt ??= at;
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
     s.joinCodes = {};
+    // A hosted room gives its creator's slot back as it closes (I7), however it closes.
+    if (s.manifest.host !== null) this.hostedOpen.get(s.createdBy)?.delete(s.id);
   }
 
   /**
@@ -1958,15 +1970,21 @@ export class MemoryStore implements BellmanStore {
     this.recordMonth(this.creates, userId);
   }
 
-  async countHostedCreatesThisMonth(userId: string): Promise<number> {
-    return this.countMonth(this.hostedCreates, userId);
+  async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
+    // No await: the count and the record are one step, for seatMember's reason.
+    const held = this.hostedOpen.get(userId) ?? new Set<string>();
+    if (held.has(sessionId)) return { ok: true };
+    if (held.size >= limit) return { ok: false, open: held.size };
+    held.add(sessionId);
+    this.hostedOpen.set(userId, held);
+    return { ok: true };
   }
 
-  async recordHostedCreate(userId: string): Promise<void> {
-    this.recordMonth(this.hostedCreates, userId);
+  async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
+    this.hostedOpen.get(userId)?.delete(sessionId);
   }
 
-  /** One rule for both monthly counts, as `RegistryDO`'s `#countMonth` is, so the two cannot drift. */
+  /** The monthly create count's rule, as `RegistryDO`'s `#countMonth` is, so the two cannot drift. */
   private countMonth(counts: Map<string, number[]>, userId: string): number {
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
@@ -2177,6 +2195,7 @@ export class MemoryStore implements BellmanStore {
   private async purgeNow(s: Session, now: number): Promise<void> {
     await this.blobs.deleteAll(s.id);
     this.byCreator.get(s.createdBy)?.delete(s.id);
+    this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);

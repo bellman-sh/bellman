@@ -2329,13 +2329,64 @@ export function describeStoreContract(
       });
     });
 
-    describe("hosted creations a month", () => {
-      it("counts hosted creations apart from creations", async () => {
-        expect(await store.countHostedCreatesThisMonth("u_host_test")).toBe(0);
-        await store.recordHostedCreate("u_host_test");
-        await store.recordHostedCreate("u_host_test");
-        expect(await store.countHostedCreatesThisMonth("u_host_test")).toBe(2);
-        expect(await store.countCreatesThisMonth("u_host_test")).toBe(0);
+    /**
+     * A plan's hosted rooms are the most a creator holds open at once (I7), not a count of
+     * creations a month: each hosted room open past the first month renews its allowance,
+     * so a monthly count let a creator's spend grow every month. A slot is taken by one
+     * count-and-record call and given back when the room closes.
+     */
+    describe("hosted room slots", () => {
+      it("admits a creator's hosted rooms up to the limit, then refuses with the count open", async () => {
+        expect(await store.reserveHostedRoom("u_slots", "qs_s1", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s2", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: false, open: 2 });
+        // A retry for a room that holds a slot is not a second room.
+        expect(await store.reserveHostedRoom("u_slots", "qs_s1", 2)).toEqual({ ok: true });
+        // Another creator's slots are their own.
+        expect(await store.reserveHostedRoom("u_other", "qs_s4", 2)).toEqual({ ok: true });
+        // A slot given back is free again, and giving one back twice is harmless.
+        await store.releaseHostedRoom("u_slots", "qs_s2");
+        await store.releaseHostedRoom("u_slots", "qs_s2");
+        expect(await store.reserveHostedRoom("u_slots", "qs_s3", 2)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_slots", "qs_s5", 2)).toEqual({ ok: false, open: 2 });
+      });
+
+      it("admits one of two reservations made at once at the limit", async () => {
+        const both = await Promise.all([
+          store.reserveHostedRoom("u_race", "qs_r1", 1),
+          store.reserveHostedRoom("u_race", "qs_r2", 1),
+        ]);
+        expect(both.filter((r) => r.ok)).toHaveLength(1);
+        expect(both.filter((r) => !r.ok)).toEqual([{ ok: false, open: 1 }]);
+      });
+
+      it("frees a hosted room's slot when the room closes, however it closes", async () => {
+        const m = hostedManifest();
+        const room = (id: string, seenAt = Date.now()) => session({
+          id, manifest: m, createdBy: "u_closer", members: [member({ lastSeenAt: seenAt }), hostMember(m, Date.now())],
+        });
+        const full = { ok: false, open: 1 };
+
+        await store.createSession(room("qs_close_a"));
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_a", 1)).toEqual({ ok: true });
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_b", 1)).toEqual(full);
+        await store.closeSession("qs_close_a");
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_b", 1)).toEqual({ ok: true });
+
+        // The last person leaves: the host does not keep the room, or its slot.
+        await store.createSession(room("qs_close_b"));
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_c", 1)).toEqual(full);
+        await store.updateMember("qs_close_b", "m_creator", { leftAt: Date.now() });
+        expect(await store.closeSessionIfEmpty("qs_close_b")).toBe(true);
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_c", 1)).toEqual({ ok: true });
+
+        // Nobody seen for the abandonment window: the room is closed by a read, or sooner by
+        // the Durable Objects store's own alarm, so the slot is checked as held before the room
+        // exists and as free once a read has seen it closed.
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_d", 1)).toEqual(full);
+        await store.createSession(room("qs_close_c", Date.now() - ABANDONED_AFTER_MS - 1));
+        expect((await store.getSession("qs_close_c"))!.closed).toBe(true);
+        expect(await store.reserveHostedRoom("u_closer", "qs_close_d", 1)).toEqual({ ok: true });
       });
     });
 

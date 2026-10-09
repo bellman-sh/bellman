@@ -2049,6 +2049,30 @@ export function describeStoreContract(
         });
       });
 
+      // The design's promise that `lastSentAt` is set at an append and not by a read. A poll stamps `lastSeenAt`
+      // through `updateMember` and a tool reads the room with `getSession`; neither is a send, and a member who
+      // only watches is quiet (D1). The case would pass for a store that kept no such field at all, so it first
+      // shows that the read did stamp what a read stamps.
+      it("leaves the sender's last send where the append put it, however the member is seen or the room is read", async () => {
+        const s = kept();
+        await store.createSession(s);
+        const event = (await store.appendEvent(s.id, sent("message", "m_creator", { payload: { text: "hi" } })))!;
+
+        vi.advanceTimersByTime(60_000);
+        await store.updateMember(s.id, "m_creator", { lastSeenAt: Date.now() });
+        await store.updateMember(s.id, "m_peer", { lastSeenAt: Date.now() });
+        await store.getSession(s.id);
+
+        const row = (await store.getSession(s.id))!;
+        expect(row.members.map((m) => m.lastSeenAt), "setup: the reads did stamp the members as seen")
+          .toEqual([Date.now(), Date.now()]);
+        expect(await books(s.id)).toEqual({
+          lastSent: { m_creator: event.at, m_peer: undefined },
+          openRequests: {},
+          lastMemberEventAt: event.at,
+        });
+      });
+
       it("keeps the books on the first append of a key, as on a plain append", async () => {
         const s = kept();
         await store.createSession(s);

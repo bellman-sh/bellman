@@ -109,6 +109,14 @@ describe("noteAppend", () => {
     expect(out.members.every((m) => m.lastSentAt === undefined)).toBe(true);
   });
 
+  // The cap on what is named (m1) is the rule's, not the book's: the log holds the same requests, and a
+  // fourth is named the moment an older one clears, so the record cannot have forgotten it.
+  it("keeps every open request in the record, however many a sender has", () => {
+    let s = base();
+    for (let i = 0; i < 5; i++) s = { ...s, ...noteAppend(s, ev({ cursor: 10 + i, type: "action_request", at: T0 + i })) };
+    expect(Object.keys(s.openRequests)).toEqual(["10", "11", "12", "13", "14"]);
+  });
+
   it("counts a member's own leaving as that member's last send", () => {
     const out = noteAppend(base(), ev({ cursor: 8, type: "member_left", fromMemberId: "m_a", at: T0 + 1 }));
     expect(out.lastMemberEventAt).toBe(T0 + 1);
@@ -233,6 +241,63 @@ describe("request_unanswered", () => {
 
     const removed = room({ members: [who("m_a", { removedAtCursor: 3 }), who("m_b")] });
     expect(dueFindings(removed, T0 + M30)).toEqual([]);
+  });
+});
+
+// m1. The threshold bounds how often a finding repeats, and nothing bounded how many there are: a member
+// holding `request_actions` could open fifty requests that nobody may answer for it (the sender cannot answer
+// its own, and a request is answered once), and each would be raised every window as an interrupt, until the
+// sender left. A sender's three oldest open requests are considered; the rest wait behind them. The record
+// keeps them all: the cap is the rule's, and the event log holds the same requests.
+describe("a sender's open requests are capped (m1)", () => {
+  /** `n` open requests from `by`, one second apart, at cursors from 10. */
+  const asked = (n: number, by = "m_a", from = 10): StoredSession["openRequests"] =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [String(from + i), { at: T0 + i * 1_000, fromMemberId: by }]));
+  const room = (openRequests: StoredSession["openRequests"], over: Partial<StoredSession> = {}) =>
+    stored({ members: [who("m_a"), who("m_b")], openRequests, ...over }, requestsOnly());
+  const NOW = T0 + 10 * M30;
+
+  it("names a sender's three oldest, and not the fourth or the fifth", () => {
+    expect(keysOf(dueFindings(room(asked(5)), NOW))).toEqual([
+      "request_unanswered:10", "request_unanswered:11", "request_unanswered:12",
+    ]);
+  });
+
+  it("applies to each sender on its own", () => {
+    const both = { ...asked(4, "m_a", 10), ...asked(4, "m_b", 20) };
+    expect(keysOf(dueFindings(room(both), NOW))).toEqual([
+      "request_unanswered:10", "request_unanswered:11", "request_unanswered:12",
+      "request_unanswered:20", "request_unanswered:21", "request_unanswered:22",
+    ]);
+  });
+
+  it("names the fourth once an older one has been answered, and not before", () => {
+    const open = asked(4);
+    expect(keysOf(dueFindings(room(open), NOW))).not.toContain("request_unanswered:13");
+
+    const { "10": _answered, ...rest } = open;
+    expect(keysOf(dueFindings(room(rest), NOW))).toEqual([
+      "request_unanswered:11", "request_unanswered:12", "request_unanswered:13",
+    ]);
+  });
+
+  it("leaves a sender with three or fewer as it was", () => {
+    expect(keysOf(dueFindings(room(asked(3)), NOW))).toHaveLength(3);
+    expect(keysOf(dueFindings(room(asked(1)), NOW))).toEqual(["request_unanswered:10"]);
+  });
+
+  // R4: "due" and "next" read one list. A fourth request that is not named must not be waited for, or
+  // the alarm is armed for a moment at which nothing is due and fires with nothing to write.
+  it("is the same list for the alarm: the time of a request that is not named is not waited for", () => {
+    const open = asked(4);
+    const raiseAt = T0 + M30 + 5_000;
+    const raisedThree = raisedBy(dueFindings(room(asked(3)), raiseAt), raiseAt);
+    const s = room(open, { raised: raisedThree });
+
+    // The fourth was asked at T0 + 3s, so counted it would be due at T0 + 3s + 30m, before the three
+    // that were just raised are due again at the raise plus 30m.
+    expect(dueFindings(s, raiseAt)).toEqual([]);
+    expect(nextHousekeepAt(s, raiseAt)).toBe(raiseAt + M30);
   });
 });
 

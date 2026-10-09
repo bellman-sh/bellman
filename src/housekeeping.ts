@@ -26,6 +26,13 @@ import { isActivePerson, isRemovedMember } from "./store.js";
 /** The name of this handler on the room's one alarm, beside the others' (retention.ts, outbox.ts). */
 export const HOUSEKEEP_HANDLER = "housekeep";
 
+/**
+ * How many of one sender's open requests the rules name (m1). The threshold bounds how often a
+ * finding repeats and nothing else bounded how many there are, so a member with many asks that
+ * nobody may answer for it would fill every window with interrupts. The record keeps them all.
+ */
+export const MAX_REQUESTS_PER_SENDER = 3;
+
 /** A proposal ready to be written: the key it is raised under, and the event's payload. */
 export interface Finding {
   key: string;
@@ -73,6 +80,10 @@ interface Anchor {
  * and the same question is asked of the sender of a request (the request is named only while
  * someone who could be asked about it is there).
  *
+ * **A sender's requests are capped (m1).** Of one sender's open requests only the oldest
+ * `MAX_REQUESTS_PER_SENDER` are listed, so a member cannot multiply the proposals a window holds
+ * by asking more. The record keeps the rest, and one is listed the moment an older one clears.
+ *
  * **The hosted seat is not a person (hosted seat spec, D5; ruling H3).** It is never named
  * quiet, it does not keep a room from being empty, and its latest join does not date a room's
  * idleness. It speaks on Bellman's clock, in answer to its two wake causes, so there is no one
@@ -107,10 +118,22 @@ function anchors(s: StoredSession): Anchor[] | null {
   if (h.answerWithinMs !== null) {
     const every = h.repeatAfterMs ?? h.answerWithinMs;
     const inRoom = new Set(live.map((m) => m.memberId));
-    for (const [cursor, r] of Object.entries(s.openRequests)) {
+    const seen = new Map<string, number>();
+    // Oldest first, by cursor: the order they were asked in, so the ones kept under the cap are
+    // stable. A newer request cannot push an older one out, and one that clears lets the next in.
+    const oldestFirst = Object.entries(s.openRequests).sort(([a], [b]) => Number(a) - Number(b));
+    for (const [cursor, r] of oldestFirst) {
       // The books drop a leaver's requests to keep the record small, but whether a request is
       // named is decided here, whichever event a departure was written as.
       if (!inRoom.has(r.fromMemberId)) continue;
+      // ponytail: a sender's three oldest open requests are named and the rest wait behind them,
+      // not tuned. Ceiling: a member holding more than three unanswered asks has the rest unseen
+      // by the room until an older one clears, and its own cannot be answered by itself. Upgrade:
+      // one finding per sender that lists the cursors, so nothing is hidden and a window still
+      // costs one interrupt per sender.
+      const nth = (seen.get(r.fromMemberId) ?? 0) + 1;
+      seen.set(r.fromMemberId, nth);
+      if (nth > MAX_REQUESTS_PER_SENDER) continue;
       out.push({
         key: `request_unanswered:${cursor}`, finding: "request_unanswered", about: { cursor: Number(cursor) },
         since: from(r.at) + h.answerWithinMs, every,

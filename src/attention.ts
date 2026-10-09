@@ -58,8 +58,11 @@ export const ATTENTION = {
   /**
    * A proposal interrupts for the tick's reason (#66): a finding nobody reads
    * produces no action, and naming a quiet member or a request nobody answered is
-   * the whole of what the server contributes. It repeats by time at most, so it
-   * cannot flood a reader.
+   * the whole of what the server contributes. A key repeats by time at most, and the
+   * keys a room can hold are bounded by its roster: one quiet clock per member, one
+   * idle clock, and three open requests per sender (`MAX_REQUESTS_PER_SENDER`). So a
+   * window holds a bounded number of them, and no one member can multiply that by
+   * sending more.
    */
   housekeeping: "interrupt",
 } as const satisfies Record<EventType, Attention>;

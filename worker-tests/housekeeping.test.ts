@@ -368,6 +368,42 @@ it("names an unanswered request at its time, and forgets it once it is answered"
   expect(after.events.filter((e) => e.type === "housekeeping"), "and says nothing more about it").toHaveLength(1);
 });
 
+// m1. One member's backlog is bounded by the rule, so a sender with many requests nobody may answer for it
+// cannot fill a window with interrupts. The fourth is not forgotten: it is named when an older one clears,
+// and the answer that clears it is an append that brings the soonest time forward (I1), so the alarm is
+// armed for it then and not at the next window of the three already raised.
+it("names a sender's three oldest unanswered requests and not the fourth, which an answer to the first brings in", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  setClock(T0);
+  await store.createSession(room("qs_cap", T0, { quietAfterMs: null, answerWithinMs: 5 * MIN }, { members: [
+    member({ memberId: "m_a", userId: "u_a", label: "a@x", joinedAt: T0, lastSeenAt: T0, lastSentAt: T0 }),
+    peerB(T0),
+  ] }));
+  const asked: SessionEvent[] = [];
+  for (let i = 0; i < 4; i++) {
+    setClock(T0 + i * 1_000);
+    asked.push((await store.appendEvent("qs_cap", request("m_a")))!);
+  }
+  const aboutOf = async () => (await proposals("qs_cap")).map((e) => (e.payload as { about: { cursor: number } }).about.cursor);
+
+  setClock(T0 + 5 * MIN + 3_000);
+  await fire("qs_cap");
+  expect(await aboutOf(), "the first three, and not the fourth").toEqual(asked.slice(0, 3).map((e) => e.cursor));
+
+  setClock(T0 + 6 * MIN);
+  await store.appendEvent("qs_cap", answer(asked[0].cursor));
+  expect(await armed("qs_cap"), "armed for the fourth, which the answer brought in, and not for the next window of the three")
+    .toBe(asked[3].at + 5 * MIN);
+  await fire("qs_cap");
+
+  expect(await aboutOf(), "now all four, the fourth last").toEqual(asked.map((e) => e.cursor));
+  const [fourth] = (await proposals("qs_cap")).slice(-1);
+  expect(fourth.payload).toMatchObject({ about: { cursor: asked[3].cursor }, repeat: 1 });
+  expect(Object.keys((await rows("qs_cap")).session!.raised), "the answered request's key is forgotten").not.toContain(`request_unanswered:${asked[0].cursor}`);
+});
+
+
 // R6. A request is the one append that can bring the soonest due time forward: it adds an anchor that may
 // fall before the alarm already armed. Every other append only moves a deadline later, and an alarm that is
 // early at worst corrects itself.
@@ -618,6 +654,36 @@ it("arms nothing for a read of a room whose next time is still ahead", async () 
 
   expect(await armed("qs_ahead")).toBeNull();
 });
+
+// Since R7 every read of an open room derives all three times and may arm the alarm, so a read depends on
+// both. A derivation or a re-arm that throws is logged the way `alarm()` logs a handler's, and the read
+// still returns the record: the work belongs to the alarm, and the read's job is to answer.
+it("returns the record from a read whose re-arm throws, and logs it as the alarm logs a handler", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_read_survives", T0));
+  await runInDurableObject(stubOf("qs_read_survives"), (_i: SessionDO, ctx) => ctx.storage.deleteAlarm());
+  setClock(T0 + 10 * MIN);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  try {
+    const read = await runInDurableObject(stubOf("qs_read_survives"), async (i: SessionDO) => {
+      const driver = (i as unknown as { driver: { reArm(): Promise<void> } }).driver;
+      driver.reArm = async () => { throw new Error("storage is unavailable"); };
+      return i.getSession();
+    });
+
+    expect(read, "the read still returns the record").toMatchObject({ id: "qs_read_survives", closed: false });
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/re-arm.*room qs_read_survives/),
+      expect.objectContaining({ message: "storage is unavailable" }),
+    );
+    expect(await armed("qs_read_survives"), "and nothing was armed by the failed attempt").toBeNull();
+  } finally {
+    log.mockRestore();
+  }
+});
+
 
 // ---------------------------------------------------------------------------
 // The alarm

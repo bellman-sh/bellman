@@ -555,9 +555,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // to it. Nothing is asked of a room whose earliest due time is null or still ahead: one
     // inside its window with its sweep done, one kept and swept, one from before the window,
     // or an open one with every time ahead (review I1).
+    //
+    // **A read never fails for it.** Every read of an open room now runs the three derivations
+    // and may arm the alarm, so a read would depend on both. A throw from either is logged the
+    // way `alarm()` logs a handler's and the record is returned: the work is the alarm's, and
+    // a read's job is to answer (review, Rec 2).
     if (read) {
-      const owed = await this.#derivedDue(read);
-      if (owed.size > 0 && Date.now() >= Math.min(...owed.values())) await this.driver.reArm();
+      try {
+        const owed = await this.#derivedDue(read);
+        if (owed.size > 0 && Date.now() >= Math.min(...owed.values())) await this.driver.reArm();
+      } catch (error) {
+        console.error(`re-arm on read failed for room ${read.id}:`, error);
+      }
     }
     return read;
   }

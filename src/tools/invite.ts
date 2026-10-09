@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { joinUrl } from "../codes.js";
 import type { Identity } from "../types.js";
@@ -29,7 +30,7 @@ Returns: { join_code, join_url, join_code_expires_at, role, replaced_previous, s
 Members see an invite_issued / invite_revoked event, unless the room freezes at that instant: the change still stands, unannounced. Revoking a role with no live code to retire is a silent no-op instead — no event, no audit row — and roles comes back empty.
 Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replacing a live code needs both; a room whose manifest gives nobody \`invite\` cannot be reopened by anyone. A \`role\` naming none the manifest declares is refused, listing the ones it does. A full session refuses (the code could not be used).`,
       inputSchema: {
-        session_id: z.string().min(4),
+        ...RoomRefShape,
         member_id: z.string().min(4),
         role: z.string().min(1).max(MAX_ROLE_KEY_LENGTH).optional(),
         revoke: z.boolean().default(false),
@@ -38,7 +39,10 @@ Errors: issuing needs the \`invite\` verb, revoking needs \`revoke\`, and replac
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, role, revoke }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id, role, revoke } = args;
       if (revoke) {
         const r = await revokeInvite(s, identity, session_id, member_id, role);
         return r.ok ? ok({ revoked: true, roles: r.value.roles, join_code: null }) : fail(r.reason);

@@ -29,6 +29,8 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
+Every tool that takes a room accepts `room_id` as the same id as `session_id`. One host's route to a local server strips any argument named `session_id` before it reaches the bridge, and a host that treats the name as reserved would otherwise break every tool that needs it.
+
 ## What a send proves
 
 **The store is truth; the channel is transport.** A room *is* its event log.

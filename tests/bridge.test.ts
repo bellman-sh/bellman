@@ -372,6 +372,19 @@ describe("channel delivery", () => {
     expect(fresh.bridge.watching()).toHaveLength(0);
   });
 
+  it("arms a watcher on a bellman_send that names the room as room_id", async () => {
+    const a = await open(DEV_KEY.jesse);
+    const b = await open(DEV_KEY.peer);
+    const { sessionId, creatorMember } = await pair(a, b);
+    // A fresh bridge for the creator knows no membership; the send is what arms it.
+    const fresh = await open(DEV_KEY.jesse);
+    expect(fresh.bridge.watching()).toHaveLength(0);
+    const sent = await fresh.call("bellman_send", { room_id: sessionId, member_id: creatorMember, type: "message", payload: { text: "by another name" } });
+    expect(sent.isError, sent.text).toBe(false);
+    expect(fresh.bridge.watching()).toHaveLength(1);
+    expect(fresh.bridge.watching()[0].session_id).toBe(sessionId);
+  });
+
   it("keeps watching when the member evicted is somebody else", async () => {
     const a = await open(DEV_KEY.jesse);
     const b = await open(DEV_KEY.peer);

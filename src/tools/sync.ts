@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
 import type { Identity } from "../types.js";
@@ -33,7 +34,7 @@ removed: true means a creator removed you from this room. Your history stays rea
 Always pass the returned cursor next time — even an empty events list can advance it.
 If a room's creator has removed you, you still get the history up to and including the member_evicted event that removed you, and nothing after it. wait_seconds does not hold the request then: there is nothing to wait for, so stop polling.`,
       inputSchema: {
-        session_id: z.string().min(4),
+        ...RoomRefShape,
         member_id: z.string().min(4),
         since_cursor: z.number().int().min(0).default(0),
         wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).default(0),
@@ -52,7 +53,10 @@ If a room's creator has removed you, you still get the history up to and includi
         readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, since_cursor, wait_seconds, surface }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id, since_cursor, wait_seconds, surface } = args;
       const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
       const me = findMember(session, member_id, identity);

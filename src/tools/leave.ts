@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { fail, ok } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
 import { leaveRoom } from "../rooms.js";
@@ -16,12 +17,15 @@ export function registerLeave(server: McpServer, identity: Identity, s: BellmanS
 
 Args: session_id, member_id
 Returns: { left: true, session_status }`,
-      inputSchema: { session_id: z.string().min(4), member_id: z.string().min(4) },
+      inputSchema: { ...RoomRefShape, member_id: z.string().min(4) },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id } = args;
       const r = await leaveRoom(s, identity, session_id, member_id);
       return r.ok ? ok({ left: true, session_status: r.value.sessionStatus }) : fail(r.reason);
     }

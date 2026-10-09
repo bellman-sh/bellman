@@ -4,6 +4,7 @@ import {
   ActionResponseShape, BriefShape, ProgressShape, SEND_KINDS, SEND_VERB, appendOrFrozen, fail, ok,
 } from "./kit.js";
 import type { ToolResult } from "./kit.js";
+import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { Brief, Identity, SessionEvent } from "../types.js";
 import { denyVerb } from "../roles.js";
 import { FROZEN, activeMembers, audit, findMember, touchMember, writeSurface } from "../rooms.js";
@@ -41,7 +42,7 @@ Returns: { room_members, cursor, replayed? }
   - replayed: true means this key had already been used and nothing new was sent.
 Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke.`,
       inputSchema: {
-        session_id: z.string().min(4),
+        ...RoomRefShape,
         member_id: z.string().min(4),
         type: z.enum(SEND_KINDS),
         payload: z.record(z.string(), z.unknown()),
@@ -52,7 +53,10 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
     },
-    async ({ session_id, member_id, type, payload, ref_id, idempotency_key }): Promise<ToolResult> => {
+    async (args): Promise<ToolResult> => {
+      const session_id = roomIdOf(args);
+      if (!session_id) return fail(NEED_ROOM);
+      const { member_id, type, payload, ref_id, idempotency_key } = args;
       // The whole sequence — guards, shape, rows, append, audit — is one
       // operation in rooms.ts, shared with the HTTP route that piece 3 adds.
       // Handled before the common guards below, which writeSurface runs itself.

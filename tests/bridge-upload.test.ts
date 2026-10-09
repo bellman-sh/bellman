@@ -115,7 +115,9 @@ describe("bellman_upload", () => {
   it("is listed, with its arguments", async () => {
     const tool = (await client.listTools()).tools.find((t) => t.name === "bellman_upload")!;
     expect(tool).toBeDefined();
-    expect(tool.inputSchema.required).toEqual(["session_id", "member_id", "path", "key"]);
+    // session_id is no longer required by the schema: room_id names the same room, and the handler requires one of the two.
+    expect(tool.inputSchema.required).toEqual(["member_id", "path", "key"]);
+    expect(Object.keys(tool.inputSchema.properties ?? {})).toEqual(expect.arrayContaining(["session_id", "room_id"]));
     expect(tool.annotations?.readOnlyHint).toBe(false);
   });
 

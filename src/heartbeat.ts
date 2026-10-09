@@ -233,6 +233,8 @@ export function dueMembers(s: StoredSession, now: number): Member[] {
 export interface ReportRow {
   member_id: string;
   label: string;
+  /** The seat's role, so an agent finds its own row and its role's instruction. */
+  room_role: string;
   /** ISO 8601, or null for a member that has never reported. */
   last_report_at: string | null;
   /** Measured at the tick. A fact about `at`, not a claim about now. */
@@ -244,6 +246,13 @@ export interface ReportRow {
 export interface HeartbeatPayload {
   cadence_seconds: number;
   ask: string;
+  /**
+   * Each answering role's instruction, in the room creator's words (heartbeat
+   * instructions spec D4): an untrusted envelope whose origin is the creator, never
+   * the server. Built here rather than with projections' `untrusted`, which imports
+   * this module (plan ruling R2). Null when no role has one.
+   */
+  instructions: { trust: "untrusted"; origin: { memberId: string; label: string }; data: Record<string, string> } | null;
   members: ReportRow[];
 }
 
@@ -262,6 +271,7 @@ export function reportRow(m: Member, now: number, every: number | null): ReportR
   return {
     member_id: m.memberId,
     label: m.label,
+    room_role: m.roomRole,
     last_report_at: at === null ? null : new Date(at).toISOString(),
     silent_for_seconds: Math.max(0, Math.round((now - lastReport(m)) / 1000)),
     silent: every !== null && now - lastReport(m) >= 2 * every,
@@ -304,10 +314,19 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
   if (every === null) {
     throw new Error("snapshotOf: the room declared no heartbeat cadence");
   }
+  const said: Record<string, string> = {};
+  for (const [key, def] of Object.entries(s.manifest.roles)) {
+    if (def.reports && def.report) said[key] = def.report;
+  }
+  const creator = s.members[0];
   return {
     cadence_seconds: Math.round(every / 1000),
     ask: "The members listed below: reply with bellman_send type=\"progress\", payload { note } "
-      + "— one line on where you are. Nobody else is being asked.",
+      + "— one line on where you are. Nobody else is being asked. Where your role has an instruction "
+      + "from the room's creator in `instructions`, your note answers it.",
     members: reporting(s).map((m) => reportRow(m, now, every)),
+    instructions: Object.keys(said).length > 0 && creator
+      ? { trust: "untrusted", origin: { memberId: creator.memberId, label: creator.label }, data: said }
+      : null,
   };
 }

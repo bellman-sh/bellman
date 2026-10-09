@@ -30,7 +30,9 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
   },
   // Max sells the hosted seat: three hosted rooms a month, 3,000 units each
   // (the hosted seat spec, D2 and D3), over pro's creates and blob ceiling.
-  // tests/auth.test.ts pins the four differences.
+  // tests/auth.test.ts pins the four differences. Not on sale yet: no Stripe
+  // price names it and STRIPE_PAYMENT_LINKS carries no `max` entry, so
+  // /upgrade/max stays a 404 until the site follow-up adds both (spec D2).
   max: {
     modes: ["pair", "swarm"],
     monthlyCreates: 2000,

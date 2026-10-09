@@ -759,7 +759,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "reports", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "host", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
@@ -1058,8 +1058,9 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     const room = preview.data.room as Record<string, unknown>;
     // The two heartbeat keys (#111) are spine: a number or null and a boolean, computed by
     // the server, so there is no authored string in them to leak and the guard below holds.
+    // So is `host` (#188): a role key, as creator_role is, and a model from a fixed list.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "heartbeat_on_seconds", "mode", "preset", "reports", "roles", "text",
+      ["creator_role", "heartbeat_on_seconds", "host", "mode", "preset", "reports", "roles", "text",
         "you_report", "your_role", "your_verbs"],
     );
 

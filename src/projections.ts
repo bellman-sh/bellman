@@ -167,6 +167,10 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     // Every seat's obligation, by the same rule, so the roles table a joiner
     // reads can compare seats (spec: "each role's verbs and whether it reports").
     reports,
+    // The seat Bellman runs, if the room has one, and the model it calls: shown before
+    // a joiner's human accepts a seat, as the roles are. Its instructions are the
+    // creator's prose and stay out of the preview.
+    host: m.host === null ? null : { role: m.host.role, model: m.host.model },
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
       { room: m.room, purpose: m.purpose, descriptions },

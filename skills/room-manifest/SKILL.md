@@ -144,6 +144,10 @@ can gate it. A room ends when its last member leaves, not on anyone's say-so.
 - `mode` is `pair` or `swarm`. `pair` caps the room at two seats regardless of
   plan; `swarm` holds as many members as its creator invites, up to 100,
   Bellman's ceiling for one room, the same on every plan.
+- A role that answers the heartbeat (`reports: true`, which needs `send`, and a
+  top-level `heartbeat_on` before anything asks it) may carry
+  `report: "what this seat reports"`, its own instruction, at most 300
+  characters. It is refused on a seat with `reports: false`.
 
 ### Choosing default_role and creator_role
 

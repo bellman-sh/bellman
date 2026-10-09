@@ -23,6 +23,7 @@ roles:
   "author":
     can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"]
     description: "Brought the work."
+    report: "What changed, and what \\"done\\" means\\nfor the next step"
     reports: true
   "reviewer":
     can: ["send", "request_actions", "respond_actions"]
@@ -53,8 +54,11 @@ describe("the panel's room.yaml export", () => {
       defaultRole: "reviewer", creatorRole: "author", heartbeatOnMs: 300_000,
     });
     expect(m.roles).toEqual({
-      author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: true },
-      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false },
+      author: {
+        can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: true,
+        report: "What changed, and what \"done\" means\nfor the next step",
+      },
+      reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false, report: null },
     });
   });
 

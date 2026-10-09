@@ -49,6 +49,19 @@ describe("bellman_start citing a saved preset", () => {
     expect(room.roles).toEqual({ author: ["send", "invite", "revoke", "write_surface"], reviewer: ["send", "request_actions"] });
   });
 
+  it("starts a room whose roles carry the preset's heartbeat instructions", async () => {
+    await h.store.putPreset("u_jesse", saved("my_review", {
+      heartbeat_on: "5m",
+      roles: {
+        author: { can: ["send", "invite", "revoke", "write_surface"], description: "Brought the work.", reports: true, report: "What changed" },
+        reviewer: { can: ["send", "request_actions"], description: null, reports: false },
+      },
+    }), 20);
+    const out = await start("my_review");
+    expect(out.isError, out.text).toBe(false);
+    expect((await h.store.getSession(String(out.data.session_id)))!.manifest.roles.author.report).toBe("What changed");
+  });
+
   it("leaves a started room alone when its preset is edited, then deleted", async () => {
     await h.store.putPreset("u_jesse", saved("my_review"), 20);
     const id = String((await start("my_review")).data.session_id);

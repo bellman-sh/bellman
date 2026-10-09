@@ -168,6 +168,9 @@ const RoleDefShape = z.strictObject({
   // for the same reason no preset does (D3): a tick that names members silent
   // who were never asked for anything is how the signal gets ignored.
   reports: z.boolean().nullish(),
+  // What the seat reports on a tick, in the creator's words (heartbeat instructions
+  // spec D1). Bounded like a description; refused below on a seat that does not report.
+  report: z.string().max(300).nullish(),
 });
 
 /**
@@ -304,7 +307,7 @@ function role(can: Verb[], description: string): RoleDef {
   // No preset expects a report (D3). Turning this on for shipped presets would
   // tick every room anyone already runs and name members silent who were never
   // asked for anything.
-  return { can, description, reports: false };
+  return { can, description, reports: false, report: null };
 }
 
 /**
@@ -509,10 +512,18 @@ export function resolveManifest(input: unknown): RoomManifest {
         `role "${key}" sets reports: true but does not hold the verb "send" (it holds: ${holds})`,
       );
     }
+    // An instruction for a seat that is never asked would be read by nobody, and
+    // shown at join as if it were (heartbeat instructions spec D2).
+    if (def.report != null && !(def.reports ?? false)) {
+      throw new ManifestError(
+        `role "${key}" sets a report instruction but does not answer the heartbeat (reports is false)`,
+      );
+    }
     roles[key] = {
       can: [...def.can],
       description: def.description ?? null,
       reports: def.reports ?? false,
+      report: def.report ?? null,
     };
   }
 

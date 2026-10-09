@@ -505,7 +505,11 @@ last did and how long it had been silent at the tick's own `at`. It is written
 only when some member is due, never into a frozen or closed room, and a room
 that declares no cadence gets none. Members answer with `progress` events —
 "still working, currently on the migration script" — which exist to reach a peer
-and have no timer of their own.
+and have no timer of their own. A reporting role may carry its creator's
+instruction for what that note says (`report`, at most 300 characters): a joiner
+sees it in the preview's untrusted text before accepting the seat, and every
+tick carries it in an envelope attributed to the creator (`instructions`), never
+in the server's own `ask`.
 
 `lastSeenAt` and `lastReportAt` are separate on purpose. Any call a member makes
 moves the first; only a deliberate report moves the second. A member can be
@@ -1778,20 +1782,26 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,722** | every request, whether or not you are in a room |
+| Tool definitions | **~7,741** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 7,722
-tokens, 71 over the 7,651 that main's head (`bfebd30`) measures by the same method,
-the figure the next paragraph records. All 71 are `bellman_send`'s (1,294 to 1,365):
-69 for the `shape` clause in the `surface` line's `Kinds:` sentence, which names the
-field, its forms and colours and `flip`, and says that the size is the placement's
-and the label is the title, and 2 for `shape?` in the payload's field list. No other
-entry in the listing changed, and no tool was added.
+Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 71 tokens
+over the 7,651 that `bfebd30` measures by the same method, all of them `bellman_send`'s
+(1,294 to 1,365): 69 for the `shape` clause in the `surface` line's `Kinds:` sentence,
+which names the field, its forms and colours and `flip`, and says that the size is the
+placement's and the label is the title, and 2 for `shape?` in the payload's field list.
+No other entry changed and no tool was added. Merged over per-role heartbeat
+instructions (#229, below), which changed only `bellman_start`, the listing is the sum:
+7,670 and 71, 7,741.
+
+Re-measured on 2026-10-09 for per-role heartbeat instructions, on top of room
+housekeeping: 19 tokens over main, all of them `bellman_start`'s (now 2,070), for
+the optional `report` a role in its manifest schema gained. That is 7,670 by the
+method below; this branch's script reads 7,668 against main's 7,649, the same 19.
 
 Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
 tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,

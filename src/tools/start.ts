@@ -15,7 +15,7 @@ import { JOIN_CODE_TTL } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 
-export function registerStart(server: McpServer, identity: Identity, s: BellmanStore): void {
+export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean }): void {
   // -------------------------------------------------------------- bellman_start
   server.registerTool(
     "bellman_start",
@@ -85,6 +85,12 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         if (e instanceof ManifestError) return fail(`invalid manifest — ${e.message}`);
         throw e;
       }
+
+      // The hosted seat's switch (BELLMAN_HOSTED_SEAT), ahead of every other host check: while
+      // it is off no plan has a seat, and the plan refusal below would send a caller to buy
+      // one. Read from the resolved manifest, so an inline block, `social` and a saved preset
+      // meet it the same way.
+      if (manifest.host !== null && !features.hostedSeat) return fail("hosted seats are not available yet");
 
       const ent = entitlementsFor(identity);
       // Before the mode check: a hosted room is always a swarm room, and on free the

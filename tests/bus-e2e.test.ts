@@ -115,7 +115,7 @@ async function until(condition: () => boolean | Promise<boolean>, what: string, 
 async function remoteFor(key: string, calls: Call[]): Promise<Remote> {
   const identity = resolveIdentity(`Bearer ${key}`);
   if (!identity) throw new Error(`unknown dev key ${key}`);
-  const server = buildServer(identity, store, new MemoryBlobStore());
+  const server = buildServer(identity, store, new MemoryBlobStore(), { hostedSeat: true });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "bridge-remote", version: "0.0.1" });
   await Promise.all([server.connect(serverSide), client.connect(clientSide)]);

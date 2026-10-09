@@ -3,7 +3,7 @@ import {
   HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT,
   WAKES_PER_HOUR, hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
   questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake,
-  callMessages, type HostDriver, type HostRecord,
+  callMessages, hostedSeatOn, type HostDriver, type HostRecord,
 } from "../src/host.js";
 import { decideHostCharge, type HostAppend } from "../src/store.js";
 import { monthKey, type StoredSession } from "../src/stored-session.js";
@@ -313,20 +313,24 @@ describe("the answer", () => {
  * and writes, and what it keeps. The room is a hosted one with ten units a month, a reply
  * wake's open question is at cursor 10, and the model answers "Fine." unless told otherwise.
  */
-function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown }; plan?: Plan } = {}) {
+function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown }; plan?: Plan; enabled?: boolean } = {}) {
   const { events: _e, ...rest } = session({ manifest: hosted(), members: [member({ lastSeenAt: NOW }), hostMember(hosted(), NOW)],
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 0, wakes: [] } });
   const room = { ...rest, ...over.room } as StoredSession;
   let record: HostRecord = { ...emptyHostRecord(), ...over.record };
-  const seen = { reads: [] as [number, number | undefined][], keys: [] as string[], calls: 0, writes: [] as { payload: unknown; units: number; key: unknown }[],
+  const seen = { rooms: 0, reads: [] as [number, number | undefined][], keys: [] as string[], calls: 0, writes: [] as { payload: unknown; units: number; key: unknown }[],
     plans: [] as string[], renewals: [] as [string, number][] };
   const driver: HostDriver = {
     retryMs: [1, 1, 1],
-    read: async () => ({
-      room,
-      events: async (cursor: number, limit?: number) => { seen.reads.push([cursor, limit]); return []; },
-      sent: async (key: string) => { seen.keys.push(key); return over.sent; },
-    }),
+    enabled: over.enabled ?? true,
+    read: async () => {
+      seen.rooms++;
+      return {
+        room,
+        events: async (cursor: number, limit?: number) => { seen.reads.push([cursor, limit]); return []; },
+        sent: async (key: string) => { seen.keys.push(key); return over.sent; },
+      };
+    },
     callModel: async () => { seen.calls++; return over.model ?? { status: 200, json: { content: [{ type: "text", text: "Fine." }], stop_reason: "end_turn" } }; },
     write: async (_id, e, units, now, key) => {
       seen.writes.push({ payload: e.payload, units, key });
@@ -377,6 +381,29 @@ describe("handleWake checks before it reads (I4, M7)", () => {
     const near = seat({ record: open10 });
     await handleWake(near.driver, replyWake(14), NOW);
     expect(near.seen.reads).toEqual([[10, READ_LIMIT]]);
+  });
+});
+
+/**
+ * The switch (BELLMAN_HOSTED_SEAT). A driver that is not enabled settles each wake before the
+ * room, the meter or the model is touched, so a hosted room made before the seat was switched
+ * off goes quiet too; `bellman_start` only refuses new ones.
+ */
+describe("handleWake with the seat switched off", () => {
+  it("settles a tick wake and a reply wake before the room is read, a plan resolved, a unit charged or the model called", async () => {
+    const nothing = { rooms: 0, reads: [], keys: [], calls: 0, writes: [], plans: [], renewals: [] };
+    for (const { wake, record } of [{ wake: tickWake(12), record: {} }, { wake: replyWake(11), record: open10 }]) {
+      const { driver, seen } = seat({ enabled: false, record });
+      expect(await handleWake(driver, wake, NOW), wake.cause).toBeNull();
+      expect(seen, wake.cause).toEqual(nothing);
+    }
+  });
+
+  // The control for the counters above: the same tick wake on an enabled driver moves each of them.
+  it("is the switch that stops them: an enabled driver reads the room, calls the model and charges a unit for the same tick wake", async () => {
+    const { driver, seen } = seat();
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen).toMatchObject({ rooms: 1, calls: 1, writes: [{ payload: { kind: "question" }, units: 1 }] });
   });
 });
 
@@ -545,5 +572,37 @@ describe("the allowance at the month turn (I7)", () => {
     expect(seen.plans).toEqual([]);
     expect(seen.renewals).toEqual([]);
     expect(seen.calls).toBe(1);
+  });
+});
+
+/**
+ * BELLMAN_HOSTED_SEAT, read as BELLMAN_BILLING is (src/billing/config.ts): only "on" switches
+ * the seat on. Unset, empty and "off" are off without a word, and any other value is off and
+ * logged, so a typo cannot start a seat that spends the key.
+ */
+describe("hostedSeatOn", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("is on for \"on\", whatever its case or padding, and says nothing", () => {
+    const spy = quiet();
+    expect(hostedSeatOn("on")).toBe(true);
+    expect(hostedSeatOn(" ON ")).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("is off when unset, empty or \"off\", and says nothing", () => {
+    const spy = quiet();
+    // A Worker deployed without the var reads it off its env as undefined.
+    const env: { BELLMAN_HOSTED_SEAT?: string } = {};
+    for (const raw of [undefined, env.BELLMAN_HOSTED_SEAT, "", "  ", "off", " OFF "]) expect(hostedSeatOn(raw), JSON.stringify(raw)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it.each(["yes", "true", "1", "onn"])("is off for %s, and logs once, naming the value", (raw) => {
+    const spy = quiet();
+    expect(hostedSeatOn(raw)).toBe(false);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0][0])).toContain(`"${raw}"`);
   });
 });

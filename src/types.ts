@@ -307,6 +307,29 @@ export interface RoomManifest {
 }
 
 /**
+ * A preset a person saved (designer spec D2, D4): a room shape without the room,
+ * in the author arm's own field names, so citing it hands these fields to
+ * `resolveManifest`. Stored and served in this one form (plan ruling R1), and a
+ * built-in is shown in it too, with `updated_at` null.
+ */
+export interface SavedPreset {
+  name: string;
+  description: string | null;
+  mode: SessionMode;
+  heartbeat_on: string | null;
+  roles: Record<string, { can: Verb[]; description: string | null; reports: boolean }>;
+  default_role: string;
+  creator_role: string;
+  /**
+   * The author arm's `host` block. Absent from a preset saved before hosted seats
+   * (#188) reached the presets, and read as null: no host.
+   */
+  host?: HostConfig | null;
+  /** ISO 8601 when it was saved; null for a built-in, which never was. */
+  updated_at: string | null;
+}
+
+/**
  * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
  * client is shown maps to a shape the server validates, and a kind lands with
  * its validator. `file` and `image` (#183) reference a blob; `html` (#185) is

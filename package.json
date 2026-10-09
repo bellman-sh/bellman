@@ -26,6 +26,7 @@
   },
   "main": "dist/index.js",
   "bin": {
+    "bellman": "dist/cli.js",
     "bellman-channel": "dist/channel.js",
     "bellman-stop-hook": "dist/stop-hook.js",
     "bellman-claude": "bin/bellman-claude"

@@ -42,6 +42,12 @@ preset: review                  # pair | swarm | review | social
 That is the entire file. Adding `roles`, `mode`, `default_role` or
 `creator_role` next to `preset` is rejected — the two forms are exclusive.
 
+A preset saved in the panel (`dash.bellman.sh/presets`) is cited the same way,
+but it works only for the person who saved it: `bellman_start` looks the name
+up among the caller's own presets, so a teammate gets `unknown preset`. For a
+shape the repo shares, use the panel's Copy room.yaml, which writes the roles
+out in full.
+
 What each preset expands to:
 
 **`pair`** — mode `pair`. Holds two members because the preset says so.
@@ -72,9 +78,9 @@ point of the preset: review flows one way.
 
 **`social`** — mode `swarm`. A room with a hosted seat: Bellman runs `host`, which
 asks the room a question each tick and answers in the thread. The beat is hourly;
-`heartbeat_on` next to `preset` slows it, up to `24h`, and never speeds it. Next
-to any other preset `heartbeat_on` is refused: only a host gives a cited room
-anything to tick for.
+`heartbeat_on` next to `preset` slows it, up to `24h`, and never speeds it. A
+saved preset with a `host` block takes one too, from `1h` to `24h`. Next to any other preset
+`heartbeat_on` is refused: only a host gives a cited room anything to tick for.
 
 | Role | Can | |
 |---|---|---|

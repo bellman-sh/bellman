@@ -23,13 +23,14 @@ import {
   sanitizeName, storedType, type BlobStore,
 } from "../blobs.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf } from "../projections.js";
+import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
+import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
 import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
-import type { Identity, Member } from "../types.js";
+import type { Identity, Member, SessionEvent } from "../types.js";
 
 /** Who is calling a room route, and how. `via` feeds the CSRF check and nothing else. */
 export interface RoomCaller {
@@ -54,9 +55,14 @@ export const MAX_ROOMS_LISTED = 50;
 // this is the bound on the JSON around it, read off the header before parsing.
 export const MAX_SURFACE_WRITE_BYTES = 64 * 1024;
 
+// ponytail: two hundred events a read, not tuned, and no paging backwards. A first read is the newest
+// two hundred; a room whose story is longer than that wants #49's paged read.
+export const MAX_EVENTS_READ = 200;
+
 const LIST = /^\/rooms$/;
 const DETAIL = /^\/rooms\/([^/]+)$/;
 const SURFACE = /^\/rooms\/([^/]+)\/surface$/;
+const EVENTS = /^\/rooms\/([^/]+)\/events$/;
 const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
@@ -76,14 +82,14 @@ const DOWNLOAD_HEADERS = {
   "content-security-policy": "sandbox",
 } as const;
 
-const json = (status: number, body: unknown, origin: string | undefined) =>
+export const json = (status: number, body: unknown, origin: string | undefined) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "content-type": "application/json", "cache-control": "no-store", ...corsHeaders(origin) },
   });
 
 /** The shape the OAuth routes answer errors in, so the panel reads one error form. */
-const problem = (status: number, error: string, description: string, origin: string | undefined) =>
+export const problem = (status: number, error: string, description: string, origin: string | undefined) =>
   json(status, { error, error_description: description }, origin);
 
 const overQuota = (used: number, ceiling: number, bytes: number, origin: string | undefined) =>
@@ -94,7 +100,7 @@ const overQuota = (used: number, ceiling: number, bytes: number, origin: string 
     ceiling,
   }, origin);
 
-const methodNotAllowed = (allow: string, origin: string | undefined) =>
+export const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
 
 /**
@@ -132,6 +138,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (surface) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await readSurfaceRoute(request, surface[1], origin, deps);
+    }
+    const events = EVENTS.exec(path);
+    if (events) {
+      if (request.method !== "GET") return methodNotAllowed("GET", origin);
+      return await readEventsRoute(request, url, events[1], origin, deps);
     }
     const item = SURFACE_ITEM.exec(path);
     if (item) {
@@ -591,6 +602,45 @@ const etagMatches = (header: string | null, tag: string): boolean =>
  * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
  * Its ETag is the record's cursor, as a member still in the room has.
  */
+/**
+ * The room's log, for the panel's Log view: the envelopes `bellman_sync` returns, the caller's own
+ * included, because a person reading the log reads the whole conversation. Without `?after`, the
+ * newest MAX_EVENTS_READ; with it, the next MAX_EVENTS_READ past that cursor, so a poll that carries
+ * the last cursor it saw reads only what is new. The caller rule is the surface read's: membership
+ * first, a removed member to its cut, and #65's fallback for an org admin reading a closed room. A
+ * read and nothing else: it moves no one's `lastSeenAt` and no bridge's cursor.
+ */
+async function readEventsRoute(request: Request, url: URL, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const session = await deps.store.getSession(sessionId);
+  const mine = session ? handlesOf(session, who.identity) : [];
+  const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
+  if (!session || (mine.length === 0 && !asAdmin)) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const raw = url.searchParams.get("after");
+  if (raw !== null && !/^\d{1,15}$/.test(raw)) {
+    return problem(400, "invalid_request", "after is a cursor: a whole number, 0 or more", origin);
+  }
+  const after = raw === null ? undefined : Number(raw);
+  const cut = asAdmin ? undefined : cutFor(mine);
+  const within = (e: SessionEvent) => cut === undefined || e.cursor <= cut;
+  let read: SessionEvent[];
+  if (after !== undefined) {
+    read = (await deps.store.eventsAfter(sessionId, after)).filter(within).slice(0, MAX_EVENTS_READ);
+  } else if (cut === undefined) {
+    read = await deps.store.recentEvents(sessionId, MAX_EVENTS_READ);
+  } else {
+    // A removed member's newest are the ones before its cut, which the room's tail may not reach.
+    read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ))).filter(within).slice(-MAX_EVENTS_READ);
+  }
+  return json(200, {
+    events: read.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),
+    cursor: read.at(-1)?.cursor ?? after ?? 0,
+  }, origin);
+}
+
 async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);

@@ -57,6 +57,12 @@ async function call(c: Client, name: string, args: Record<string, unknown>): Pro
 }
 
 describe("HTTP surface", () => {
+  it("serves the preset routes beside the room routes", async () => {
+    const res = await fetch(`${base}/presets`, { headers: { authorization: "Bearer qk_dev_jesse" } });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
+  });
+
   it("serves a health check without auth", async () => {
     const res = await fetch(`${base}/healthz`);
     expect(res.status).toBe(200);

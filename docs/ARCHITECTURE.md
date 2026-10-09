@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: badc1bd
+last-verified-against-source: 68f3387
 last-updated: 2026-10-09
 ---
 
@@ -204,16 +204,19 @@ Two consequences:
 **The control panel** (`dash.bellman.sh`, #49) reaches a room over HTTP rather
 than MCP: `GET /rooms` for the rooms a person created or holds a handle in,
 `GET /rooms/:id` for a room as their seat sees it, `GET /rooms/:id/surface` for
-the working surface with the surface cursor as its `ETag`, and `PUT`/`DELETE
-/rooms/:id/surface/:key` to write or remove an item (#184), beside the blob
-routes (#183). The routes authenticate through the same composed caller the blob
+the working surface with the surface cursor as its `ETag`, `GET
+/rooms/:id/events` for the room's log, the newest 200 events or the next 200
+past `?after`, in the envelopes `bellman_sync` returns with the caller's own
+included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
+(#184), and `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
+saved presets, beside the blob routes (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
 "surface"` calls. Membership is the tenant boundary: a stranger and an unknown
 room are one 404. The one exception is an org admin's read of a *closed* room
 its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id`, the
-surface read and the blob download fall back to it for a caller with no seat,
+surface read, the log read and the blob download fall back to it for a caller with no seat,
 `GET /rooms?as=admin` lists those rooms from the registry's org index, and
 `DELETE /rooms/:id` lets the room's creator or such an admin ask for the purge,
 answered 202 with the time the room is stored to go, because the room's own
@@ -440,7 +443,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -637,9 +640,13 @@ asks the room a question on its own cadence and answers replies in that
 question's thread. The manifest's `host` block names its role, its model and the
 creator's instructions, and `resolveManifest` requires the role to hold exactly
 `send` and not report, the room to be a swarm room, and `heartbeat_on` to be at
-least an hour. A cite may set `heartbeat_on` only for `social`, the one preset
-with a host; a cite of any other is refused for it, since nothing there would
-tick. `bellman_start` refuses a plan with no hosted rooms (free, pro), then takes
+least an hour. A cite may set `heartbeat_on` only for a preset with a host:
+`social`, the one built-in with one, or a saved preset that carries a `host`
+block. A cite of any other is refused for it, since nothing there would tick or
+the preset already holds its author's cadence. A saved preset keeps its `host`
+block, and `bellman_start` expands it before any refusal, so a room started from
+one meets the plan refusal and the slot below exactly as an inline block does.
+`bellman_start` refuses a plan with no hosted rooms (free, pro), then takes
 one of the creator's hosted-room slots: a plan's hosted rooms are the most its
 holder has open at once (3 on max, 5 on team), not a count of creations a month.
 `RegistryDO.reserveHostedRoom` counts the creator's `ho:<userId>:` rows and adds
@@ -1695,12 +1702,20 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,354** | every request, whether or not you are in a room |
+| Tool definitions | **~7,377** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 once main's saved presets (#224) merged beneath the
+hosted seat: 7,377 tokens, 23 over the 7,354 below, all of them
+`bellman_start`'s (now 1,810): its `preset` is any name rather than an enum of
+four, and its manifest line names the panel beside `social`. Saved presets cost
+25 against main's text (the 7,118 paragraph below) and 23 against the hosted
+seat's. The next two paragraphs are the hosted seat's branch and the one after
+them is main's; both lines start from the 7,093 measured at `93e7c1d`.
 
 Re-measured the same day after the live cap on hosted rooms (I7): 7,354 tokens,
 17 more, all `bellman_start`'s, whose error line now names the hosted room limit
@@ -1720,6 +1735,13 @@ answers only replies that carry its question's cursor. Per tool, now:
 `bellman_sync` 740, `bellman_invite` 728, `bellman_connect` 588, `bellman_evict`
 513, `bellman_surface` 281, `bellman_rooms` 255, `bellman_audit` 213 and
 `bellman_leave` 179.
+
+Tool definitions were re-measured on 2026-10-09 again after saved presets landed:
+7,118 tokens in all. Measured the same way at `93e7c1d`, main's head before that
+branch, the listing was 7,093, so the branch's share is 25, all of it
+`bellman_start`'s: its `preset` is now any name rather than three, and its
+description names the panel. The 71 between the 7,022 recorded next and that
+7,093 were there before the branch.
 
 Before that, tool definitions were re-measured on 2026-10-09 after `room_id` landed as an alias
 of `session_id` on the six tools that take a room: 7,022 tokens in all, 147 over

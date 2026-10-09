@@ -4,7 +4,7 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
+  AuditEntry, EventType, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -2963,6 +2963,45 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     const cutoff = Date.now() - 62 * 24 * 60 * 60 * 1000;
     await this.ctx.storage.put(key, list.filter((t) => t >= cutoff));
   }
+
+  /**
+   * `pr:<userId>:<name>` — a person's saved presets (designer spec D4).
+   * Injective for the reason `us:` is: a user id is `u_[A-Za-z0-9_-]+` and a name
+   * is a slug, so neither holds the separator. Storage lists keys in order, which
+   * is the names' code-unit order.
+   */
+  async listPresets(userId: string): Promise<SavedPreset[]> {
+    const prefix = `pr:${userId}:`;
+    const map = await this.ctx.storage.list<SavedPreset>({ prefix });
+    // A key under this prefix whose rest is not its own preset's name belongs to someone whose id
+    // extends this one past a colon, which an operator-issued id may hold. It is not this person's.
+    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => p);
+  }
+
+  /** The listing's guard for one name: the record under the key must be the preset asked for. */
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    const p = await this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
+    return p && p.name === name ? p : undefined;
+  }
+
+  /**
+   * The count and the write in one call. The object's input gate holds every
+   * other request while this one awaits storage, so a second save cannot count
+   * between this one's count and its write.
+   */
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    if ((await this.getPreset(userId, preset.name)) === undefined) {
+      if ((await this.listPresets(userId)).length >= cap) return "full";
+    }
+    await this.ctx.storage.put(`pr:${userId}:${preset.name}`, preset);
+    return "saved";
+  }
+
+  /** Only a record that is this person's, by the listing's guard. */
+  async deletePreset(userId: string, name: string): Promise<boolean> {
+    if ((await this.getPreset(userId, name)) === undefined) return false;
+    return this.ctx.storage.delete(`pr:${userId}:${name}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3415,6 +3454,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async releaseHostedRoom(userId: string, sessionId: string): Promise<void> {
     await this.registry.releaseHostedRoom(userId, sessionId);
+  }
+
+  async listPresets(userId: string): Promise<SavedPreset[]> {
+    return this.registry.listPresets(userId);
+  }
+
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    return this.registry.getPreset(userId, name);
+  }
+
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    return this.registry.putPreset(userId, preset, cap);
+  }
+
+  async deletePreset(userId: string, name: string): Promise<boolean> {
+    return this.registry.deletePreset(userId, name);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

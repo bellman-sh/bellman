@@ -135,8 +135,9 @@ export function decide(
   return { kind: "answer", question: open, replies: replies.slice(-REPLIES_PER_QUESTION) };
 }
 
-/** `&` becomes `&amp;`, `<` becomes `&lt;` and `>` becomes `&gt;`, so nothing inside a tag can close it or open another. */
-export const escapeText = (s: string): string => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/** `&`, `<`, `>` and `"` become entities, so nothing a stranger wrote can close a tag, open one, or end the quotes around an attribute. */
+export const escapeText = (s: string): string =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const textOf = (e: SessionEvent): string => {
   const p = e.payload as { text?: unknown; note?: unknown } | null;

@@ -202,6 +202,12 @@ describe("the prompt", () => {
     expect(p.user.match(/</g)).toHaveLength(2);
   });
 
+  it("keeps a label inside the from attribute, with no raw quote or angle bracket", () => {
+    const p = answerPrompt(hosted(), "q", [ev({ fromLabel: 'x" onload="y">z', payload: { text: "hi" } })]);
+    expect(p.user).toContain('<reply from="x&quot; onload=&quot;y&quot;&gt;z">hi</reply>');
+    expect(p.user.match(/"/g)).toHaveLength(2);
+  });
+
   it("reads the note of a progress reply", () => {
     const p = answerPrompt(hosted(), "q", [ev({ type: "progress", payload: { note: "halfway there" } })]);
     expect(p.user).toContain("halfway there");

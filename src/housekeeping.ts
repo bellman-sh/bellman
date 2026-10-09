@@ -18,10 +18,10 @@
  */
 import type { HousekeepingFinding, HousekeepingPayload, Member, SessionEvent } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
-// `isActiveMember` and `isRemovedMember` live in store.ts beside the other member rules, and
+// `isActivePerson` and `isRemovedMember` live in store.ts beside the other member rules, and
 // store.ts applies `noteAppend` inside both stores, so this module imports that one and not
 // the reverse. heartbeat.ts is built the same way.
-import { isActiveMember, isRemovedMember } from "./store.js";
+import { isActivePerson, isRemovedMember } from "./store.js";
 
 /** The name of this handler on the room's one alarm, beside the others' (retention.ts, outbox.ts). */
 export const HOUSEKEEP_HANDLER = "housekeep";
@@ -68,9 +68,16 @@ interface Anchor {
  *
  * Not evaluated: a room that declared no housekeeping, one that is closed or frozen (nothing
  * can answer a finding in either, and a freeze is not anybody's silence), and one with no
- * member in it, which is about to close. A member counts while it is in the room and has not
- * been removed from it, and the same question is asked of the sender of a request (the
- * request is named only while someone who could be asked about it is there).
+ * person in it, which is about to close. A member counts while it is a person in the room
+ * (`isActivePerson`: still in it, and not the hosted seat) and has not been removed from it,
+ * and the same question is asked of the sender of a request (the request is named only while
+ * someone who could be asked about it is there).
+ *
+ * **The hosted seat is not a person (hosted seat spec, D5; ruling H3).** It is never named
+ * quiet, it does not keep a room from being empty, and its latest join does not date a room's
+ * idleness. It speaks on Bellman's clock, in answer to its two wake causes, so there is no one
+ * to nudge, and `isActivePerson` is the one predicate the three readings of "who is there"
+ * (empty, abandoned, and this) share.
  *
  * **A thaw restarts the clocks (R9).** Every base time is floored at `thawedAt`: a member's
  * last send, a request's `at`, the last member event. While the room was frozen nobody could
@@ -83,7 +90,7 @@ interface Anchor {
 function anchors(s: StoredSession): Anchor[] | null {
   const h = s.manifest.housekeeping;
   if (!h || s.closed || s.frozenAt !== null) return null;
-  const live = s.members.filter((m) => isActiveMember(m) && !isRemovedMember(m));
+  const live = s.members.filter((m) => isActivePerson(m) && !isRemovedMember(m));
   if (live.length === 0) return null;
 
   const from = (base: number): number => Math.max(base, s.thawedAt ?? 0);

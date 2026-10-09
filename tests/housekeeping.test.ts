@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { clearedKeys, dueFindings, nextHousekeepAt, startsAnswerClock } from "../src/housekeeping.js";
 import { noteAppend } from "../src/store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import type { StoredSession } from "../src/stored-session.js";
 import type { RoomManifest, SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
@@ -596,5 +597,85 @@ describe("the rules", () => {
     clearedKeys(s, T0 + 3 * D1);
     nextHousekeepAt(s, T0 + 3 * D1);
     expect(s).toEqual(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The hosted seat is not a person (hosted seat spec D5, ruling H3).
+//
+// Housekeeping counts people. The seat speaks on Bellman's clock, two causes of its own,
+// so it is never named quiet, what it says is nobody's activity, and a room only it speaks
+// in is idle. The books and the rules each ask the question, and each case here fails if
+// the one it names stops asking.
+// ---------------------------------------------------------------------------
+
+describe("the hosted seat is not a person (H3)", () => {
+  const hostedManifest = (thresholds: Thresholds | null = rules()) => roomManifest({
+    mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead",
+    host: { role: "host", model: "haiku", instructions: null },
+    housekeeping: thresholds,
+  });
+  /** The seat as `bellman_start` seats it, `joinedAt` when the room was made. */
+  const seat = (joinedAt = T0 - 1_000) => hostMember(hostedManifest(), joinedAt);
+  const hostSays = (over: Partial<SessionEvent> = {}) =>
+    ev({ fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman", ...over });
+
+  describe("what it says", () => {
+    const withSeat = () => ({ ...base(hostedManifest()), members: [...base().members, seat()] });
+
+    it("moves no clock: not its own last send, and not the room's last member event", () => {
+      const out = noteAppend(withSeat(), hostSays({ at: T0 + 5 }));
+      expect(out.lastMemberEventAt).toBeNull();
+      expect(out.members.every((m) => m.lastSentAt === undefined)).toBe(true);
+    });
+
+    it("leaves the room's last member event where a person put it", () => {
+      const afterPerson = { ...withSeat(), ...noteAppend(withSeat(), ev({ at: T0 + 5 })) };
+      expect(noteAppend(afterPerson, hostSays({ at: T0 + 9 })).lastMemberEventAt).toBe(T0 + 5);
+    });
+
+    // The seat holds `send` and nothing else, so no real request comes from it. The books do not
+    // rely on that: a request is a person asking, and the seat is not one.
+    it("opens no request, whatever the event is typed", () => {
+      const out = noteAppend(withSeat(), hostSays({ cursor: 7, type: "action_request", at: T0 }));
+      expect(out.openRequests).toEqual({});
+    });
+  });
+
+  describe("the rules", () => {
+    const room = (over: Partial<StoredSession> = {}, thresholds: Thresholds | null = rules()) =>
+      stored({ manifest: hostedManifest(thresholds), members: [who("m_a", { lastSentAt: T0 }), seat()], ...over }, thresholds);
+
+    // The seat joined before the person's last send, so were it counted its quiet anchor
+    // (joinedAt + quiet_after) would come first: the room would be named quiet about it, and the
+    // alarm would be armed for it, at a moment nobody could act on.
+    it("never name it quiet, and never arm the alarm for it", () => {
+      const s = room({ members: [who("m_a", { lastSentAt: T0 + 3_600_000 }), seat(T0 - 1_000)] }, quietOnly());
+      expect(dueFindings(s, T0 + H2)).toEqual([]);
+      expect(nextHousekeepAt(s, T0)).toBe(T0 + 3_600_000 + H2);
+      expect(keysOf(dueFindings(s, T0 + 3_600_000 + H2))).toEqual(["member_quiet:m_a"]);
+    });
+
+    it("do not count a room it is alone in as one with someone in it", () => {
+      const s = room({ members: [who("m_a", { lastSentAt: T0, leftAt: T0 + 1 }), seat()] });
+      expect(nextHousekeepAt(s, T0)).toBeNull();
+      expect(dueFindings(s, T0 + 30 * D1)).toEqual([]);
+    });
+
+    it("start the idle clock from the latest person to join, and not from the seat", () => {
+      const s = room({ lastMemberEventAt: null, members: [who("m_a", { joinedAt: T0 - 500 }), seat(T0 + 900)] }, idleOnly());
+      expect(dueFindings(s, T0 - 500 + D1 - 1)).toEqual([]);
+      expect(dueFindings(s, T0 - 500 + D1).map((f) => f.payload.since)).toEqual([T0 - 500 + D1]);
+    });
+
+    it("read a room only it speaks in as idle: its events never moved the book the clock reads", () => {
+      const before = room({ members: [who("m_a"), seat()], lastMemberEventAt: T0 }, idleOnly());
+      // The seat speaks a moment before the day is out, and the room is still idle when it ends.
+      const after = { ...before, ...noteAppend(before, hostSays({ at: T0 + D1 - 1 })) };
+      expect(after.lastMemberEventAt).toBe(T0);
+      expect(keysOf(dueFindings(after, T0 + D1))).toEqual(["room_idle"]);
+    });
   });
 });

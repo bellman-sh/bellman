@@ -2343,6 +2343,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * is a `system` event and owes them nothing today, but every event row goes through one
    * path, so a later change to what the books keep cannot miss this writer.
    *
+   * It queues no wake for a hosted seat (ruling H1): a proposal is not one of the seat's two
+   * causes, and waking spends the room's host units on the server's initiative.
+   *
    * It writes nothing when nothing is due and nothing is to be forgotten, not even the record,
    * so a firing the alarm made early (a member sent between the arming and the firing, which
    * re-arms nothing on the hot path) costs no write. Nothing here advances a clock to stop

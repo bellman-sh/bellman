@@ -334,10 +334,13 @@ function departedMemberId(e: SessionEvent): string | null {
  * **Only a room that declared housekeeping keeps books.** Any other returns at once, and
  * the Durable Objects store then writes exactly the rows it wrote before this existed.
  *
- * **A member's event moves the sender and the room; the server's does not.** A tick, a
- * proposal, an eviction and a timeout are all authored by "system", and none of them is
- * anybody's activity. Departures still close the departed member's requests whoever
- * authored them, which is why that comes first.
+ * **A person's event moves the sender and the room; the server's does not, and neither
+ * does the hosted seat's.** A tick, a proposal, an eviction and a timeout are all authored by
+ * "system", and none of them is anybody's activity. The seat is Bellman's, not a person
+ * (hosted seat spec, D5; ruling H3): it speaks on its own clock, in answer to its two wake
+ * causes, so what it says is not a member writing to the room, and a room only it speaks in
+ * reads idle. Departures still close the departed member's requests whoever authored them,
+ * which is why that comes first.
  *
  * Requests are kept here and not derived from the log, because every read of the log is
  * bounded and a request older than the bound must not be forgotten. An `action_response`
@@ -365,7 +368,7 @@ export function noteAppend(s: Books & Pick<Session, "manifest">, e: SessionEvent
     openRequests = Object.fromEntries(Object.entries(openRequests).filter(([, r]) => r.fromMemberId !== gone));
   }
 
-  if (e.fromMemberId === "system") {
+  if (e.fromMemberId === "system" || isHostMember({ userId: e.fromUserId })) {
     return openRequests === s.openRequests
       ? s
       : { members: s.members, openRequests, lastMemberEventAt: s.lastMemberEventAt };
@@ -1833,6 +1836,10 @@ export class MemoryStore implements BellmanStore {
    * answer names its question as `refId`, so it reads as a reply, and
    * `appendHostEvent` queues no wake in either store. No awaits, for
    * appendEvent's reason.
+   *
+   * The two causes stay two (ruling H1). A housekeeping proposal (#66) is a server event
+   * with no `refId`, so it falls through here, and it must: waking spends the room's
+   * host units on the server's initiative, which a proposal's design rules out.
    */
   private wakeHost(s: Session, event: SessionEvent): void {
     if (s.manifest.host === null || !hostSeated(s)) return;

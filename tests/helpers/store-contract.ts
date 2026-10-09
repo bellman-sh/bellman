@@ -2643,6 +2643,70 @@ export function describeStoreContract(
     });
 
     /**
+     * Housekeeping counts people (#66, ruling H3), and every event write runs its books (H2).
+     * The seat's send and a person's reply to it both reach the books through a store's own
+     * appends, so these are the two stores agreeing on what each owes them: a reply is a
+     * person's event, and the seat's word is nobody's activity.
+     */
+    describe("a hosted room's housekeeping books", () => {
+      const watched = () => {
+        const m = { ...hostedManifest(), housekeeping: { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: 86_400_000, repeatAfterMs: null } };
+        const now = Date.now();
+        return session({ manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(now), used: 0, wakes: [] } });
+      };
+      const asks = (): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+        payload: { kind: "question", text: "What shipped?", tick: 1 }, refId: null,
+      });
+      const replyTo = (cursor: number): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd",
+        payload: { text: "a parser" }, refId: String(cursor),
+      });
+      /** The three books, as they stand. */
+      const booksOf = async (id: string) => {
+        const s = (await store.getSession(id))!;
+        return { room: s.lastMemberEventAt, sent: Object.fromEntries(s.members.map((m) => [m.memberId, m.lastSentAt])), open: s.openRequests };
+      };
+
+      it("keeps no book for the seat's own send: no clock of its own, and none for the room", async () => {
+        const s = watched();
+        await store.createSession(s);
+        expect((await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1")).ok).toBe(true);
+        expect(await booksOf(s.id)).toEqual({ room: null, sent: { m_creator: undefined, m_host: undefined }, open: {} });
+      });
+
+      it("keeps a person's reply to the seat in the books, through appendEvent", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const reply = (await store.appendEvent(s.id, replyTo(q.ok ? q.event.cursor : 0)))!;
+        expect(await booksOf(s.id)).toEqual({ room: reply.at, sent: { m_creator: reply.at, m_host: undefined }, open: {} });
+      });
+
+      it("keeps a person's reply to the seat in the books, through appendEventOnce", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const r = await store.appendEventOnce(s.id, replyTo(q.ok ? q.event.cursor : 0), "reply-1");
+        if (r.outcome !== "appended") throw new Error(`expected an append, got ${r.outcome}`);
+        expect(await booksOf(s.id)).toEqual({ room: r.event.at, sent: { m_creator: r.event.at, m_host: undefined }, open: {} });
+      });
+
+      it("leaves the room's last member event with the person when the seat speaks again", async () => {
+        const s = watched();
+        await store.createSession(s);
+        const q = await store.appendHostEvent(s.id, asks(), 1, Date.now(), "host:tick:1");
+        const reply = (await store.appendEvent(s.id, replyTo(q.ok ? q.event.cursor : 0)))!;
+        // The suite's clock is held, so move it: an answer at the reply's own moment could not tell.
+        vi.setSystemTime(reply.at + 60_000);
+        const answer = { ...asks(), payload: { kind: "answer", text: "Nice." }, refId: String(reply.cursor) };
+        expect((await store.appendHostEvent(s.id, answer, 1, Date.now(), "host:reply:2")).ok).toBe(true);
+        expect((await booksOf(s.id)).room).toBe(reply.at);
+      });
+    });
+
+    /**
      * A plan's hosted rooms are the most a creator holds open at once (I7), not a count of
      * creations a month: each hosted room open past the first month renews its allowance,
      * so a monthly count let a creator's spend grow every month. A slot is taken by one

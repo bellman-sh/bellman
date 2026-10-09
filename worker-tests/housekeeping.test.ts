@@ -11,6 +11,10 @@
 import { it, expect, vi, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import type { HostDO } from "../src/host-do.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
+import { OUTBOX_PREFIX } from "../src/outbox.js";
+import { monthKey } from "../src/stored-session.js";
 import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
 import { publicEvent } from "../src/public-event.js";
 import type { RoomManifest, Session, SessionEvent } from "../src/types.js";
@@ -563,4 +567,95 @@ it("is projected as any event is, carrying its payload as written and no ambient
   });
   expect(shown).not.toHaveProperty("ambient");
   expect(shown).not.toHaveProperty("fromUserId");
+});
+
+// ---------------------------------------------------------------------------
+// A hosted room (hosted seat spec D5; rulings H1 and H3)
+//
+// Housekeeping counts people and never wakes the seat. The seat speaks on Bellman's clock, in
+// answer to its two wake causes, so it is never named quiet, its words are nobody's activity,
+// and a proposal is not a cause of a wake.
+// ---------------------------------------------------------------------------
+
+/**
+ * A hosted swarm room that declared housekeeping: one person (`m_a`) who last sent at `sentAt`, and
+ * the seat, seated at `at`. Every finding is off unless a case turns it on.
+ */
+const hostedRoom = (id: string, at: number, hk: Partial<Thresholds> = {}, sentAt = at) => {
+  const manifest = roomManifest({
+    mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead",
+    host: { role: "host", model: "haiku", instructions: null },
+    housekeeping: { quietAfterMs: 5 * MIN, answerWithinMs: null, idleAfterMs: null, repeatAfterMs: null, ...hk },
+  });
+  return session({
+    id, joinCodes: {}, manifest,
+    members: [
+      member({ memberId: "m_a", userId: "u_a", label: "a@x", roomRole: "lead", joinedAt: at, lastSeenAt: at, lastSentAt: sentAt }),
+      hostMember(manifest, at),
+    ],
+    hostUnitsPerMonth: 10, hostUnits: { month: monthKey(at), used: 0, wakes: [] },
+  });
+};
+
+/** What the seat writes on a tick: a thread root. */
+const hostAsks = (): Omit<SessionEvent, "cursor" | "at"> => ({
+  type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+  payload: { kind: "question", text: "What shipped?", tick: 1 }, refId: null,
+});
+
+it("never names the hosted seat quiet, and arms for the person alone", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  // The person last sent a minute after the room was made. Were the seat counted, its anchor
+  // (made, plus quiet_after) would come first, and the alarm would be armed for it.
+  await store.createSession(hostedRoom("qs_h_quiet", T0, {}, T0 + MIN));
+  expect(await armed("qs_h_quiet"), "armed at the person's last send plus quiet_after").toBe(T0 + MIN + 5 * MIN);
+
+  setClock(T0 + 6 * MIN);
+  await fire("qs_h_quiet");
+  expect((await proposals("qs_h_quiet")).map((e) => e.payload)).toEqual([
+    { finding: "member_quiet", about: { member_id: "m_a" }, since: T0 + 6 * MIN, repeat: 1 },
+  ]);
+});
+
+it("reads a room only the seat speaks in as idle: what the seat says is nobody's activity", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(hostedRoom("qs_h_idle", T0, { quietAfterMs: null, idleAfterMs: 10 * MIN }));
+  expect(await armed("qs_h_idle")).toBe(T0 + 10 * MIN);
+
+  // The seat asks twice, the second a minute before the room has been idle for the threshold.
+  setClock(T0 + 5 * MIN);
+  expect((await store.appendHostEvent("qs_h_idle", hostAsks(), 1, Date.now(), "host:tick:1")).ok).toBe(true);
+  setClock(T0 + 9 * MIN);
+  expect((await store.appendHostEvent("qs_h_idle", hostAsks(), 1, Date.now(), "host:tick:2")).ok).toBe(true);
+  // Read off the record, not the alarm: the seat's send also queues its audit row, whose delivery arms the alarm of its own.
+  expect((await rows("qs_h_idle")).session!.lastMemberEventAt, "the seat's words moved no book").toBeNull();
+
+  setClock(T0 + 10 * MIN);
+  await fire("qs_h_idle");
+  expect((await proposals("qs_h_idle")).map((e) => e.payload)).toEqual([
+    { finding: "room_idle", since: T0 + 10 * MIN, repeat: 1 },
+  ]);
+});
+
+// A proposal is not a cause (H1). The room's outbox is where a wake would be queued, and the seat's
+// object is where it would be delivered, and a seat never woken holds nothing at all: any wake leaves
+// its queue behind, even after it is handled.
+it("wakes nobody when it raises a proposal in a hosted room", async () => {
+  const T0 = Date.now();
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(hostedRoom("qs_h_wake", T0, { quietAfterMs: null, idleAfterMs: 5 * MIN }));
+  setClock(T0 + 5 * MIN);
+  await fire("qs_h_wake");
+  expect(await proposals("qs_h_wake"), "the firing raised its proposal").toHaveLength(1);
+
+  const queued = await runInDurableObject(stubOf("qs_h_wake"), async (_i: SessionDO, ctx) =>
+    (await ctx.storage.list({ prefix: OUTBOX_PREFIX })).size);
+  expect(queued, "no row owed to the seat in the room's outbox").toBe(0);
+  const seat = env.HOST.get(env.HOST.idFromName("qs_h_wake"));
+  const kept = await runInDurableObject(seat, async (_i: HostDO, ctx) => (await ctx.storage.list()).size);
+  expect(kept, "nothing delivered to the seat").toBe(0);
 });

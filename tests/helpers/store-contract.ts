@@ -27,6 +27,11 @@ import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../
 import { monthKey } from "../../src/stored-session.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
+/** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
+const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+  roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+  defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+
 /**
  * Cases an implementation cannot pass, each mapped to the reason it cannot.
  *
@@ -2121,11 +2126,8 @@ export function describeStoreContract(
      */
     describe("appendHostEvent", () => {
       const NOW = () => Date.now();
-      const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
-        roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
-        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
       const hostedRoom = (over: Partial<Session> = {}) => {
-        const m = hosted();
+        const m = hostedManifest();
         return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
           hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
       };
@@ -2192,6 +2194,25 @@ export function describeStoreContract(
         await store.appendHostEvent(s.id, question("1"), 1, before + 5_000);
         const after = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!;
         expect(after.lastSeenAt).toBe(before + 5_000);
+      });
+    });
+
+    /**
+     * The host is not a person (#188): when the last member who is one leaves, the
+     * room closes as a room without a host does. `abandonedAt` already ignores the
+     * seat; without this the two paths that end a room both missed one whose only
+     * remaining member was its host, and it stayed open for good.
+     */
+    describe("a hosted room whose people have left", () => {
+      it("closes when the last person has left, with its host still seated", async () => {
+        const m = hostedManifest();
+        const s = session({ manifest: m, members: [member(), hostMember(m, Date.now())] });
+        await store.createSession(s);
+        // The control: a person is in it, so it stays open.
+        expect(await store.closeSessionIfEmpty(s.id)).toBe(false);
+        await store.updateMember(s.id, "m_creator", { leftAt: Date.now() });
+        expect(await store.closeSessionIfEmpty(s.id)).toBe(true);
+        expect((await store.getSession(s.id))!.closed).toBe(true);
       });
     });
 

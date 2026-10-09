@@ -60,6 +60,14 @@ export const HOST_MEMBER_ID = "m_host";
 export const HOST_USER_ID = "u_bellman_host";
 export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
 
+/**
+ * A member still in the room who is a person and not the hosted seat (hosted seat
+ * spec, D5). The host does not vouch for a room, so whether a room is empty, when it
+ * is abandoned and whether a hosted tick has anyone to ask all count these and only
+ * these: one predicate, so the three cannot disagree about who is there.
+ */
+export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
+
 /** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
 export const WAKES_PER_HOUR = 8;
 
@@ -145,7 +153,7 @@ export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
  */
 export function abandonedAt(s: RoomRoster): number | null {
   if (s.closed || s.frozenAt !== null) return null;
-  const active = s.members.filter((m) => isActiveMember(m) && !isHostMember(m));
+  const active = s.members.filter(isActivePerson);
   if (active.length === 0) return null;
   return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
 }
@@ -814,9 +822,11 @@ export interface BellmanStore {
    * occupied room, those keep a join from landing on a closed one, and neither is
    * enough alone.
    *
-   * "Nobody" is no member for whom `isActiveMember` holds. A frozen room closes
-   * like any other: freezing refuses writes into a room someone is in, and an
-   * empty one is over either way.
+   * "Nobody" is no member for whom `isActivePerson` holds: `isActiveMember`, and
+   * not the hosted seat (#188). The host is not a person, so a hosted room closes
+   * when its last person leaves, as a room without one does, with the seat still on
+   * the roster. A frozen room closes like any other: freezing refuses writes into a
+   * room someone is in, and an empty one is over either way.
    *
    * The answer is a state and not an event, on purpose, and DurableObjectStore
    * depends on it. An already-closed room answers true whoever is listed in it.
@@ -1356,7 +1366,7 @@ export class MemoryStore implements BellmanStore {
     // same rule, and the same reason, as waitForEvents and the guarded grant
     // writes. The Durable Objects store gets it from a transaction instead.
     if (s.closed) return true;
-    if (s.members.some(isActiveMember)) return false;
+    if (s.members.some(isActivePerson)) return false;
     this.closeNow(s);
     return true;
   }

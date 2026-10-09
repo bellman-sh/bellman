@@ -12,8 +12,8 @@ import type {
 } from "./store.js";
 import {
   ABANDONED_AFTER_MS, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
-  decideHostCharge, isAbandoned, isActiveMember, isRemovedMember, isReplyToHost, markRemoved,
-  seatVictims, stampSeen,
+  decideHostCharge, isAbandoned, isActiveMember, isActivePerson, isRemovedMember, isReplyToHost,
+  markRemoved, seatVictims, stampSeen,
 } from "./store.js";
 import { hostWakeIntent } from "./host.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -22,7 +22,7 @@ import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
-import { clearSilence, dueMembers, nextTickAt, snapshotOf } from "./heartbeat.js";
+import { clearSilence, dueMembers, hostedTickDue, nextTickAt, snapshotOf } from "./heartbeat.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
@@ -1283,7 +1283,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.closed) return true;
-      if (s.members.some(isActiveMember)) return false;
+      if (s.members.some(isActivePerson)) return false;
       await txn.put("session", { ...s, closed: true });
       return true;
     });
@@ -1969,8 +1969,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * The closure makes no cross-object call, so it stays within ARCHITECTURE.md §9
    * runtime fact 2: everything awaited in it is this object's storage. A room with a
-   * host is woken by its tick (hosted seat spec, D4): the wake is queued as an outbox
-   * row in the tick's own put, and delivered after the commit.
+   * host ticks on its own cadence whether or not anyone reports, and writes the tick
+   * only while a person is in it (`hostedTickDue`, #188). The seat's wake (hosted seat
+   * spec, D4) is queued as an outbox row in the tick's own put, and delivered after
+   * the commit.
    *
    * `lastTickAt` advances whether or not an event is written, which is what
    * stops the alarm spinning: the clock has to move even on a firing that found
@@ -1983,11 +1985,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return null;
       if (s.closed || s.frozenAt !== null) return null;
-      if (isAbandoned(s, now, connectedAmong(s.members, this.#attachedIds()))) return null;
+      const connected = connectedAmong(s.members, this.#attachedIds());
+      if (isAbandoned(s, now, connected)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
-      const due = dueMembers(s, now);
-      if (due.length === 0) {
+      // A reporting member that is due, or a hosted room's own tick with a person in
+      // the room to ask (#188). A hosted room nobody has been in since the last firing
+      // takes the branch below: no event, and the clock moves.
+      if (dueMembers(s, now).length === 0 && !hostedTickDue(s, now, connected)) {
         // Nothing to ask, but the clock still moves. See the comment above.
         await txn.put<unknown>({ session: { ...s, lastTickAt: now } });
         return null;

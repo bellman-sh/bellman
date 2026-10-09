@@ -35,11 +35,12 @@ describe("the preset routes through the Worker", () => {
   });
 });
 
-// Housekeeping (#66), integration ruling M1. The registry keeps a row for as long as its owner
-// does, so a preset saved before the field existed has no such key. Both reads give it the
-// saved-preset form the type promises, which is what the routes serve and bellman_start cites.
+// Housekeeping (#66). The registry keeps a row for as long as its owner does, so a preset saved
+// before the field existed has no such key. Both reads hand it back as it was written, as they do a
+// row saved before hosted seats reached the presets and has no `host`: the key is optional, and an
+// absent one is read as none where it is used (`asManifest`), not invented here.
 describe("a preset saved before housekeeping existed", () => {
-  const legacy = (): Partial<SavedPreset> => ({
+  const legacy = (): SavedPreset => ({
     name: "old_review",
     description: null,
     mode: "pair",
@@ -50,16 +51,16 @@ describe("a preset saved before housekeeping existed", () => {
     updated_at: "2026-10-09T12:00:00.000Z",
   });
 
-  it("reads as one that sets none, by get and by list, and keeps what else it holds", async () => {
+  it("reads as it was written, by get and by list, with no key invented for it", async () => {
     const store = new DurableObjectStore(env as never);
-    await store.putPreset("u_old", legacy() as SavedPreset, 20);
-    expect(await store.getPreset("u_old", "old_review")).toEqual({ ...legacy(), housekeeping: null });
-    expect(await store.listPresets("u_old")).toEqual([{ ...legacy(), housekeeping: null }]);
+    await store.putPreset("u_old", legacy(), 20);
+    expect(await store.getPreset("u_old", "old_review")).toEqual(legacy());
+    expect(await store.listPresets("u_old")).toEqual([legacy()]);
   });
 
   it("keeps a block a row does hold", async () => {
     const store = new DurableObjectStore(env as never);
-    await store.putPreset("u_new", { ...legacy(), housekeeping: { quiet_after: "2h" } } as SavedPreset, 20);
+    await store.putPreset("u_new", { ...legacy(), housekeeping: { quiet_after: "2h" } }, 20);
     expect((await store.getPreset("u_new", "old_review"))!.housekeeping).toEqual({ quiet_after: "2h" });
     expect((await store.listPresets("u_new")).map((p) => p.housekeeping)).toEqual([{ quiet_after: "2h" }]);
   });

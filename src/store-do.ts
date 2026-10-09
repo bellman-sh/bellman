@@ -30,7 +30,6 @@ import {
 } from "./retention.js";
 import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
-import { liftPreset } from "./presets.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
@@ -3129,16 +3128,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     const map = await this.ctx.storage.list<SavedPreset>({ prefix });
     // A key under this prefix whose rest is not its own preset's name belongs to someone whose id
     // extends this one past a colon, which an operator-issued id may hold. It is not this person's.
-    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => liftPreset(p));
+    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => p);
   }
 
-  /**
-   * The listing's guard for one name: the record under the key must be the preset asked for.
-   * A row is read through `liftPreset`, because a row outlives the code that wrote it.
-   */
+  /** The listing's guard for one name: the record under the key must be the preset asked for. */
   async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
     const p = await this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
-    return p && p.name === name ? liftPreset(p) : undefined;
+    return p && p.name === name ? p : undefined;
   }
 
   /**

@@ -61,50 +61,58 @@ export const MAX_HOUSEKEEPING_MS = 7 * 24 * 3_600_000;
 
 const DURATION = /^(\d{1,4})(s|m|h|d)$/;
 const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 } as const;
+type Unit = keyof typeof UNIT_MS;
+
+/**
+ * The units a field is written in, largest first. They belong to the field and not to the
+ * parser, so what a field reads and what it prints cannot disagree. heartbeat_on has never
+ * been written in days: its ceiling is a day (the hosted seat's daily beat) and a day is "24h",
+ * so "1d" is a shape error there and its bound prints as 24h. A housekeeping threshold's
+ * ceiling is a week, so it also takes days and prints that bound as 7d.
+ */
+const BEAT_UNITS: readonly Unit[] = ["h", "m", "s"];
+const THRESHOLD_UNITS: readonly Unit[] = ["d", "h", "m", "s"];
 
 /**
  * Milliseconds back to the shortest duration that denotes them — the inverse of
  * what parseDuration reads, so an error can name a bound in the same notation
- * the caller wrote. Largest unit that divides exactly, so 3_600_000 is "1h"
- * rather than "60m", and a week is "7d" rather than "168h".
+ * the caller wrote. The largest of the field's units that divides exactly, so
+ * 3_600_000 is "1h" rather than "60m", and a week is "7d" rather than "168h" where
+ * days are written, but a day is "24h" where they are not.
  */
-const duration = (ms: number): string => {
-  for (const [unit, size] of [["d", UNIT_MS.d], ["h", UNIT_MS.h], ["m", UNIT_MS.m]] as const) {
-    if (ms % size === 0) return `${ms / size}${unit}`;
-  }
-  return `${ms / UNIT_MS.s}s`;
+const duration = (ms: number, units: readonly Unit[]): string => {
+  const unit = units.find((u) => ms % UNIT_MS[u] === 0) ?? "s";
+  return `${ms / UNIT_MS[unit]}${unit}`;
 };
 
 /**
- * `"30s"`, `"5m"`, `"1h"`, `"2d"` to milliseconds, refused outside `[min, max]`.
- * `field` is the manifest key, and both errors name it first.
+ * `"30s"`, `"5m"`, `"1h"`, and `"2d"` where `units` has days, to milliseconds, refused
+ * outside `[min, max]`. `field` is the manifest key, and both errors name it first.
  *
  * The raw value is echoed by both errors, and those reach tool errors and the
  * audit log, so DurationShape bounds it to 8 characters before it can get
  * here. The regex caps the digits too, so neither message can be grown by its
  * input.
  */
-function parseDuration(field: string, raw: string, min: number, max: number): number {
+function parseDuration(field: string, raw: string, min: number, max: number, units: readonly Unit[]): number {
   const m = DURATION.exec(raw);
-  if (!m) {
-    // heartbeat_on's message keeps the examples it always had. Its ceiling has since moved
-    // from an hour to a day (the hosted seat's daily beat), and a day is still not among them.
-    const examples = field === "heartbeat_on" ? '"30s", "5m" or "1h"' : '"30s", "5m", "1h" or "2d"';
+  if (!m || !units.includes(m[2] as Unit)) {
+    const examples = units.includes("d") ? '"30s", "5m", "1h" or "2d"' : '"30s", "5m" or "1h"';
     throw new ManifestError(`${field} must be a duration like ${examples} (got "${raw}")`);
   }
-  const ms = Number(m[1]) * UNIT_MS[m[2] as keyof typeof UNIT_MS];
+  const ms = Number(m[1]) * UNIT_MS[m[2] as Unit];
   if (ms < min || ms > max) {
     // Rendered from the bounds, not restated. A bound change would otherwise
     // leave this message wrong while the test pinning its literal text passed.
     throw new ManifestError(
-      `${field} must be between ${duration(min)} and ${duration(max)} (got "${raw}")`,
+      `${field} must be between ${duration(min, units)} and ${duration(max, units)} (got "${raw}")`,
     );
   }
   return ms;
 }
 
 const parseHeartbeatOn = (raw: string): number =>
-  parseDuration("heartbeat_on", raw, MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS);
+  parseDuration("heartbeat_on", raw, MIN_HEARTBEAT_MS, MAX_HEARTBEAT_MS, BEAT_UNITS);
 
 /** Bounded before interpolation. See parseDuration. */
 const DurationShape = z.string().max(8);
@@ -391,7 +399,7 @@ export function builtinPresets(): SavedPreset[] {
       name,
       description: BUILTIN_DESCRIPTIONS[name],
       mode: body.mode,
-      heartbeat_on: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs),
+      heartbeat_on: body.heartbeatOnMs === undefined ? null : duration(body.heartbeatOnMs, BEAT_UNITS),
       // No built-in sets housekeeping, `social` included (D5), and PresetBody cannot say it does.
       housekeeping: null,
       roles: structuredClone(body.roles),
@@ -566,12 +574,12 @@ function checkHost(m: RoomManifest): void {
   if (def.reports) throw new ManifestError(`host role "${m.host.role}" must not report`);
   // Rendered from the constant, as parseHeartbeatOn renders its bounds: a floor change
   // would otherwise leave these messages naming a floor that no longer exists.
-  const floor = duration(MIN_HOST_HEARTBEAT_MS);
+  const floor = duration(MIN_HOST_HEARTBEAT_MS, BEAT_UNITS);
   if (m.heartbeatOnMs === null) {
     throw new ManifestError(`a room with a host must set heartbeat_on (at least ${floor})`);
   }
   if (m.heartbeatOnMs < MIN_HOST_HEARTBEAT_MS) {
-    throw new ManifestError(`a room with a host must tick no faster than ${floor} (got "${duration(m.heartbeatOnMs)}")`);
+    throw new ManifestError(`a room with a host must tick no faster than ${floor} (got "${duration(m.heartbeatOnMs, BEAT_UNITS)}")`);
   }
 }
 
@@ -594,7 +602,7 @@ function resolveHousekeeping(
   const ms = (key: keyof typeof h): number | null => {
     const raw = h[key];
     return raw != null
-      ? parseDuration(`housekeeping.${key}`, raw, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS)
+      ? parseDuration(`housekeeping.${key}`, raw, MIN_HOUSEKEEPING_MS, MAX_HOUSEKEEPING_MS, THRESHOLD_UNITS)
       : null;
   };
   const out = {

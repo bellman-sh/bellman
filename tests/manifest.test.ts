@@ -517,7 +517,7 @@ describe("heartbeat_on", () => {
   });
 
   // Review Focus 5 — the raw value reaches a tool error and the audit log.
-  it.each(["5 minutes", "0m", "99h", "-5m", "", "5", "m", "5M"])(
+  it.each(["5 minutes", "0m", "99h", "-5m", "", "5", "m", "5M", "1d"])(
     "refuses %o with a message naming the shape",
     (bad) => {
       const attempt = () => resolveManifest(authored({ heartbeat_on: bad }));
@@ -529,9 +529,9 @@ describe("heartbeat_on", () => {
 
   it("refuses a duration outside the bounds, naming them", () => {
     expect(() => resolveManifest(authored({ heartbeat_on: "10s" })))
-      .toThrow(/between 30s and 1d/);
+      .toThrow(/between 30s and 24h/);
     expect(() => resolveManifest(authored({ heartbeat_on: "25h" })))
-      .toThrow(/between 30s and 1d/);
+      .toThrow(/between 30s and 24h/);
     expect(MIN_HEARTBEAT_MS).toBe(30_000);
     expect(MAX_HEARTBEAT_MS).toBe(86_400_000);
   });
@@ -744,18 +744,32 @@ describe("housekeeping (#66)", () => {
     });
   });
 
-  // The parser is shared, and a day is now a unit it reads. heartbeat_on must not move.
+  // The parser is shared and the units are not: a field reads, and prints its bounds in, the units it has
+  // always been written in. A housekeeping threshold's ceiling is a week, so it takes days; heartbeat_on's is
+  // a day (the hosted seat, D3), which it has always written "24h", so days stay out of it.
   describe("the parser it shares with heartbeat_on", () => {
     it("leaves heartbeat_on's shape message as it was, without days among the examples", () => {
       expect(refusal(authored({ heartbeat_on: "soon" })))
         .toBe('heartbeat_on must be a duration like "30s", "5m" or "1h" (got "soon")');
     });
 
-    // The hosted seat raised heartbeat_on's ceiling to a day (hosted seat spec, D3), so a day is
-    // legal for it and two are not. The message renders the bound in the largest unit that divides it.
-    it("refuses 2d by heartbeat_on's own ceiling, not housekeeping's week", () => {
-      expect(refusal(authored({ heartbeat_on: "2d" })))
-        .toBe('heartbeat_on must be between 30s and 1d (got "2d")');
+    it.each(["1d", "2d"])("refuses %s for heartbeat_on as a shape: a daily beat is 24h", (raw) => {
+      expect(refusal(authored({ heartbeat_on: raw })))
+        .toBe(`heartbeat_on must be a duration like "30s", "5m" or "1h" (got "${raw}")`);
+    });
+
+    it("prints each field's bounds in that field's own largest unit: hours for heartbeat_on, days for housekeeping", () => {
+      expect(refusal(authored({ heartbeat_on: "25h" }))).toBe('heartbeat_on must be between 30s and 24h (got "25h")');
+      expect(refusal(withHousekeeping({ quiet_after: "8d" })))
+        .toBe('housekeeping.quiet_after must be between 5m and 7d (got "8d")');
+    });
+
+    it("still reads 24h for heartbeat_on and 7d, 168h and 2d for housekeeping", () => {
+      expect(resolveManifest(authored({ heartbeat_on: "24h" })).heartbeatOnMs).toBe(86_400_000);
+      for (const written of ["7d", "168h", "2d"]) {
+        expect(resolveManifest(withHousekeeping({ idle_after: written })).housekeeping?.idleAfterMs, written)
+          .toBe(Number(written.slice(0, -1)) * (written.endsWith("d") ? 86_400_000 : 3_600_000));
+      }
     });
   });
 });
@@ -834,7 +848,7 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
 
   it("allows a daily beat now that a host can be slow", () => {
     expect(resolveManifest(hosted({ heartbeat_on: "24h" })).heartbeatOnMs).toBe(86_400_000);
-    expect(() => resolveManifest(authored({ heartbeat_on: "25h" }))).toThrow(/between 30s and 1d/);
+    expect(() => resolveManifest(authored({ heartbeat_on: "25h" }))).toThrow(/between 30s and 24h/);
     expect(MAX_HEARTBEAT_MS).toBe(86_400_000);
   });
 

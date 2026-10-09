@@ -395,10 +395,10 @@ export interface SavedPreset {
   /**
    * The housekeeping thresholds (#66) in the author arm's own keys, durations as
    * written, and only the keys the preset sets. Null when it sets none, which is
-   * what every built-in holds (D5). A row saved before the field existed has no
-   * such key; the registry reads it as null (`liftPreset`).
+   * what every built-in holds (D5). Absent from a preset saved before the field
+   * existed, and read as null: none, as `host` is read.
    */
-  housekeeping: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
+  housekeeping?: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
   roles: Record<string, { can: Verb[]; description: string | null; reports: boolean }>;
   default_role: string;
   creator_role: string;

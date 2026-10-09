@@ -216,13 +216,24 @@ describe("bellman_start citing a saved preset that carries housekeeping", () => 
     });
   });
 
-  it("starts the room with none when the cite says none, as an authored manifest's null or empty block does", async () => {
+  // A cite follows the rule its heartbeat_on follows: absent or null, the preset's own stands. A caller who
+  // wants a preset's block off says so with an empty one, which resolves to none as it does in an authored manifest.
+  it("keeps the preset's block when the cite's housekeeping is absent or null", async () => {
     await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
-    for (const none of [null, {}]) {
-      const out = await start("watchful", { housekeeping: none });
+    for (const unset of [undefined, null]) {
+      const out = await start("watchful", { housekeeping: unset });
       expect(out.isError, out.text).toBe(false);
-      expect((await recorded(out)).housekeeping, JSON.stringify(none)).toBeNull();
+      expect((await recorded(out)).housekeeping, String(unset)).toEqual({
+        quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: null, repeatAfterMs: null,
+      });
     }
+  });
+
+  it("starts the room with none when the cite carries an empty block", async () => {
+    await h.store.putPreset("u_jesse", saved("watchful", WATCHFUL), 20);
+    const out = await start("watchful", { housekeeping: {} });
+    expect(out.isError, out.text).toBe(false);
+    expect((await recorded(out)).housekeeping).toBeNull();
   });
 
   it("refuses a cite's block the validator refuses, in the validator's words", async () => {
@@ -241,9 +252,8 @@ describe("bellman_start citing a saved preset that carries housekeeping", () => 
 
   // A preset saved before the field existed has no such key at all, in the registry's storage.
   it("starts a room with none from a preset saved before the field existed", async () => {
-    const legacy: Partial<SavedPreset> = saved("old_review");
-    delete legacy.housekeeping;
-    await h.store.putPreset("u_jesse", legacy as SavedPreset, 20);
+    const { housekeeping: _gone, ...legacy } = saved("old_review");
+    await h.store.putPreset("u_jesse", legacy, 20);
     const out = await start("old_review");
     expect(out.isError, out.text).toBe(false);
     expect((await recorded(out)).housekeeping).toBeNull();

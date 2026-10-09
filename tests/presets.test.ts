@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import { asManifest, checkPreset } from "../src/presets.js";
 import { builtinPresets, resolveManifest } from "../src/manifest.js";
+import type { SavedPreset } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");
 
@@ -119,6 +120,21 @@ describe("checkPreset and housekeeping", () => {
       .toEqual(resolveManifest(authoredWith(written)).housekeeping);
   });
 
+  // asManifest is where a cite meets a preset. A cite's block replaces the preset's whole, and an absent or
+  // null one leaves the preset's own, as a cite's heartbeat_on is read: one meaning for null on a cite.
+  it("lets a cite's block replace the preset's whole, and reads an absent or null one as the preset's own", () => {
+    const check = savedWith({ quiet_after: "2h", answer_within: "30m" });
+    if (!check.ok) throw new Error(check.description);
+    const cited = (cite: Parameters<typeof asManifest>[4]) =>
+      resolveManifest(asManifest(check.preset, "r", null, undefined, cite)).housekeeping;
+    const own = { quietAfterMs: 7_200_000, answerWithinMs: 1_800_000, idleAfterMs: null, repeatAfterMs: null };
+
+    expect(cited(undefined)).toEqual(own);
+    expect(cited(null)).toEqual(own);
+    expect(cited({})).toBeNull();
+    expect(cited({ idle_after: "1d" })).toEqual({ quietAfterMs: null, answerWithinMs: null, idleAfterMs: 86_400_000, repeatAfterMs: null });
+  });
+
   it("gives a cited preset's thresholds in milliseconds, the repeat window with them", () => {
     const check = savedWith({ quiet_after: "2h", answer_within: "30m", repeat_after: "4h" });
     if (!check.ok) throw new Error(check.description);
@@ -184,6 +200,15 @@ describe("a saved preset with a host (#188 beneath the designer)", () => {
     expect(checkPreset("standup", hosted({ host: { role: "lead" } }), NOW)).toMatchObject({
       ok: false, error: "invalid_manifest", description: 'host role "lead" must hold exactly the verb "send" (it holds: send, invite)',
     });
+  });
+
+  // Typed as a SavedPreset with the key left out: it compiles only while `housekeeping` is optional, as `host` is.
+  it("reads a preset saved before housekeeping, with no housekeeping key, as setting none", () => {
+    const check = checkPreset("my_review", body(), NOW);
+    if (!check.ok) throw new Error(check.description);
+    const { housekeeping: _gone, ...legacy } = check.preset;
+    const stored: SavedPreset = legacy;
+    expect(resolveManifest(asManifest(stored, "Q3 review", null)).housekeeping).toBeNull();
   });
 
   it("reads a preset saved before hosts reached the presets, with no host key, as having none", () => {

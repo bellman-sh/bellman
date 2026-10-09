@@ -20,9 +20,10 @@ export type PresetCheck =
  * plan refusal and hosted-room slot exactly as an inline `host` block does. A cite's
  * `heartbeat_on`, which checkCiteCadence admits only for a preset with a host, replaces
  * the preset's own; absent or null, the preset's stands, as for a built-in. A cite's
- * `housekeeping` (#66, D5) is the caller's say for this room and replaces the preset's
- * block whole: null or {} says none, as in an authored manifest, and only absent leaves
- * the preset's.
+ * `housekeeping` (#66, D5) follows the same rule, so null means one thing on a cite
+ * whichever field it is on: absent or null, the preset's own block stands, and a block
+ * replaces it whole. An empty one says none, as it does in an authored manifest. A
+ * preset saved before the field existed has no such key, which reads as none.
  */
 export function asManifest(
   p: SavedPreset, room: string, purpose: string | null | undefined, heartbeatOn?: string | null,
@@ -33,7 +34,7 @@ export function asManifest(
     purpose: purpose ?? null,
     mode: p.mode,
     heartbeat_on: heartbeatOn ?? p.heartbeat_on,
-    housekeeping: housekeeping !== undefined ? housekeeping : p.housekeeping,
+    housekeeping: housekeeping ?? p.housekeeping,
     roles: p.roles,
     default_role: p.default_role,
     creator_role: p.creator_role,
@@ -41,12 +42,6 @@ export function asManifest(
   };
 }
 
-/**
- * A row read back from the registry, in the form the type promises. Stored rows outlive
- * the code that wrote them: one saved before `housekeeping` existed has no such key, and
- * is a preset that sets none.
- */
-export const liftPreset = (p: SavedPreset): SavedPreset => ({ ...p, housekeeping: p.housekeeping ?? null });
 
 /**
  * The block as saved (#66): the keys it sets, durations as written, and null when it sets

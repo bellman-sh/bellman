@@ -67,12 +67,14 @@ const heartbeat: Omit<SessionEvent, "cursor" | "at"> =
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("MemoryHost", () => {
-  it("asks a question when a heartbeat lands, through the same loop", async () => {
+  // The question is a thread root (I1): its only ref an agent sees is its own cursor, and
+  // the tick it answers travels in the payload.
+  it("asks a question when a heartbeat lands, through the same loop, as a thread root carrying its tick", async () => {
     const { store, host, id, calls } = await hostedStore([{ status: 200, text: "What shipped?" }]);
     await store.appendEvent(id, { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null });
     await host.settled();
     const q = (await store.eventsAfter(id, 0)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
-    expect(q).toMatchObject({ refId: "1", payload: { kind: "question", text: "What shipped?" } });
+    expect(q).toMatchObject({ refId: null, payload: { kind: "question", text: "What shipped?", tick: 1 } });
     expect(calls).toHaveLength(1);
     expect((await store.getSession(id))!.hostUnits.used).toBe(1);
   });
@@ -120,7 +122,7 @@ describe("MemoryHost", () => {
     await host.settled();
     expect(calls).toHaveLength(2);
     const asked = (await store.eventsAfter(id, 0)).filter((e) => e.fromMemberId === HOST_MEMBER_ID);
-    expect(asked.map((e) => e.payload)).toEqual([{ kind: "question", text: "Back again." }]);
+    expect(asked.map((e) => e.payload)).toEqual([{ kind: "question", text: "Back again.", tick: 1 }]);
   });
 
   it("runs on the Node server's fake model with no key: a question, then an answer in its thread", async () => {
@@ -139,7 +141,7 @@ describe("MemoryHost", () => {
       await store.appendEvent(s.id, { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null });
       await host.settled();
       const q = (await store.eventsAfter(s.id, 0)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
-      expect(q.payload).toEqual({ kind: "question", text: "What did you build today, and what got in the way?" });
+      expect(q.payload).toEqual({ kind: "question", text: "What did you build today, and what got in the way?", tick: 1 });
 
       await store.appendEvent(s.id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "a parser" }, refId: String(q.cursor) });
       await host.settled();
@@ -172,6 +174,36 @@ describe("MemoryHost", () => {
     expect(await hostSaid(store, id, q.cursor)).toMatchObject([{ refId: String(q.cursor), payload: { kind: "answer", text: "Nice, tell us more." } }]);
   });
 
+  /**
+   * A reply that lands while the model is answering an earlier one is read by its own wake
+   * (I2). After an answer the seat's cursor is the last reply it read; it was the answer's
+   * own cursor, which is past the reply, so the reply's wake found nothing to answer.
+   */
+  it("a reply appended while the model call is held gets its own answer", async () => {
+    const { store, host, id, replies, woken } = await hostedStore([{ status: 200, text: "What shipped?" }], { deliver: false });
+    await store.appendEvent(id, heartbeat);
+    await host.wake(woken.shift()!);
+    await host.settled();
+    const [q] = await hostSaid(store, id);
+    const first = held("Nice, tell us more.");
+    replies.push(first.reply, { status: 200, text: "A compiler, even better." });
+    try {
+      await store.appendEvent(id, replyTo(q.cursor));
+      void host.wake(woken.shift()!);
+      await first.asked;
+      // A second reply lands while the first one's model call is held; its wake queues behind it.
+      await store.appendEvent(id, { ...replyTo(q.cursor), fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", payload: { text: "a compiler" } });
+      await host.wake(woken.shift()!);
+    } finally {
+      first.release();
+    }
+    await host.settled();
+    expect((await hostSaid(store, id, q.cursor)).map((e) => e.payload)).toEqual([
+      { kind: "answer", text: "Nice, tell us more." },
+      { kind: "answer", text: "A compiler, even better." },
+    ]);
+  });
+
   it("a wake delivered while another is being handled waits its turn, and the seat keeps what both did", async () => {
     const { store, host, id, replies, woken } = await hostedStore([{ status: 200, text: "Ask me anything." }], { deliver: false });
     await store.appendEvent(id, heartbeat);
@@ -195,12 +227,12 @@ describe("MemoryHost", () => {
     await host.settled();
     expect((await hostSaid(store, id, q.cursor)).map((e) => [e.refId, e.payload])).toEqual([
       [String(q.cursor), { kind: "answer", text: "Nice, tell us more." }],
-      [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
+      [null, { kind: "question", text: "What did you learn?", tick: beat.cursor }],
     ]);
 
     // What the seat kept, read through what it does next: the new question is the open one,
     // so a reply to it is answered, and the tick is handled, so delivering it again asks nothing.
-    const q2 = (await hostSaid(store, id, q.cursor)).find((e) => e.refId === String(beat.cursor))!;
+    const q2 = (await hostSaid(store, id, q.cursor)).find((e) => (e.payload as { tick?: number }).tick === beat.cursor)!;
     replies.push({ status: 200, text: "Good one." });
     await store.appendEvent(id, replyTo(q2.cursor));
     await host.wake(woken.shift()!);

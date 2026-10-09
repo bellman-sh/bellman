@@ -124,7 +124,8 @@ const heartbeat: Omit<SessionEvent, "cursor" | "at"> =
   { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-it("a tick wakes the host, which asks a question in the room with the tick as its ref", async () => {
+// The question is a thread root (I1): its only ref an agent sees is its own cursor, and the tick travels in the payload.
+it("a tick wakes the host, which asks a question in the room as a thread root carrying its tick", async () => {
   const { store, id, stub, host } = await hostedRoom();
   modelAnswers("What did you ship this week?");
   await tick(stub);
@@ -132,7 +133,7 @@ it("a tick wakes the host, which asks a question in the room with the tick as it
   const events = await store.eventsAfter(id, 0);
   const heartbeat = events.find((e) => e.type === "heartbeat")!;
   const q = events.find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
-  expect(q).toMatchObject({ type: "message", refId: String(heartbeat.cursor), payload: { kind: "question", text: "What did you ship this week?" } });
+  expect(q).toMatchObject({ type: "message", refId: null, payload: { kind: "question", text: "What did you ship this week?", tick: heartbeat.cursor } });
   expect((await store.getSession(id))!.hostUnits.used).toBe(1);
 });
 
@@ -277,7 +278,7 @@ it("a wake delivered while another is being handled waits its turn, and the seat
   expect(whileHeld).toEqual([]);
   expect((await hostSaid(store, id, q.cursor)).map((e) => [e.refId, e.payload])).toEqual([
     [String(q.cursor), { kind: "answer", text: "Nice, tell us more." }],
-    [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
+    [null, { kind: "question", text: "What did you learn?", tick: beat.cursor }],
   ]);
   const record = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.get<HostRecord>("state"));
   expect(record!.questions.map(({ text, answers }) => ({ text, answers }))).toEqual([
@@ -306,7 +307,7 @@ it("wakes queued before the seat's alarm runs are all handled, in the order they
   await seatIdle(host);
   expect((await hostSaid(store, id, q.cursor)).map((e) => [e.refId, e.payload])).toEqual([
     [String(q.cursor), { kind: "answer", text: "Nice, tell us more." }],
-    [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
+    [null, { kind: "question", text: "What did you learn?", tick: beat.cursor }],
   ]);
 });
 

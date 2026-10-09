@@ -2169,16 +2169,17 @@ export function describeStoreContract(
         return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
           hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
       };
-      const question = (refId: string): Omit<SessionEvent, "cursor" | "at"> => ({
+      /** What the host writes on a tick: a thread root, the tick's cursor in its payload (I1). */
+      const question = (): Omit<SessionEvent, "cursor" | "at"> => ({
         type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
-        payload: { kind: "question", text: "What shipped?" }, refId,
+        payload: { kind: "question", text: "What shipped?", tick: 1 }, refId: null,
       });
 
       it("appends the event and charges the units in one write", async () => {
         const s = hostedRoom();
         await store.createSession(s);
-        const r = await store.appendHostEvent(s.id, question("1"), 3, NOW());
-        expect(r).toMatchObject({ ok: true, event: { fromMemberId: HOST_MEMBER_ID, refId: "1" } });
+        const r = await store.appendHostEvent(s.id, question(), 3, NOW());
+        expect(r).toMatchObject({ ok: true, event: { fromMemberId: HOST_MEMBER_ID, refId: null } });
         const after = (await store.getSession(s.id))!;
         expect(after.hostUnits.used).toBe(3);
         expect(after.hostUnits.wakes).toHaveLength(1);
@@ -2188,7 +2189,7 @@ export function describeStoreContract(
       it("refuses a wake that would cross the month's units, appending nothing", async () => {
         const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 8, wakes: [] } });
         await store.createSession(s);
-        expect(await store.appendHostEvent(s.id, question("1"), 3, NOW())).toEqual({ ok: false, reason: "units", used: 8, allowed: 10 });
+        expect(await store.appendHostEvent(s.id, question(), 3, NOW())).toEqual({ ok: false, reason: "units", used: 8, allowed: 10 });
         expect(await store.eventsAfter(s.id, 0)).toEqual([]);
         expect((await store.getSession(s.id))!.hostUnits.used).toBe(8);
       });
@@ -2196,7 +2197,7 @@ export function describeStoreContract(
       it("a new month starts the count again", async () => {
         const s = hostedRoom({ hostUnits: { month: "2026-09", used: 10, wakes: [] } });
         await store.createSession(s);
-        const r = await store.appendHostEvent(s.id, question("1"), 1, NOW());
+        const r = await store.appendHostEvent(s.id, question(), 1, NOW());
         expect(r.ok).toBe(true);
         expect((await store.getSession(s.id))!.hostUnits).toMatchObject({ month: monthKey(NOW()), used: 1 });
       });
@@ -2205,11 +2206,11 @@ export function describeStoreContract(
         const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW() - i * 60_000);
         const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 0, wakes: recent } });
         await store.createSession(s);
-        expect(await store.appendHostEvent(s.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "hourly" });
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW())).toMatchObject({ ok: false, reason: "hourly" });
         const old = recent.map((t) => t - 3_600_000 - 1);
         const s2 = hostedRoom({ id: "qs_host_2", hostUnits: { month: monthKey(NOW()), used: 0, wakes: old } });
         await store.createSession(s2);
-        expect((await store.appendHostEvent(s2.id, question("1"), 1, NOW())).ok).toBe(true);
+        expect((await store.appendHostEvent(s2.id, question(), 1, NOW())).ok).toBe(true);
         expect((await store.getSession(s2.id))!.hostUnits.wakes).toHaveLength(1);
       });
 
@@ -2217,19 +2218,19 @@ export function describeStoreContract(
         const closed = hostedRoom({ id: "qs_host_c" });
         await store.createSession(closed);
         await store.closeSession(closed.id);
-        expect(await store.appendHostEvent(closed.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "closed" });
+        expect(await store.appendHostEvent(closed.id, question(), 1, NOW())).toMatchObject({ ok: false, reason: "closed" });
         const frozen = hostedRoom({ id: "qs_host_f" });
         await store.createSession(frozen);
         await store.freezeSession(frozen.id, NOW());
-        expect(await store.appendHostEvent(frozen.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "frozen" });
-        expect(await store.appendHostEvent("qs_nobody", question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "not_found" });
+        expect(await store.appendHostEvent(frozen.id, question(), 1, NOW())).toMatchObject({ ok: false, reason: "frozen" });
+        expect(await store.appendHostEvent("qs_nobody", question(), 1, NOW())).toMatchObject({ ok: false, reason: "not_found" });
       });
 
       it("stamps the host as seen on its send, and the roster shows it", async () => {
         const s = hostedRoom();
         await store.createSession(s);
         const before = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!.lastSeenAt!;
-        await store.appendHostEvent(s.id, question("1"), 1, before + 5_000);
+        await store.appendHostEvent(s.id, question(), 1, before + 5_000);
         const after = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!;
         expect(after.lastSeenAt).toBe(before + 5_000);
       });
@@ -2247,7 +2248,7 @@ export function describeStoreContract(
             payload: { member_id: HOST_MEMBER_ID }, refId: null },
         });
         const before = await store.eventsAfter(s.id, 0);
-        expect(await store.appendHostEvent(s.id, question("1"), 1, NOW())).toEqual({ ok: false, reason: "removed", used: 0, allowed: 10 });
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW())).toEqual({ ok: false, reason: "removed", used: 0, allowed: 10 });
         expect(await store.eventsAfter(s.id, 0)).toEqual(before);
         expect((await store.getSession(s.id))!.hostUnits.used).toBe(0);
       });
@@ -2256,10 +2257,11 @@ export function describeStoreContract(
       it("records the host's send in the room's audit stream, as a member's send is recorded", async () => {
         const s = hostedRoom({ id: "qs_host_audit" });
         await store.createSession(s);
-        expect((await store.appendHostEvent(s.id, question("1"), 1, NOW())).ok).toBe(true);
+        const answer = { ...question(), payload: { kind: "answer", text: "Nice." }, refId: "1" };
+        expect((await store.appendHostEvent(s.id, answer, 1, NOW())).ok).toBe(true);
         expect((await store.auditForOrg("org_codenerd", 10)).filter((a) => a.sessionId === s.id)).toEqual([
           expect.objectContaining({ orgId: "org_codenerd", actorUserId: HOST_USER_ID, action: "sent_message",
-            detail: { chars: JSON.stringify(question("1").payload).length, ref_id: "1" } }),
+            detail: { chars: JSON.stringify(answer.payload).length, ref_id: "1" } }),
         ]);
       });
     });

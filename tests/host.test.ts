@@ -73,7 +73,7 @@ describe("decide", () => {
 
   it("asks a question on a tick when someone has been there since the last one", () => {
     const d = decide(emptyHostState(), tick(9), room(), [], NOW);
-    expect(d).toEqual({ kind: "question", refId: 9 });
+    expect(d).toEqual({ kind: "question", tick: 9 });
   });
 
   // Presence is the store's (#188): `tickPlan` queues a tick wake only when a person was
@@ -82,9 +82,9 @@ describe("decide", () => {
   // tick, so the seat asks on whatever wake reaches it.
   it("asks on a tick however long since anyone was seen, because the store guards presence", () => {
     const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), hostMember(hosted(), NOW)] });
-    expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toEqual({ kind: "question", refId: 9 });
+    expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toEqual({ kind: "question", tick: 9 });
     const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), hostMember(hosted(), NOW)] });
-    expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toEqual({ kind: "question", refId: 9 });
+    expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toEqual({ kind: "question", tick: 9 });
   });
 
   it("drops a wake it has already answered, and one for a closed or frozen room", () => {
@@ -257,17 +257,19 @@ describe("the answer", () => {
   });
 
   it("records a sent question as open and keeps the last five, and counts an answer", () => {
-    const s1 = applyDecision(emptyHostState(), { kind: "question", refId: 9 }, { cursor: 10, text: "q" }, NOW);
+    const s1 = applyDecision(emptyHostState(), { kind: "question", tick: 9 }, { cursor: 10, text: "q" }, NOW);
     expect(s1.questions).toEqual([{ cursor: 10, text: "q", askedAt: NOW, answers: 0 }]);
     expect(s1.lastCause).toBe(9);
     let s = s1;
-    for (let i = 0; i < 6; i++) s = applyDecision(s, { kind: "question", refId: 20 + i }, { cursor: 30 + i, text: `q${i}` }, NOW);
+    for (let i = 0; i < 6; i++) s = applyDecision(s, { kind: "question", tick: 20 + i }, { cursor: 30 + i, text: `q${i}` }, NOW);
     expect(s.questions).toHaveLength(5);
     const q = s.questions[4];
     const s2 = applyDecision(s, { kind: "answer", question: q, replies: [ev({ cursor: 40, refId: String(q.cursor) })] }, { cursor: 41, text: "a" }, NOW);
     expect(s2.questions[4].answers).toBe(1);
     expect(s2.lastCause).toBe(40);
-    expect(s2.cursor).toBe(41);
+    // The last reply read, not the answer's own cursor (I2): a reply that landed during the
+    // model call has a cursor between the two, and its own wake must still read it.
+    expect(s2.cursor).toBe(40);
   });
 
   it("reads the first text block when another kind of block comes before it", () => {

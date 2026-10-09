@@ -59,7 +59,7 @@ export const emptyHostState = (): HostState => ({ cursor: 0, lastCause: 0, quest
 
 export type HostDecision =
   | { kind: "skip"; why: string }
-  | { kind: "question"; refId: number }
+  | { kind: "question"; tick: number }
   | { kind: "answer"; question: HostQuestion; replies: SessionEvent[] };
 
 export function hostMember(manifest: RoomManifest, now: number): Member {
@@ -109,7 +109,7 @@ export function decide(
   // Presence is the store's (#188): `tickPlan` queues a tick wake only when a person was
   // seen since the previous tick, decided before the tick's own write moves `lastTickAt`.
   // Asked again here, after that write, it would refuse every tick.
-  if (wake.cause === "tick") return { kind: "question", refId: wake.cursor };
+  if (wake.cause === "tick") return { kind: "question", tick: wake.cursor };
 
   const open = latest(state);
   if (open === undefined) return { kind: "skip", why: "no question is open" };
@@ -186,12 +186,14 @@ export function applyDecision(state: HostState, decision: HostDecision, sent: { 
   if (decision.kind === "question") {
     const questions = [...state.questions, { cursor: sent.cursor, text: sent.text, askedAt: now, answers: 0 }]
       .slice(-QUESTIONS_REMEMBERED);
-    return { cursor: sent.cursor, lastCause: decision.refId, questions };
+    return { cursor: sent.cursor, lastCause: decision.tick, questions };
   }
   if (decision.kind === "answer") {
     const last = decision.replies[decision.replies.length - 1];
     const questions = state.questions.map((q) => q.cursor === decision.question.cursor ? { ...q, answers: q.answers + 1 } : q);
-    return { cursor: sent.cursor, lastCause: last.cursor, questions };
+    // The last reply read, not the answer's own cursor (I2): a reply that landed during the
+    // model call sits between the two, and its own wake must still find it unread.
+    return { cursor: last.cursor, lastCause: last.cursor, questions };
   }
   return state;
 }
@@ -310,10 +312,14 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
   const text = parseModelText(res.json);
   if (text === null) return settle(record);
 
-  const refId = decision.kind === "question" ? String(decision.refId) : String(decision.question.cursor);
+  // A question is a thread root (I1): the only ref an agent sees on it is its own cursor, so
+  // a reply that copies the ref it was shown answers the question. The tick it answers
+  // rides in the payload. An answer names its question, as a member's reply does.
   const written = await driver.write(wake.sessionId, {
     type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: label,
-    payload: { kind: decision.kind, text }, refId,
+    ...(decision.kind === "question"
+      ? { payload: { kind: "question", text, tick: decision.tick }, refId: null }
+      : { payload: { kind: "answer", text }, refId: String(decision.question.cursor) }),
   }, units, now);
   if (!written.ok) return settle(written.reason === "units" ? await notice(written.used, written.allowed) : record);
   const next = applyDecision(record, decision, { cursor: written.event.cursor, text }, now);

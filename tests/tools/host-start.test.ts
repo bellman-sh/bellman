@@ -19,6 +19,15 @@ const max: Identity = { userId: "u_max", orgId: null, plan: "max", role: "member
 const pro: Identity = { userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" };
 const social = { room: "the square", purpose: "what people build", preset: "social" };
 
+// The host answers only a reply whose ref_id is its question's cursor (I1), so the tool says so where agents read it.
+it("bellman_send tells an agent what ref_id is for, and that the host answers only replies carrying its question's cursor", async () => {
+  const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+  const send = tools.find((t) => t.name === "bellman_send")!;
+  expect(send.description).toContain(
+    "ref_id: the cursor of the event you are answering; a room's host answers only replies that carry its question's cursor",
+  );
+});
+
 describe("bellman_start with a host", () => {
   it("refuses a hosted room on a plan with no hosted seat, naming the plan", async () => {
     // Free cannot make a swarm room either; the hosted seat's refusal is the one it

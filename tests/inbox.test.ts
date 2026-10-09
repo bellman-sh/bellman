@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   discardThrough, drain, enqueue, findInbox, inboxDirFor, pendingCount, readMemberships,
-  renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent,
+  renderBatch, renderEvent, safeJson, sweepStaleInboxes, writeMemberships, type PeerEvent,
 } from "../src/inbox.js";
 
 function event(over: Partial<PeerEvent> = {}): PeerEvent {
@@ -182,6 +182,12 @@ describe("rendering peer content", () => {
     expect(text).toContain('"key":"plan"');
     expect(text).not.toContain("</channel>");
     expect(text).toContain("\\u003c/channel>");
+  });
+
+  // The Stop hook prints this batch. A room's host answers only replies that carry its
+  // question's cursor, so the agent is told how to thread a reply (I1).
+  it("tells the agent to set ref_id to an event's cursor when replying to it", () => {
+    expect(renderBatch([event()])).toContain("to reply to an event, set ref_id to its cursor");
   });
 
   it("tells the agent an action request needs its human's approval", () => {

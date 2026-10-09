@@ -4,7 +4,7 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
+  AuditEntry, EventType, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -2763,6 +2763,40 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     const cutoff = Date.now() - 62 * 24 * 60 * 60 * 1000;
     await this.ctx.storage.put(key, list.filter((t) => t >= cutoff));
   }
+
+  /**
+   * `pr:<userId>:<name>` — a person's saved presets (designer spec D4).
+   * Injective for the reason `us:` is: a user id is `u_[A-Za-z0-9_-]+` and a name
+   * is a slug, so neither holds the separator. Storage lists keys in order, which
+   * is the names' code-unit order.
+   */
+  async listPresets(userId: string): Promise<SavedPreset[]> {
+    const map = await this.ctx.storage.list<SavedPreset>({ prefix: `pr:${userId}:` });
+    return [...map.values()];
+  }
+
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    return this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
+  }
+
+  /**
+   * The count and the write in one call. The object's input gate holds every
+   * other request while this one awaits storage, so a second save cannot count
+   * between this one's count and its write.
+   */
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    const key = `pr:${userId}:${preset.name}`;
+    if ((await this.ctx.storage.get(key)) === undefined) {
+      const held = await this.ctx.storage.list({ prefix: `pr:${userId}:`, limit: cap });
+      if (held.size >= cap) return "full";
+    }
+    await this.ctx.storage.put(key, preset);
+    return "saved";
+  }
+
+  async deletePreset(userId: string, name: string): Promise<boolean> {
+    return this.ctx.storage.delete(`pr:${userId}:${name}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3183,6 +3217,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async recordCreate(userId: string): Promise<void> {
     await this.registry.recordCreate(userId);
+  }
+
+  async listPresets(userId: string): Promise<SavedPreset[]> {
+    return this.registry.listPresets(userId);
+  }
+
+  async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
+    return this.registry.getPreset(userId, name);
+  }
+
+  async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
+    return this.registry.putPreset(userId, preset, cap);
+  }
+
+  async deletePreset(userId: string, name: string): Promise<boolean> {
+    return this.registry.deletePreset(userId, name);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

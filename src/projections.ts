@@ -207,7 +207,7 @@ export const ROOM_TAIL = 100;
  * A member's heartbeat standing as the monitor shows it (#28). The numbers are
  * `reportRow`'s, the tick's own computation (D8). `asked` is whether this room
  * asks this seat at all: a cadence AND a reporting seat, the same two
- * conditions `you_report` in roomPreview reads. `silent` is forced false for a
+ * conditions `your_heartbeat_on` in roomPreview reads. `silent` is forced false for a
  * seat not asked, because silence is only a finding about a member that was
  * expected to speak. `note` is the member's latest `progress` payload, peer
  * prose, so it ships in the untrusted envelope like every other peer string.

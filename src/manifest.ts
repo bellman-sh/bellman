@@ -542,8 +542,10 @@ export function resolveManifest(input: unknown): RoomManifest {
   }
 
   const beat = roomBeat(v);
-  // The words a refusal about the frequency speaks when the author wrote neither (plan ruling R2).
-  const spelledNew = beat.word === "heartbeat" || Object.values(v.roles).some((d) => d.heartbeat_on !== undefined);
+  // The word a refusal about the frequency speaks when the author wrote neither spelling: today's
+  // only for a manifest written in the old words, a role's `reports` or `report`, else the new
+  // one, which the tools teach (vocabulary plan ruling R2, amended).
+  const spelledOld = Object.values(v.roles).some((d) => d.reports !== undefined || d.report !== undefined);
   const roleWords: Record<string, "heartbeat_on" | "reports"> = {};
   const roles: Record<string, RoleDef> = {};
   for (const [key, def] of Object.entries(v.roles)) {
@@ -563,7 +565,7 @@ export function resolveManifest(input: unknown): RoomManifest {
     // Refused whether or not the room declares a cadence, because the seat is
     // what cannot answer. A room with no `heartbeat_on` never ticks, so such a
     // manifest asks nothing of anybody today — but it is still unanswerable the
-    // day a cadence is added, and the author is here now. `you_report` in the
+    // day a cadence is added, and the author is here now. `your_heartbeat_on` in the
     // connect preview is the other half of that split: it reads the cadence AND
     // the seat, so a room that never ticks promises nothing.
     const onBeat = roleBeat(key, def);
@@ -596,7 +598,7 @@ export function resolveManifest(input: unknown): RoomManifest {
     host,
   };
   checkHost(manifest, {
-    cadence: beat.word ?? (spelledNew ? "heartbeat" : "heartbeat_on"),
+    cadence: beat.word ?? (spelledOld ? "heartbeat_on" : "heartbeat"),
     hostRole: (v.host && roleWords[v.host.role]) ?? "reports",
   });
   return manifest;

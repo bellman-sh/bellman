@@ -1,6 +1,6 @@
 {
   "name": "@bellman-sh/mcp-server",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Cross-session, cross-provider agent collaboration over MCP",
   "author": "mcfearsome",
   "license": "MIT",

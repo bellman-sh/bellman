@@ -1,7 +1,7 @@
 {
   "name": "bellman",
   "description": "Author Bellman room manifests. Use when declaring a room in a repo with .bellman/room.yaml, choosing between the pair, swarm and review presets, or deciding which verbs each role should hold.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": {
     "name": "mcfearsome"
   },

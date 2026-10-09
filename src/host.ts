@@ -7,16 +7,17 @@
  * this module cannot — read the room, call the model, write the event — and nothing
  * else.
  *
- * Imports `store.ts` and never the reverse: `store.ts` seats and meters the host
- * through the small facts in `types.ts`, and this module is a consumer of the store
- * like a tool is.
+ * Imports `store.ts` and never the reverse at runtime: `store.ts` seats, meters and
+ * wakes the host with the few facts it defines itself (the seat's ids,
+ * `isHostMember`, `isReplyToHost`, the hourly cap), which this module re-exports,
+ * and this module is a consumer of the store like a tool is.
  */
 import type { HostModelName, Member, RoomManifest, SessionEvent } from "./types.js";
 import type { OutboxIntent } from "./outbox.js";
-import { isActiveMember, lastSeen } from "./store.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, isActiveMember, isHostMember, lastSeen } from "./store.js";
 
-export const HOST_MEMBER_ID = "m_host";
-export const HOST_USER_ID = "u_bellman_host";
+// Defined in store.ts, which reads them inside both stores; host.ts imports store.ts, so they cannot live here.
+export { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, isHostMember, isReplyToHost } from "./store.js";
 
 /** The models a manifest may name, their ids, and their weight in units (spec D3: list-price ratios). */
 export const HOST_MODELS: Record<HostModelName, { id: string; weight: number }> = {
@@ -26,7 +27,6 @@ export const HOST_MODELS: Record<HostModelName, { id: string; weight: number }> 
 };
 
 export const REPLIES_PER_QUESTION = 3;
-export const WAKES_PER_HOUR = 8;
 export const QUESTION_MAX_TOKENS = 250;
 export const ANSWER_MAX_TOKENS = 200;
 export const MAX_REPLY_CHARS = 600;
@@ -83,22 +83,10 @@ export function hostMember(manifest: RoomManifest, now: number): Member {
   };
 }
 
-export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
-
 export const unitsFor = (model: HostModelName): number => HOST_MODELS[model].weight;
 
 export function hostWakeIntent(sessionId: string, cause: "tick" | "reply", cursor: number): OutboxIntent {
   return { id: `host:${cause}:${cursor}`, kind: "host", payload: { sessionId, cause, cursor } };
-}
-
-/** A member's answer to the host: a message or a progress event whose ref names one of the host's events. */
-export function isReplyToHost(
-  e: Pick<SessionEvent, "type" | "refId">,
-  referenced: Pick<SessionEvent, "fromMemberId"> | undefined,
-): boolean {
-  if (e.refId === null || referenced === undefined) return false;
-  if (e.type !== "message" && e.type !== "progress") return false;
-  return referenced.fromMemberId === HOST_MEMBER_ID;
 }
 
 const latest = (state: HostState): HostQuestion | undefined => state.questions[state.questions.length - 1];

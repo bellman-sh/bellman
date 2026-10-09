@@ -22,7 +22,9 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed } from "../../src/blobs.js";
-import type { Session, SurfaceItem } from "../../src/types.js";
+import type { Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
+import { monthKey } from "../../src/stored-session.js";
 import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /**
@@ -2108,6 +2110,98 @@ export function describeStoreContract(
         const s = session({ members: [member({ lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 })] });
         await store.createSession(s);
         expect(await store.chargeBlobBytes(s.id, 1)).toMatchObject({ ok: false, reason: "closed" });
+      });
+    });
+
+    // ------------------------------------------------ the hosted seat's meter
+    /**
+     * The seat's send and the charge are one write (hosted seat spec, D3): a
+     * refused wake appends nothing and charges nothing, and a month that turns
+     * starts the count again.
+     */
+    describe("appendHostEvent", () => {
+      const NOW = () => Date.now();
+      const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+        roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+      const hostedRoom = (over: Partial<Session> = {}) => {
+        const m = hosted();
+        return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
+      };
+      const question = (refId: string): Omit<SessionEvent, "cursor" | "at"> => ({
+        type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+        payload: { kind: "question", text: "What shipped?" }, refId,
+      });
+
+      it("appends the event and charges the units in one write", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        const r = await store.appendHostEvent(s.id, question("1"), 3, NOW());
+        expect(r).toMatchObject({ ok: true, event: { fromMemberId: HOST_MEMBER_ID, refId: "1" } });
+        const after = (await store.getSession(s.id))!;
+        expect(after.hostUnits.used).toBe(3);
+        expect(after.hostUnits.wakes).toHaveLength(1);
+        expect((await store.eventsAfter(s.id, 0)).map((e) => e.fromMemberId)).toEqual([HOST_MEMBER_ID]);
+      });
+
+      it("refuses a wake that would cross the month's units, appending nothing", async () => {
+        const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 8, wakes: [] } });
+        await store.createSession(s);
+        expect(await store.appendHostEvent(s.id, question("1"), 3, NOW())).toEqual({ ok: false, reason: "units", used: 8, allowed: 10 });
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+        expect((await store.getSession(s.id))!.hostUnits.used).toBe(8);
+      });
+
+      it("a new month starts the count again", async () => {
+        const s = hostedRoom({ hostUnits: { month: "2026-09", used: 10, wakes: [] } });
+        await store.createSession(s);
+        const r = await store.appendHostEvent(s.id, question("1"), 1, NOW());
+        expect(r.ok).toBe(true);
+        expect((await store.getSession(s.id))!.hostUnits).toMatchObject({ month: monthKey(NOW()), used: 1 });
+      });
+
+      it("refuses the ninth wake in an hour, and forgets wakes older than an hour", async () => {
+        const recent = Array.from({ length: WAKES_PER_HOUR }, (_, i) => NOW() - i * 60_000);
+        const s = hostedRoom({ hostUnits: { month: monthKey(NOW()), used: 0, wakes: recent } });
+        await store.createSession(s);
+        expect(await store.appendHostEvent(s.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "hourly" });
+        const old = recent.map((t) => t - 3_600_000 - 1);
+        const s2 = hostedRoom({ id: "qs_host_2", hostUnits: { month: monthKey(NOW()), used: 0, wakes: old } });
+        await store.createSession(s2);
+        expect((await store.appendHostEvent(s2.id, question("1"), 1, NOW())).ok).toBe(true);
+        expect((await store.getSession(s2.id))!.hostUnits.wakes).toHaveLength(1);
+      });
+
+      it("refuses a closed, a frozen and a missing room", async () => {
+        const closed = hostedRoom({ id: "qs_host_c" });
+        await store.createSession(closed);
+        await store.closeSession(closed.id);
+        expect(await store.appendHostEvent(closed.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "closed" });
+        const frozen = hostedRoom({ id: "qs_host_f" });
+        await store.createSession(frozen);
+        await store.freezeSession(frozen.id, NOW());
+        expect(await store.appendHostEvent(frozen.id, question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "frozen" });
+        expect(await store.appendHostEvent("qs_nobody", question("1"), 1, NOW())).toMatchObject({ ok: false, reason: "not_found" });
+      });
+
+      it("stamps the host as seen on its send, and the roster shows it", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        const before = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!.lastSeenAt!;
+        await store.appendHostEvent(s.id, question("1"), 1, before + 5_000);
+        const after = (await store.getSession(s.id))!.members.find((m) => m.memberId === HOST_MEMBER_ID)!;
+        expect(after.lastSeenAt).toBe(before + 5_000);
+      });
+    });
+
+    describe("hosted creations a month", () => {
+      it("counts hosted creations apart from creations", async () => {
+        expect(await store.countHostedCreatesThisMonth("u_host_test")).toBe(0);
+        await store.recordHostedCreate("u_host_test");
+        await store.recordHostedCreate("u_host_test");
+        expect(await store.countHostedCreatesThisMonth("u_host_test")).toBe(2);
+        expect(await store.countCreatesThisMonth("u_host_test")).toBe(0);
       });
     });
 

@@ -1,9 +1,11 @@
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
+  AuditEntry, HostUnits, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
   SurfaceRow,
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
-import type { StoredSession } from "./stored-session.js";
+import { monthKey, type StoredSession } from "./stored-session.js";
+// Type-only: host.ts imports this module at runtime, so a value import back would be a cycle.
+import type { HostWake } from "./host.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -45,6 +47,31 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  * applies to `joinCode`.
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * The hosted seat's identity (hosted seat spec, D1): the member id it holds in
+ * every room, and the user every hosted seat is seated under.
+ *
+ * These and the two rules below are here beside `isActiveMember`, and
+ * re-exported from host.ts, for the reason `lastSeen` gives: both stores read
+ * them inside their own methods, and host.ts imports this module.
+ */
+export const HOST_MEMBER_ID = "m_host";
+export const HOST_USER_ID = "u_bellman_host";
+export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
+
+/** Wakes the hosted seat may spend in any hour, whatever its month has left (spec D3: the burst cap). */
+export const WAKES_PER_HOUR = 8;
+
+/** A member's answer to the host: a message or a progress event whose ref names one of the host's events. */
+export function isReplyToHost(
+  e: Pick<SessionEvent, "type" | "refId">,
+  referenced: Pick<SessionEvent, "fromMemberId"> | undefined,
+): boolean {
+  if (e.refId === null || referenced === undefined) return false;
+  if (e.type !== "message" && e.type !== "progress") return false;
+  return referenced.fromMemberId === HOST_MEMBER_ID;
+}
 
 /** Nobody is on a socket. What every reading of presence assumes until it is told otherwise. */
 export const NO_SOCKETS: ReadonlySet<string> = new Set();
@@ -112,11 +139,13 @@ export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
  * closed room is over, a frozen one is waiting on a payment and `touchMember`
  * cannot stamp it, and an empty one is `closeSessionIfEmpty`'s. Departed members
  * do not count: a goodbye yesterday does not keep open a room that nobody else
- * has been in for a season.
+ * has been in for a season. Nor does the hosted seat (hosted seat spec, D5): its
+ * sends stamp it as seen, and a room whose people have all gone quiet still ends
+ * 90 days after one of them was last there, however recently its host spoke.
  */
 export function abandonedAt(s: RoomRoster): number | null {
   if (s.closed || s.frozenAt !== null) return null;
-  const active = s.members.filter(isActiveMember);
+  const active = s.members.filter((m) => isActiveMember(m) && !isHostMember(m));
   if (active.length === 0) return null;
   return Math.max(...active.map(lastSeen)) + ABANDONED_AFTER_MS;
 }
@@ -385,6 +414,10 @@ export interface SeatOutcome {
  * MemoryStore from a hook that is empty unless a test says otherwise. The rule
  * stays one function, and the contract suite still holds both to it.
  *
+ * The hosted seat holds a seat and is never reclaimable (hosted seat spec, D5).
+ * Its `lastSeenAt` moves only when it sends, so a quiet host reads stale, and
+ * without this it would be the first seat a full room gave up.
+ *
  * `null` means refuse: the room is full of members that are not reclaimable.
  * An empty array means seat them with nobody removed.
  */
@@ -400,7 +433,7 @@ export function seatVictims(
   // Longest-quiet first: if only one seat has to go, it is the one whose member
   // has been gone longest.
   const victims = active
-    .filter((m) => lastSeen(m) < staleBefore && !connected.has(m.memberId))
+    .filter((m) => !isHostMember(m) && lastSeen(m) < staleBefore && !connected.has(m.memberId))
     .sort((a, b) => lastSeen(a) - lastSeen(b))
     .slice(0, needed);
   return victims.length < needed ? null : victims;
@@ -509,6 +542,34 @@ export function decideBlobCharge(
   if (s.frozenAt !== null) return { ok: false, reason: "frozen", used };
   if (used + bytes > s.blobBytesCeiling) return { ok: false, reason: "over_quota", used };
   return { ok: true, used: used + bytes };
+}
+
+/**
+ * What the hosted seat's write did (hosted seat spec, D3). A refusal says what
+ * the room's month has spent (`used`) and may spend (`allowed`), so the seat can
+ * say so in its one notice.
+ */
+export type HostAppend =
+  | { ok: true; event: SessionEvent }
+  | { ok: false; reason: "not_found" | "closed" | "frozen" | "units" | "hourly"; used: number; allowed: number };
+
+/**
+ * The meter's decision (hosted seat spec, D3), shared by both stores so they
+ * cannot charge differently. Returns the refusal, or the units record to write.
+ */
+export function decideHostCharge(
+  s: Pick<StoredSession, "closed" | "frozenAt" | "hostUnitsPerMonth" | "hostUnits">,
+  units: number,
+  now: number,
+): { ok: false; reason: "closed" | "frozen" | "units" | "hourly"; used: number; allowed: number } | { ok: true; next: HostUnits } {
+  if (s.closed) return { ok: false, reason: "closed", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  if (s.frozenAt !== null) return { ok: false, reason: "frozen", used: s.hostUnits.used, allowed: s.hostUnitsPerMonth };
+  const month = monthKey(now);
+  const current = s.hostUnits.month === month ? s.hostUnits : { month, used: 0, wakes: [] };
+  const wakes = current.wakes.filter((t) => t > now - 3_600_000);
+  if (wakes.length >= WAKES_PER_HOUR) return { ok: false, reason: "hourly", used: current.used, allowed: s.hostUnitsPerMonth };
+  if (current.used + units > s.hostUnitsPerMonth) return { ok: false, reason: "units", used: current.used, allowed: s.hostUnitsPerMonth };
+  return { ok: true, next: { month, used: current.used + units, wakes: [...wakes, now] } };
 }
 
 export interface AppendExtras {
@@ -916,12 +977,21 @@ export interface BellmanStore {
    * just put. Nothing credits the total; retention (#65) will.
    */
   chargeBlobBytes(sessionId: string, bytes: number): Promise<BlobCharge>;
+  /**
+   * The hosted seat's one write (hosted seat spec, D3): the event and the charge
+   * of `units` against the room's month, in one transaction. Refused, nothing is
+   * written. `now` is the caller's clock, as `seatMember`'s is.
+   */
+  appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
 
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
+  /** Hosted rooms this person created this month, counted apart from creations (spec D2). */
+  countHostedCreatesThisMonth(userId: string): Promise<number>;
+  recordHostedCreate(userId: string): Promise<void>;
 
   /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
   getGrant(key: string): Promise<PlanGrant | undefined>;
@@ -990,6 +1060,7 @@ export class MemoryStore implements BellmanStore {
   private byMember = new Map<string, Set<string>>();
   private pending = new Map<string, PendingConnect>();
   private creates = new Map<string, number[]>(); // userId -> timestamps
+  private hostedCreates = new Map<string, number[]>(); // userId -> timestamps, hosted rooms only
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
@@ -1381,7 +1452,48 @@ export class MemoryStore implements BellmanStore {
     // of an await, the same arrangement closeSessionIfEmpty and appendNow use.
     const event = this.appendNow(s, e);
     this.applyExtras(s, event, extras);
+    this.wakeHost(s, event);
     return detach(event);
+  }
+
+  /**
+   * Called synchronously once an append has landed that wakes the hosted seat
+   * (hosted seat spec, D4). Nothing here: a subclass, or the Node server's seat,
+   * says what a wake does. `SessionDO` queues the same wakes as outbox rows, in
+   * the event's own transaction.
+   */
+  protected hostWoken(_wake: HostWake): void {}
+
+  /**
+   * Wake the hosted seat if `event` is one of the two causes (spec D4): a
+   * `heartbeat`, or a reply to one of the host's events, in a room whose
+   * manifest has a host.
+   *
+   * Called by the two public appends once the event and its extras have landed,
+   * which are `SessionDO`'s places too, and not from `appendNow`: the host's own
+   * answer names its question as `refId`, so it reads as a reply, and
+   * `appendHostEvent` queues no wake in either store. No awaits, for
+   * appendEvent's reason.
+   */
+  private wakeHost(s: Session, event: SessionEvent): void {
+    if (s.manifest.host === null) return;
+    if (event.type === "heartbeat") this.hostWoken({ sessionId: s.id, cause: "tick", cursor: event.cursor });
+    else if (event.refId !== null) {
+      const referenced = s.events.find((x) => x.cursor === Number(event.refId));
+      if (isReplyToHost(event, referenced)) this.hostWoken({ sessionId: s.id, cause: "reply", cursor: event.cursor });
+    }
+  }
+
+  async appendHostEvent(sessionId: string, e: Omit<SessionEvent, "cursor" | "at">, units: number, now: number): Promise<HostAppend> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found", used: 0, allowed: 0 };
+    const charge = decideHostCharge(s, units, now);
+    if (!charge.ok) return charge;
+    // Synchronous from here: the event, the meter and the stamp land together.
+    const event = this.appendNow(s, e);
+    s.hostUnits = charge.next;
+    s.members = s.members.map((m) => m.memberId === e.fromMemberId ? { ...m, lastSeenAt: now } : m);
+    return { ok: true, event: detach(event) };
   }
 
   /**
@@ -1486,6 +1598,7 @@ export class MemoryStore implements BellmanStore {
     map.set(storageKey, { cursor: event.cursor, print });
     this.keys.set(sessionId, map);
     this.applyExtras(s, event, extras);
+    this.wakeHost(s, event);
     return { outcome: "appended", event: detach(event) };
   }
 
@@ -1586,15 +1699,32 @@ export class MemoryStore implements BellmanStore {
   }
 
   async countCreatesThisMonth(userId: string): Promise<number> {
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
-    return (this.creates.get(userId) ?? []).filter((t) => t >= monthStart).length;
+    return this.countMonth(this.creates, userId);
   }
 
   async recordCreate(userId: string): Promise<void> {
-    const list = this.creates.get(userId) ?? [];
+    this.recordMonth(this.creates, userId);
+  }
+
+  async countHostedCreatesThisMonth(userId: string): Promise<number> {
+    return this.countMonth(this.hostedCreates, userId);
+  }
+
+  async recordHostedCreate(userId: string): Promise<void> {
+    this.recordMonth(this.hostedCreates, userId);
+  }
+
+  /** One rule for both monthly counts, as `RegistryDO`'s `#countMonth` is, so the two cannot drift. */
+  private countMonth(counts: Map<string, number[]>, userId: string): number {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    return (counts.get(userId) ?? []).filter((t) => t >= monthStart).length;
+  }
+
+  private recordMonth(counts: Map<string, number[]>, userId: string): void {
+    const list = counts.get(userId) ?? [];
     list.push(Date.now());
-    this.creates.set(userId, list);
+    counts.set(userId, list);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

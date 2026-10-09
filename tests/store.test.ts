@@ -1,10 +1,67 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryStore } from "../src/store.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
+import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
-import { roomManifest, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 describeStoreContract("MemoryStore", () => new MemoryStore());
+
+class Recording extends MemoryStore {
+  wakes: HostWake[] = [];
+  protected override hostWoken(wake: HostWake): void { this.wakes.push(wake); }
+}
+
+describe("MemoryStore wakes the host (hosted seat spec, D4)", () => {
+  const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+  const NOW = Date.now();
+
+  it("queues a tick wake when a heartbeat lands in a hosted room, and none in a room without a host", async () => {
+    const store = new Recording();
+    const m = hosted();
+    const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)] });
+    await store.createSession(s);
+    await store.appendEvent(s.id, { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null });
+    expect(store.wakes).toEqual([{ sessionId: s.id, cause: "tick", cursor: 1 }]);
+    const plain = session({ id: "qs_plain" });
+    await store.createSession(plain);
+    await store.appendEvent(plain.id, { type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", payload: {}, refId: null });
+    expect(store.wakes).toHaveLength(1);
+  });
+
+  it("queues a reply wake for a message that references the host's event, and not for one that references a member's", async () => {
+    const store = new Recording();
+    const m = hosted();
+    // Units to spend: the fixture's default is 0, and the meter refuses the question without them.
+    const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)], hostUnitsPerMonth: 10 });
+    await store.createSession(s);
+    const q = await store.appendHostEvent(s.id, { type: "message", fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman", payload: { kind: "question", text: "q" }, refId: null }, 1, NOW);
+    expect(q.ok).toBe(true);
+    const qc = q.ok ? q.event.cursor : 0;
+    await store.appendEvent(s.id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "a" }, refId: String(qc) });
+    expect(store.wakes).toEqual([{ sessionId: s.id, cause: "reply", cursor: qc + 1 }]);
+    await store.appendEvent(s.id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: { text: "b" }, refId: String(qc + 1) });
+    expect(store.wakes).toHaveLength(1);
+  });
+
+  // The host's own answer carries its question's cursor as `refId`, which reads as a
+  // reply to the host. SessionDO queues no wake for the host's sends (appendHostEvent
+  // queues none), so MemoryStore must not either, or the seat wakes itself.
+  it("queues no wake for the host's own answer in its thread", async () => {
+    const store = new Recording();
+    const m = hosted();
+    const s = session({ manifest: m, members: [member({ lastSeenAt: NOW }), hostMember(m, NOW)], hostUnitsPerMonth: 10 });
+    await store.createSession(s);
+    const host = { type: "message" as const, fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman" };
+    const q = await store.appendHostEvent(s.id, { ...host, payload: { kind: "question", text: "q" }, refId: null }, 1, NOW);
+    const qc = q.ok ? q.event.cursor : 0;
+    const a = await store.appendHostEvent(s.id, { ...host, payload: { kind: "answer", text: "a" }, refId: String(qc) }, 1, NOW);
+    expect(a.ok).toBe(true);
+    expect(store.wakes).toEqual([]);
+  });
+});
 
 describe("manifest persistence", () => {
   it("round-trips a manifest through the store unchanged", async () => {

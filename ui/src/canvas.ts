@@ -24,6 +24,10 @@ export interface Canvas {
   root: HTMLElement;
   /** A new result: the status line always; the cards only when the cursor moved (spec D7). */
   update(r: SurfaceResult, now?: number): void;
+  /** Fit every card in the viewport. The page calls it once the root is in the document, where the viewport first has a size (spec D6). */
+  fit(): void;
+  /** A failed read, said on the status line; the next answer overwrites it. The screen stays. */
+  error(message: string): void;
   transform(): Transform;
 }
 
@@ -57,7 +61,7 @@ function openInDash(sessionId: string, deps: CanvasDeps): HTMLButtonElement {
 const kindClass = (kind: string): string => (/^[a-z]{1,16}$/.test(kind) ? kind : "other");
 
 /** One card. The header is the envelope's, never the body's (spec, Trust). */
-function renderCard(e: Untrusted<SurfaceItemWire>, box: Box, sessionId: string, deps: CanvasDeps, now: number): HTMLElement {
+function renderCard(e: Untrusted<SurfaceItemWire>, box: Box, sessionId: string, deps: CanvasDeps, now: number, signal: AbortSignal): HTMLElement {
   const item = e.data;
   const card = el("article", { class: `item kind-${kindClass(item.kind)}` });
   card.style.left = `${box.x}px`;
@@ -88,7 +92,7 @@ function renderCard(e: Untrusted<SurfaceItemWire>, box: Box, sessionId: string, 
       break;
     case "html":
       if (item.body !== null && deps.nested) {
-        card.append(artifactFrame(item.body, item.title ?? "artifact"));
+        card.append(artifactFrame(item.body, signal));
       } else {
         if (item.blob) card.append(blobLine(item.blob));
         card.append(
@@ -131,6 +135,8 @@ export function createCanvas(first: SurfaceResult, deps: CanvasDeps, now = Date.
   let t: Transform = { tx: 0, ty: 0, k: 1 };
   let drawn: number | null = null;
   let boxes: Box[] = [];
+  /** The listeners of the frames on screen; aborted on every redraw, so none outlives its frame. */
+  let frames = new AbortController();
   const layer = el("div", { class: "layer" });
   const viewport = el("div", { class: "viewport", tabindex: "0", "aria-label": "Surface canvas" }, layer);
   const status = el("p", { class: "muted", role: "status" });
@@ -199,7 +205,9 @@ export function createCanvas(first: SurfaceResult, deps: CanvasDeps, now = Date.
     const { boxes: next, lines } = layout(items);
     boxes = next;
     const byKey = new Map(items.map((e) => [e.data.key, e] as const));
-    layer.replaceChildren(renderLines(lines), ...boxes.map((b) => renderCard(byKey.get(b.key)!, b, r.session_id, deps, at)));
+    frames.abort();
+    frames = new AbortController();
+    layer.replaceChildren(renderLines(lines), ...boxes.map((b) => renderCard(byKey.get(b.key)!, b, r.session_id, deps, at, frames.signal)));
     drawn = cursor;
     if (had === 0) setT(fit(boxes, dims()));
   };
@@ -210,5 +218,11 @@ export function createCanvas(first: SurfaceResult, deps: CanvasDeps, now = Date.
     viewport,
   );
   update(first, now);
-  return { root, update, transform: () => t };
+  return {
+    root,
+    update,
+    fit: () => setT(fit(boxes, dims())),
+    error: (message) => { status.textContent = message; },
+    transform: () => t,
+  };
 }

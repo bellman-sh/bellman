@@ -30,9 +30,13 @@ export const fromFrame = (ev: { source: unknown; origin: string }, frame: HTMLIF
 const sandboxed = (title: string, extra: Record<string, string> = {}): HTMLIFrameElement =>
   el("iframe", { sandbox: FRAME_SANDBOX, referrerpolicy: "no-referrer", title, ...extra });
 
-/** The artifact in its frame. The height listener lives as long as the page; a frame that is gone matches no message. */
-export function artifactFrame(html: string, title: string): HTMLIFrameElement {
-  const frame = sandboxed(title, { class: "artifact" });
+/**
+ * The artifact in its frame. The title is fixed: an attribute never carries peer
+ * text (spec, Trust). The height listener ends when `signal` aborts, which the
+ * canvas does on every redraw, so a frame that is gone leaves no listener behind.
+ */
+export function artifactFrame(html: string, signal?: AbortSignal): HTMLIFrameElement {
+  const frame = sandboxed("artifact", { class: "artifact" });
   frame.srcdoc = html + REPORT_HEIGHT;
   frame.style.height = `${MIN_FRAME_HEIGHT}px`;
   window.addEventListener("message", (ev: MessageEvent) => {
@@ -41,7 +45,7 @@ export function artifactFrame(html: string, title: string): HTMLIFrameElement {
     if (m && typeof m === "object" && m.kind === "resize" && typeof m.height === "number" && Number.isFinite(m.height)) {
       frame.style.height = `${clampHeight(m.height)}px`;
     }
-  });
+  }, { signal });
   return frame;
 }
 

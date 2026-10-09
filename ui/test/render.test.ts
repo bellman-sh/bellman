@@ -268,6 +268,15 @@ describe("createCanvas", () => {
     c.root.remove();
   });
 
+  it("puts peer text in no attribute of any element, the artifact frame's title included", () => {
+    const r = surfaceFixture();
+    for (const e of r.surface.items) { e.data.title = HOSTILE; e.origin.label = HOSTILE; }
+    const c = createCanvas(r, deps().deps, NOW);
+    const tainted = [...c.root.querySelectorAll("*")].flatMap((node) => [...node.attributes].filter((a) => a.value.includes(HOSTILE)).map((a) => `${node.tagName}@${a.name}`));
+    expect(tainted).toEqual([]);
+    expect(c.root.textContent).toContain(HOSTILE);
+  });
+
   it("disables Open for a link that is not http(s), and renders an unknown kind by name", () => {
     const r = surfaceFixture();
     r.surface.items[1].data.body = "javascript:alert(1)";

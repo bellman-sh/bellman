@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { handleOAuth, identityFromAccessToken, signedInPlan, type OAuthConfig } from "../src/oauth/routes.js";
+import { handleOAuth, identityFromAccessToken, replanOnRefresh, resolvePlan, signedInPlan, type OAuthConfig } from "../src/oauth/routes.js";
 import { MemoryAuthStore } from "../src/oauth/storage.js";
 import { MemoryStore } from "../src/store.js";
 import { sha256Base64url } from "../src/oauth/tokens.js";
 import type { Identity } from "../src/types.js";
+import type { ProviderProfile } from "../src/oauth/providers.js";
 
 /**
  * The whole authorization code flow, with GitHub and Google stubbed at the
@@ -473,6 +474,56 @@ describe("plan resolution", () => {
     };
 
     expect(await signedInIdentity()).toMatchObject({ plan: "team", role: "admin" });
+  });
+
+  describe("the key it resolved through", () => {
+    // The human fakeFetch signs in: GitHub id 4242, verified jesse@example.dev.
+    const PROFILE: ProviderProfile = {
+      provider: "github", subject: "4242", label: "mcfearsome", email: "jesse@example.dev",
+    };
+    const KEYS = ["github:4242", "github:jesse@example.dev", "email:jesse@example.dev"];
+    const OVERRIDE: Identity = {
+      userId: "u_github_4242", orgId: null, plan: "pro", role: "member", label: "jesse@example.dev",
+    };
+
+    it("is the override's key, whether subject or address", async () => {
+      config.overrides = { "github:4242": OVERRIDE };
+      expect((await resolvePlan(PROFILE, config)).key).toBe("github:4242");
+
+      config.overrides = { "email:jesse@example.dev": OVERRIDE };
+      expect((await resolvePlan(PROFILE, config)).key).toBe("email:jesse@example.dev");
+    });
+
+    it("is where a grant is filed once claimed, not the address it was found under", async () => {
+      await config.plans!.putGrant(grant({ key: "email:jesse@example.dev" }));
+
+      expect((await resolvePlan(PROFILE, config)).key).toBe("github:4242");
+    });
+
+    // The move is best effort and logs its failure, so a "could not pin a grant"
+    // line in the output is expected.
+    it("is the address when the grant could not be moved off it", async () => {
+      await config.plans!.putGrant(grant({ key: "email:jesse@example.dev" }));
+      config.plans!.moveGrant = () => Promise.reject(new Error("registry unreachable"));
+
+      expect((await resolvePlan(PROFILE, config)).key).toBe("email:jesse@example.dev");
+    });
+
+    it("is null when nothing matched", async () => {
+      expect((await resolvePlan(PROFILE, config)).key).toBeNull();
+    });
+
+    it("is the subject or null on a re-check, which consults nothing else", async () => {
+      config.overrides = { "email:jesse@example.dev": OVERRIDE };
+      expect((await replanOnRefresh(OVERRIDE, KEYS, config)).key).toBeNull();
+
+      config.overrides = { "github:4242": OVERRIDE };
+      expect((await replanOnRefresh(OVERRIDE, KEYS, config)).key).toBe("github:4242");
+
+      config.overrides = {};
+      await config.plans!.putGrant(grant({ key: "github:4242" }));
+      expect((await replanOnRefresh(OVERRIDE, KEYS, config)).key).toBe("github:4242");
+    });
   });
 });
 

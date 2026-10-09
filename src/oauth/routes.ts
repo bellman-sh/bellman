@@ -96,23 +96,29 @@ export type PlanSource = "operator" | "grant" | "default";
  * An override is the exception, and only here: it supplies the whole identity,
  * userId included, which is what lets an operator point someone at a specific
  * account. replanOnRefresh deliberately does not — see there.
+ *
+ * `key` is the identity key that decided the plan: the override's, or the
+ * grant's where claimGrant left it, and null when nothing did. The panel's
+ * settings page shows it, so that a plan resting on an address is visible.
  */
 export async function resolvePlan(
   profile: ProviderProfile,
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
-): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[] }> {
+): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {
   const keys = identityKeys(profile);
   for (const key of keys) {
     const override = config.overrides?.[key];
-    if (override) return { identity: override, source: "operator", keys };
+    if (override) return { identity: override, source: "operator", keys, key };
   }
   const match = config.plans
     ? await firstGrant(config.plans, keys, config.honourPurchases !== false)
     : undefined;
   if (match) {
     // Sign-in is the only place with the profile, so it is the only place that
-    // can pin an address-keyed grant to the subject behind it.
-    await claimGrant(config.plans!, match.grant, match.key, profile);
+    // can pin an address-keyed grant to the subject behind it. Where the grant is
+    // filed afterwards is the key worth reporting: one moved onto the subject is
+    // found there at every re-check, and one that could not be moved is not.
+    const filed = await claimGrant(config.plans!, match.grant, match.key, profile);
     const { grant } = match;
     return {
       identity: { ...defaultIdentity(profile), plan: grant.plan, role: grant.role, orgId: grant.orgId },
@@ -122,9 +128,10 @@ export async function resolvePlan(
       // must not replace one an admin wrote by hand.
       grantSource: grant.source,
       keys,
+      key: filed,
     };
   }
-  return { identity: defaultIdentity(profile), source: "default", keys };
+  return { identity: defaultIdentity(profile), source: "default", keys, key: null };
 }
 
 /**
@@ -141,7 +148,7 @@ export async function replanOnRefresh(
   stored: Identity,
   keys: string[],
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
-): Promise<{ identity: Identity; source: PlanSource }> {
+): Promise<{ identity: Identity; source: PlanSource; key: string | null }> {
   const base: Identity = { ...stored, plan: "free", role: "member", orgId: null };
   // The subject and nothing else. These keys were written down at sign-in and
   // any of the others may have been reassigned since — an address handed to a
@@ -159,6 +166,7 @@ export async function replanOnRefresh(
       return {
         identity: { ...base, plan: override.plan, role: override.role, orgId: override.orgId },
         source: "operator",
+        key,
       };
     }
   }
@@ -174,9 +182,10 @@ export async function replanOnRefresh(
     return {
       identity: { ...base, plan: grant.plan, role: grant.role, orgId: grant.orgId },
       source: "grant",
+      key: match.key,
     };
   }
-  return { identity: base, source: "default" };
+  return { identity: base, source: "default", key: null };
 }
 
 /**
@@ -262,19 +271,24 @@ function usableGrant(grant: PlanGrant | undefined): grant is PlanGrant {
  * Best effort at the call site, which is now safe — the move either happened or
  * it did not. Failing to tidy up must not cost the human their sign-in, and the
  * grant keeps resolving by address until a later sign-in succeeds.
+ *
+ * Answers the key the grant is filed under when it returns: the subject's, or
+ * the address it was found under when the move failed and left it there.
  */
 async function claimGrant(
   plans: PlanStore,
   grant: PlanGrant,
   matchedKey: string,
   profile: ProviderProfile
-): Promise<void> {
+): Promise<string> {
   const subjectKey = `${profile.provider}:${profile.subject}`;
-  if (matchedKey === subjectKey) return;
+  if (matchedKey === subjectKey) return subjectKey;
   try {
     await plans.moveGrant(matchedKey, subjectKey);
+    return subjectKey;
   } catch (err) {
     console.error("could not pin a grant to its subject:", err);
+    return matchedKey;
   }
 }
 

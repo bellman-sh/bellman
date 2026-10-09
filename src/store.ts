@@ -4,8 +4,10 @@ import type {
 } from "./types.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
-// Type-only: host.ts imports this module at runtime, so a value import back would be a cycle.
+// Type-only: host.ts and heartbeat.ts import this module at runtime, so a value import
+// back would be a cycle. `MemoryStore.tick` is handed its rule for that reason.
 import type { HostWake } from "./host.js";
+import type { TickStep } from "./heartbeat.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
@@ -1617,9 +1619,9 @@ export class MemoryStore implements BellmanStore {
    * it without yielding between their guard and their write. Same rule, and
    * the same reason, as liveGrant and waitForEvents.
    */
-  private appendNow(s: Session, e: Omit<SessionEvent, "cursor" | "at">): SessionEvent {
+  private appendNow(s: Session, e: Omit<SessionEvent, "cursor" | "at">, at = Date.now()): SessionEvent {
     const event: SessionEvent = {
-      ...detach(e), cursor: s.events.length + 1, at: Date.now(),
+      ...detach(e), cursor: s.events.length + 1, at,
     };
     s.events.push(event);
     this.wake(s);
@@ -1873,6 +1875,34 @@ export class MemoryStore implements BellmanStore {
     for (const s of this.sessions.values()) this.closeIfAbandoned(s, now);
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
+    }
+  }
+
+  /**
+   * The Node server's heartbeat (#111, #188): for every room, what SessionDO's alarm
+   * does for one. `step` is `tickStep` from heartbeat.ts, handed in because that module
+   * imports this one; it decides, and this writes. Not on `BellmanStore`: the Workers
+   * store ticks by alarm.
+   *
+   * A room whose tick is not due is left alone, clock included. The caller runs this
+   * far more often than any cadence, and moving `lastTickAt` on every call would push
+   * every room's next tick back for good. A due room either gets its heartbeat, written
+   * as `#tickIfDue` writes it, or only its clock moved; the seat is woken after the
+   * write when the step says so. No awaits, for appendEvent's reason.
+   */
+  tick(now: number, step: (s: StoredSession, now: number) => TickStep): void {
+    for (const s of this.sessions.values()) {
+      if (s.closed || s.frozenAt !== null || s.manifest.heartbeatOnMs === null) continue;
+      if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
+      const r = step(s, now);
+      if (!r.due) continue;
+      (s as { lastTickAt?: number }).lastTickAt = now;
+      if (!r.write) continue;
+      const tick = this.appendNow(s, {
+        type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+        payload: r.payload, refId: null,
+      }, now);
+      if (r.wakeHost) this.hostWoken({ sessionId: s.id, cause: "tick", cursor: tick.cursor });
     }
   }
 

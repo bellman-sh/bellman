@@ -194,6 +194,27 @@ export function tickPlan(
   return { write, wakeHost: write && s.manifest.host !== null && personSince(s, connected) };
 }
 
+/**
+ * Everything one room's tick at `now` needs decided, for a store that cannot import this
+ * module (#188). `MemoryStore.tick` takes `tickStep` from its caller: this module imports
+ * store.ts, so store.ts importing it back would be the cycle store.ts documents.
+ */
+export type TickStep = { due: boolean; write: boolean; wakeHost: boolean; payload: HeartbeatPayload };
+
+/**
+ * `due` is the moment SessionDO's alarm would name the tick (`nextTickAt`); the two
+ * booleans are `tickPlan`'s with no sockets, which is what a store without any has; the
+ * payload is the tick's own snapshot. Throws for a room with no cadence, as `snapshotOf`
+ * does, so a caller asks only of a room that declared one.
+ */
+export function tickStep(s: StoredSession, now: number): TickStep {
+  return {
+    due: (nextTickAt(s) ?? Infinity) <= now,
+    ...tickPlan(s, now, new Set()),
+    payload: snapshotOf(s, now),
+  };
+}
+
 /** Members that have gone a full cadence without reporting. The tick asks these. */
 export function dueMembers(s: StoredSession, now: number): Member[] {
   const every = s.manifest.heartbeatOnMs;

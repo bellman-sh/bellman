@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { MemoryStore } from "../src/store.js";
+import { ABANDONED_AFTER_MS, MemoryStore } from "../src/store.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
+import { tickStep } from "../src/heartbeat.js";
+import type { Session } from "../src/types.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
@@ -59,6 +61,88 @@ describe("MemoryStore wakes the host (hosted seat spec, D4)", () => {
     const qc = q.ok ? q.event.cursor : 0;
     const a = await store.appendHostEvent(s.id, { ...host, payload: { kind: "answer", text: "a" }, refId: String(qc) }, 1, NOW);
     expect(a.ok).toBe(true);
+    expect(store.wakes).toEqual([]);
+  });
+});
+
+/**
+ * The Node server's heartbeat (#111, #188). `MemoryStore.tick` is handed its rule,
+ * `tickStep` from heartbeat.ts, because heartbeat.ts imports store.ts and the reverse
+ * import would be a cycle. These cases hand it the real one.
+ */
+describe("MemoryStore ticks its rooms with the step it is handed", () => {
+  const HOUR = 3_600_000;
+  const T = Date.now();
+  const manifest = (host: boolean, reports: boolean) => roomManifest({
+    mode: "swarm", preset: null, heartbeatOnMs: HOUR,
+    roles: { lead: { can: ["send", "invite"], description: null, reports }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead", host: host ? { role: "host", model: "haiku", instructions: null } : null,
+  });
+  /**
+   * One person (`m_creator`, joined two cadences ago) and, unless `host: false`, the
+   * seat, which was seen at T, after the last tick: a rule that counted the host would
+   * tick every room here.
+   */
+  const room = (id: string, { host = true, reports = false, seenAt = T - 1_000, lastTickAt = T - HOUR - 1 } = {}) => {
+    const m = manifest(host, reports);
+    const members = [member({ roomRole: "lead", joinedAt: T - 2 * HOUR, lastSeenAt: seenAt }), ...(host ? [hostMember(m, T)] : [])];
+    return { ...session({ id, manifest: m, members, joinCodes: {} }), lastTickAt } as Session;
+  };
+  const ticked = async (store: MemoryStore, id: string) => ({
+    events: await store.eventsAfter(id, 0),
+    lastTickAt: (await store.getSession(id))!.lastTickAt,
+  });
+
+  it("(a) ticks a hosted room no role reports in while a person is in it, and wakes the seat", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_a"));
+    store.tick(T, tickStep);
+    const after = await ticked(store, "qs_tick_a");
+    expect(after.events).toMatchObject([{ cursor: 1, type: "heartbeat", fromMemberId: "system", refId: null, at: T, payload: { members: [] } }]);
+    expect(after.lastTickAt).toBe(T);
+    expect(store.wakes).toEqual([{ sessionId: "qs_tick_a", cause: "tick", cursor: 1 }]);
+  });
+
+  it("(b) writes nothing into a hosted room nobody has been in since the last tick, and moves the clock", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_b", { seenAt: T - HOUR - 1_000 }));
+    store.tick(T, tickStep);
+    expect(await ticked(store, "qs_tick_b")).toEqual({ events: [], lastTickAt: T });
+    expect(store.wakes).toEqual([]);
+  });
+
+  it("(c) writes a due reporter's tick into a hosted room nobody has been in, and leaves the seat asleep", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_c", { reports: true, seenAt: T - HOUR - 1_000 }));
+    store.tick(T, tickStep);
+    const after = await ticked(store, "qs_tick_c");
+    expect(after.events).toMatchObject([{ type: "heartbeat", payload: { members: [{ member_id: "m_creator" }] } }]);
+    expect(store.wakes).toEqual([]);
+  });
+
+  it("(d) never ticks a room without a host whose roles ask for no reports", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_d", { host: false }));
+    store.tick(T, tickStep);
+    expect(await ticked(store, "qs_tick_d")).toEqual({ events: [], lastTickAt: T - HOUR - 1 });
+    expect(store.wakes).toEqual([]);
+  });
+
+  // The caller runs this on an interval far shorter than any cadence. A room whose tick
+  // is not due keeps its clock, or every call would push the cadence back again.
+  it("(e) leaves a hosted room whose cadence has not come round untouched, clock included", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_e", { lastTickAt: T - 60_000 }));
+    store.tick(T, tickStep);
+    expect(await ticked(store, "qs_tick_e")).toEqual({ events: [], lastTickAt: T - 60_000 });
+    expect(store.wakes).toEqual([]);
+  });
+
+  it("(f) writes no tick into an abandoned room, though a reporter is due in it", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_tick_f", { reports: true, seenAt: T - ABANDONED_AFTER_MS - 1_000 }));
+    store.tick(T, tickStep);
+    expect((await store.eventsAfter("qs_tick_f", 0)).filter((e) => e.type === "heartbeat")).toEqual([]);
     expect(store.wakes).toEqual([]);
   });
 });

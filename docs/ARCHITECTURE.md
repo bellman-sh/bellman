@@ -7,8 +7,8 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: badc1bd
-last-updated: 2026-10-08
+last-verified-against-source: 3573b7b
+last-updated: 2026-10-09
 ---
 
 # Bellman Architecture
@@ -956,7 +956,7 @@ flowchart TB
         B0["#129 the working surface — shipped"]
         B1["#18 long-lived rooms"]
         B2["#65 a record that<br/>outlives the session — shipped:<br/>an org admin's read, retention,<br/>delete on demand"]
-        B3["#66 the scribe as actor"]
+        B3["#66 housekeeping: the server<br/>proposes, never acts — shipped"]
     end
     subgraph C["Surfaces beyond /mcp"]
         C1["#49 HTTP API — room routes<br/>(#184) shipped, the rest pending"]
@@ -992,6 +992,14 @@ it current. The record that outlives the session (#65) has shipped: a closed
 room is kept for the window its plan promised and then purged, its orphaned
 objects are swept when it closes, an org admin may read it and list the rooms of
 their org, and its creator or such an admin may delete it.
+
+Housekeeping (#66) has shipped as the noticing half of the scribe. The server
+computes three findings from the record (a member gone quiet, an action request
+unanswered, a room idle), proposes each as an event on the room's own alarm, and
+acts on nothing: no nudge is sent, no request answered, no room closed, no
+member removed. A scribe that reads the `plan` and acts, which needs a trust
+model for acting in a room that holds another person's agent, remains the
+follow-on.
 
 Piece 3 of the working surface (#129) is split: the room routes are here (#184);
 the canvas page is in `bellman-sh/dash` (#13), the first screen that renders
@@ -1121,12 +1129,12 @@ loss is findable, and the sweep at close (#65) is what finds it.
 4. **Named alarms.** An object has one alarm, so handlers share it: each has a
    due time, `alarm()` runs whichever are due, then points the alarm at the
    soonest. A due time is a stored `due:<name>` row or one derived from the
-   session record, and a stored row wins. `SessionDO` has five handlers,
-   `outbox`, `abandoned`, `heartbeat`, `sweep` and `purge`, and only `outbox`
-   is stored. The abandonment time is derived from the members' `lastSeenAt`
-   (`abandonedAt`, #18), so a room written before named alarms, or before rooms
-   persisted, is still swept; a socket vouching for a member moves it a window
-   ahead instead of closing the room.
+   session record, and a stored row wins. `SessionDO` has six handlers,
+   `outbox`, `abandoned`, `heartbeat`, `housekeep`, `sweep` and `purge`, and
+   only `outbox` is stored. The abandonment time is derived from the members'
+   `lastSeenAt` (`abandonedAt`, #18), so a room written before named alarms, or
+   before rooms persisted, is still swept; a socket vouching for a member moves it
+   a window ahead instead of closing the room.
    The tick (#111) is derived from `nextTickAt`, which asks each member
    at its own `lastReport + cadence` — except one already due at the preceding
    tick, asked at `lastTickAt + cadence` — and arms for the earliest of those. So
@@ -1136,6 +1144,22 @@ loss is findable, and the sweep at close (#65) is what finds it.
    that numbers rows, sits outside the `ob:` prefix or its own drain would list
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.
+
+   `housekeep` (#66) appends a server-authored `housekeeping` event when a
+   member has gone quiet, an action request is unanswered or the room is idle
+   past the thresholds its manifest declares, once per window, and forgets a
+   finding when its condition ends. It holds no seat and no verb, is written with
+   `fromMemberId: "system"` through the path that runs the bookkeeping, and
+   acts on nothing. Its time is derived from `nextHousekeepAt`, which reads the
+   same list of conditions `dueFindings` does, so the alarm is armed for a moment
+   something is due and for none before it, and a raise puts that key's next time
+   a window ahead, so a firing cannot find the same thing due again at once. What
+   it reads is kept at every append by both stores (`noteAppend` in `store.ts`):
+   each member's last send, the room's last member event and the requests still
+   waiting, so no scan of the log has to find them. The one append that can bring
+   the alarm forward, an `action_request` in a room that declares `answer_within`,
+   re-arms after its commit. A thaw restarts the clocks (`thawedAt`): nobody can
+   send in a frozen room, so a freeze is never counted as silence.
 
    `sweep` runs once when a room closes and deletes the objects under its R2
    prefix that no surface item names, crediting the room their bytes (#65, D3).
@@ -1161,10 +1185,12 @@ loss is findable, and the sweep at close (#65) is what finds it.
    entry queued in the storage the last step deletes would go with it. And every
    place a room closes re-arms the alarm, since a close that queues nothing
    would otherwise leave it pointing at an abandonment time months off;
-   `SessionDO.getSession` re-arms it too when it reads a closed room whose sweep
-   or purge is due, for work the runtime gave up on, and leaves the work itself
-   to the alarm. A dropped alarm is recovered by the next read of the room and by
-   nothing else: a room nobody reads again keeps what it owes until someone does.
+   `SessionDO.getSession` re-arms it too when the earliest of what the room owes
+   is already past, whichever handler owes it (a closed room's sweep or purge, an
+   open room's tick or housekeeping time), for work the runtime gave up on, and
+   leaves the work itself to the alarm. A dropped alarm is recovered by the next
+   read of the room and by nothing else: a room nobody reads again keeps what it
+   owes until someone does.
    The runtime retries a throwing alarm a few times and then says nothing of
    which object it gave up on, so `alarm()` writes the room id and the handler
    name to the log before it rethrows, and that line is the only record. The
@@ -1401,12 +1427,14 @@ know is never computed, so there is nothing for it to leave behind. Rolling back
 past #111 strands no row and needs no cleanup, where rolling back past #62 does.
 The sweep and the purge (#65) are derived the same way, so rolling back past them
 strands nothing either: an older build never computes the names, and a room it
-finds closed is kept. What a rollback cannot undo is a purge that has already run.
-An alarm already armed for a tick fires once into a build that knows the
-`abandoned` name, which finds nothing to run and re-arms for the abandonment
-time. A build older than #18 does not know that name: for a row #18 rewrote, its
-`reArm()` calls `setAlarm(undefined)`, which workerd rejects, so rolling back
-past #18 is not supported (ADR 0001).
+finds closed is kept. Housekeeping (#66) is derived too, and the fields it adds to
+the record are read with defaults, so rolling back past it strands nothing. What a
+rollback cannot undo is a purge that has already run.
+An alarm already armed for a tick, or for housekeeping, fires once into a build
+that knows the `abandoned` name, which finds nothing to run and re-arms for the
+abandonment time. A build older than #18 does not know that name: for a row #18
+rewrote, its `reArm()` calls `setAlarm(undefined)`, which workerd rejects, so
+rolling back past #18 is not supported (ADR 0001).
 
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both

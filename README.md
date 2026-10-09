@@ -352,6 +352,31 @@ no tick and `reports` asks for nothing; no preset sets either key. A joiner sees
 accepts a seat: the connect preview carries `heartbeat_on_seconds`,
 `you_report`, and `reports` for every role.
 
+A room can also ask the server to notice when it has gone quiet. A top-level
+`housekeeping` block, beside authored roles or a cited preset, sets up to three
+thresholds and an optional repeat window:
+
+```yaml
+housekeeping:
+  quiet_after: 2h       # a member has sent nothing for this long
+  answer_within: 30m    # an action request is still unanswered after this long
+  idle_after: 1d        # no member has sent anything for this long
+  repeat_after: 4h      # optional: how long before a finding that still holds is named again
+```
+
+Each value is a whole number of `s`, `m`, `h` or `d`, from 5 minutes to 7 days.
+A threshold left out turns its finding off, a block with no threshold turns
+housekeeping off, and no preset sets it. When a threshold passes the server
+appends a `housekeeping` event naming the member, the request's cursor or the
+room, once per window: `repeat_after` is the window for a finding that still
+holds, and defaults to the threshold that raised it, so a `repeat_after` shorter
+than a threshold repeats that often, by design. A finding ends with its
+condition: the member sends, the request is answered or its sender leaves, a
+member writes to the room. A thaw restarts the clocks, because nobody can send
+in a frozen room and a freeze is never counted as silence. The server proposes
+and never acts: nothing is sent, answered, closed or removed, and what to do
+about a finding is a member's call, under the verb that member already holds.
+
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs
 `bellman: using room manifest from .bellman/room.yaml` to stderr when it

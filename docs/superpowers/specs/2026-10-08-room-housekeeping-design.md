@@ -101,7 +101,12 @@ event's `at` plus `idle_after`, and each raised key's last raise plus its
 `repeat_after`. A room with no housekeeping, a closed room and a frozen room
 derive `null` (heartbeat D10). A firing computes the findings, appends one
 event per key that is due, updates `raised`, and re-arms; it reads and writes
-inside one object, so nothing here crosses the atomicity gap.
+inside one object, so nothing here crosses the atomicity gap. A thaw restarts
+the clocks, as heartbeat D10 refuses the tick its silence across a freeze: the
+session records `thawedAt` and every base time (a member's last send, a
+request's time, the last member event) is floored at it, so nothing the freeze
+imposed is held against anyone and each finding comes back one threshold after
+the thaw.
 
 ### D7 — No tool, no verb, no seat.
 
@@ -127,15 +132,23 @@ interface HousekeepingPayload {
 housekeeping: { quietAfterMs: number | null; answerWithinMs: number | null; idleAfterMs: number | null; repeatAfterMs: number | null } | null;
 
 // StoredSession
-raised: Record<string, { at: number; repeat: number }>;   // finding key -> last raise
+raised: Record<string, { at: number; repeat: number; since: number }>;  // finding key -> last raise, and the `since` of the condition it was for
+openRequests: Record<string, { at: number; fromMemberId: string }>;     // request cursor -> when asked, and by whom; kept at append
+lastMemberEventAt: number | null;                                       // the last member event; kept at append
+thawedAt: number | null;                                                // the last thaw; every clock is floored at it
 // Member
-lastSentAt: number | null;    // the member's last appended event; set at append
+lastSentAt?: number;          // the member's last appended event; set at append, absent until the first send
 
 // src/housekeeping.ts (runtime-free, beside heartbeat.ts)
 export function nextHousekeepAt(s: StoredSession, now: number): number | null;
 export function dueFindings(s: StoredSession, now: number): Array<{ key: string; payload: HousekeepingPayload }>;
 export function clearedKeys(s: StoredSession, now: number): string[];
 ```
+
+A key is raised against a condition's `since`. A member who sends after being
+named and goes quiet again before any firing has dropped the old key has a new
+`since`, so the second condition is a new one and starts at `repeat: 1`, whether
+or not the record still holds the first.
 
 ## Security
 

@@ -265,12 +265,34 @@ export const joinsQueue = (record: HostRecord, pending: readonly HostWake[], wak
   wake.cursor > record.lastCause && !pending.some((w) => w.cursor === wake.cursor);
 
 /**
+ * BELLMAN_HOSTED_SEAT, the switch for the hosted seat, read as BELLMAN_BILLING is
+ * (src/billing/config.ts): only "on" switches it on. Unset, empty and "off" are off, and any
+ * other value is off and logged, so a typo cannot start a seat that spends the model key.
+ *
+ * It is checked where a room is made and where a room is woken, because stopping one does
+ * not stop the other. `bellman_start` refuses a room that declares a host while the seat is
+ * off, and `handleWake` settles every wake with no read, charge or model call, which quiets
+ * the hosted rooms that exist already. A var in wrangler.toml, so that turning it on is a
+ * reviewed commit.
+ */
+export function hostedSeatOn(raw: string | undefined): boolean {
+  const value = raw?.trim().toLowerCase();
+  if (value === "on") return true;
+  if (!value || value === "off") return false;
+  // Fail closed, loudly: a typo must not switch the seat on.
+  console.error(`BELLMAN_HOSTED_SEAT is "${raw}", which is not on or off — treating it as off`);
+  return false;
+}
+
+/**
  * What a runtime does for `handleWake` (spec D7). `HostDO` reads and writes the room by
  * RPC and keeps the record in its own storage; `MemoryHost` does the same over a
  * `MemoryStore` and a map. Each queues its wakes and handles them one at a time, on its
  * alarm or on a timer, through `handleWake`, which makes every decision.
  */
 export interface HostDriver {
+  /** Whether the seat is switched on (`hostedSeatOn`). Off, `handleWake` returns before it reads or calls anything. */
+  readonly enabled: boolean;
   /** The delay before each retry, in order: `RETRY_MS`, or shorter in a test. */
   readonly retryMs: readonly number[];
   read(sessionId: string): Promise<{
@@ -328,7 +350,10 @@ const postedText = (e: SessionEvent): string => {
  * One wake, start to finish (spec D4–D6), whichever driver runs it. Returns how long to
  * wait before running the same wake again, or null when it is done with.
  *
- * In order, and nothing later runs once an earlier step has settled the wake: what the
+ * First of all, a driver that is not `enabled` (BELLMAN_HOSTED_SEAT) returns null and does
+ * nothing else: no record, room, meter or model is touched, and the wake leaves its queue.
+ *
+ * Then, in order, and nothing later runs once an earlier step has settled the wake: what the
  * record and the room alone decide (`admit`); whether this wake's post already landed, its
  * response lost (M6); the whole meter, run read-only (I4, M7); then, for a reply wake, a
  * bounded read of the log (I4); then the model and the write. So a wake the room cannot
@@ -343,6 +368,7 @@ const postedText = (e: SessionEvent): string => {
  * the record) propagates to `runWake`, which counts it the same way.
  */
 export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<number | null> {
+  if (!driver.enabled) return null;
   const record = await driver.load(wake.sessionId);
   const settle = async (r: HostRecord): Promise<null> => {
     await driver.save(wake.sessionId, { ...r, lastCause: Math.max(r.lastCause, wake.cursor), attempts: 0 });

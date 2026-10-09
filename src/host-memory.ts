@@ -47,16 +47,19 @@ export class MemoryHost {
   readonly #driver: HostDriver;
 
   /**
+   * `enabled` is the switch (BELLMAN_HOSTED_SEAT, `hostedSeatOn`), required so that no caller
+   * runs a seat without deciding: off, every wake settles with no read, charge or model call.
    * `plan` is how a room creator's plan is read at a month turn (I7). The Node server knows a
    * caller only from its key table (`resolveIdentity`), so by default that table decides,
    * and a user it does not name holds the free plan.
    */
   constructor(
     store: MemoryStore,
-    opts: { modelUrl: string; apiKey?: string; fetch?: typeof fetch; retryMs?: number[]; plan?: (userId: string) => Promise<Plan> },
+    opts: { enabled: boolean; modelUrl: string; apiKey?: string; fetch?: typeof fetch; retryMs?: number[]; plan?: (userId: string) => Promise<Plan> },
   ) {
     const fetcher = opts.fetch ?? fetch;
     this.#driver = {
+      enabled: opts.enabled,
       retryMs: opts.retryMs ?? RETRY_MS,
       read: async (id) => ({
         room: await store.getSession(id),

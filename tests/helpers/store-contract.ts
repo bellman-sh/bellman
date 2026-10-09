@@ -3098,6 +3098,17 @@ export function describeStoreContract(
         expect(await store.getPreset("u_jesse", "a")).toBeDefined();
       });
 
+      // Operator-issued ids may hold a colon, so one person's id can extend another's past
+      // the key's separator. Neither may reach the other's presets through it.
+      it("never reaches another person's presets through an id that extends this one past a colon", async () => {
+        await store.putPreset("u_x:y", preset("n"), 20);
+        expect(await store.listPresets("u_x")).toEqual([]);
+        expect(await store.getPreset("u_x", "y:n")).toBeUndefined();
+        expect(await store.deletePreset("u_x", "y:n")).toBe(false);
+        expect(await store.getPreset("u_x:y", "n")).toBeDefined();
+        expect(await store.putPreset("u_x", preset("a"), 1)).toBe("saved");
+      });
+
       it("deletes one, and says false for one it does not have", async () => {
         await store.putPreset("u_jesse", preset("a"), 20);
         expect(await store.deletePreset("u_jesse", "a")).toBe(true);

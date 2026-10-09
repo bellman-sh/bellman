@@ -5,7 +5,7 @@
  * write is keyed by the caller's own user id.
  */
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { builtinPresets } from "../manifest.js";
+import { PresetNameShape, builtinPresets } from "../manifest.js";
 import { MAX_PRESETS, checkPreset } from "../presets.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
@@ -61,7 +61,8 @@ async function writePreset(request: Request, rawName: string, origin: string | u
   const userId = who.identity.userId;
 
   if (request.method === "DELETE") {
-    if (!(await deps.store.deletePreset(userId, name))) {
+    // A name outside the grammar was never saved; the store is not asked about it.
+    if (!PresetNameShape.safeParse(name).success || !(await deps.store.deletePreset(userId, name))) {
       return problem(404, "not_found", `you have no preset named ${JSON.stringify(name)}`, origin);
     }
     return new Response(null, { status: 204, headers: corsHeaders(origin) });

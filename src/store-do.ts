@@ -2771,12 +2771,17 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * is the names' code-unit order.
    */
   async listPresets(userId: string): Promise<SavedPreset[]> {
-    const map = await this.ctx.storage.list<SavedPreset>({ prefix: `pr:${userId}:` });
-    return [...map.values()];
+    const prefix = `pr:${userId}:`;
+    const map = await this.ctx.storage.list<SavedPreset>({ prefix });
+    // A key under this prefix whose rest is not its own preset's name belongs to someone whose id
+    // extends this one past a colon, which an operator-issued id may hold. It is not this person's.
+    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => p);
   }
 
+  /** The listing's guard for one name: the record under the key must be the preset asked for. */
   async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
-    return this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
+    const p = await this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
+    return p && p.name === name ? p : undefined;
   }
 
   /**
@@ -2785,16 +2790,16 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * between this one's count and its write.
    */
   async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {
-    const key = `pr:${userId}:${preset.name}`;
-    if ((await this.ctx.storage.get(key)) === undefined) {
-      const held = await this.ctx.storage.list({ prefix: `pr:${userId}:`, limit: cap });
-      if (held.size >= cap) return "full";
+    if ((await this.getPreset(userId, preset.name)) === undefined) {
+      if ((await this.listPresets(userId)).length >= cap) return "full";
     }
-    await this.ctx.storage.put(key, preset);
+    await this.ctx.storage.put(`pr:${userId}:${preset.name}`, preset);
     return "saved";
   }
 
+  /** Only a record that is this person's, by the listing's guard. */
   async deletePreset(userId: string, name: string): Promise<boolean> {
+    if ((await this.getPreset(userId, name)) === undefined) return false;
     return this.ctx.storage.delete(`pr:${userId}:${name}`);
   }
 }

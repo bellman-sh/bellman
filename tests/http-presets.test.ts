@@ -143,6 +143,14 @@ describe("the preset routes", () => {
     expect((await call(DEV_KEY.jesse, "/presets/my_review", { method: "DELETE" }))!.status).toBe(404);
   });
 
+  it("answer 404 to a delete whose name is outside the grammar, without asking the store", async () => {
+    deps = { ...deps, store: Object.assign(Object.create(store), {
+      deletePreset: async () => { throw new Error("the store was asked"); },
+    }) };
+    const res = (await call(DEV_KEY.jesse, "/presets/y%3An", { method: "DELETE" }))!;
+    expect(res.status).toBe(404);
+  });
+
   it("answer the panel's preflight, and 405 for a method a path does not take", async () => {
     const pre = (await call(null, "/presets/my_review", { method: "OPTIONS", headers: { origin: PANEL } }))!;
     expect(pre.status).toBe(204);

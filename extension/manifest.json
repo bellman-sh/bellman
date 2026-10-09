@@ -80,6 +80,10 @@
       "description": "The rooms you hold a seat in: members, roles, last beats, codes and expiry."
     },
     {
+      "name": "bellman_surface",
+      "description": "The room's working surface, read-only: every item and the cursor of its last change. Backs the in-chat canvas."
+    },
+    {
       "name": "bellman_wait",
       "description": "Block until a queued peer event arrives."
     },

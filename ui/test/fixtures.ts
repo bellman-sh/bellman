@@ -1,4 +1,4 @@
-import type { ConnectResult, RoomsResult } from "../src/types.js";
+import type { ConnectResult, RoomsResult, SurfaceItemWire, SurfaceResult, Untrusted } from "../src/types.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -66,3 +66,33 @@ export function roomsFixture(): RoomsResult {
 }
 
 export const NOW = T0;
+
+const by = (label: string) => ({ memberId: `m_${label}`, label });
+
+function item(over: Partial<SurfaceItemWire> & { key: string; kind: string }, author = "ada@acme"): Untrusted<SurfaceItemWire> {
+  return {
+    trust: "untrusted",
+    origin: by(author),
+    data: { title: null, body: null, ends: null, placement: null, blob: null, cursor: 1, at: iso(T0 - 120_000), ...over },
+  };
+}
+
+export function surfaceFixture(): SurfaceResult {
+  return {
+    session_id: "qs_1",
+    room: roomsFixture().rooms[0].room,
+    surface: {
+      cursor: 9,
+      items: [
+        item({ key: "plan", kind: "text", title: "Plan", body: "Port v2 to v3\n\n- keep the ids", placement: { x: 10, y: 20 } }),
+        item({ key: "spec", kind: "link", title: "The spec", body: "https://example.com/spec" }, "bob@acme"),
+        item({ key: "plan_to_spec", kind: "connector", title: "argues", ends: { from: "plan", to: "spec" } }),
+        item({ key: "deck", kind: "file", title: "Deck", blob: { id: "b_deck", bytes: 2048, type: "application/pdf", name: "deck.pdf" }, placement: { x: 400, y: 20, w: 200, h: 120 } }),
+        item({ key: "photo", kind: "image", blob: { id: "b_photo", bytes: 123_456, type: "image/png", name: "photo.png" } }),
+        item({ key: "flow", kind: "diagram", title: "Flow", body: "graph TD; A-->B" }),
+        item({ key: "widget", kind: "html", title: "Widget", body: "<h1>hi</h1><script>document.title='w'</script>" }),
+        item({ key: "report", kind: "html", title: "Report", blob: { id: "b_report", bytes: 9_000, type: "text/html", name: "report.html" } }),
+      ],
+    },
+  };
+}

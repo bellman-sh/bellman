@@ -19,7 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember,
+  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
@@ -251,6 +251,31 @@ export function findMember(s: StoredSession, memberId: string, identity: Identit
 
 export const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
+
+/** Every handle this person holds in the room, in roster order. Empty means a stranger. Structural, so a test can hand it a fixture. */
+export const handlesOf = (session: Pick<StoredSession, "members">, identity: Pick<Identity, "userId">): Member[] =>
+  session.members.filter((m) => m.userId === identity.userId);
+
+/**
+ * Where a person's reading stops (#113), if anywhere. Only when every handle
+ * they hold was removed: a handle still in the room, or one that left of its
+ * own accord, keeps the open feed, as it does on `bellman_sync`. With several
+ * removed handles, the latest cut: the most this person was ever shown.
+ * Shared by the room routes and bellman_surface (canvas spec D2).
+ */
+export const cutFor = (handles: readonly Member[]): number | undefined =>
+  handles.every(isRemovedMember)
+    ? Math.max(...handles.map((m) => m.removedAtCursor ?? 0))
+    : undefined;
+
+/**
+ * The same cut as a moment, for what a cursor cannot bound: the roster and the
+ * member count carry times and no cursors. `markRemoved` sets `leftAt` in the
+ * write that sets the cut, so the latest removal's `leftAt` is when this person's
+ * reading stopped. Undefined exactly when `cutFor` is, since it asks `cutFor`.
+ */
+export const cutAtFor = (handles: readonly Member[]): number | undefined =>
+  cutFor(handles) === undefined ? undefined : Math.max(...handles.map((m) => m.leftAt ?? 0));
 
 /**
  * The surface as a member reads it (#129, D7): every row in an envelope, and

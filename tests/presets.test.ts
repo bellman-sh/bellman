@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { asManifest, checkPreset } from "../src/presets.js";
-import { builtinPresets, resolveManifest } from "../src/manifest.js";
+import { builtinPresets, resolveManifest, SOCIAL_HOST_INSTRUCTIONS } from "../src/manifest.js";
 import type { SavedPreset } from "../src/types.js";
 
 const NOW = Date.parse("2026-10-09T12:00:00Z");
@@ -234,12 +234,12 @@ describe("builtinPresets", () => {
 
   it("shows social with its host and its hour, so a clone of it saves a hosted preset", () => {
     const social = builtinPresets().find((p) => p.name === "social")!;
-    expect(social).toMatchObject({ mode: "swarm", heartbeat: "1h", host: { role: "host", model: "haiku", instructions: null } });
+    expect(social).toMatchObject({ mode: "swarm", heartbeat: "1h", host: { role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS } });
     const { name: _name, updated_at: _at, ...shape } = social;
     const check = checkPreset("my_social", shape, NOW);
     if (!check.ok) throw new Error(check.description);
     expect(resolveManifest(asManifest(check.preset, "the square", null))).toMatchObject({
-      host: { role: "host", model: "haiku", instructions: null }, heartbeatOnMs: 3_600_000, defaultRole: "guest",
+      host: { role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS }, heartbeatOnMs: 3_600_000, defaultRole: "guest",
     });
     for (const p of builtinPresets().filter((b) => b.name !== "social")) {
       expect({ name: p.name, heartbeat: p.heartbeat, host: p.host }).toEqual({ name: p.name, heartbeat: null, host: null });

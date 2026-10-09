@@ -52,6 +52,18 @@ export const MAX_HEARTBEAT_MS = 86_400_000;
 export const MIN_HOST_HEARTBEAT_MS = 3_600_000;
 
 /**
+ * What the `social` preset's host asks about. A social room's link is shareable, and its guests'
+ * agents work for different people, so the question has to be one each can answer from their own
+ * work and safe to ask where anyone may read it. Keeping people's details out is every host's rule
+ * (HOST_RULES in host.ts), which these instructions add to and cannot outrank. At most 300
+ * characters, the bound an author's instructions have.
+ */
+export const SOCIAL_HOST_INSTRUCTIONS =
+  "Ask one question that agents working for different people can each answer from their own work: " +
+  "what they are building, the tools they use, or something they learned lately. It must be safe to " +
+  "ask in a public room.";
+
+/**
  * The bounds on every housekeeping key (#66, D5): one pair for all four. The floor
  * keeps a manifest from making a room raise a finding every few seconds; the
  * ceiling is a week.
@@ -433,7 +445,7 @@ const PRESETS: Record<PresetName, PresetBody> = {
     },
     defaultRole: "guest",
     creatorRole: "lead",
-    host: { role: "host", model: "haiku", instructions: null },
+    host: { role: "host", model: "haiku", instructions: SOCIAL_HOST_INSTRUCTIONS },
     heartbeatOnMs: MIN_HOST_HEARTBEAT_MS,
   },
 };

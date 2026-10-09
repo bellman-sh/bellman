@@ -122,14 +122,14 @@ Plans gate **creating** a room, not joining one. Anyone signed in can be invited
 | --- | --- | --- | --- | --- | --- | --- |
 | `free` | pair | 20 | 50 MB | 7 days | — | |
 | `pro` | pair, swarm | 500 | 500 MB | 1 year | — | |
-| `max` | pair, swarm | 2,000 | 5 GB | until deleted | 3 rooms / month | *not on sale yet* |
-| `team` | pair, swarm | 5,000 | 5 GB | until deleted | 5 rooms / month | `org_only` scoping, audit trail |
+| `max` | pair, swarm | 2,000 | 5 GB | until deleted | 3 rooms open at once | *not on sale yet* |
+| `team` | pair, swarm | 5,000 | 5 GB | until deleted | 5 rooms open at once | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
 Max and team buy a hosted seat: a member Bellman runs, labelled `host@bellman` whatever its role is called. A room declares it in its manifest's `host` block ([declaring a room](#declaring-a-room-in-your-repo)), and `bellman_start` seats it beside the creator, holding the verb `send` and nothing else. Once a cadence, its room's `heartbeat_on`, it asks the room a question, which starts its own thread: the question carries no `ref_id`, and the tick it answers rides in its payload as `tick`. A member answers with a `message` whose `ref_id` is the question's cursor, and the host replies in that thread, up to three times, until it asks a newer question. It asks on its own cadence only: a tick written because a reporting seat was due does not wake it. It is woken only when a person has been in the room since it last asked, or is connected to it, so a room nobody visits spends one question, the first, which the creator's own seat earns, and nothing after. A tick that asks nobody for a report reaches members without interrupting them; the question interrupts on its own. Evicting the host (`bellman_evict` on `m_host`) stops it: nothing wakes it again, and the room refuses its writes. The host never keeps a room open: a hosted room ends when its last person leaves, or after 90 days in which no person in it was seen. What it writes reaches members as peer content, untrusted like any member's, and a team org's audit stream records its sends as it records any member's.
 
-A hosted seat is metered in wakes, one model call each, weighted by the model: Haiku 1, Sonnet 3, Opus 5. A hosted room spends up to 3,000 units a month and ticks no faster than once an hour; an Opus host at an hourly beat, in a room that replies to every question, is quiet after six days, and at a daily beat it lasts the month. It sends eight times an hour at most. The units are stamped on the room from its creator's plan when it is created, as the blob ceiling is, and a month that runs out gets one notice from the host, outside the meter, and then quiet until the month turns. A wake the meter would refuse costs no model call, and an answer the model cut off at its token cap, or declined, is never posted or charged.
+A hosted seat is metered in wakes, one model call each, weighted by the model: Haiku 1, Sonnet 3, Opus 5. A hosted room spends up to 3,000 units a month and ticks no faster than once an hour; an Opus host at an hourly beat, in a room that replies to every question, is quiet after six days, and at a daily beat it lasts the month. It sends eight times an hour at most. A plan's hosted rooms are the most its holder has open at once: a hosted room takes a slot when it is created and gives it back when it closes, so a creator on max can start a fourth once one of three has ended. A room's units for each month come from its creator's plan as it is when the month begins: a creator still on max or team gets the month's 3,000, and one whose plan no longer includes a hosted seat gets none, so the host posts one notice saying it is paused and calls no model until a month begins on a plan that includes it again. A month that runs out gets one notice from the host, outside the meter, and then quiet until the month turns. A wake the meter would refuse costs no model call, and an answer the model cut off at its token cap, or declined, is never posted or charged.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
@@ -386,7 +386,7 @@ The room must be a swarm room, and must set `heartbeat_on` to at least `1h`:
 a pair room's two seats are its members', and a host with no tick has nothing to
 wake it. The server refuses a manifest that breaks any of these, naming the
 rule. `bellman_start` refuses a hosted room on free and pro, and past the
-plan's hosted rooms for the month. `instructions` follow Bellman's own rules
+plan's hosted rooms open at once. `instructions` follow Bellman's own rules
 for the host in its prompt, which ends saying those rules outrank them; they
 cannot give it a tool or a verb, or a name: the host is `host@bellman` whatever
 its role is called.

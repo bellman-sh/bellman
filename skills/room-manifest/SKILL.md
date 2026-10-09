@@ -198,9 +198,10 @@ Three refusals an author meets:
   least 1h)`; under it, `a room with a host must tick no faster than 1h (got
   "30m")`.
 - **The plan.** `bellman_start` refuses a host on free and pro, `a hosted seat
-  requires the max or team plan (you are on "pro")`. Max creates three hosted
-  rooms a month and team five; the fourth on max is `monthly hosted room limit
-  reached (3 on the "max" plan)`.
+  requires the max or team plan (you are on "pro")`. A plan's hosted rooms are the
+  most open at once, three on max and five on team; with three open on max the
+  answer is `hosted room limit reached: 3 hosted rooms open, the most the "max"
+  plan allows. A hosted room that closes frees its slot.`
 - **The pair room.** A host needs `mode: swarm`. With `mode: pair` the answer is
   `a pair room cannot have a host: its two seats are its members'`.
 

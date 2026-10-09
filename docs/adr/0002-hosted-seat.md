@@ -26,11 +26,16 @@ attach to (ADR 0001, decision 3), and nothing sold it.
    declares one. The seat calls the model on Bellman's key; no member's
    credentials reach it. Evicting it stops it: nothing wakes it again and the
    room refuses its writes.
-2. **The plan buys an allowance, not a meter.** Max creates three hosted rooms a
-   month and team five. Free and pro create none, and `bellman_start` refuses
-   them naming the plan. Each hosted room carries `hostUnitsPerMonth`, 3,000 on
-   both plans, stamped from the creator's plan at creation and never read from a
-   plan again, the blob ceiling's rule.
+2. **The plan buys hosted rooms open at once, and an allowance each month for
+   each, not a meter.** Max holds three hosted rooms open at once and team five.
+   Free and pro hold none, and `bellman_start` refuses them naming the plan. A
+   hosted room takes one of its creator's slots in `RegistryDO` when it is
+   created, counted and recorded in one transaction, and gives it back when it
+   closes or is purged. Each hosted room carries `hostUnitsPerMonth`, 3,000 on
+   both plans: stamped from the creator's plan at creation, and read from the
+   creator's plan again at the first wake of each later month, 0 once that plan
+   includes no hosted seat, which pauses the host until a month begins on a plan
+   that includes one.
 3. **The unit is a wake, weighted by the model.** A wake is one Messages API call
    with a bounded prompt and a bounded answer, so its worst cost is known and the
    count is the meter. It costs `haiku` 1, `sonnet` 3 or `opus` 5 units. Those
@@ -72,9 +77,14 @@ attach to (ADR 0001, decision 3), and nothing sold it.
 
 - Deploying needs the `HOST` binding, migration `v3`, and the
   `ANTHROPIC_API_KEY` secret before the first hosted room. A build rolled back
-  past this change throws `outbox: unknown kind host` on a queued wake, and the
-  room's outbox, first in first out, holds every row behind it; the deployment
-  rolls forward.
+  past this change throws `outbox: unknown kind host` on a queued wake, or
+  `outbox: unknown kind hosted_release` on a hosted room's close, and the room's
+  outbox, first in first out, holds every row behind it; the deployment rolls
+  forward.
+- Each hosted room reads its creator's plan once a month, at its first wake of
+  the month: a registry read for a signed-in creator. The read is outside the
+  room's transaction, so a plan that changes between it and the charge costs
+  one wake at most.
 - `MAX_HEARTBEAT_MS` is a day for every room, so a daily host exists. An Opus
   host at an hourly beat, in a room that replies to every question, is quiet
   after six days; at a daily beat it lasts the month.
@@ -135,3 +145,16 @@ Each is reflected above; what changed and why:
   member's human to act on their own machine, which is no part of answering the
   room's question; a seat that can only read would be asked the host's questions
   every hour with no way to answer them.
+- **Three at a time, quiet on lapse (decision 2, the owner's ruling on the
+  review's I7).** Decision 2 first counted hosted creations a month and stamped
+  each room's 3,000 units once, never read from a plan again, the blob ceiling's
+  rule. That held D2's cost bound (three busy Haiku rooms at $25 at worst
+  against max's $30, five at $42 against team's $60) for the first month only:
+  every hosted room kept renewing its units for its whole life, a creator could
+  add three more each month and keep them all, and kept them after cancelling.
+  A plan's hosted rooms are now the most open at once, with a slot taken in one
+  registry transaction so parallel starts cannot both pass, and each month's
+  units come from the creator's plan as it is when the month begins. The
+  entitlement is renamed from `hostedRoomsPerMonth` to `hostedRooms`, since it
+  no longer counts a month. The blob ceiling keeps its rule: storage costs
+  nothing to keep, and model calls cost every month.

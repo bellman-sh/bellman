@@ -639,10 +639,16 @@ creator's instructions, and `resolveManifest` requires the role to hold exactly
 `send` and not report, the room to be a swarm room, and `heartbeat_on` to be at
 least an hour. A cite may set `heartbeat_on` only for `social`, the one preset
 with a host; a cite of any other is refused for it, since nothing there would
-tick. `bellman_start` refuses a plan with no hosted rooms (free, pro) and a
-creator past the plan's hosted rooms for the month (3 on max, 5 on team, counted
-in `RegistryDO` beside the create count), then seats the host beside the creator
-as `m_host`, under the user `u_bellman_host`, labelled `host@bellman` whatever
+tick. `bellman_start` refuses a plan with no hosted rooms (free, pro), then takes
+one of the creator's hosted-room slots: a plan's hosted rooms are the most its
+holder has open at once (3 on max, 5 on team), not a count of creations a month.
+`RegistryDO.reserveHostedRoom` counts the creator's `ho:<userId>:` rows and adds
+one in a single transaction, so two starts at the limit cannot both pass, and the
+refusal names the count open and the plan. A hosted room gives its row back as it
+closes, however it closes, through a `hosted_release` row queued in the close's
+own transaction, and again, idempotently, when it is purged; a start whose room
+is never created gives its slot straight back. Then `bellman_start` seats the host
+beside the creator as `m_host`, under the user `u_bellman_host`, labelled `host@bellman` whatever
 its role is called: a label built from the creator's role name, `security@bellman`
 say, would lend Bellman's name to the creator's words. It never joins by code and
 never holds a socket. ADR 0002 records the decisions.
@@ -713,8 +719,18 @@ bounded read; then the model and the write.
 
 **The meter is the room's.** A wake costs its model's weight in units (`haiku` 1,
 `sonnet` 3, `opus` 5, `HOST_MODELS`), charged against `hostUnitsPerMonth`, which
-`bellman_start` stamps on the room from the plan (3,000 on max and team) and
-nothing reads from a plan again, the blob ceiling's rule. The send and the
+`bellman_start` stamps on the room from the plan (3,000 on max and team). Unlike
+the blob ceiling, it is not stamped for good: at the first wake of each later
+month, before any model call, the seat reads the creator's plan as it is then and
+writes the month's allowance (`renewHostAllowance`), the creator's plan's units if
+that plan still includes a hosted seat and 0 if it does not. The read resolves a
+user id as a call from that user would be: a key table that names them
+(`keyedPlan`; the Worker reads only `BELLMAN_KEYS`, never the dev keys), else what
+their next token refresh would carry (`signedInPlan`, `replanOnRefresh` over their
+provider subject), else free. It is not inside the room's transaction, so a plan
+that changes between the read and the write costs one wake at most. A month with
+no units is a paused host: one notice saying so, and no model call until a month
+begins on a plan that includes a hosted seat again. The send and the
 charge are one write: `SessionDO.appendHostEvent` runs `decideHostCharge`, the
 rule `MemoryStore` shares, and appends the event in the same transaction, so an
 answer is never sent without its charge or charged without being sent. The same
@@ -1376,6 +1392,10 @@ It is used four times:
   entry, a session holding a code nothing resolves, was open: a stale `jc:` row
   was already inert, because `getSessionByJoinCode` re-reads the session and
   requires the code to still be in its `joinCodes`.
+  A hosted room's close queues one more row on this pair, `hosted_release`, in the
+  close's transaction: it gives the creator's hosted-room slot back (I7), and a
+  delete of an absent row is harmless, so a redelivery is absorbed by the registry
+  as it is.
 - **`SessionDO → AuditDO` ([#73](../../../issues/73), [#117](../../../issues/117)).**
   `removeMember` queues a removal's audit rows, and those of the door it shuts,
   in the transaction that makes the change each one records. Auditing afterwards
@@ -1675,12 +1695,16 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,337** | every request, whether or not you are in a room |
+| Tool definitions | **~7,354** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured the same day after the live cap on hosted rooms (I7): 7,354 tokens,
+17 more, all `bellman_start`'s, whose error line now names the hosted room limit
+as rooms open rather than a monthly quota (`bellman_start` 1,787).
 
 Tool definitions were re-measured on 2026-10-09 after the hosted seat (#188) and
 its fixes: 7,337 tokens in all, 315 over the 7,022 recorded at `d5bba8c`, which

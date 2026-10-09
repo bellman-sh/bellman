@@ -77,6 +77,15 @@ gains `hostUnitsPerMonth` (stamped from the plan at creation, never consulted
 against a plan again, the blob ceiling's rule) and `hostUnits: { month, used }`.
 A downgrade does not reach into an existing room.
 
+(Changed after review, by the owner's ruling, "3 at a time, quiet on lapse": the
+column above is hosted rooms open at once, not created a month, held as a slot in
+`RegistryDO` that a room gives back when it closes, and the entitlement is
+`hostedRooms`. A room's units for each later month are read from its creator's
+plan as it is then, and a creator whose plan no longer includes a hosted seat gets
+none, so a downgrade does reach an existing room, at its next month. ADR 0002
+records the ruling and why: this section's cost bound held for the first month
+only.)
+
 Max is sold on this. Shipping it is what adds the `max` entry to
 `STRIPE_PAYMENT_LINKS` and turns the site's card from *coming soon* to a buy
 button; that is the site follow-up.
@@ -231,8 +240,9 @@ no key and spends none even with a key exported; it says at startup which.
 | `host.role` undeclared, or holds a verb other than `send`, or reports | `resolveManifest` refuses, naming the rule |
 | `host.model` not in the list | refused, listing the names |
 | `host` set with `heartbeat_on` under 1 h, or absent | refused, naming the floor |
-| `host` on a plan with `hostedRoomsPerMonth: 0` | `bellman_start` refuses, naming the plan |
-| fourth hosted room on max in a month | `bellman_start` refuses, as for the create limit |
+| `host` on a plan with `hostedRooms: 0` | `bellman_start` refuses, naming the plan |
+| fourth hosted room open at once on max | `bellman_start` refuses, naming the count open and the plan |
+| the creator's plan no longer includes a hosted seat | at the next month's first wake the room's units are 0: one notice that the host is paused, no model call |
 | wake would cross `hostUnitsPerMonth` | the send is refused in the transaction; one message outside metering; quiet until the month turns |
 | ninth wake in an hour | refused before the model is called; the wake is dropped; the next tick wakes it again |
 | host evicted | nothing wakes it; a wake already queued is dropped with no model call; the room refuses its writes |
@@ -273,7 +283,7 @@ Every new assertion is run against a broken implementation before it counts.
 
 | File | Change |
 |---|---|
-| `src/types.ts` | `Entitlements.hostedRoomsPerMonth`, `hostUnitsPerRoom`; `Session.hostUnitsPerMonth`, `hostUnits`; `RoomManifest.host` |
+| `src/types.ts` | `Entitlements.hostedRooms`, `hostUnitsPerRoom`; `Session.hostUnitsPerMonth`, `hostUnits`; `RoomManifest.host` |
 | `src/auth.ts` | the two entitlements per plan; max's comment loses "nothing sells it" |
 | `src/manifest.ts` | `HostShape`, the model table with weights, the refusals, the `social` preset |
 | `src/host.ts` | new, runtime-free: the loop |

@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: 87ad161
+last-verified-against-source: 21f13b4
 last-updated: 2026-10-09
 ---
 
@@ -833,11 +833,24 @@ tests run the seat; ADR 0002 records when production does.
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally
 placed items — `text`, `link`, `diagram`, `connector`, the blob-backed `file`
-and `image`, and `html` — that members read and a seat holding `write_surface`
-keeps current. The log is how the surface got that way; the surface is where
-things stand. Blobs, piece 2, are the next subsection. The `html` kind (#185) is
-the server's half of piece 4; the canvas (piece 3) and the sandbox that renders
-`html` and `diagram` items (`bellman-sh/dash#14`) are the control panel's.
+and `image`, `html`, and `shape` — that members read and a seat holding
+`write_surface` keeps current. The log is how the surface got that way; the
+surface is where things stand. Blobs, piece 2, are the next subsection. The
+`html` kind (#185) is the server's half of piece 4; the canvas (piece 3) and the
+sandbox that renders `html` and `diagram` items (`bellman-sh/dash#14`) are the
+control panel's.
+
+The `shape` kind (#197) is a few numbers the canvas draws: its own field,
+`shape { form, color, flip }`, beside `ends` and `blob`, with five forms and six
+colours by name, stored with their defaults (`slate`, `false`) applied so a
+reader never branches on absence. Its rules are `normalizeSurfaceWrite`'s: a
+shape needs `placement { x, y, w, h }`, because its size is the placement's, and
+takes no `body`, because its label is the `title`; `flip: true` is for an arrow
+or a line and is refused on any other form, while `flip: false`, the default
+every stored shape carries, is accepted so that a shape read back can be sent
+back; and no other kind may carry the field. The stores keep it with the row, as
+they keep `blob`, the projection carries it for every item and reads `null` for a
+row written before it, and the canvas side is `bellman-sh/dash#15`.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -1765,12 +1778,20 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,651** | every request, whether or not you are in a room |
+| Tool definitions | **~7,722** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 7,722
+tokens, 71 over the 7,651 that main's head (`bfebd30`) measures by the same method,
+the figure the next paragraph records. All 71 are `bellman_send`'s (1,294 to 1,365):
+69 for the `shape` clause in the `surface` line's `Kinds:` sentence, which names the
+field, its forms and colours and `flip`, and says that the size is the placement's
+and the label is the title, and 2 for `shape?` in the payload's field list. No other
+entry in the listing changed, and no tool was added.
 
 Re-measured on 2026-10-09 for room housekeeping (#66), by the method below: 7,651
 tokens, 274 over the 7,377 that main's head (`7bc37e7`) measures by the same method,

@@ -665,7 +665,7 @@ describe("file and image items (#183)", () => {
   // Review Focus 3: read, edit, send back works for a blob-backed item too, once the server's
   // fields come off — the three inside `blob` as well as the two on top. zod reports the nested
   // issue before the top-level one and the refusal names only the first, so each step asserts
-  // its first issue by its path (`blob: `; the refusal's own prefix says `blob? }`, never
+  // its first issue by its path (`blob: `; the refusal's own prefix says `blob?, shape? }`, never
   // `blob: `) and by the key it names, and says which issue is not the first.
   it("reads a file item back with its blob, and accepts it back once the server's fields are stripped", async () => {
     const p = await pairUp(h);

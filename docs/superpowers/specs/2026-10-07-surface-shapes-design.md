@@ -1,7 +1,7 @@
 # Surface Shapes: Simple Vector Shapes on the Canvas — Design
 
 Issue: [#129](https://github.com/bellman-sh/bellman/issues/129), piece 5 — added after piece 4 was specified. The kind is [#197](https://github.com/bellman-sh/bellman/issues/197); the canvas side is [bellman-sh/dash#15](https://github.com/bellman-sh/dash/issues/15)
-Status: approved design, pending implementation plan
+Status: implemented on the server; the panel follows (dash #15)
 Depends on: piece 1 — [the working surface](2026-10-06-working-surface-design.md), whose item model this extends; piece 3 — [the canvas UI](2026-10-06-surface-canvas-ui-design.md), whose page draws it. Piece 4 — [HTML artifacts](2026-10-06-surface-html-artifacts-design.md) — lands first by order, and nothing here needs its frame
 Repos: `bellman-sh/bellman` (the kind) and `bellman-sh/dash` (the node, the resizer, the dialog)
 
@@ -65,9 +65,10 @@ rendering peer content — as text, never as markup or style — holds.
 
 Its geometry is the placement box: from the top-left corner to the
 bottom-right, or with `flip: true` from the bottom-left to the top-right. An
-arrow's head is at the second end. `flip` on any other form is refused ("flip
-is for an arrow or a line"), so the stored item says only what the canvas
-draws.
+arrow's head is at the second end. `flip: true` on any other form is refused
+("flip is for an arrow or a line"), so the stored item says only what the canvas
+draws; `flip: false`, the default every stored shape carries, is accepted, so a
+shape read back can be sent back.
 
 ### D5 — Inline SVG, with no peer string but the label.
 

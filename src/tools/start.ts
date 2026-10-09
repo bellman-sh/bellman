@@ -7,7 +7,8 @@ import { roomPreview } from "../projections.js";
 import type { Brief, Capability, Identity, Member, RoomManifest, Session } from "../types.js";
 import { entitlementsFor } from "../auth.js";
 import { generateSessionId, joinUrl, renderJoinCode } from "../codes.js";
-import { ManifestError, ManifestShape, resolveManifest } from "../manifest.js";
+import { ManifestError, ManifestShape, PRESET_NAMES, resolveManifest } from "../manifest.js";
+import { asManifest } from "../presets.js";
 import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL } from "../store.js";
 import type { BellmanStore } from "../store.js";
@@ -24,7 +25,7 @@ The join code (e.g. BELL-7F3K-92-PEER-B) is human-relayable: paste it into anoth
 
 Args:
   - manifest: the room's declaration. Either cite a preset —
-    { room, purpose?, preset: "pair" | "swarm" | "review" } — or author roles:
+    { room, purpose?, preset: "pair" | "swarm" | "review", or the name of a preset you saved at dash.bellman.sh/presets } — or author roles:
     { room, purpose?, mode, roles: { <role>: { can: [verbs] } }, default_role, creator_role }.
     Verbs: send, invite, revoke, request_actions, respond_actions, write_surface.
     Verbs are enforced by the server: a role's list is what each seat may actually do, and a call outside it is refused; reading the room and leaving it are never gated.
@@ -57,7 +58,22 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       // plan check below reads the mode the manifest declares.
       let manifest: RoomManifest;
       try {
-        manifest = resolveManifest(manifestInput);
+        // A cited name that is not a built-in is one of the caller's saved presets
+        // (designer spec D6): the room is authored from it here, so resolveManifest
+        // only ever sees a built-in cite or an author arm and stays pure. Unknown
+        // everywhere, the refusal names both lists.
+        let input: unknown = manifestInput;
+        if ("preset" in manifestInput && !(PRESET_NAMES as readonly string[]).includes(manifestInput.preset)) {
+          const saved = await s.getPreset(identity.userId, manifestInput.preset);
+          if (!saved) {
+            const yours = (await s.listPresets(identity.userId)).map((p) => p.name);
+            throw new ManifestError(
+              `unknown preset "${manifestInput.preset}" (built-in: ${PRESET_NAMES.join(", ")}; yours: ${yours.length > 0 ? yours.join(", ") : "none"})`,
+            );
+          }
+          input = asManifest(saved, manifestInput.room, manifestInput.purpose);
+        }
+        manifest = resolveManifest(input);
       } catch (e) {
         if (e instanceof ManifestError) return fail(`invalid manifest — ${e.message}`);
         throw e;

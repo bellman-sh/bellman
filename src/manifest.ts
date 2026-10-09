@@ -180,7 +180,7 @@ const RolesShape = z.preprocess(
 const CiteShape = z.strictObject({
   room: z.string().min(1).max(80),
   purpose: z.string().max(300).nullish(),
-  preset: z.enum(PRESET_NAMES),
+  preset: PresetNameShape,
 });
 
 const AuthorShape = z.strictObject({
@@ -367,11 +367,11 @@ export function resolveManifest(input: unknown): RoomManifest {
   const v = parsed.data;
 
   if ("preset" in v) {
-    const body = PRESETS[v.preset];
+    const body = PRESETS[v.preset as PresetName];
     return {
       room: v.room,
       purpose: v.purpose ?? null,
-      preset: v.preset,
+      preset: v.preset as PresetName,
       mode: body.mode,
       roles: structuredClone(body.roles),
       defaultRole: body.defaultRole,

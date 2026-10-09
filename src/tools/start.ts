@@ -125,6 +125,12 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // reach into it. The meter starts empty in this month.
         hostUnitsPerMonth: manifest.host === null ? 0 : ent.hostUnitsPerRoom,
         hostUnits: { month: monthKey(now), used: 0, wakes: [] },
+        // The window a closed room is kept for (#65, D1), stamped as the ceiling above is: a plan
+        // change after the fact never shortens a room that was promised one.
+        retainAfterCloseMs: ent.retainAfterCloseMs,
+        closedAt: null,
+        purgeAt: null,
+        blobsSwept: false,
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

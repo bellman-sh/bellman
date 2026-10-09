@@ -141,6 +141,14 @@ export interface Session {
   members: Member[];
   events: SessionEvent[];
   closed: boolean;
+  /** When `closed` was set (#65). null while open, and on rows closed before #65. */
+  closedAt: number | null;
+  /** The window stamped at creation from the creator's plan (#65, D1); null keeps the room until deleted. */
+  retainAfterCloseMs: number | null;
+  /** A purge asked for by DELETE /rooms/:id (#65, D6): due at this time instead of the window's end. */
+  purgeAt: number | null;
+  /** Whether the close-time sweep of unnamed objects has run (#65, D3). */
+  blobsSwept: boolean;
   /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
@@ -210,6 +218,11 @@ export interface Entitlements {
   hostedRoomsPerMonth: number;
   /** Units a hosted room may spend a month, stamped on the room at creation (spec D3). */
   hostUnitsPerRoom: number;
+  /**
+   * How long a closed room's record and bytes are kept before the purge (#65,
+   * D1): null keeps them until a creator or an org admin deletes the room.
+   */
+  retainAfterCloseMs: number | null;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.

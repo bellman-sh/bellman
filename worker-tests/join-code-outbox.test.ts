@@ -110,10 +110,16 @@ const live = () => Date.now() + JOIN_CODE_TTL;
 const sessionStub = (id: string) => env.SESSION.get(env.SESSION.idFromName(id));
 const registry = () => env.REGISTRY.get(env.REGISTRY.idFromName("registry"));
 
-/** A room holding a live code for each of two roles. */
+/**
+ * A room holding a live code for each of two roles. Its sweep has run (#65): these cases are about
+ * the outbox's alarm, and a closed room that still owed its sweep would have the alarm due at the
+ * close, ahead of the grace the queue's own backstop is armed behind, and the real alarm would
+ * deliver the rows before a case had looked at them.
+ */
 const twoCodes = (id: string) =>
   session({
     id,
+    blobsSwept: true,
     joinCodes: { peer_b: { code: A, expiresAt: live() }, peer_a: { code: B, expiresAt: live() } },
   });
 

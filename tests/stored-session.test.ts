@@ -217,3 +217,34 @@ describe("hydrateStoredSession — a record stored before the hosted seat", () =
     expect(row.hostUnitsPerMonth).toBe(3000);
   });
 });
+
+/**
+ * A record closed before retention (#65): it carries `closed: true` and none of the four fields the
+ * purge reads. The keys are ABSENT, not undefined, which is what Durable Object storage hands back.
+ * Every default is the one that keeps the room: no known close time, no window, no delete asked for,
+ * and a sweep that has not run (it never will, without a close time to date it from).
+ */
+describe("hydrateStoredSession — a record closed before retention", () => {
+  const legacyClosed = () => {
+    const { events: _events, closedAt: _c, retainAfterCloseMs: _r, purgeAt: _p, blobsSwept: _b, ...raw } =
+      session({ closed: true });
+    // Without this, a fixture that grew the fields would pass for the wrong reason.
+    for (const key of ["closedAt", "retainAfterCloseMs", "purgeAt", "blobsSwept"]) {
+      expect(key in raw, key).toBe(false);
+    }
+    return raw;
+  };
+
+  it("reads the four missing fields as the ones that keep the room", () => {
+    expect(hydrateStoredSession(legacyClosed())).toMatchObject({
+      closed: true, closedAt: null, retainAfterCloseMs: null, purgeAt: null, blobsSwept: false,
+    });
+  });
+
+  /** A default that clobbered would erase every window a room was promised, and every delete asked for. */
+  it("leaves fields the room already carries alone", () => {
+    expect(hydrateStoredSession({
+      ...legacyClosed(), closedAt: 1_000, retainAfterCloseMs: 500, purgeAt: 1_200, blobsSwept: true,
+    })).toMatchObject({ closedAt: 1_000, retainAfterCloseMs: 500, purgeAt: 1_200, blobsSwept: true });
+  });
+});

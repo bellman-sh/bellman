@@ -276,6 +276,7 @@ Returns: { blob_id, bytes, type, kind, cursor, room_members } — type is what t
     type: "object",
     properties: {
       session_id: { type: "string" },
+      room_id: { type: "string", description: "session_id under another name, for a host that reserves it." },
       member_id: { type: "string" },
       path: { type: "string" },
       key: { type: "string" },
@@ -287,7 +288,7 @@ Returns: { blob_id, bytes, type, kind, cursor, room_members } — type is what t
         required: ["x", "y"],
       },
     },
-    required: ["session_id", "member_id", "path", "key"],
+    required: ["member_id", "path", "key"],
   },
   annotations: {
     readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
@@ -801,7 +802,8 @@ export function createBridge(opts: BridgeOptions) {
   function observe(name: string, args: Record<string, unknown>, result: CallToolResult): void {
     if (result.isError) return;
     const out = (result.structuredContent ?? {}) as Record<string, unknown>;
-    const sessionId = String(out.session_id ?? args.session_id ?? "");
+    // room_id is session_id under another name (RoomRefShape in tools/kit.ts); the server answers with session_id either way.
+    const sessionId = String(out.session_id ?? args.session_id ?? args.room_id ?? "");
     const memberId = String(out.member_id ?? args.member_id ?? "");
 
     switch (name) {
@@ -1264,11 +1266,11 @@ export function createBridge(opts: BridgeOptions) {
     const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
     const upload = opts.upload;
     if (!upload) return fail("this bridge has no upload target configured, so bellman_upload cannot post anything");
-    const sessionId = String(args.session_id ?? "");
+    const sessionId = String(args.session_id ?? args.room_id ?? "");
     const memberId = String(args.member_id ?? "");
     const path = String(args.path ?? "");
     const key = String(args.key ?? "");
-    if (!sessionId || !memberId || !path || !key) return fail("session_id, member_id, path and key are required");
+    if (!sessionId || !memberId || !path || !key) return fail("session_id (or room_id), member_id, path and key are required");
 
     let file: { bytes: Buffer<ArrayBuffer> };
     try {

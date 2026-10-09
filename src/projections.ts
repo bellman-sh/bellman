@@ -5,6 +5,7 @@ import { reportRow } from "./heartbeat.js";
 import { asked, capacityOf, isActiveMember } from "./store.js";
 import { activeMembers, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
+import { purgeDueAt } from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
 
 // Deliberately not in server.ts, for the reason public-event.ts gives for
@@ -112,6 +113,12 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * creator's); resolveManifest checked both against `roles`. Do not pass a name
  * that has not been validated that way.
  *
+ * Or null, for a reader who holds no seat: an org admin reading a closed room
+ * their org sat in (#65, D4). The preview is then the one a seat sees with the
+ * three fields about the viewer's own seat emptied (`your_role` null,
+ * `your_verbs` none, `you_report` false), so the page that renders one renders
+ * the other, and nothing here promises a seat that does not exist.
+ *
  * The creator gets the same block, not a second shape: their own words come back
  * inside the same envelope. That is deliberate. One function builds it for every
  * seat, so the trust split cannot differ between them.
@@ -122,7 +129,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
  * lookup back into this function: a preview that over-promised by a single verb
  * is the failure this whole design exists to prevent.
  */
-export function roomPreview(session: StoredSession, viewerRole: string) {
+export function roomPreview(session: StoredSession, viewerRole: string | null) {
   const m = session.manifest;
   const creator = session.members[0];
   /**
@@ -157,11 +164,11 @@ export function roomPreview(session: StoredSession, viewerRole: string) {
     preset: m.preset,
     mode: m.mode,
     your_role: viewerRole,
-    your_verbs: verbsOfRole(m, viewerRole),
+    your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
     heartbeat_on_seconds: m.heartbeatOnMs === null ? null : Math.round(m.heartbeatOnMs / 1000),
     // The viewer's own obligation, hoisted as your_verbs is: the fact the
     // joiner's human is deciding on.
-    you_report: asked(viewerRole),
+    you_report: viewerRole === null ? false : asked(viewerRole),
     creator_role: m.creatorRole,
     roles,
     // Every seat's obligation, by the same rule, so the roles table a joiner
@@ -249,6 +256,18 @@ export function roomSummary(
       })),
     last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,
   };
+}
+
+/**
+ * When the room closed and when it goes, for the detail (#65, review M8): the two times a member has no
+ * other way to learn, on the record already. ISO, as this module's other times are spelled, and null
+ * where the record has none: an open room, a room kept until someone deletes it (no `purge_at`), a row
+ * closed before the close was dated (neither). `purge_at` is when the room's alarm purges it: the end of
+ * the window stamped at creation, or the time a delete asked for, whichever the record carries.
+ */
+export function retentionOf(s: StoredSession) {
+  const iso = (ms: number | null) => (ms === null ? null : new Date(ms).toISOString());
+  return { closed_at: iso(s.closedAt), purge_at: iso(purgeDueAt(s)) };
 }
 
 /**

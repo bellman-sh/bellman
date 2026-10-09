@@ -151,10 +151,17 @@ and it can be embedded by the panel and by nothing else. A top-level visit to
 ### D5 — What an artifact may do, said where an agent reads it.
 
 The `html` line in `bellman_send`'s description states the contract: a
-self-contained page; inline script and style; `data:` images; no network, no
-cookies, no parent, no navigation, no popups, no downloads, no forms.
-Interaction inside the artifact works. An artifact that needs a library inlines
-it.
+self-contained page; inline script and style; `data:` images; no cookies, no
+parent, no navigation, no popups, no downloads, no forms, and no network through
+anything the policy governs (fetch, sockets, beacons). WebRTC is outside that
+policy: Chromium does not implement the CSP `webrtc` directive (measured: the
+directive is reported as unrecognised, and an `RTCPeerConnection` gathers
+candidates under the committed policy), so an artifact that names a STUN or TURN
+server reaches that host, which learns the viewer's address and can receive
+what the viewer typed into the artifact. The cookie, the panel and the room stay
+out of reach either way. The contract says so rather than claiming more than the
+policy delivers. Interaction inside the artifact works. An artifact that needs a
+library inlines it.
 
 A CDN allowlist — `script-src https://cdnjs.cloudflare.com …` — is the obvious
 follow-up and is not in this design. It widens what an artifact can reach, and
@@ -183,10 +190,13 @@ sandbox origin in `frame-src`, which is the one place the two meet.
   cookie is ever sent; D3's `sandbox` without `allow-same-origin` makes its
   origin opaque, so even a same-site deployment would send none. Either alone
   would hold; both are kept because the cost is an attribute.
-- **No network from an artifact** (D4). `connect-src 'none'` and no
-  `allow-same-origin`: an artifact that calls `fetch` gets a refusal, and an
-  artifact that tries `parent.document` gets a `SecurityError`. Both are in the
-  manual check below, and both must fail.
+- **No network from an artifact through anything the policy governs** (D4).
+  `connect-src 'none'` and no `allow-same-origin`: an artifact that calls
+  `fetch` gets a refusal, and an artifact that tries `parent.document` gets a
+  `SecurityError`. Both are in the manual check below, and both must fail.
+  WebRTC is the exception (D5): no CSP directive closes it in Chromium, and a
+  prelude that deletes the constructor from the nested document is bypassed by
+  a child `srcdoc` realm, so it is stated rather than claimed closed.
 - **The frame holds nothing** (D3). No credential, no content fetch, no
   storage. A compromise of the sandbox origin yields an empty page.
 - **Only the panel can speak to it** (D3, D4). `event.origin` is the panel's,
@@ -218,7 +228,9 @@ Manual, before calling it done, with an artifact written for the purpose: a
 `fetch` to `https://mcp.bellman.sh/auth/session` with credentials fails; a
 read of `parent.document` throws; `document.cookie` is empty; a `<form>`
 submission is blocked; the artifact's own button handlers run. All five, every
-time the frame's policy changes.
+time the frame's policy changes; the check artifact also prints the WebRTC
+result as information, neither pass nor fail, so the five are not mistaken for
+a full inventory.
 
 ## Files
 

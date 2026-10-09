@@ -31,6 +31,8 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { retentionOf, roomPreview } from "../src/projections.js";
+import { session } from "./helpers/fixtures.js";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
 
@@ -143,5 +145,58 @@ describe("the projection layer stays importable from both transports", () => {
     // at top level and always will — if this comes back clean, the check above
     // is proving nothing about projections.ts.
     expect(offenders(resolve(SRC, "server.ts"))).not.toEqual([]);
+  });
+});
+
+/**
+ * The preview for a viewer who holds no seat (#65, D4): an org admin reading a closed room their org sat in.
+ * It is the preview a seat sees with the three fields that are about the viewer's own seat emptied, so the
+ * page that renders one renders the other.
+ */
+describe("roomPreview for a viewer with no seat", () => {
+  const room = session();
+
+  it("names no role, grants no verb, and asks nothing of the viewer", () => {
+    expect(roomPreview(room, null)).toMatchObject({ your_role: null, your_verbs: [], you_report: false });
+  });
+
+  it("is otherwise the preview a seat sees", () => {
+    const { your_role: _a, your_verbs: _b, you_report: _c, ...seated } = roomPreview(room, "peer_a");
+    const { your_role: _d, your_verbs: _e, you_report: _f, ...seatless } = roomPreview(room, null);
+    expect(seatless).toEqual(seated);
+    // Control: the three fields really are the ones a seat fills in.
+    expect(roomPreview(room, "peer_a")).toMatchObject({ your_role: "peer_a" });
+    expect(roomPreview(room, "peer_a").your_verbs.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The two times the detail carries (#65, review M8): when the room closed and when it goes. ISO, as the envelope's
+ * others are spelled, and null where the record has none, so the page can tell "kept until deleted" from "in six days".
+ */
+describe("retentionOf", () => {
+  const closedAt = Date.parse("2026-10-01T12:00:00.000Z");
+  const week = 7 * 24 * 60 * 60 * 1000;
+
+  it("spells the close and the end of the window as ISO times", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: week })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: "2026-10-08T12:00:00.000Z" });
+  });
+
+  it("gives a delete's time in place of the window's end", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: week, purgeAt: closedAt + 1_000 })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: "2026-10-01T12:00:01.000Z" });
+  });
+
+  it("has no purge time for a room kept until deleted, and neither time for a row closed before the close was dated", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: null })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: null });
+    expect(retentionOf(session({ closed: true, closedAt: null, retainAfterCloseMs: null })))
+      .toEqual({ closed_at: null, purge_at: null });
+  });
+
+  it("has no purge time for an open room, whatever window it carries", () => {
+    expect(retentionOf(session({ closed: false, closedAt: null, retainAfterCloseMs: week })))
+      .toEqual({ closed_at: null, purge_at: null });
   });
 });

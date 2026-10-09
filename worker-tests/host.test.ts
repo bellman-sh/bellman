@@ -279,3 +279,47 @@ it("wakes queued before the seat's alarm runs are all handled, in the order they
     [String(beat.cursor), { kind: "question", text: "What did you learn?" }],
   ]);
 });
+
+/** Every key the seat's object holds. */
+const seatRows = (host: DurableObjectStub<HostDO>) =>
+  runInDurableObject(host, async (_i: HostDO, ctx) => [...(await ctx.storage.list()).keys()]);
+
+/** Close the room and delete it now (#65, D6), and wait for the room's own alarm to purge it. */
+async function closeAndPurge(store: DurableObjectStore, id: string) {
+  await store.closeSession(id);
+  expect(await store.schedulePurge(id, Date.now(), "u_jesse")).toMatchObject({ ok: true });
+  await vi.waitFor(async () => expect(await store.getSession(id)).toBeUndefined(), { timeout: 5_000, interval: 10 });
+}
+
+it("the room's purge empties the seat's object: its record, the questions it asked, and its alarm", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_purged");
+  modelAnswers("What did you ship this week?");
+  await tick(stub);
+  await seatIdle(host);
+  const kept = await runInDurableObject(host, async (_i: HostDO, ctx) => ctx.storage.get<HostRecord>("state"));
+  expect(kept!.questions.map((q) => q.text), "the seat keeps what it asked").toEqual(["What did you ship this week?"]);
+
+  await closeAndPurge(store, id);
+
+  expect(await seatRows(host)).toEqual([]);
+  expect(await runInDurableObject(host, (_i: HostDO, ctx) => ctx.storage.getAlarm())).toBeNull();
+});
+
+it("a wake the seat is still handling when the room is purged puts nothing back once it settles", async () => {
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_purged_mid_wake");
+  // An alarm an hour out, as a retry's backoff would be: the tick's wake queues behind it, and
+  // the test runs the seat's alarm itself, so it can hold the model mid-wake and await the end.
+  await runInDurableObject(host, (_i: HostDO, ctx) => ctx.storage.setAlarm(Date.now() + 3_600_000));
+  const held = modelHolds("What did you ship this week?");
+  await tick(stub);
+  const handling = runInDurableObject(host, (i: HostDO) => i.alarm());
+  await held.asked();
+
+  await closeAndPurge(store, id);
+  held.release();
+  await handling;
+
+  expect(await seatRows(host)).toEqual([]);
+  expect(await runInDurableObject(host, (_i: HostDO, ctx) => ctx.storage.getAlarm())).toBeNull();
+  expect(await hostSaid(store, id), "the answer found no room to land in").toEqual([]);
+});

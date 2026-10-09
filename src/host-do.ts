@@ -23,6 +23,13 @@ const PENDING = "pending";
 
 export class HostDO extends DurableObject<BellmanEnv> {
   /**
+   * Set by `forget`, for a purge that lands while a wake is being handled: that wake settles
+   * after the purge, and its save and its queue write would put back what `forget` emptied.
+   * In memory, because the alarm it guards runs in this same instance.
+   */
+  #forgotten = false;
+
+  /**
    * `handleWake`'s driver. A field rather than methods on the class, because a Durable
    * Object answers RPC for every method on its class, and these write the room and the
    * seat's record.
@@ -39,7 +46,9 @@ export class HostDO extends DurableObject<BellmanEnv> {
     // stub's mapped result does not narrow on `ok`.
     write: async (sessionId, e, units, now) => (await this.#room(sessionId).appendHostEvent(e, units, now)) as HostAppend,
     load: async () => (await this.ctx.storage.get<HostRecord>("state")) ?? emptyHostRecord(),
-    save: (_sessionId, record) => this.ctx.storage.put("state", record),
+    save: async (_sessionId, record) => {
+      if (!this.#forgotten) await this.ctx.storage.put("state", record);
+    },
   };
 
   #room(sessionId: string) {
@@ -75,9 +84,21 @@ export class HostDO extends DurableObject<BellmanEnv> {
     const [head] = await this.#pending();
     if (!head) return;
     const retryIn = await handleWake(this.#driver, head, Date.now());
+    if (this.#forgotten) return;
     if (retryIn !== null) return this.ctx.storage.setAlarm(Date.now() + retryIn);
     const rest = (await this.#pending()).filter((w) => w.cursor !== head.cursor);
     await this.ctx.storage.put(PENDING, rest);
     if (rest.length > 0) await this.ctx.storage.setAlarm(Date.now());
+  }
+
+  /**
+   * Empty the seat: its record, the questions it asked among it, its queue and its alarm.
+   * The room's purge (#65) calls this once the room's outbox has drained, so no wake reaches
+   * the seat afterwards and a purged room leaves nothing here either. Idempotent.
+   */
+  async forget(): Promise<void> {
+    this.#forgotten = true;
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.deleteAlarm();
   }
 }

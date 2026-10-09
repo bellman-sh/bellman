@@ -143,17 +143,34 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.blobBytesPerRoom).toBe(5 * 1024 * 1024 * 1024);
   });
 
+  /** How long a closed room is kept (#65, D1): a week, a year, and until someone deletes it. */
+  it("keeps a closed room for a window that grows by plan, and for ever on max and team", () => {
+    expect(ENTITLEMENTS.free.retainAfterCloseMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(ENTITLEMENTS.pro.retainAfterCloseMs).toBe(365 * 24 * 60 * 60 * 1000);
+    expect(ENTITLEMENTS.max.retainAfterCloseMs).toBeNull();
+    expect(ENTITLEMENTS.team.retainAfterCloseMs).toBeNull();
+  });
+
   /**
    * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
-   * differs from pro by creates, the blob ceiling and the hosted seat (#188);
-   * landing another facet is a deliberate edit to this line.
+   * differs from pro by creates, the blob ceiling, how long a closed room is kept
+   * (#65) and the hosted seat (#188); landing another facet is a deliberate edit
+   * to this line.
    */
-  it("gives max creates, the blob ceiling and the hosted seat over pro, and nothing else", () => {
-    const { monthlyCreates: mc, blobBytesPerRoom: mb, hostedRoomsPerMonth: mh, hostUnitsPerRoom: mu, ...maxRest } = ENTITLEMENTS.max;
-    const { monthlyCreates: pc, blobBytesPerRoom: pb, hostedRoomsPerMonth: ph, hostUnitsPerRoom: pu, ...proRest } = ENTITLEMENTS.pro;
+  it("gives max creates, the blob ceiling, the retention window and the hosted seat over pro, and nothing else", () => {
+    const {
+      monthlyCreates: mc, blobBytesPerRoom: mb, retainAfterCloseMs: mk,
+      hostedRoomsPerMonth: mh, hostUnitsPerRoom: mu, ...maxRest
+    } = ENTITLEMENTS.max;
+    const {
+      monthlyCreates: pc, blobBytesPerRoom: pb, retainAfterCloseMs: pk,
+      hostedRoomsPerMonth: ph, hostUnitsPerRoom: pu, ...proRest
+    } = ENTITLEMENTS.pro;
     expect(maxRest).toEqual(proRest);
     expect([mc, pc]).toEqual([2000, 500]);
     expect([mb, pb]).toEqual([5 * 1024 * 1024 * 1024, 500 * 1024 * 1024]);
+    expect(mk).toBeNull();
+    expect(pk).toBe(365 * 24 * 60 * 60 * 1000);
     expect([mh, ph]).toEqual([3, 0]);
     expect([mu, pu]).toEqual([3000, 0]);
   });
@@ -187,13 +204,13 @@ describe("plan entitlements", () => {
    * INVARIANT 1: entitlements gate session CREATION only. A join-side field
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
-   * bounds what a room stores, not who may join it; `hostedRoomsPerMonth` and
-   * `hostUnitsPerRoom` (#188) bound what a person creates and what a hosted
-   * room spends, not who may join it either.
+   * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
+   * room is kept; `hostedRoomsPerMonth` and `hostUnitsPerRoom` (#188) bound what
+   * a person creates and what a hosted room spends. None says who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
-      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom",
+      "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
       "hostedRoomsPerMonth", "hostUnitsPerRoom",
     ].sort();
 

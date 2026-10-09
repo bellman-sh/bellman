@@ -8,6 +8,7 @@ import type { Brief, Capability, Identity, Member } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
 import type { BellmanStore } from "../store.js";
+import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConfirm(server: McpServer, identity: Identity, s: BellmanStore): void {
   // ------------------------------------------------------------ bellman_confirm
@@ -37,6 +38,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
+      // Rendered as the room's canvas by a host that supports MCP Apps: the
+      // result already carries session_id, room and surface (canvas spec D3).
+      _meta: APP_UI_META,
     },
     async ({ connect_token, brief, capabilities }): Promise<ToolResult> => {
       const pending = await s.takePendingConnect(connect_token);

@@ -9,6 +9,9 @@ import { RETRY_MS, callMessages, emptyHostRecord, handleWake, joinsQueue, type H
 import type { MemoryStore } from "./store.js";
 
 export class MemoryHost {
+  // ponytail: a purged room's record stays in this map until the process exits, because
+  // MemoryStore's purge cannot reach it (HostDO.forget is the production path). Local
+  // development only; hand MemoryStore a forget hook beside `host` if that ever matters.
   readonly #records = new Map<string, HostRecord>();
   /** Each seat's queue of wakes, oldest first. The head is the one being handled, or waiting on a retry. */
   readonly #pending = new Map<string, HostWake[]>();

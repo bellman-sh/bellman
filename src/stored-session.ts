@@ -78,7 +78,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Ten changes to the stored shape landed after the sessions now in production
+ * Eleven changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -123,8 +123,13 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   manifest that never mentioned a host declares none, so the default invents
  *   nothing. Left alone it reads as `undefined`, which a guard written
  *   `=== null` takes for a host.
+ * - **closedAt, retainAfterCloseMs, purgeAt and blobsSwept** (#65) default to the
+ *   readings that keep the room: no known close time, no window, no delete asked
+ *   for, and a sweep that has not run. A room closed before the purge existed was
+ *   promised no window, and a purge is the one irreversible act here, so only a
+ *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All ten live here, in one gate, rather than in separate functions that could drift.
+ * All eleven live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -150,6 +155,12 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     blobBytesCeiling: (row as { blobBytesCeiling?: number }).blobBytesCeiling ?? ENTITLEMENTS.free.blobBytesPerRoom,
     hostUnitsPerMonth: (row as { hostUnitsPerMonth?: number }).hostUnitsPerMonth ?? 0,
     hostUnits: (row as { hostUnits?: HostUnits }).hostUnits ?? { month: monthKey(Date.now()), used: 0, wakes: [] },
+    // Required on the type, absent on a row written before #65: the cast says so where `??`
+    // alone would read as redundant, and the room is kept (see above).
+    closedAt: row.closedAt ?? null,
+    retainAfterCloseMs: (row as { retainAfterCloseMs?: number | null }).retainAfterCloseMs ?? null,
+    purgeAt: row.purgeAt ?? null,
+    blobsSwept: row.blobsSwept ?? false,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

@@ -18,6 +18,9 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     blobBytesPerRoom: 50 * 1024 * 1024,
     hostedRoomsPerMonth: 0,
     hostUnitsPerRoom: 0,
+    // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
+    // max and team until someone with the right to delete it does.
+    retainAfterCloseMs: 7 * 24 * 60 * 60 * 1000,
   },
   pro: {
     modes: ["pair", "swarm"],
@@ -27,12 +30,14 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     blobBytesPerRoom: 500 * 1024 * 1024,
     hostedRoomsPerMonth: 0,
     hostUnitsPerRoom: 0,
+    retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
   },
   // Max sells the hosted seat: three hosted rooms a month, 3,000 units each
-  // (the hosted seat spec, D2 and D3), over pro's creates and blob ceiling.
-  // tests/auth.test.ts pins the four differences. Not on sale yet: no Stripe
-  // price names it and STRIPE_PAYMENT_LINKS carries no `max` entry, so
-  // /upgrade/max stays a 404 until the site follow-up adds both (spec D2).
+  // (the hosted seat spec, D2 and D3), over pro's creates, blob ceiling and how
+  // long a closed room is kept (#65). tests/auth.test.ts pins the five
+  // differences. Not on sale yet: no Stripe price names it and
+  // STRIPE_PAYMENT_LINKS carries no `max` entry, so /upgrade/max stays a 404
+  // until the site follow-up adds both (spec D2).
   max: {
     modes: ["pair", "swarm"],
     monthlyCreates: 2000,
@@ -41,6 +46,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
     hostedRoomsPerMonth: 3,
     hostUnitsPerRoom: 3000,
+    retainAfterCloseMs: null,
   },
   team: {
     modes: ["pair", "swarm"],
@@ -50,6 +56,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     blobBytesPerRoom: 5 * 1024 * 1024 * 1024,
     hostedRoomsPerMonth: 5,
     hostUnitsPerRoom: 3000,
+    retainAfterCloseMs: null,
   },
 };
 

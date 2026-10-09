@@ -52,6 +52,25 @@ export const SEND_VERB = {
 // Zod shapes (raw shapes — broadest client compatibility via the SDK)
 // ---------------------------------------------------------------------------
 
+/**
+ * The room's id, under either name. Every tool that takes a room takes both:
+ * one host's route to a local server strips any argument named session_id
+ * before it reaches the bridge, and a host that treats the name as reserved
+ * breaks every tool that needs it. Both are optional in the schema, because a
+ * required session_id is refused by the SDK's validation before a handler
+ * could look for room_id; the handler requires one of the two (`roomIdOf`,
+ * `NEED_ROOM`). session_id wins when both are given.
+ */
+export const RoomRefShape = {
+  session_id: z.string().min(4).optional(),
+  room_id: z.string().min(4).optional().describe("session_id under another name, for a host that reserves it."),
+};
+
+export const NEED_ROOM = "session_id is required; room_id is accepted as the same id, for hosts that reserve the name.";
+
+export const roomIdOf = (args: { session_id?: string; room_id?: string }): string | undefined =>
+  args.session_id ?? args.room_id;
+
 export const AgentShape = z.object({
   provider: z.string().min(1).max(50)
     .describe('Model provider, e.g. "anthropic", "openai", "google"'),

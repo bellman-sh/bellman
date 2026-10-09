@@ -87,10 +87,10 @@ describe("HTTP surface", () => {
     expect(res.status).toBe(401);
   });
 
-  it("lists the 10 tools over HTTP", async () => {
+  it("lists the 11 tools over HTTP", async () => {
     const client = await mcpClient("qk_dev_jesse");
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(10);
+    expect(tools).toHaveLength(11);
     await client.close();
   });
 });
@@ -283,7 +283,7 @@ describe("the room routes over the Node server (#183)", () => {
     const res = await fetch(`${base}/rooms`, { headers: { authorization: "Bearer qk_dev_outsider" } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("application/json");
-    expect(await res.json()).toEqual({ rooms: [], truncated: false });
+    expect(await res.json()).toEqual({ rooms: [], truncated: false, viewer: "member" });
   });
 
   // A handler that throws is answered by the route module, in JSON. Left to Express, a rejected async handler

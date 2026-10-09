@@ -7,14 +7,16 @@ import { MemoryStore } from "./store.js";
 
 const port = parseInt(process.env.PORT || "3900", 10);
 
+// One blob store for the routes, the tools and the store: the purge deletes from the same bucket they serve.
+const blobs = new MemoryBlobStore();
 // The hosted seat (hosted seat spec, D7). With neither MODEL_URL nor a key it asks
 // this server's own fake model, so a host runs locally with no key.
-const store = new MemoryStore({ host: (w) => void host.wake(w) });
+const store = new MemoryStore({ blobs, host: (w) => void host.wake(w) });
 const host = new MemoryHost(store, {
   modelUrl: process.env.MODEL_URL ?? (process.env.ANTHROPIC_API_KEY ? ANTHROPIC_MESSAGES_URL : `http://localhost:${port}/__fake-model`),
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
-const app = createApp(store, new MemoryBlobStore());
+const app = createApp(store, blobs);
 
 // Periodic expiry of sessions and pending connect tokens, and the heartbeat: what
 // SessionDO's alarm does for one room, tick for every room (#111, #188).

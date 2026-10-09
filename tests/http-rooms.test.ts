@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { JOINED_SCAN, MemoryStore } from "../src/store.js";
 import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";
@@ -1360,5 +1360,108 @@ describe("DELETE /rooms/:id (#65)", () => {
     const pre = (await call(null, `/rooms/${ROOM}`, { method: "OPTIONS", headers: { origin: PANEL } }))!;
     expect(pre.status).toBe(204);
     expect(pre.headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+});
+
+describe("GET /rooms/:id/events", () => {
+  /** A message as the tools append one: from a member, with a payload. */
+  const say = async (from: Member, text: string, room = ROOM) => {
+    const e = await store.appendEvent(room, {
+      type: "message", fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload: { text }, refId: null,
+    });
+    expect(e).not.toBeNull();
+    return e!;
+  };
+
+  interface Read {
+    events: { trust: string; origin: { memberId: string; label: string }; data: { cursor: number; type: string; payload: unknown } }[];
+    cursor: number;
+  }
+  const read = async (key: string | null, query = "", room = ROOM) => (await bodyOf(await call(key, `/rooms/${room}/events${query}`))) as unknown as Read;
+  const texts = (r: Read) => r.events.filter((e) => e.data.type === "message").map((e) => (e.data.payload as { text: string }).text);
+
+  it("refuses without a credential, with CORS on the refusal", async () => {
+    const res = (await call(null, `/rooms/${ROOM}/events`, { headers: { origin: PANEL } }))!;
+    expect(res.status).toBe(401);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
+  it("answers a stranger and an unknown room with the same 404", async () => {
+    const stranger = (await call(DEV_KEY.outsider, `/rooms/${ROOM}/events`))!;
+    const unknown = (await call(DEV_KEY.jesse, "/rooms/qs_nowhere/events"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    const said = await bodyOf(stranger);
+    expect(said).toEqual(await bodyOf(unknown));
+    // The route's own words, not the router's "no such route": the room is hidden, the route is not.
+    expect(said).toMatchObject({ error_description: "no such room, or no member of yours in it" });
+  });
+
+  it("returns the log in untrusted envelopes, oldest first, the caller's own included, and the last cursor", async () => {
+    await say(member(), "from the creator");
+    const last = await say(peer(), "from the peer");
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/events`, { headers: { origin: PANEL } }))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    const body = (await res.json()) as Read;
+    expect(texts(body)).toEqual(["from the creator", "from the peer"]);
+    expect(body.events.find((e) => e.data.type === "message")).toMatchObject({
+      trust: "untrusted", origin: { memberId: "m_creator", label: "jesse@codenerd" },
+    });
+    expect(body.cursor).toBe(last.cursor);
+    // The projection, not the stored event: a sender's upstream identity never leaves.
+    expect(JSON.stringify(body)).not.toContain("u_peer");
+  });
+
+  it("returns only what is past ?after, and keeps the cursor when nothing is", async () => {
+    const first = await say(member(), "one");
+    const second = await say(peer(), "two");
+    const past = await read(DEV_KEY.jesse, `?after=${first.cursor}`);
+    expect(texts(past)).toEqual(["two"]);
+    expect(past.cursor).toBe(second.cursor);
+    expect(await read(DEV_KEY.jesse, `?after=${second.cursor}`)).toEqual({ events: [], cursor: second.cursor });
+  });
+
+  it("is bounded: the newest on a first read, the next ones past a cursor", async () => {
+    const cursors: number[] = [];
+    for (let i = 0; i < MAX_EVENTS_READ + 5; i++) cursors.push((await say(member(), `n${i}`)).cursor);
+    const tail = await read(DEV_KEY.jesse);
+    expect(tail.events.map((e) => e.data.cursor)).toEqual(cursors.slice(-MAX_EVENTS_READ));
+    expect(tail.cursor).toBe(cursors.at(-1));
+    const fromStart = await read(DEV_KEY.jesse, "?after=0");
+    expect(fromStart.events.map((e) => e.data.cursor)).toEqual(cursors.slice(0, MAX_EVENTS_READ));
+    expect(fromStart.cursor).toBe(cursors[MAX_EVENTS_READ - 1]);
+  });
+
+  it.each(["abc", "-1", "1.5", ""])("refuses ?after=%s, which is not a cursor", async (after) => {
+    const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/events?after=${after}`))!;
+    expect(res.status).toBe(400);
+  });
+
+  it("is a read and nothing else", async () => {
+    expect((await call(DEV_KEY.jesse, `/rooms/${ROOM}/events`, { method: "POST", body: {} }))!.status).toBe(405);
+    const old = Date.now() - 60 * 60_000;
+    await store.updateMember(ROOM, "m_creator", { lastSeenAt: old });
+    await read(DEV_KEY.jesse);
+    expect((await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_creator")!.lastSeenAt).toBe(old);
+  });
+
+  it("reads a removed member's log to its cut, on a first read and past a cursor", async () => {
+    await say(member(), "before the cut");
+    await evictThroughTool("m_peer");
+    await say(member(), "after the cut");
+    for (const r of [await read(DEV_KEY.peer), await read(DEV_KEY.peer, "?after=0")]) {
+      expect(texts(r)).toEqual(["before the cut"]);
+      expect(r.events.at(-1)!.data.type).toBe("member_evicted");
+      expect(r.cursor).toBe(r.events.at(-1)!.data.cursor);
+    }
+  });
+
+  it("reads a closed room's whole log for an org admin of a member, as the surface read does (#65)", async () => {
+    await store.createSession(orgRoom({ closed: false, closedAt: null }));
+    expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}/events`))!.status).toBe(404);
+    await say(peer(), "said in the org's room", ORG_ROOM);
+    await store.closeSession(ORG_ROOM);
+    const r = await read(DEV_KEY.jesse, "", ORG_ROOM);
+    expect(texts(r)).toEqual(["said in the org's room"]);
   });
 });

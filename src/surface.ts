@@ -10,12 +10,12 @@
  * `clearSilence` in store.ts rather than heartbeat.ts.
  */
 import { z } from "zod";
-import type { SessionEvent, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
+import type { SessionEvent, Shape, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
 
-export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html"] as const satisfies readonly SurfaceKind[];
+export const SURFACE_KINDS = ["text", "link", "diagram", "connector", "file", "image", "html", "shape"] as const satisfies readonly SurfaceKind[];
 
 // ponytail: ceilings, not tuned. 64 keeps a full read inside one tool response;
 // the first room past it wants pagination, not a bigger number. 8,000 is the
@@ -85,6 +85,18 @@ const BlobShape = z.strictObject({
   id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
 });
 
+/** A shape's forms and colours (#197, D1, D3): names, resolved by the panel to its own classes, never a value a stylesheet reads. */
+export const SHAPE_FORMS = ["rect", "ellipse", "diamond", "arrow", "line"] as const satisfies readonly Shape["form"][];
+export const SHAPE_COLORS = ["slate", "blue", "green", "amber", "red", "violet"] as const satisfies readonly Shape["color"][];
+const LINE_FORMS: ReadonlySet<string> = new Set(["arrow", "line"]);
+
+/** What a shape is (D1). The defaults apply here, so a stored shape spells both and a reader never branches on absence. */
+const ShapeShape = z.strictObject({
+  form: z.enum(SHAPE_FORMS),
+  color: z.enum(SHAPE_COLORS).default("slate"),
+  flip: z.boolean().default(false),
+});
+
 /**
  * Non-empty text of at most `max` UTF-16 code units: `.length`, which is what
  * the index reports as `chars`, so the bound and the number read against it
@@ -100,7 +112,7 @@ const boundedText = (max: number) =>
  * than dropped: `cursor` and `at` are the server's to set, and an item sent back
  * as it was read is refused for them until the sender takes them off.
  *
- * `null` is absence, for the five fields a read spells that way: an item as a
+ * `null` is absence, for the six fields a read spells that way: an item as a
  * member reads it carries `null` for each it left out, and read, edit, send back
  * is the natural replace. `normalizeSurfaceWrite` reads null as absent in every
  * rule below and stores absence as null either way.
@@ -113,6 +125,7 @@ export const SurfaceItemShape = z.strictObject({
   ends: EndsShape.nullish(),
   placement: PlacementShape.nullish(),
   blob: BlobShape.nullish(),
+  shape: ShapeShape.nullish(),
 });
 
 /** A removal. `remove: true` and nothing else, so it cannot be mistaken for an item. */
@@ -152,7 +165,7 @@ export function normalizeSurfaceWrite(
   if (!parsed.success) {
     return {
       ok: false,
-      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, blob? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
+      reason: `surface payload must be { key, kind, title?, body?, ends?, placement?, blob?, shape? } or { key, remove: true }: ${describeIssue(parsed.error.issues[0])}`,
     };
   }
   const v = parsed.data;
@@ -176,11 +189,22 @@ export function normalizeSurfaceWrite(
       // bridge still has a way onto the surface, and anything larger is an upload.
       if (v.body && v.blob) return refuse("an html item is inline (body) or a blob (blob: { id }), not both");
       if (!v.body && !v.blob) return refuse("an html item needs a body (the page, inline) or blob { id } naming a blob stored as text/html");
+    } else if (v.kind === "shape") {
+      // A shape is a few numbers the canvas draws (#197, D1, D2, D4): its own field, its size on the placement, no body.
+      if (!v.shape) return refuse("a shape needs shape { form, color?, flip? }");
+      if (v.body) return refuse("a shape has no body; its label is the title");
+      if (!v.placement || v.placement.w === undefined || v.placement.h === undefined) {
+        return refuse("a shape needs placement { x, y, w, h }");
+      }
+      // `flip: false` is the default every stored shape carries, so a shape read back and sent back is
+      // accepted; only a flip that would draw nothing is refused.
+      if (v.shape.flip && !LINE_FORMS.has(v.shape.form)) return refuse("flip is for an arrow or a line");
     } else if (!v.body) {
       return refuse("needs a body");
     }
   }
   if (v.blob && !blobBacked && v.kind !== "html") return refuse("only a file, an image or an html item names a blob");
+  if (v.shape && v.kind !== "shape") return refuse("only a shape has shape");
 
   if (v.kind === "link") {
     if (v.body!.length > MAX_SURFACE_LINK_CHARS) {
@@ -211,6 +235,7 @@ export function normalizeSurfaceWrite(
         placement: v.placement ?? null,
         // Filled from the object by writeSurface (D5): the writer's word is the id alone.
         blob: null,
+        shape: v.kind === "shape" ? v.shape! : null,
       },
     },
     blobId: v.blob?.id ?? null,

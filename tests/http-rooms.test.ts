@@ -611,6 +611,21 @@ describe("PUT and DELETE /rooms/:id/surface/:key", () => {
     expect(body.items.map((i) => [i.data.key, i.data.kind, i.data.body])).toEqual([["demo", "html", page]]);
   });
 
+  // The route hands the item to the operation the tool calls, so a shape arrives as it does from the tool: the
+  // defaults applied, the key the path's, and the size on the placement (#197).
+  it("places a shape through the route with its defaults applied, and a member's read carries them", async () => {
+    const res = (await put(DEV_KEY.jesse, "box", {
+      kind: "shape", title: "Group A", shape: { form: "rect" }, placement: { x: 10, y: 20, w: 200, h: 120 },
+    }))!;
+    expect(res.status, await res.clone().text()).toBe(200);
+    expect(await store.surfaceOf(ROOM)).toMatchObject([{
+      key: "box", kind: "shape", title: "Group A", body: null,
+      shape: { form: "rect", color: "slate", flip: false }, placement: { x: 10, y: 20, w: 200, h: 120 },
+    }]);
+    const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}/surface`)) as { items: { data: { shape: unknown } }[] };
+    expect(body.items.map((i) => i.data.shape)).toEqual([{ form: "rect", color: "slate", flip: false }]);
+  });
+
   it("reads back through the route what the tool wrote, and replaces by key", async () => {
     await placeThroughTool("plan", { kind: "text", body: "v1" });
     const res = (await put(DEV_KEY.jesse, "plan", { kind: "text", body: "v2" }))!;
@@ -845,7 +860,7 @@ const otherOrgPeer = (over: Parameters<typeof member>[0] = {}) =>
 
 /** An item on a room's surface, written the way the store is asked to commit one, by peer. */
 async function placeDirect(room: string, key: string, body: string) {
-  const item: SurfaceItem = { key, kind: "text", title: null, body, ends: null, placement: null, blob: null };
+  const item: SurfaceItem = { key, kind: "text", title: null, body, ends: null, placement: null, blob: null, shape: null };
   return (await store.appendEvent(
     room,
     { type: "surface", fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: "peer@codenerd", payload: item, refId: null },

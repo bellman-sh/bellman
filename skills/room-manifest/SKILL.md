@@ -35,7 +35,7 @@ agent may send but must never invite", "auditors read and nothing else".
 ```yaml
 room: payments-migration
 purpose: Port Stripe v2 to v3   # optional, ≤300 chars
-preset: review                  # pair | swarm | review
+preset: review                  # pair | swarm | review, or one you saved at dash.bellman.sh/presets
 ```
 
 That is the entire file. Adding `roles`, `mode`, `default_role` or

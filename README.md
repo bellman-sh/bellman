@@ -366,7 +366,7 @@ housekeeping:
 
 Each value is a whole number of `s`, `m`, `h` or `d`, from 5 minutes to 7 days.
 A threshold left out turns its finding off, a block with no threshold turns
-housekeeping off, and no preset sets it. When a threshold passes the server
+housekeeping off, and no built-in preset sets it. When a threshold passes the server
 appends a `housekeeping` event naming the member, the request's cursor or the
 room, once per window: `repeat_after` is the window for a finding that still
 holds, and defaults to the threshold that raised it, so a `repeat_after` shorter
@@ -396,7 +396,7 @@ a `default_role` naming no role are all reported by the server, which
 means that request does cross the wire and comes back an error. Only the
 parsed object reaches the server, which has no YAML parser.
 
-**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
+**Saved presets.** The panel's Presets page (`dash.bellman.sh/presets`) keeps up to 20 room shapes of your own: clone a built-in, set the roles, their verbs and who reports, and save. An agent starts a room from one with `bellman_start { manifest: { room, preset: "<name>" } }`; the room is expanded at start, so editing a preset never changes a room that exists. A saved preset can carry a cadence and a `housekeeping` block as an authored manifest does; a `housekeeping` block beside the cite replaces the preset's whole, and an empty one turns it off. The routes behind it are `GET /presets`, and `PUT` and `DELETE /presets/:name`, refused in the room validator's words when `bellman_start` would refuse the same shape. A preset is yours alone; for a shape a repo shares, the page's Copy room.yaml writes this file with every role spelled out.
 
 ### When a plan lapses
 

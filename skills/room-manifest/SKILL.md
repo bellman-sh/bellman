@@ -167,8 +167,9 @@ housekeeping:
 
 Each value is a whole number and a unit (`s`, `m`, `h` or `d`),
 between **5m** and **7d**. A key left out turns that finding off, and a block
-that sets no threshold turns housekeeping off. No preset sets it, so a room that
-wants it says so here.
+that sets no threshold turns housekeeping off. No built-in preset sets it, so a
+room that wants it says so here. A preset you saved in the panel can carry the
+block, and a block beside the cite replaces the preset's whole.
 
 A finding is a `housekeeping` event in the room. It names the condition and does
 nothing about it: the server sends no nudge, answers no request, closes no room

@@ -88,9 +88,14 @@ the room sees an event. A condition that returns starts at `repeat: 1`.
 Each value is a duration in the form `heartbeat_on` takes, bounded between 5
 minutes and 7 days; `repeat_after` is optional and defaults per finding to
 that finding's threshold. An absent threshold disables its finding; an absent
-object disables housekeeping. No preset sets it (heartbeat D3's reason holds:
-a shipped preset that starts naming members quiet changes what rooms people
-already run), and a cited preset may add it as it adds `heartbeat_on`.
+object disables housekeeping. No built-in preset sets it (heartbeat D3's reason
+holds: a shipped preset that starts naming members quiet changes what rooms
+people already run), and a cited preset may add it as it adds `heartbeat_on`. A
+preset a person saves ([room designer](2026-10-09-room-designer-design.md)) is
+what an authored manifest is without its room and purpose, so it carries the
+block as it carries `heartbeat_on`: stored as the keys it sets, null when it
+sets none, and cited by `bellman_start` like any other field. A block beside
+such a cite replaces the preset's whole, and an empty or null one turns it off.
 
 ### D6 — The alarm is derived, and fires only when something is due.
 
@@ -180,7 +185,9 @@ test is run once against the broken implementation before it counts.
 `src/manifest.ts`, `src/store.ts` and `src/store-do.ts` (the handler,
 `lastSentAt`, `raised`), `src/tools/send.ts` (the refusal), `src/public-event.ts`
 (the projection), `docs/ARCHITECTURE.md` (§4 the alarm, §8 the roadmap's B3),
-`README.md` (the manifest field), the tests above.
+`README.md` (the manifest field), the tests above. A saved preset carries the
+block too: `src/presets.ts` and `src/tools/start.ts` (D5), with the registry
+reading an older row as a preset that sets none.
 
 ## Out of scope
 

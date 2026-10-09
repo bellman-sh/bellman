@@ -6,9 +6,9 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
 last-verified-against-source: cfb4981
-last-updated: 2026-10-08
+last-updated: 2026-10-09
 ---
 
 # Bellman Architecture
@@ -75,6 +75,7 @@ flowchart TB
         RDO["RegistryDO<br/>singleton"]
         ADO["AuditDO<br/>one per org"]
         AUTH["AuthDO<br/>tokens, billing ledger"]
+        HDO["HostDO<br/>one per hosted seat"]
     end
 
     CCT --> BRIDGE
@@ -94,6 +95,9 @@ flowchart TB
     BILL --> RDO
     ADMIN --> RDO
     ADMIN --> ADO
+    SDO -->|"outbox: host wakes"| HDO
+    HDO -->|"reads, appendHostEvent"| SDO
+    HDO --> MODEL(["Anthropic<br/>Messages API"])
 
     STRIPE(["Stripe"]) --> BILL
     IDP(["GitHub, Google"]) --> AS
@@ -422,7 +426,10 @@ flowchart LR
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms index"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
+        HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
     end
+
+    SDO -.->|"outbox: host wakes"| HDO
 
     BLOB["BlobStore<br/>src/blobs.ts"]
     R2["R2 — bellman-blobs<br/>rooms/&lt;sessionId&gt;/&lt;blobId&gt;<br/>the object's metadata is the metadata"]
@@ -445,6 +452,10 @@ Why the split is shaped that way:
 - **`AuditDO` is per org** because a cross-org room writes into *both* orgs'
   streams, and each side must see only the crossings that touched its own
   boundary.
+- **`HostDO`, one per hosted seat,** because a model call takes seconds and the
+  room's object must never wait on one: the room stays a record of events, and
+  the seat that calls the model is an object of its own, keyed by the room's
+  session id. See [the hosted seat](#the-hosted-seat).
 
 ### Presence is derived, membership is stored
 
@@ -601,6 +612,99 @@ The stamp says the member WAS there, which is a fact about a moment that has
 passed; presence stays derived, and only a listed socket says it is there now.
 What remains uncovered is a socket the runtime never reports at all, which would
 need the upgrade stamp as well and is not done.
+
+### The hosted seat
+
+A room may declare one hosted seat (#188, #189): a member Bellman runs, which
+asks the room a question on each heartbeat tick and answers replies in that
+question's thread. The manifest's `host` block names its role, its model and the
+creator's instructions, and `resolveManifest` requires the role to hold exactly
+`send` and not report, the room to be a swarm room, and `heartbeat_on` to be at
+least an hour. `bellman_start` refuses a plan with no hosted rooms (free, pro)
+and a creator past the plan's hosted rooms for the month (3 on max, 5 on team,
+counted in `RegistryDO` beside the create count), then seats the host beside the
+creator as `m_host`, under the user `u_bellman_host`, labelled `<role>@bellman`.
+It never joins by code and never holds a socket. ADR 0002 records the decisions.
+
+**It is woken through the room's outbox.** The room queues a `host` row,
+`{ sessionId, cause, cursor }`, in the transaction that writes the event causing
+it: a `heartbeat`, or a `message` or `progress` whose `ref_id` names one of the
+host's events (`isReplyToHost`). The host's own sends queue none, so it never
+wakes itself. The outbox delivers the row by RPC to the seat's `HostDO`, at
+least once. `HostDO.wake` only stores the wake in a queue and arms an alarm for
+now, so the delivery returns after a few storage operations and a member whose
+reply caused it is not held behind a model call. The alarm handles the head of
+the queue through `handleWake` and comes back for the next, so no two wakes run
+at once and neither saves over the other's record. A wake whose cause cursor the
+seat has handled, or has queued already, is dropped, which is how an
+at-least-once delivery is acknowledged.
+
+**A tick wakes it only when a person is there.** A hosted room ticks on its own
+cadence and needs no reporting role. `tickPlan` (`src/heartbeat.ts`), which both
+stores call, decides before the tick's write moves `lastTickAt`: the tick is
+written and the host woken when a person (`isActivePerson`: not the host, not
+departed) was seen since the previous tick or holds a socket in the room now.
+Otherwise the firing advances `lastTickAt` and writes nothing, so a hosted room
+nobody is in grows no log and spends no unit. The seat does not check again:
+read after the tick's write, every person would read as unseen since it.
+
+**What a wake does** is decided in `src/host.ts`, runtime-free, so the two
+drivers cannot decide it differently. A tick wake asks: a `message` whose
+`ref_id` is the tick's cursor and whose payload is `{ kind: "question", text }`,
+composed with the seat's last five questions in the prompt so the room does not
+hear one twice. A reply wake reads the events after the seat's cursor by RPC
+(`eventsAfter`), keeps the replies to its latest question, and answers in that
+thread (`ref_id` the question's cursor, payload `{ kind: "answer", text }`) from
+the newest three, three answers a question at most. A reply to an older question
+gets none.
+
+**The meter is the room's.** A wake costs its model's weight in units (`haiku` 1,
+`sonnet` 3, `opus` 5, `HOST_MODELS`), charged against `hostUnitsPerMonth`, which
+`bellman_start` stamps on the room from the plan (3,000 on max and team) and
+nothing reads from a plan again, the blob ceiling's rule. The send and the
+charge are one write: `SessionDO.appendHostEvent` runs `decideHostCharge`, the
+rule `MemoryStore` shares, and appends the event in the same transaction, so an
+answer is never sent without its charge or charged without being sent. The same
+rule refuses a ninth send within an hour (`WAKES_PER_HOUR`). The seat reads the
+meter before it calls the model, so a wake the month cannot pay for costs no
+call; the room's charge is the one that counts. A month that runs out gets one
+notice, written with zero units so the spent allowance cannot refuse it, and
+then quiet until the calendar month turns.
+
+**Failure.** A 429, a 5xx or a model that cannot be reached is the model's
+failure: the wake stays at the head of the queue and the alarm comes back 1, 5
+and 15 minutes later (`RETRY_MS`), four calls at most, after which the wake is
+dropped. A tick with no question is still a tick, and the room is truth. A wake
+that arrives meanwhile waits behind the failing head, so new wakes never call a
+failing model sooner. An answer with no text settles the wake with nothing
+sent, and so does a write the room refuses, apart from the month's one notice.
+
+**The boundary.** The seat has no tools and reaches nothing but the model. Its
+one act is a `send` through the room's append path under its own member id, so
+the verb guard, the audit log and every reader see a member. Replies cross into
+its prompt as data: each inside `<reply from="…">`, its text escaped (`&`, `<`,
+`>`) and its label escaped for an attribute (`escapeAttr`), after Bellman's
+fixed rules and the creator's instructions in the system prompt. What it writes
+enters the room as peer content, untrusted to every member like any member's.
+It cannot hold `respond_actions`, so an action request addressed to it is
+refused as one to any seat without the verb would be. `HostDO` keeps its driver
+in a `#driver` field rather than in methods, because a Durable Object answers
+RPC for every method on its class (section 9, runtime fact 3), and the driver
+writes the room and spends the key.
+
+**It never vouches for the room.** `isActivePerson` leaves the host out, so a
+hosted room closes when its last person leaves (`closeSessionIfEmpty`) and ends
+after 90 days in which no person was seen (`abandonedAt`). `seatVictims` skips
+the host, so its seat is never reclaimed for a joiner. Its `lastSeenAt` moves on
+its sends for the roster's sake, and nothing reads it for liveness.
+
+**Node runs the same seat.** `MemoryHost` drives `handleWake` over a
+`MemoryStore`, with its retries on timers, and the Node server's interval calls
+`store.tick(now, tickStep)` beside the sweep. The model URL is `MODEL_URL`, else
+Anthropic's when `ANTHROPIC_API_KEY` is set, else a fake model the server serves
+itself at `POST /__fake-model`, so `npm start` runs a host with no key.
+Production needs the `HOST` binding, migration `v3` and the `ANTHROPIC_API_KEY`
+secret.
 
 ### The working surface
 
@@ -955,7 +1059,7 @@ a member, sensitive values readable by membership — has something to be built 
 
 **A Durable Object's input gate covers one invocation. Nothing spans two.**
 
-Bellman's state is deliberately split across four object types, so any
+Bellman's state is deliberately split across five object types, so any
 operation touching two of them has a window in the middle. That window produced
 three filed bugs, and they were two different problems:
 
@@ -964,7 +1068,7 @@ three filed bugs, and they were two different problems:
 | Filed as | [#59](../../../issues/59), [#62](../../../issues/62) | [#69](../../../issues/69) |
 | What goes wrong | A mutation commits in one object and the write that must accompany it lands in another. Lose the second and nothing records that it was owed. | Two operations interleave and an older result lands after a newer one. |
 | What fixes it | **Durable delivery.** Persist the intent in the same transaction as the mutation, then deliver it. An alarm retries what did not arrive. | **A lock.** The whole operation runs inside the object whose queue can cover it. |
-| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO`, `SessionDO → RegistryDO` and `SessionDO → AuditDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
+| Where it lives | `src/outbox.ts`, used `RegistryDO → AuditDO`, `SessionDO → RegistryDO`, `SessionDO → AuditDO` and `SessionDO → HostDO` | `AuthDO.reconcile`, inside `BillingLedger.serializeUser` |
 
 Neither fixes the other's problem. A durable queue delivers an old write as
 reliably as a new one, and a lock does nothing for a write that was never sent;
@@ -1086,7 +1190,7 @@ loss is findable, and retention (#65) is what sweeps it.
    it as a row; the OAuth purge cursor (`AuthDO.#purge` in
    `src/oauth/store.ts`) follows the same rule.
 
-It is used three times:
+It is used four times:
 
 - **`RegistryDO → AuditDO` ([#59](../../../issues/59)).** The four guarded grant
   writes (`putGrantIfOwned`, `deleteGrantIfOwned`, `putGrantIfSource`,
@@ -1126,11 +1230,16 @@ It is used three times:
   leaves race on one handle. `SessionDO`'s `#deliver` hands each row to the org's
   `AuditDO`, and `AuditDO.append`'s intent-id dedupe is what absorbs a
   redelivery of one.
+- **`SessionDO → HostDO` (#188).** A `heartbeat`, or a reply to the hosted
+  seat, queues a `host` row in the event's own transaction, and `#deliverHost`
+  hands it to the room's `HostDO`. Waking the seat afterwards would lose the
+  wake when the call fails, and a lost tick wake is a question never asked.
 
 Delivery is at least once, so each consumer absorbs a redelivery in its own way.
 `AuditDO.append` dedupes on the intent id (a `d:<id>` row written in the entry's
 transaction), because appending is not idempotent. Join-code delivery needs no
-marker: a put and a delete of one key already are.
+marker: a put and a delete of one key already are. `HostDO.wake` drops a wake
+whose cause cursor the seat has handled or already queued.
 
 **A misordered write: a lock.** `AuthDO.reconcile`. A purchase reconcile reads
 what a user is paying for and then writes or deletes their grant in
@@ -1283,7 +1392,7 @@ off its documentation, decide how code here is written.
    `nextCursor(txn)`, `AuthDO`'s `rows`) is still the convention, because it shows a
    reader where the transaction's boundary is and does not lean on this fact, but it is
    not what makes the transaction hold. Fact 1 is this one seen through `setAlarm`: its
-   test arms the alarm through `ctx.storage` inside the closure. All four classes here
+   test arms the alarm through `ctx.storage` inside the closure. All five classes here
    are SQLite-backed (`wrangler.toml`). The KV-backed flavour was not measured, and
    nothing here uses it.
 
@@ -1291,12 +1400,13 @@ off its documentation, decide how code here is written.
    `this.ctx.storage` inside `admitRegistration`'s transaction left every test green,
    and a probe showed why. `worker-tests/storage-handles-in-transaction.test.ts` holds
    the fact on its own, on workerd 1.20260926.1 (pinned in `worker-tests/package.json`),
-   for each of the four classes. It checks the object has the SQLite storage API,
-   writes through both handles in a closure that throws, aborts the object and reads
-   both rows back from a new instance, does the same with a closure that commits, and
-   reads each handle's view of the other's write mid-closure. If it fails, a
-   `ctx.storage` call inside a closure is no longer inside the transaction and the
-   convention becomes a requirement; the test is not wrong.
+   for each of the four classes that open a transaction (`HostDO` opens none). It
+   checks the object has the SQLite storage API, writes through both handles in a
+   closure that throws, aborts the object and reads both rows back from a new instance,
+   does the same with a closure that commits, and reads each handle's view of the
+   other's write mid-closure. If it fails, a `ctx.storage` call inside a closure is no
+   longer inside the transaction and the convention becomes a requirement; the test is
+   not wrong.
 
 **Rolling back.** `alarm()` clears a due name only through its own branch, and its
 closing `reArm()` points the alarm back at any name still due. A `SessionDO`

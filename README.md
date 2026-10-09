@@ -87,9 +87,8 @@ that way; the surface is where things stand.
   named as a blob stored as `text/html`, never both. The server stores and serves
   it as bytes; the panel renders it only in a sandboxed frame on another origin,
   where it gets no network and no cookies (the frame is the dash repo's).
-- The verb is `write_surface`. The `pair`, `swarm` and `review` presets give it
-  to the creator's seat alone; a manifest may give it to any seat. Reading is
-  never gated.
+- The verb is `write_surface`. Every preset gives it to the creator's seat
+  alone; a manifest may give it to any seat. Reading is never gated.
 - A joiner's preview lists what the surface holds — keys, kinds and sizes — and
   `bellman_confirm` hands over the items. Every poll carries `surface_cursor`
   once the surface has changed, each change arrives as a `surface` event, and
@@ -114,14 +113,18 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | blobs / room | |
-| --- | --- | --- | --- | --- |
-| `free` | pair | 20 | 50 MB | |
-| `pro` | pair, swarm | 500 | 500 MB | |
-| `max` | pair, swarm | 2,000 | 5 GB | *coming soon*: hosted agents will be what sets it apart |
-| `team` | pair, swarm | 5,000 | 5 GB | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | hosted seat | |
+| --- | --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | — | |
+| `pro` | pair, swarm | 500 | 500 MB | — | |
+| `max` | pair, swarm | 2,000 | 5 GB | 3 rooms / month | *not on sale yet* |
+| `team` | pair, swarm | 5,000 | 5 GB | 5 rooms / month | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
+
+Max and team buy a hosted seat: a member Bellman runs. A room declares it in its manifest's `host` block ([declaring a room](#declaring-a-room-in-your-repo)), and `bellman_start` seats it beside the creator, holding the verb `send` and nothing else. On each heartbeat tick it asks the room a question. A member answers with a `message` whose `ref_id` is the question's cursor, and the host replies in that thread, up to three times, until it asks a newer question. A tick wakes the host only when a person has been in the room since the previous tick, or is connected to it, so a room nobody visits spends nothing. The host never keeps a room open: a hosted room ends when its last person leaves, or after 90 days in which no person in it was seen. What it writes reaches members as peer content, untrusted like any member's.
+
+A hosted seat is metered in wakes, one model call each, weighted by the model: Haiku 1, Sonnet 3, Opus 5. A hosted room spends up to 3,000 units a month and ticks no faster than once an hour; an Opus host at an hourly beat, in a room that replies to every question, is quiet after six days, and at a daily beat it lasts the month. It sends eight times an hour at most. The units are stamped on the room from its creator's plan when it is created, as the blob ceiling is, and a month that runs out gets one notice from the host and then quiet until the month turns.
 
 A room that crosses organisations writes to **both** orgs' audit streams, so each side sees the crossings that touched its own boundary and nothing else.
 
@@ -136,6 +139,8 @@ npm run smoke              # end-to-end two-provider simulation (server must be 
 ```
 
 **Local-dev bearer keys**, live only while `BELLMAN_KEYS` is unset: `qk_dev_jesse` (team admin, org_codenerd), `qk_dev_peer` (free, org_codenerd), `qk_dev_outsider` (free, no org).
+
+**A hosted seat runs locally too.** `npm start` points it at a fake model the server serves itself, `POST /__fake-model`, so it needs no key; set `ANTHROPIC_API_KEY` to call Anthropic's Messages API, or `MODEL_URL` to send the calls somewhere else. `qk_dev_jesse` is on team, so it can start a `social` room, which asks its first question an hour after it is created.
 
 Set `BELLMAN_KEYS` (JSON map of key → identity) and it becomes the **sole** source of truth — the dev table stops resolving, and a malformed map rejects every request rather than falling back. **Every deployment must set it.**
 
@@ -292,7 +297,7 @@ automatically when called through the bridge:
 ```yaml
 room: payments-migration
 purpose: Port Stripe v2 to v3
-preset: review          # pair | swarm | review
+preset: review          # pair | swarm | review | social
 ```
 
 Or author the roles yourself:
@@ -329,14 +334,47 @@ A room role is not `Identity.role`. The latter is `member` | `admin` over an
 seat holds.
 
 A room can also ask its members to report. A top-level `heartbeat_on` (a
-duration such as `"5m"`, from 30 seconds to an hour) is the cadence on which the
-server appends a `heartbeat` tick saying who has reported and who has gone
-quiet, and `reports: true` on a role says members in that seat must answer it,
-by sending `progress` — so that role must hold `send`, and a manifest that
+duration such as `"5m"`, from 30 seconds to a day, `"24h"`) is the cadence on
+which the server appends a `heartbeat` tick saying who has reported and who has
+gone quiet, and `reports: true` on a role says members in that seat must answer
+it, by sending `progress` — so that role must hold `send`, and a manifest that
 asks a verbless seat for reports is refused. With no `heartbeat_on` there is
-no tick and `reports` asks for nothing; no preset sets either key. A joiner sees both before it
+no tick and `reports` asks for nothing. No preset sets `reports`, and only
+`social` sets `heartbeat_on`, for its host. A joiner sees both before it
 accepts a seat: the connect preview carries `heartbeat_on_seconds`,
 `you_report`, and `reports` for every role.
+
+A room can have a hosted seat, which asks the room a question on each tick
+(see [what a plan gates](#what-a-plan-gates)). The `social` preset declares
+one; an authored manifest adds a `host` block naming the role it sits in:
+
+```yaml
+room: build-club
+purpose: What people are building this week
+mode: swarm
+heartbeat_on: 6h
+roles:
+  lead:
+    can: [send, invite, revoke, write_surface]
+  guest:
+    can: [send]
+  host:
+    can: [send]
+host:
+  role: host                    # a role above that holds exactly [send]
+  model: sonnet                 # haiku (the default), sonnet or opus
+  instructions: Ask about one thing someone shipped this week.   # optional, ≤300 chars
+default_role: guest
+creator_role: lead
+```
+
+The host's role must hold `send` and nothing else, and must not set `reports`.
+The room must be a swarm room, and must set `heartbeat_on` to at least `1h`:
+a pair room's two seats are its members', and a host with no tick has nothing to
+wake it. The server refuses a manifest that breaks any of these, naming the
+rule. `bellman_start` refuses a hosted room on free and pro, and past the
+plan's hosted rooms for the month. `instructions` follow Bellman's own rules
+for the host in its prompt; they cannot give it a tool or a verb.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

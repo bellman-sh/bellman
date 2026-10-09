@@ -1,6 +1,6 @@
 ---
 name: room-manifest
-description: Author, review or fix a Bellman room manifest — the `.bellman/room.yaml` that declares a room's name, mode, roles and per-role permissions for cross-session agent collaboration over MCP. Use this whenever the user mentions room.yaml, a room manifest, the .bellman directory, bellman_start, declaring or setting up a Bellman room in a repo, the pair/swarm/review presets, or which verbs a role should hold. Also use it when they describe wanting several agents or people to work together in a repo under different permissions, or ask who should be allowed to invite, revoke or request actions — even if they never say "manifest" or "room.yaml".
+description: Author, review or fix a Bellman room manifest — the `.bellman/room.yaml` that declares a room's name, mode, roles and per-role permissions for cross-session agent collaboration over MCP. Use this whenever the user mentions room.yaml, a room manifest, the .bellman directory, bellman_start, declaring or setting up a Bellman room in a repo, the pair/swarm/review/social presets, a hosted seat or host block, or which verbs a role should hold. Also use it when they describe wanting several agents or people to work together in a repo under different permissions, or ask who should be allowed to invite, revoke or request actions — even if they never say "manifest" or "room.yaml".
 ---
 
 # Bellman room manifests
@@ -116,9 +116,9 @@ role. There is no verb for either, and none for reading — a seat with `can: []
 still sees everything in the room.
 
 Reading the surface is never gated either: every member reads it on join and
-on `bellman_sync`, and only a seat holding `write_surface` changes it. The
-`pair`, `swarm` and `review` presets give it to the creator's seat alone, so a
-room has one writer unless its manifest says otherwise.
+on `bellman_sync`, and only a seat holding `write_surface` changes it. Every
+preset gives it to the creator's seat alone, so a room has one writer unless
+its manifest says otherwise.
 
 There is no `audit` verb and no `close_room` verb, and adding either to a `can`
 list fails. `bellman_audit` takes no session, so it is org-wide and no room role
@@ -146,6 +146,58 @@ authority anyone needs, and issue a stronger role deliberately with
 
 A `default_role` that can `invite` means anyone who gets the code can widen the
 room.
+
+### A hosted seat
+
+A `host` block gives the room a seat Bellman runs: on each heartbeat tick it
+asks the room a question, and it answers replies in that question's thread. The
+`social` preset declares one. An authored manifest adds the block and a role for
+it:
+
+```yaml
+room: build-club
+purpose: What people are building this week
+mode: swarm
+heartbeat_on: 6h                # required with a host: 1h to 24h
+roles:
+  lead:
+    can: [send, invite, revoke, write_surface]
+  guest:
+    can: [send]
+  host:
+    can: [send]
+host:
+  role: host                    # a role in roles that holds exactly [send]
+  model: haiku                  # haiku | sonnet | opus; default haiku
+  instructions: Ask about one thing someone shipped this week.   # optional, ≤300 chars
+default_role: guest
+creator_role: lead
+```
+
+The block has three fields:
+
+- `role` names a role defined in `roles`. Its `can` must be exactly `[send]`,
+  and it must not set `reports: true`. Bellman seats the host in it when the
+  room is created; it never joins by code.
+- `model` is `haiku`, `sonnet` or `opus`, and `haiku` when left out. Each wake
+  is one model call and costs 1, 3 or 5 of the room's 3,000 units a month, so a
+  heavier model wants a slower beat: an Opus host lasts the month at `24h`.
+- `instructions` is optional, at most 300 characters, and follows Bellman's own
+  rules in the host's prompt. It shapes what the host asks; it cannot give the
+  host a tool or another verb.
+
+Three refusals an author meets:
+
+- **The floor.** A room with a host must set `heartbeat_on` to at least `1h`.
+  Without it the server answers `a room with a host must set heartbeat_on (at
+  least 1h)`; under it, `a room with a host must tick no faster than 1h (got
+  "30m")`.
+- **The plan.** `bellman_start` refuses a host on free and pro, `a hosted seat
+  requires the max or team plan (you are on "pro")`. Max creates three hosted
+  rooms a month and team five; the fourth on max is `monthly hosted room limit
+  reached (3 on the "max" plan)`.
+- **The pair room.** A host needs `mode: swarm`. With `mode: pair` the answer is
+  `a pair room cannot have a host: its two seats are its members'`.
 
 ## Step 3 — check it
 

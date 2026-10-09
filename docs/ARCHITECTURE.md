@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md]
-last-verified-against-source: 565bb92
+last-verified-against-source: 6e4d0bb
 last-updated: 2026-10-08
 ---
 
@@ -212,7 +212,10 @@ its org sat in (#65, [section 7](#7-trust-boundaries)): `GET /rooms/:id`, the
 surface read and the blob download fall back to it for a caller with no seat,
 `GET /rooms?as=admin` lists those rooms from the registry's org index, and
 `DELETE /rooms/:id` lets the room's creator or such an admin ask for the purge,
-answered 202 because the room's own alarm does it. A member a creator removed
+answered 202 with the time the room is stored to go, because the room's own
+alarm does it. The detail carries `closed_at` and `purge_at` as ISO times, null
+where the record has none, so a member of a closed room can see how long it
+has. A member a creator removed
 (#113) is served the room as it stood at its removal and nothing after: the
 surface to the rows it was shown, and the roster and the member count as of the
 removal, with no `presence`. The one exception is the org's admin: once the room
@@ -220,7 +223,13 @@ has closed, a removed member who is also an admin of an org in it reads it
 whole, because the cut is a seat's and they no longer hold one. The
 list is bounded at 50 rooms and says when it was (`truncated`), because neither
 registry index orders by recency; the newest 50 of a larger set is #49's summary
-index. A poll that finds nothing new costs one record read, because the ETag is
+index. The admin's list reads the org index wider than it answers, `JOINED_SCAN`
+ids (`src/store.ts`, the bound the monitor's joined history is read with),
+because that index holds the org's open rooms among its closed ones in no
+promised order; it keeps the closed rooms of what it finds and lists the newest
+50 by close, and `truncated` says either bound was hit. The scan costs up to that
+many room reads for one request, which #49's summary index removes. A poll that
+finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
@@ -907,10 +916,11 @@ loud:
   still a seat, and reads as the admin, whole: one predicate (`readsAsAdmin`)
   answers for the detail, the surface read and the download, so the page never
   shows a file it cannot fetch, and `my_handles` still lists the removed handles
-  so the page can say so. The read is a read: a write to the surface from an
-  admin is a 403, since it holds no seat, and a file item's bytes come down
-  through the download route under the headers a member's do. The delete is the
-  one write, and the room's creator may ask for it as well.
+  so the page can say so. The read is a read: a write to the surface or an upload
+  from an admin is a 403, one status for the one fact that it holds no seat, and
+  a file item's bytes come down through the download route under the headers a
+  member's do. The delete is the one write, and the room's creator may ask for it
+  as well.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
 - **No shared mutable state between sessions.** Reads return detached copies and
@@ -1121,9 +1131,15 @@ loss is findable, and the sweep at close (#65) is what finds it.
    `purge` fires at `closedAt + retainAfterCloseMs`, the window the creator's plan
    stamped on the room, or at `purgeAt` when a delete asked for it sooner: bytes
    first, then the registry's rows and an audit entry per org, then the record,
-   so a crash between leaves a record whose next wake purges again and never a
-   record naming bytes that are gone. Both are derived from the record, like
-   `abandoned`, and a closed row from before #65 carries no window and is kept.
+   and last the room's watchers, whose polls are settled with nothing and whose
+   sockets are closed with 1000 "room purged". A crash between leaves a record
+   whose next wake purges again. What the order guarantees is never bytes that no
+   record can find, the orphan the sweep exists for. It does not keep a record
+   from naming bytes that are gone: between the bucket's delete and the wipe, and
+   after a crash between them until the next wake, the record exists and its
+   objects do not, and a download of one answers 404, as it does for any
+   reference that dangles. Both are derived from the record, like `abandoned`,
+   and a closed row from before #65 carries no window and is kept.
 
    Four things keep the pair from spinning or losing anything. A name derived
    with no branch in `alarm()` is never consumed, so the sweep sets `blobsSwept`,
@@ -1134,9 +1150,14 @@ loss is findable, and the sweep at close (#65) is what finds it.
    entry queued in the storage the last step deletes would go with it. And every
    place a room closes re-arms the alarm, since a close that queues nothing
    would otherwise leave it pointing at an abandonment time months off;
-   `SessionDO.getSession` re-arms it too when it reads a closed room whose purge
-   is due, for a purge the runtime gave up on, and leaves the purge itself to the
-   alarm. The audit entry carries `purge:<room>:<org>` as its intent id, which
+   `SessionDO.getSession` re-arms it too when it reads a closed room whose sweep
+   or purge is due, for work the runtime gave up on, and leaves the work itself
+   to the alarm. A dropped alarm is recovered by the next read of the room and by
+   nothing else: a room nobody reads again keeps what it owes until someone does.
+   The runtime retries a throwing alarm a few times and then says nothing of
+   which object it gave up on, so `alarm()` writes the room id and the handler
+   name to the log before it rethrows, and that line is the only record. The
+   audit entry carries `purge:<room>:<org>` as its intent id, which
    `AuditDO.append` dedupes on, so a purge run twice files one entry per org.
 
 It is used three times:

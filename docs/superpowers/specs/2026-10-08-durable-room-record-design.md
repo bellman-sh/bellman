@@ -1,7 +1,7 @@
 # The Durable Room Record: an Admin's Read, and Retention — Design
 
 Issue: [#65](https://github.com/bellman-sh/bellman/issues/65)
-Status: approved design, pending implementation plan
+Status: implemented on `mcfearsome/durable-room-record`; plan: [the durable room record](../plans/2026-10-08-durable-room-record.md)
 Depends on: [the working surface](2026-10-06-working-surface-design.md) (D5: the room object is not deleted at close; D11: what that settled here), [blobs](2026-10-06-surface-blobs-design.md) (the R2 prefix, the charge rule), [the room routes](../plans/2026-10-07-room-routes.md) (#184) (the panel's reads this extends)
 Related: #49 (the panel's HTTP API, which the admin list belongs to), #158 (a room anyone can read: the share link stays there), #18 (rooms persist: a room closes when its last member leaves or after 90 days with nobody in it, and this design starts its clock at that close)
 Repos: `bellman-sh/bellman` only; the panel reads what the routes answer
@@ -100,15 +100,19 @@ says to an admin exactly what it says to a stranger.
 `sessionsJoinedBy`, written on the same outbox messages: at creation for the
 creator's org, at each seating for the member's org when it has one, and
 removed by `forget` at purge. `GET /rooms?as=admin` lists them for a caller
-D4 admits, closed rooms only, with the same `{ rooms, truncated }` shape and
-the same bound. The identity's own org is the only one it can ask for; the
-query names no org.
+D4 admits, closed rooms only, with the same `{ rooms, truncated }` shape. The
+list holds the newest 50 closes, as the member list holds 50, but the index is
+read wider than that (`JOINED_SCAN`, the bound the monitor's joined history is
+read with), because it holds the org's open rooms among its closed ones in no
+promised order; `truncated` says either bound was hit. The identity's own org
+is the only one it can ask for; the query names no org.
 
 ### D6 — Delete on demand purges a closed room now.
 
 `DELETE /rooms/:id` by the room's creator, or by an admin D4 admits, sets the
-purge due now and answers 202; the alarm does the work, so the route and the
-alarm are one code path. An open room answers 409 "a room is deleted after it
+purge due now and answers 202 with `{ id, purge_at }`, the time the room is
+stored with, which a retry is told again; the alarm does the work, so the route
+and the alarm are one code path. An open room answers 409 "a room is deleted after it
 closes"; closing stays what it is, the last member leaving or 90 days with
 nobody in the room. A
 `room_deleted` audit entry names who asked, where `room_purged` names only
@@ -130,21 +134,25 @@ retainAfterCloseMs: number | null;     // free 7 d, pro 365 d, max null, team nu
 closedAt: number | null;               // set with `closed`
 retainAfterCloseMs: number | null;     // stamped at creation from the plan
 purgeAt: number | null;                // set on demand (D6); otherwise derived
+blobsSwept: boolean;                   // the close-time sweep has run (D3)
 
 // src/store.ts, BellmanStore
 sessionsForOrg(orgId: string, limit: number): Promise<string[]>;
-purgeSession(sessionId: string): Promise<void>;   // the alarm's work, callable now
+schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;  // D6; the alarm does the purge
 sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }>;
+type PurgeSchedule = { ok: true; purgeAt: number } | { ok: false; reason: "open" | "missing" };
 
 // src/blobs.ts, BlobStore
-list(sessionId: string): AsyncIterable<{ id: string; bytes: number }>;
+list(sessionId: string): Promise<{ id: string; bytes: number }[]>;
 deleteAll(sessionId: string): Promise<number>;
 
-// src/types.ts, AuditEntry kinds
-"room_purged" | "room_deleted"          // payload: { session_id, room, by? }
+// src/types.ts, AuditEntry
+action: string;                         // "room_purged" | "room_deleted"
+detail: Record<string, unknown>;        // { session_id, room }; actorUserId is the asker, or "system"
 ```
 
-The wire: `GET /rooms/:id` gains `viewer: "member" | "admin"`; the list gains
+The wire: `GET /rooms/:id` gains `viewer: "member" | "admin"`, and `closed_at` and
+`purge_at` as ISO times, null where the record has none; the list gains
 `viewer` too. `roomListEntry` is unchanged.
 
 ## Security
@@ -152,8 +160,12 @@ The wire: `GET /rooms/:id` gains `viewer: "member" | "admin"`; the list gains
 An admin's read is bounded three ways: the plan that pays for audit, the
 role, and the org tie on the roster, each already enforced for the audit log.
 Membership is still the tenant boundary for an open room. A purge deletes
-bytes before the record so a reader can never be handed an id whose object is
-gone while the record says it is there. Delete on demand is the creator's or
+bytes before the record, so there are never bytes that no record can find: a
+purge that dies leaves a record whose next wake does it all again. The converse
+is not promised. Between the bucket's delete and the wipe, and after a crash
+between them until the next wake, the record exists and may name bytes that are
+gone, and a download of one answers 404, as the dangling-reference rule already
+allows. Delete on demand is the creator's or
 the admin's and is a 202 that the alarm fulfils, so no route holds the
 object open for the time a prefix takes to delete. The audit entries carry
 identifiers, never prose.
@@ -162,7 +174,7 @@ identifiers, never prose.
 
 `tests/helpers/store-contract.ts` (both stores): a closed room with a finite
 window is purged at the window and gone from both listings and the org index;
-an infinite window is never purged; `purgeSession` on an open room is
+an infinite window is never purged; `schedulePurge` on an open room is
 refused; `sweepBlobs` removes exactly the unnamed objects and credits their
 bytes; `closedAt` is set with `closed`. `worker-tests`: the derived `purge`
 alarm fires once and the object's storage is empty; a record closed before
@@ -179,7 +191,7 @@ Every test is run once against the broken implementation before it counts.
 `src/auth.ts` (the entitlement), `src/types.ts` (`closedAt`,
 `retainAfterCloseMs`, `purgeAt`, the audit kinds), `src/store.ts` and
 `src/store-do.ts` (the purge handler, the sweep, `sessionsForOrg`,
-`purgeSession`), `src/registry-do.ts` (the org index, `forget`),
+`schedulePurge`), `src/registry-do.ts` (the org index, `forget`),
 `src/blobs.ts` and `src/blobs-r2.ts` (`list`, `deleteAll`), `src/http/rooms.ts`
 (the admin fallback, `?as=admin`, `DELETE`), `src/projections.ts` (`viewer`,
 the preview with no seat), `docs/ARCHITECTURE.md` (§4 the fourth alarm, §8

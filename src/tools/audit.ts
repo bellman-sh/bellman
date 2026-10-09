@@ -12,7 +12,7 @@ export function registerAudit(server: McpServer, identity: Identity, s: BellmanS
     "bellman_audit",
     {
       title: "Bellman org audit log",
-      description: `Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving. Cross-org sessions appear in BOTH orgs' logs.
+      description: `Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving, and the end of a room's record: room_deleted when its creator or an org admin asked for it to be deleted, room_purged when it was purged. Cross-org sessions appear in BOTH orgs' logs.
 
 Requires: team plan + admin role. Args: limit (default 50).
 Returns: { entries: [{ at, session_id, actor, action, detail }] }`,

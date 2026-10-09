@@ -1929,7 +1929,10 @@ export class MemoryStore implements BellmanStore {
    * The purge (#65, D2), in the order the Durable Objects store keeps: the bytes first, then what
    * the rest of the store holds about the room, then the room. The first step is the only one that
    * can fail, and it fails before anything is forgotten, so a failed purge leaves a room the next
-   * sweep tries again, and never a room that names bytes that are gone.
+   * sweep tries again. What the order guarantees is never bytes that no record can find. It does not
+   * keep a room from naming bytes that are gone: from the bucket's delete to the forgetting the room
+   * is there and its objects are not, and a download of one answers 404, as it does for any
+   * reference that dangles.
    *
    * A poll still waiting on the room is answered with nothing rather than dropped: it registered a
    * promise, and its own timer would find no waiter to settle.

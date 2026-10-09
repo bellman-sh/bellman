@@ -2101,9 +2101,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /**
    * The purge (#65, D2). Bytes first, then what other objects hold about this room,
    * then the record: a crash between leaves a record whose next wake does it all
-   * again, and never a record that names bytes that are gone. Direct calls rather
-   * than the outbox, because the outbox rows live in the storage the last step
-   * empties.
+   * again. What the order guarantees is never bytes that no record can find, the
+   * orphan the sweep exists for. It does not keep a record from naming bytes that
+   * are gone: between the bucket's delete and the wipe, and after a crash between
+   * them until the next wake, the record exists and its objects do not, and a
+   * download of one answers 404, as it does for any reference that dangles. Direct
+   * calls rather than the outbox, because the outbox rows live in the storage the
+   * last step empties.
    *
    * Every step can run twice. The bucket delete and the two index drops are
    * idempotent, and the audit entry carries `purge:<room>:<org>` as its intent id,
@@ -2114,7 +2118,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * will not deliver holds the purge back: a `room_deleted` entry, or a member's
    * removal, queued here and not yet filed in an org's stream would be emptied with
    * the rest, and an audit log that quietly drops the record of a delete is not one.
-   * The throw is what makes the runtime try again.
+   * The throw is what makes the runtime try again. Once the room is gone its
+   * watchers are told (#settleWatchers).
    *
    * `#private`, because it empties this object and a Durable Object answers RPC for
    * every method on its class (ARCHITECTURE.md section 9, runtime fact 3).
@@ -2212,6 +2217,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * and the next firing starts again. The bytes of the objects removed before the failure
    * are then not credited, since they cannot be listed twice. The room is closed, so
    * nothing charges it again, and the purge deletes whatever is left.
+   *
+   * A member's own append can land after the sweep's read of the rows: a member whose
+   * surface write passed its gate and whose own leave then closed the room leaves an item
+   * naming an object the sweep has deleted and credited. It takes a writer racing its own
+   * leave, since another member's seat keeps the room open, and the download's 404 covers
+   * an item that names bytes that are gone, so no code here tries to prevent it.
    *
    * `#private`: it deletes from the bucket on the strength of the record it is handed.
    */

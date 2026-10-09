@@ -505,7 +505,11 @@ last did and how long it had been silent at the tick's own `at`. It is written
 only when some member is due, never into a frozen or closed room, and a room
 that declares no cadence gets none. Members answer with `progress` events —
 "still working, currently on the migration script" — which exist to reach a peer
-and have no timer of their own.
+and have no timer of their own. A reporting role may carry its creator's
+instruction for what that note says (`report`, at most 300 characters): a joiner
+sees it in the preview's untrusted text before accepting the seat, and every
+tick carries it in an envelope attributed to the creator (`instructions`), never
+in the server's own `ask`.
 
 `lastSeenAt` and `lastReportAt` are separate on purpose. Any call a member makes
 moves the first; only a deliberate report moves the second. A member can be
@@ -1702,12 +1706,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,377** | every request, whether or not you are in a room |
+| Tool definitions | **~7,394** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 for per-role heartbeat instructions: 7,394 tokens, 19
+over the merge base measured the same way (7,375, what this method gives for the
+7,377 below), all of them `bellman_start`'s (now 1,829): a role in its manifest
+schema gained the optional `report`.
 
 Re-measured on 2026-10-09 once main's saved presets (#224) merged beneath the
 hosted seat: 7,377 tokens, 23 over the 7,354 below, all of them

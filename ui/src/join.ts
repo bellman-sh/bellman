@@ -48,7 +48,9 @@ export function renderJoin(
     el("tr", { class: role === r.room.your_role ? "you" : "" },
       el("td", {}, role),
       el("td", {}, verbs.length > 0 ? verbs.join(", ") : "read only"),
-      el("td", {}, r.room.reports[role] ? "yes" : "no"),
+      el("td", {}, r.room.reports[role]
+        ? (prose.report_instructions?.[role] ? `yes: ${prose.report_instructions[role]}` : "yes")
+        : "no"),
       el("td", { class: "muted" }, prose.descriptions[role] ?? "")),
   );
 

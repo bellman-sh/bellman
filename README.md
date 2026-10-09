@@ -362,7 +362,11 @@ a preset with a host, `social` or a saved preset carrying a `host` block, and a
 cite of any other preset that sets it is refused, since nothing there would tick
 or the preset already holds its author's cadence. A joiner sees both before it
 accepts a seat: the connect preview carries `heartbeat_on_seconds`,
-`you_report`, and `reports` for every role.
+`you_report`, and `reports` for every role. A role that answers it can carry
+`report`: what that seat reports, in the creator's words, at most 300
+characters, and refused on a seat with `reports: false`. A joiner sees it before
+accepting the seat, and each tick hands it to the seat as the creator's words,
+never the server's.
 
 A room can have a hosted seat, which asks the room a question on each tick
 (see [what a plan gates](#what-a-plan-gates)). The `social` preset declares

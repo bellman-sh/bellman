@@ -157,10 +157,12 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
   const roles: Record<string, Verb[]> = {};
   const reports: Record<string, boolean> = {};
   const descriptions: Record<string, string | null> = {};
+  const report_instructions: Record<string, string | null> = {};
   for (const [key, def] of Object.entries(m.roles)) {
     roles[key] = def.can;
     reports[key] = asked(key);
     descriptions[key] = def.description;
+    report_instructions[key] = def.report ?? null;
   }
   return {
     preset: m.preset,
@@ -193,7 +195,7 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
     host: m.host === null ? null : { role: m.host.role, model: m.host.model },
     text: untrusted(
       { memberId: creator.memberId, label: creator.label },
-      { room: m.room, purpose: m.purpose, descriptions },
+      { room: m.room, purpose: m.purpose, descriptions, report_instructions },
     ),
   };
 }

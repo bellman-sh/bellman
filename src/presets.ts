@@ -73,7 +73,7 @@ export function checkPreset(name: string, body: unknown, now: number): PresetChe
   }
   const roles: SavedPreset["roles"] = {};
   for (const [key, def] of Object.entries(v.roles)) {
-    roles[key] = { can: [...def.can], description: def.description ?? null, reports: def.reports ?? false };
+    roles[key] = { can: [...def.can], description: def.description ?? null, reports: def.reports ?? false, report: def.report ?? null };
   }
   const preset: SavedPreset = {
     name,

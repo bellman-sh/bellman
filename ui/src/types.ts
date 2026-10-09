@@ -26,7 +26,7 @@ export interface RoomBlock {
   creator_role: string;
   roles: Record<string, string[]>;
   reports: Record<string, boolean>;
-  text: Untrusted<{ room: string; purpose: string | null; descriptions: Record<string, string | null> }>;
+  text: Untrusted<{ room: string; purpose: string | null; descriptions: Record<string, string | null>; report_instructions?: Record<string, string | null> }>;
 }
 
 export interface Brief {

@@ -515,6 +515,32 @@ export function decideBlobCharge(
   return { ok: true, used: used + bytes };
 }
 
+/**
+ * What a delete on demand was told (#65, D6). `purgeAt` is the time the room is stored with: the first
+ * request's, whatever time a repeated one asked for. A client that asks again is told when the room goes,
+ * and that is the record's word and not the clock of the request that is answering.
+ */
+export type PurgeSchedule =
+  | { ok: true; purgeAt: number }
+  | { ok: false; reason: "open" | "missing" };
+
+/**
+ * How many ids an index is read for, per call, when its rows are resolved and filtered before the answer
+ * is full. The joined index lists every room a person ever held a handle in, closed ones included, in no
+ * promised order, and is never pruned (`BellmanStore.sessionsJoinedBy`), so a window the size of the
+ * answer, taken before the closed filter, cut live rooms for anyone past 50 memberships, and the cut was
+ * permanent. The org index is the same shape (`sessionsForOrg`): open and closed rooms together, in no
+ * promised order, so the admin's list asks it for this many and keeps the closed rooms of what it finds,
+ * and the monitor's listing asks the joined index for the same. The created index needs no such room:
+ * `sessionsCreatedBy` drops closed rows as it meets them.
+ *
+ * Each id the filter drops costs one `getSession`, so this is also the bound on that spend.
+ * ponytail: a person whose live rooms sit past 500 dead memberships loses them from the monitor's
+ * listing, and an org whose closed rooms sit past 500 index rows loses them from the admin's list; the
+ * upgrade is a status-aware or pruned index, or a summary of the org's closed rooms (#49).
+ */
+export const JOINED_SCAN = 500;
+
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -772,17 +798,20 @@ export interface BellmanStore {
   freezeSession(sessionId: string, frozenAt: number | null): Promise<void>;
   /**
    * Ask for a closed room to be purged at `at` rather than at the end of its window (#65, D6):
-   * the delete on demand. Resolves to "scheduled" for a closed room, "open" for a room that has
-   * not closed, which a delete never closes, and "missing" for a room that is not there, a purged
-   * one included. The purge itself is the store's own to carry out, by `sweep` for MemoryStore and
-   * by the room's alarm for the Durable Objects store, so "scheduled" means asked, not done.
+   * the delete on demand. Resolves to `{ ok: true, purgeAt }` for a closed room, `reason: "open"`
+   * for a room that has not closed, which a delete never closes, and `reason: "missing"` for a room
+   * that is not there, a purged one included. The purge itself is the store's own to carry out, by
+   * `sweep` for MemoryStore and by the room's alarm for the Durable Objects store, so `ok` means
+   * asked, not done.
    *
    * Asking again changes nothing and files nothing: the first request stands. A client that
    * retries a delete it never heard the answer to is the case, and the audit log owes one
    * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
-   * `by` is null when the caller is not a person.
+   * `purgeAt` says the same of the time: it is the one the room is stored with, the first
+   * request's, and a repeat is told that and not the `at` it asked for. `by` is null when the
+   * caller is not a person.
    */
-  schedulePurge(sessionId: string, at: number, by: string | null): Promise<"scheduled" | "open" | "missing">;
+  schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
   /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
@@ -1472,17 +1501,15 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async schedulePurge(
-    sessionId: string, at: number, by: string | null,
-  ): Promise<"scheduled" | "open" | "missing"> {
+  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
     const s = this.sessions.get(sessionId);
-    if (!s) return "missing";
-    if (!s.closed) return "open";
-    // Asked already: the first request stands, and is on the record once.
-    if (s.purgeAt !== null) return "scheduled";
+    if (!s) return { ok: false, reason: "missing" };
+    if (!s.closed) return { ok: false, reason: "open" };
+    // Asked already: the first request stands, is on the record once, and is the time the answer gives.
+    if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
     this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
-    return "scheduled";
+    return { ok: true, purgeAt: at };
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

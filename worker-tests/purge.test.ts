@@ -8,7 +8,7 @@
  * (`runDurableObjectAlarm`) is the first, for the end-to-end path.
  */
 import { it, expect, vi, afterEach } from "vitest";
-import { env, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import { env, SELF, reset, abortAllDurableObjects, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { R2BlobStore } from "../src/blobs-r2.js";
 import { OUTBOX_HANDLER, OUTBOX_SEQ, dueKey, outboxKey } from "../src/outbox.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
@@ -200,7 +200,7 @@ it("keeps a row closed before the window existed, and lets a delete reach it", a
     closed: true, closedAt: null, retainAfterCloseMs: null, purgeAt: null, blobsSwept: false,
   });
 
-  expect(await store.schedulePurge("qs_legacy", Date.now(), "u_jesse")).toBe("scheduled");
+  expect(await store.schedulePurge("qs_legacy", Date.now(), "u_jesse")).toMatchObject({ ok: true });
   await runAlarm("qs_legacy");
 
   expect(await rowCount("qs_legacy")).toBe(0);
@@ -212,7 +212,7 @@ it("answers open for a room that has not closed, and arms and queues nothing", a
   await store.createSession(room("qs_open"));
   const before = { alarm: await armedAlarm("qs_open"), rows: await rowCount("qs_open") };
 
-  expect(await store.schedulePurge("qs_open", Date.now(), "u_jesse")).toBe("open");
+  expect(await store.schedulePurge("qs_open", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
 
   expect({ alarm: await armedAlarm("qs_open"), rows: await rowCount("qs_open") }).toEqual(before);
 });
@@ -225,7 +225,7 @@ it("arms the purge at the time a delete asked for, files who asked, and purges t
   expect(await armedAlarm("qs_asked")).toBeGreaterThan(Date.now() + 80 * 24 * HOUR);
   const at = Date.now() + HOUR;
 
-  expect(await store.schedulePurge("qs_asked", at, "u_jesse")).toBe("scheduled");
+  expect(await store.schedulePurge("qs_asked", at, "u_jesse")).toEqual({ ok: true, purgeAt: at });
 
   await vi.waitFor(async () => expect(await armedAlarm("qs_asked")).toBe(at), { timeout: 2_000 });
   expect(await store.getSession("qs_asked"), "an hour out, the room is still there").toBeDefined();
@@ -344,6 +344,54 @@ it("arms nothing for a read of a closed room that is inside its window, or kept,
 });
 
 // ---------------------------------------------------------------------------
+// What a purge owes the watchers of the room (#65, review M3)
+// ---------------------------------------------------------------------------
+
+const after = (ms: number) => new Promise<"timed out">((resolve) => setTimeout(() => resolve("timed out"), ms));
+/** How many long polls the room object is holding. */
+const waitersOf = (id: string) =>
+  runInDurableObject(stubOf(id), (instance: SessionDO) => (instance as unknown as { waiters: unknown[] }).waiters.length);
+
+// MemoryStore settles a poll that is waiting on a purged room with nothing. This object has to do the same, or the
+// poll waits out its own timer on a room that is gone.
+it("settles a poll that is waiting on the room when it is purged, and does not leave it to its own timer", async () => {
+  const { store, closedAt } = await closedRoom("qs_polling");
+  const cursor = (await runInDurableObject(stubOf("qs_polling"), (_i: SessionDO, ctx) => ctx.storage.get<number>("cursor"))) ?? 0;
+  const waiting = store.waitForEvents("qs_polling", cursor, 120_000);
+  waiting.catch(() => undefined); // a poll the object is aborted under is not what this case reports
+  await vi.waitFor(async () => expect(await waitersOf("qs_polling"), "the poll is registered").toBe(1), { timeout: 2_000 });
+
+  setClock(closedAt + WINDOW);
+  await runAlarm("qs_polling");
+
+  expect(await Promise.race([waiting, after(2_000)]), "settled with the purge, and not at its own timer").toEqual([]);
+});
+
+// A socket is the room's future, and a purged room has none. Left alone it stays attached to an empty object until its
+// client gives up on it. The close is the ordinary 1000: nothing in the bridge's client reads a close code as "room gone"
+// (src/room-socket.ts reconnects after any close and learns the room's state from the upgrade's answer or its poll), so the
+// reason is for the developer reading the client's close event.
+it("closes the sockets attached to the room when it is purged", async () => {
+  const store = new DurableObjectStore(env as never);
+  await store.createSession(room("qs_socket"));
+  const upgraded = await SELF.fetch("https://bellman.test/ws?session=qs_socket&cursor=0", {
+    headers: { upgrade: "websocket", authorization: "Bearer qk_ws_test" },
+  });
+  expect(upgraded.status, "the upgrade is accepted while the room is open").toBe(101);
+  const ws = upgraded.webSocket!;
+  ws.accept();
+  const closed = new Promise<{ code: number; reason: string }>((resolve) =>
+    ws.addEventListener("close", (event) => resolve({ code: event.code, reason: event.reason })));
+  await store.closeSession("qs_socket");
+  const closedAt = (await store.getSession("qs_socket"))!.closedAt!;
+
+  setClock(closedAt + WINDOW);
+  await runAlarm("qs_socket");
+
+  expect(await Promise.race([closed, after(2_000)])).toEqual({ code: 1000, reason: "room purged" });
+});
+
+// ---------------------------------------------------------------------------
 // The sweep of unnamed objects at close (#65, D3)
 // ---------------------------------------------------------------------------
 
@@ -451,4 +499,102 @@ it("credits the freed bytes once when two sweeps overlap", async () => {
 
   expect((await store.getSession("qs_overlap"))!.blobBytes).toBe(10);
   expect(await blobs().list("qs_overlap")).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// A dropped alarm, and what the runtime does not say about it (#65, review I1 and M7 i)
+// ---------------------------------------------------------------------------
+
+/** Swap a room's env for one whose bucket refuses its next `refusals` deletes and lists the real one (see the purge case above). */
+async function refuseDeletes(id: string, refusals: number) {
+  await runInDurableObject(stubOf(id), (instance: SessionDO) => {
+    const holder = instance as unknown as { env: { BLOBS: R2Bucket } };
+    const real = holder.env.BLOBS;
+    const flaky = {
+      list: (...args: Parameters<R2Bucket["list"]>) => real.list(...args),
+      delete: async (...args: Parameters<R2Bucket["delete"]>) => {
+        if (refusals-- > 0) throw new Error("R2 is unavailable");
+        return real.delete(...args);
+      },
+    };
+    holder.env = Object.create(holder.env, { BLOBS: { value: flaky } });
+  });
+}
+
+// A throwing alarm() is retried a few times and then left, with nothing armed. A room kept until deleted owes the sweep
+// and nothing else, so no purge is ever due to bring a read back to it: the read that finds the sweep due re-arms for it
+// as it does for the purge, and leaves the sweep to the alarm. A room with a window owes the purge as well, later, and
+// the read re-arms for the earlier of the two: the sweep.
+it.each([
+  ["a kept room's", "qs_sweep_lost_kept", null],
+  ["a room's whose window has not run out", "qs_sweep_lost_window", WINDOW],
+])("re-arms the alarm when a read finds %s sweep due with nothing armed, and leaves the sweep to the alarm", async (_name, id, window) => {
+  const store = new DurableObjectStore(env as never);
+  // Closed an hour from now by its own record, so no alarm of the pool's can fire before the clock moves.
+  const closedAt = Date.now() + HOUR;
+  await store.createSession(room(id, { closed: true, closedAt, retainAfterCloseMs: window, blobsSwept: false }));
+  await putObject(id, "b_orphan", 30);
+  await runInDurableObject(stubOf(id), (_i: SessionDO, ctx) => ctx.storage.deleteAlarm());
+  expect(await armedAlarm(id), "the runtime gave up on it").toBeNull();
+  setClock(closedAt);
+
+  expect(await store.getSession(id), "read once, the room is served as any closed room is").toMatchObject({ closed: true });
+
+  expect(await armedAlarm(id), "armed again, at the sweep").toBe(closedAt);
+  expect(await blobs().list(id), "and the read swept nothing").toHaveLength(1);
+  await runAlarm(id);
+  expect(await blobs().list(id)).toEqual([]);
+  expect((await store.getSession(id))!.blobsSwept).toBe(true);
+});
+
+// "A delete that fails throws before the record is touched, so `blobsSwept` stays false and the next firing starts
+// again" (#sweep). The sweep that failed is not recorded as done, and the one after it does the whole of it.
+it("leaves blobsSwept false when a delete of the sweep throws, and the next firing starts the sweep again", async () => {
+  const store = new DurableObjectStore(env as never);
+  const closedAt = Date.now() + HOUR;
+  await store.createSession(room("qs_sweep_flaky", { closed: true, closedAt, retainAfterCloseMs: null, blobsSwept: false }));
+  await runInDurableObject(stubOf("qs_sweep_flaky"), async (_i: SessionDO, ctx) => {
+    await ctx.storage.put("session", { ...(await ctx.storage.get<object>("session")), blobBytes: 45 });
+  });
+  await putObject("qs_sweep_flaky", "b_orphan", 30);
+  await putObject("qs_sweep_flaky", "b_other", 5);
+  await refuseDeletes("qs_sweep_flaky", 1);
+  const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  try {
+    setClock(closedAt);
+    await expect(runAlarm("qs_sweep_flaky")).rejects.toThrow("R2 is unavailable");
+    expect(await store.getSession("qs_sweep_flaky"), "nothing is recorded as done").toMatchObject({ blobsSwept: false, blobBytes: 45 });
+    expect(await blobs().list("qs_sweep_flaky"), "and nothing was removed").toHaveLength(2);
+
+    await runAlarm("qs_sweep_flaky");
+
+    expect(await store.getSession("qs_sweep_flaky")).toMatchObject({ blobsSwept: true, blobBytes: 10 });
+    expect(await blobs().list("qs_sweep_flaky")).toEqual([]);
+  } finally {
+    quiet.mockRestore();
+  }
+});
+
+// The runtime says nothing of which object it gave up on. The line alarm() writes before it rethrows is the one record
+// of the room and the handler, and the rethrow is what lets the runtime retry.
+it("names the room and the handler in the log when a handler throws, and still throws", async () => {
+  const store = new DurableObjectStore(env as never);
+  const closedAt = Date.now() + HOUR;
+  await store.createSession(room("qs_logged", { closed: true, closedAt, retainAfterCloseMs: null, blobsSwept: false }));
+  await putObject("qs_logged", "b_orphan", 3);
+  await refuseDeletes("qs_logged", 1);
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  try {
+    setClock(closedAt);
+    await expect(runAlarm("qs_logged"), "the alarm still throws, for the runtime to retry").rejects.toThrow("R2 is unavailable");
+    expect(log).toHaveBeenCalledWith(
+      expect.stringMatching(/"sweep".*qs_logged/),
+      expect.objectContaining({ message: "R2 is unavailable" }),
+    );
+  } finally {
+    log.mockRestore();
+  }
+  expect(await store.getSession("qs_logged")).toMatchObject({ blobsSwept: false });
 });

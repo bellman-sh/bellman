@@ -5,12 +5,12 @@
  * Response out — with no listener. Who is calling is a stub over the dev keys,
  * as in tests/http-blobs.test.ts.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
-import { MemoryStore } from "../src/store.js";
+import { JOINED_SCAN, MemoryStore } from "../src/store.js";
 import type { Identity, Member, Session, SurfaceItem } from "../src/types.js";
 import { member, session } from "./helpers/fixtures.js";
 import { DEV_KEY, Harness } from "./helpers/harness.js";
@@ -303,6 +303,29 @@ describe("GET /rooms/:id", () => {
     const res = (await call(DEV_KEY.jesse, "/rooms/qs_gone"))!;
     expect(res.status).toBe(200);
     expect(await bodyOf(res)).toMatchObject({ session_status: "closed", my_handles: [{ active: false, removed: false }] });
+  });
+
+  // Review M8. A member reading a closed room has no other way, on any wire, to learn when it goes: the two times are
+  // on the record already. ISO, as the envelope's other times are, and null where the record has none.
+  it("carries when the room closed and when it goes, and null where the record has none", async () => {
+    const closedAt = Date.parse("2026-10-01T12:00:00.000Z");
+    const week = 7 * 24 * 60 * 60 * 1000;
+    const closedRoom = (id: string, over: Partial<Session>) =>
+      session({ id, closed: true, closedAt, members: [member(), peer()], ...over });
+    await store.createSession(closedRoom("qs_t_window", { retainAfterCloseMs: week }));
+    await store.createSession(closedRoom("qs_t_asked", { retainAfterCloseMs: week, purgeAt: closedAt + 1_000 }));
+    await store.createSession(closedRoom("qs_t_kept", { retainAfterCloseMs: null }));
+    await store.createSession(closedRoom("qs_t_legacy", { closedAt: null, retainAfterCloseMs: null }));
+    const times = async (id: string) => {
+      const body = (await bodyOf(await call(DEV_KEY.jesse, `/rooms/${id}`))) as { closed_at: unknown; purge_at: unknown };
+      return [body.closed_at, body.purge_at];
+    };
+
+    expect(await times("qs_t_window")).toEqual(["2026-10-01T12:00:00.000Z", "2026-10-08T12:00:00.000Z"]);
+    expect(await times("qs_t_asked"), "a delete asked for sooner wins").toEqual(["2026-10-01T12:00:00.000Z", "2026-10-01T12:00:01.000Z"]);
+    expect(await times("qs_t_kept"), "kept until someone deletes it").toEqual(["2026-10-01T12:00:00.000Z", null]);
+    expect(await times("qs_t_legacy"), "closed before the close was dated").toEqual([null, null]);
+    expect(await times(ROOM), "open").toEqual([null, null]);
   });
 
   it("refuses without a credential, with CORS on the refusal, and answers 405 to a method it does not take", async () => {
@@ -836,6 +859,18 @@ describe("an org admin's read of a closed room (#65)", () => {
     expect(body.members.map((m) => m.member_id)).toEqual(["m_peer"]);
   });
 
+  // Review M8, on the admin's envelope: the same two times, spelled the same way.
+  it("carries when the room closed and when it goes on the admin's envelope, as on a member's", async () => {
+    await store.createSession(orgRoom({ retainAfterCloseMs: 60_000 }));
+    expect(await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}`))).toMatchObject({
+      viewer: "admin", closed_at: "2023-11-14T22:13:20.000Z", purge_at: "2023-11-14T22:14:20.000Z",
+    });
+    await store.createSession(orgRoom({ id: "qs_org_kept", retainAfterCloseMs: null }));
+    expect(await bodyOf(await call(DEV_KEY.jesse, "/rooms/qs_org_kept"))).toMatchObject({
+      viewer: "admin", closed_at: "2023-11-14T22:13:20.000Z", purge_at: null,
+    });
+  });
+
   it("answers 404 while the room is open, on both reads: an open room is its members'", async () => {
     await store.createSession(orgRoom({ closed: false, closedAt: null }));
     expect((await call(DEV_KEY.jesse, `/rooms/${ORG_ROOM}`))!.status).toBe(404);
@@ -1119,24 +1154,44 @@ describe("GET /rooms?as=admin (#65)", () => {
     expect((await list(null))!.status).toBe(401);
   });
 
-  // The window is the index's: the first MAX_ROOMS_LISTED rows of the org, open rooms among them, so the
-  // fixture's own open room takes a place in it that a closed one could have had. That is the bound's cost
-  // and the reason `truncated` exists; #49's summary index is what removes it.
-  it("is bounded at MAX_ROOMS_LISTED, and says it may have been cut", async () => {
+  // The index names an org's rooms in no promised order, open ones among them, so a list that stopped at the first
+  // MAX_ROOMS_LISTED rows of it could hold nothing but open rooms, or any fifty of the closed ones (review I2). The
+  // scan is wider than the list (JOINED_SCAN, the bound the joined history is read with), the record decides what
+  // is kept, and the list is the newest MAX_ROOMS_LISTED closes of what the scan found.
+  it("lists the closed rooms that sit behind more open rooms than the list holds", async () => {
+    for (let i = 0; i < MAX_ROOMS_LISTED + 5; i++) await store.createSession(closedRoom(`qs_adm_open_${i}`, null, { closed: false }));
+    await store.createSession(closedRoom("qs_adm_behind_old", 2_000));
+    await store.createSession(closedRoom("qs_adm_behind_new", 3_000));
+
+    const body = (await bodyOf(await list(DEV_KEY.jesse))) as { rooms: { id: string }[]; truncated: boolean };
+
+    expect(body.rooms.map((r) => r.id)).toEqual(["qs_adm_behind_new", "qs_adm_behind_old"]);
+    expect(body.truncated, "the index came back short of the scan, and fewer were kept than the list holds").toBe(false);
+  });
+
+  it("keeps the newest MAX_ROOMS_LISTED closes of the rooms it found, and says it cut", async () => {
     for (let i = 0; i < MAX_ROOMS_LISTED + 5; i++) await store.createSession(closedRoom(`qs_adm_many_${i}`, 1_000 + i));
-    const body = (await bodyOf(await list(DEV_KEY.jesse))) as { rooms: unknown[]; truncated: boolean };
-    expect(body.rooms.length).toBeGreaterThan(MAX_ROOMS_LISTED - 5);
-    expect(body.rooms.length).toBeLessThanOrEqual(MAX_ROOMS_LISTED);
+
+    const body = (await bodyOf(await list(DEV_KEY.jesse))) as { rooms: { id: string }[]; truncated: boolean };
+
+    // many_54 closed last and many_0 first: the five oldest are the ones left off.
+    const newest = Array.from({ length: MAX_ROOMS_LISTED }, (_, k) => `qs_adm_many_${MAX_ROOMS_LISTED + 4 - k}`);
+    expect(body.rooms.map((r) => r.id)).toEqual(newest);
     expect(body.truncated).toBe(true);
   });
 
-  it("reads no more rooms than the bound", async () => {
-    for (let i = 0; i < MAX_ROOMS_LISTED + 5; i++) await store.createSession(closedRoom(`qs_adm_reads_${i}`, 1_000 + i));
-    let reads = 0;
+  it("asks the index for JOINED_SCAN ids, reads each of them once, and says it may have been cut when the index came back full", async () => {
+    const named = Array.from({ length: JOINED_SCAN }, (_, i) => `qs_adm_scan_${i}`);
+    const asked = vi.spyOn(store, "sessionsForOrg").mockResolvedValue(named);
+    const reads: string[] = [];
     const read = store.getSession.bind(store);
-    store.getSession = async (id: string) => { reads++; return read(id); };
-    await list(DEV_KEY.jesse);
-    expect(reads).toBeLessThanOrEqual(MAX_ROOMS_LISTED);
+    store.getSession = async (id: string) => { reads.push(id); return read(id); };
+
+    const body = (await bodyOf(await list(DEV_KEY.jesse))) as { rooms: unknown[]; truncated: boolean };
+
+    expect(asked).toHaveBeenCalledWith("org_codenerd", JOINED_SCAN);
+    expect(reads.sort(), "each id the index named, once").toEqual([...named].sort());
+    expect(body).toMatchObject({ rooms: [], truncated: true });
   });
 
   it("leaves the member list as it was, and marks it a member's", async () => {
@@ -1249,6 +1304,19 @@ describe("DELETE /rooms/:id (#65)", () => {
     expect(await store.getSession("qs_del_legacy")).toBeUndefined();
   });
 
+  // The admin's door to the same row (review M7 iii): it holds no seat, the row names no window and no close time,
+  // and a delete is still what reaches it.
+  it("lets an admin of an org in the room delete a room closed before the window existed", async () => {
+    await store.createSession(orgRoom({ closedAt: null, retainAfterCloseMs: null }));
+    await store.sweep(Date.now());
+    expect(await store.getSession(ORG_ROOM), "kept however long it sits").toBeDefined();
+
+    expect((await removeRoom(DEV_KEY.jesse, ORG_ROOM))!.status).toBe(202);
+    await store.sweep(Date.now());
+
+    expect(await store.getSession(ORG_ROOM)).toBeUndefined();
+  });
+
   it("answers a repeated delete 202 again, and files one entry for who asked", async () => {
     await store.createSession(mineClosed("qs_del_twice"));
     expect((await removeRoom(DEV_KEY.jesse, "qs_del_twice"))!.status).toBe(202);
@@ -1256,6 +1324,25 @@ describe("DELETE /rooms/:id (#65)", () => {
 
     const asked = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.sessionId === "qs_del_twice");
     expect(asked).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+  });
+
+  // Review M2. The 202 says when the room goes by the time the record holds, which is the first request's, and never by
+  // the clock of the request that is answering.
+  it("answers a repeated delete with the time the first one asked for", async () => {
+    await store.createSession(mineClosed("qs_del_time"));
+    const first = Date.parse("2026-10-08T12:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(first);
+      const asked = (await bodyOf(await removeRoom(DEV_KEY.jesse, "qs_del_time"))) as { purge_at: string };
+      vi.setSystemTime(first + 5_000);
+      const again = (await bodyOf(await removeRoom(DEV_KEY.jesse, "qs_del_time"))) as { purge_at: string };
+
+      expect(asked.purge_at).toBe("2026-10-08T12:00:00.000Z");
+      expect(again.purge_at, "the repeat is told the first's time").toBe("2026-10-08T12:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("answers 405 to a method the detail does not take, naming GET and DELETE, and the preflight allows DELETE", async () => {

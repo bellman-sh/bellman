@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { ROOM_TAIL, UNTRUSTED_PREAMBLE, roomSummary } from "../projections.js";
-import { isActiveMember } from "../store.js";
+import { JOINED_SCAN, isActiveMember } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import type { Identity } from "../types.js";
 import { APP_UI_META } from "../ui/resource.js";
@@ -13,20 +13,6 @@ import { APP_UI_META } from "../ui/resource.js";
  * now.
  */
 export const ROOMS_LIMIT = 50;
-
-/**
- * How many ids the joined index is read for, per call. That index lists every
- * room a person ever held a handle in, closed ones included, in no promised
- * order, and is never pruned (`BellmanStore.sessionsJoinedBy`), so a window the
- * size of the answer, taken before the closed filter, cut live rooms for anyone
- * past 50 memberships, and the cut was permanent. The created index needs no
- * such room: `sessionsCreatedBy` drops closed rows as it meets them.
- *
- * Each dead id costs one `getSession`, so this is also the bound on that spend.
- * ponytail: a person whose live rooms sit past 500 dead memberships loses them
- * from this listing; the upgrade is a status-aware or pruned joined index (#49).
- */
-export const JOINED_SCAN = 500;
 
 export function registerRooms(server: McpServer, identity: Identity, s: BellmanStore): void {
   // --------------------------------------------------------------- bellman_rooms

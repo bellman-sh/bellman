@@ -3264,7 +3264,8 @@ export function describeStoreContract(
         expect(await blobs.list(s.id)).toEqual([]);
         const audit = await store.auditForOrg("org_codenerd", 50);
         expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });
-        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was").toBe("missing");
+        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was")
+          .toEqual({ ok: false, reason: "missing" });
       });
 
       it("purges at the window's end exactly, and not a millisecond before", async () => {
@@ -3292,8 +3293,9 @@ export function describeStoreContract(
         for (const s of [kept, legacy]) await sweepRoom(s.id);
         for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeDefined();
 
+        const asked = Date.now();
         for (const s of [kept, legacy]) {
-          expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), s.id).toBe("scheduled");
+          expect(await store.schedulePurge(s.id, asked, "u_jesse"), s.id).toEqual({ ok: true, purgeAt: asked });
         }
         for (const s of [kept, legacy]) await sweepRoom(s.id);
         for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeUndefined();
@@ -3302,8 +3304,8 @@ export function describeStoreContract(
       it("refuses to schedule a purge of an open room, and says so for a missing one", async () => {
         const open = session({ id: "qs_open" });
         await store.createSession(open);
-        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toBe("open");
-        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toBe("missing");
+        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
+        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "missing" });
         // The refusal wrote nothing: the room is still open, and a sweep leaves it alone.
         await sweepRoom(open.id);
         expect((await store.getSession(open.id))?.closed).toBe(false);
@@ -3337,13 +3339,27 @@ export function describeStoreContract(
         await store.closeSession(s.id);
 
         // A minute out, so the room is still there for the second ask: this is about the record of asking.
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toBe("scheduled");
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toBe("scheduled");
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toMatchObject({ ok: true });
 
         for (const org of ["org_codenerd", "org_other"]) {
           const asked = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
           expect(asked, org).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
         }
+      });
+
+      // M2. The first request stands, and the answer says so: a client that asks again is told when the room goes,
+      // which is the time the record holds, and not the time of the repeat.
+      it("answers a repeated delete with the time the first one asked for", async () => {
+        const s = session({ id: "qs_first_time", joinCodes: {} });
+        await store.createSession(s);
+        await store.closeSession(s.id);
+        const first = Date.now() + 60_000;
+        const second = Date.now() + 120_000;
+
+        expect(await store.schedulePurge(s.id, first, "u_jesse")).toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, second, "u_jesse"), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
+        expect((await store.getSession(s.id))!.purgeAt, "and the record holds it").toBe(first);
       });
 
       it("leaves nothing of a purged room for a reader to be handed", async () => {

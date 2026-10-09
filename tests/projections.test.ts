@@ -31,7 +31,7 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { roomPreview } from "../src/projections.js";
+import { retentionOf, roomPreview } from "../src/projections.js";
 import { session } from "./helpers/fixtures.js";
 
 const SRC = resolve(dirname(fileURLToPath(import.meta.url)), "../src");
@@ -167,5 +167,36 @@ describe("roomPreview for a viewer with no seat", () => {
     // Control: the three fields really are the ones a seat fills in.
     expect(roomPreview(room, "peer_a")).toMatchObject({ your_role: "peer_a" });
     expect(roomPreview(room, "peer_a").your_verbs.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The two times the detail carries (#65, review M8): when the room closed and when it goes. ISO, as the envelope's
+ * others are spelled, and null where the record has none, so the page can tell "kept until deleted" from "in six days".
+ */
+describe("retentionOf", () => {
+  const closedAt = Date.parse("2026-10-01T12:00:00.000Z");
+  const week = 7 * 24 * 60 * 60 * 1000;
+
+  it("spells the close and the end of the window as ISO times", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: week })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: "2026-10-08T12:00:00.000Z" });
+  });
+
+  it("gives a delete's time in place of the window's end", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: week, purgeAt: closedAt + 1_000 })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: "2026-10-01T12:00:01.000Z" });
+  });
+
+  it("has no purge time for a room kept until deleted, and neither time for a row closed before the close was dated", () => {
+    expect(retentionOf(session({ closed: true, closedAt, retainAfterCloseMs: null })))
+      .toEqual({ closed_at: "2026-10-01T12:00:00.000Z", purge_at: null });
+    expect(retentionOf(session({ closed: true, closedAt: null, retainAfterCloseMs: null })))
+      .toEqual({ closed_at: null, purge_at: null });
+  });
+
+  it("has no purge time for an open room, whatever window it carries", () => {
+    expect(retentionOf(session({ closed: false, closedAt: null, retainAfterCloseMs: week })))
+      .toEqual({ closed_at: null, purge_at: null });
   });
 });

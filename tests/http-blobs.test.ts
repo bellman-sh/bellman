@@ -574,3 +574,44 @@ describe("an org admin's download from a closed room (#65)", () => {
     expect((await download(DEV_KEY.peer, blob_id, {}, id))!.status).toBe(403);
   });
 });
+
+// ---------------------------------------------------------------------------
+// An org admin's upload to a closed room (#65, review M1)
+// ---------------------------------------------------------------------------
+
+// One status per fact. The admin the room admits to read holds no seat to write with, and its surface write is
+// answered 403 for that reason (tests/http-rooms.test.ts); the upload is the same write by another door, and says the same.
+describe("an org admin's upload to a closed room (#65)", () => {
+  const ORG_ROOM = "qs_upload_org";
+  const ownerSeat = () => member({ memberId: "m_owner", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_a" });
+
+  beforeEach(async () => {
+    await store.createSession(session({ id: ORG_ROOM, createdBy: "u_peer", blobBytesCeiling: 1024, members: [ownerSeat()] }));
+  });
+
+  it("refuses the admin with 403, as it refuses its surface write, and stores and charges nothing", async () => {
+    await store.closeSession(ORG_ROOM);
+
+    const res = (await upload(DEV_KEY.jesse, "the plan", { room: ORG_ROOM, member: "m_owner" }))!;
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ error: "forbidden" });
+    expect(blobs.puts.filter((put) => put.sessionId === ORG_ROOM), "nothing was stored").toEqual([]);
+    expect(blobBytesUsed((await store.getSession(ORG_ROOM))!), "or charged").toBe(0);
+  });
+
+  it("tells a stranger and an admin of another org nothing: the room is not theirs to know of", async () => {
+    await store.closeSession(ORG_ROOM);
+    const unknown = await (await upload(DEV_KEY.jesse, "x", { room: "qs_nowhere", member: "m_owner" }))!.text();
+
+    for (const key of [DEV_KEY.outsider, "qk_other_admin"]) {
+      const res = (await upload(key, "x", { room: ORG_ROOM, member: "m_owner" }))!;
+      expect(res.status, key).toBe(404);
+      expect(await res.text(), key).toBe(unknown);
+    }
+  });
+
+  it("answers the admin 404 while the room is open: an open room is its members', and the admin a stranger to it", async () => {
+    expect((await upload(DEV_KEY.jesse, "x", { room: ORG_ROOM, member: "m_owner" }))!.status).toBe(404);
+  });
+});

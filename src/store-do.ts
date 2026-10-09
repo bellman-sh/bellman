@@ -2,7 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, SetJoinCode } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   AuditEntry, EventType, Member, PendingConnect, PlanGrant, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
@@ -500,15 +500,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // Re-read: closeIfAbandoned may have written closed=true and cleared the codes,
     // or stamped a socket's members.
     const read = await this.stored();
-    // A closed room whose purge is already due should have had its alarm run it. When one
-    // is found here, the alarm has been lost (a throwing alarm() is retried a few times
-    // and then left, with nothing armed), so point it at the purge again. Re-armed and not
-    // run from here: the alarm does the purge, as it does for every other room, so no read
-    // pays for deleting a prefix. Nothing is asked of a room still inside its window, a
-    // room kept until deleted, or one from before the window, whose purge is not due.
-    if (read?.closed) {
-      const purge = purgeDueAt(read);
-      if (purge !== null && Date.now() >= purge) await this.driver.reArm();
+    // A closed room owes two things (#derivedDue): the sweep of its unnamed objects, once, and
+    // the purge. If either is already due, its alarm should have run it. When one is found
+    // here the alarm has been lost (a throwing alarm() is retried a few times and then left,
+    // with nothing armed), so point it back. reArm() arms the earliest of what is owed, so the
+    // one question covers both. Re-armed and not run from here: the alarm does the work, as
+    // it does for every other room, so no read pays for deleting a prefix. A room kept until
+    // deleted owes the sweep and nothing else, which is why the sweep counts: no purge is
+    // ever due to bring a read back to it. Nothing is asked of a room still inside its window
+    // with its sweep done, a room kept and swept, or one from before the window, whose due
+    // times are null (review I1).
+    if (read) {
+      const owed = [sweepDueAt(read), purgeDueAt(read)].filter((at): at is number => at !== null);
+      if (owed.length > 0 && Date.now() >= Math.min(...owed)) await this.driver.reArm();
     }
     return read;
   }
@@ -1338,28 +1342,29 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * (`#purgeIfDue`) and no request holds the object open while a prefix is deleted.
    *
    * "open" for a room that has not closed, which a delete never closes, and "missing"
-   * for one that is not there. A room already asked for answers "scheduled" and writes
-   * nothing: the first request stands, and a client retrying a delete it never heard
-   * the answer to files one `room_deleted` for each org, not two.
+   * for one that is not there. A room already asked for answers with the time it is
+   * stored with and writes nothing: the first request stands, and a client retrying a
+   * delete it never heard the answer to files one `room_deleted` for each org, not two,
+   * and is told the first request's `purgeAt` and not the `at` of the retry.
    *
    * The re-arm and the delivery are for that retry as much as for the first ask: a
    * process that died between the commit and them left an alarm only if there was an
    * entry to queue, and the retry is what points it at the purge.
    */
-  async schedulePurge(at: number, by: string | null): Promise<"scheduled" | "open" | "missing"> {
-    const outcome = await this.ctx.storage.transaction(async (txn) => {
+  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+    const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
       const s = await this.stored(txn);
-      if (!s) return "missing" as const;
-      if (!s.closed) return "open" as const;
-      if (s.purgeAt !== null) return "scheduled" as const;
+      if (!s) return { ok: false, reason: "missing" };
+      if (!s.closed) return { ok: false, reason: "open" };
+      if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
       const rows = await this.driver.enqueue(
         txn, orgsOnRoster(s).map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
       );
       await txn.put<unknown>({ session: { ...s, purgeAt: at }, ...rows });
-      return "scheduled" as const;
+      return { ok: true, purgeAt: at };
     });
-    if (outcome === "scheduled") {
+    if (outcome.ok) {
       await this.driver.reArm();
       await this.driver.deliverNow();
     }
@@ -1873,16 +1878,40 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const name of await this.driver.dueNow(now)) {
-      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
-      if (name === ABANDONED_HANDLER) {
-        const s = await this.stored();
-        if (s) await this.#closeIfAbandoned(s, now);
+      try {
+        if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+        if (name === ABANDONED_HANDLER) {
+          const s = await this.stored();
+          if (s) await this.#closeIfAbandoned(s, now);
+        }
+        if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
+        if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
+        if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
+      } catch (error) {
+        // The runtime retries a throwing alarm a few times and then leaves it with nothing armed
+        // (a read of the room arms it again: getSession), and it says nothing of which object it
+        // gave up on. This line is the one record of the room and the handler. Rethrown, so the
+        // runtime still retries (review I1).
+        console.error(`alarm handler "${name}" failed for room ${await this.#roomIdForLog()}:`, error);
+        throw error;
       }
-      if (name === HEARTBEAT_HANDLER) await this.#tickIfDue(now);
-      if (name === PURGE_HANDLER) await this.#purgeIfDue(now);
-      if (name === SWEEP_HANDLER) await this.#sweepIfDue(now);
     }
     await this.driver.reArm();
+  }
+
+  /**
+   * The room's id for a log line: from the record, else the name the object was addressed by.
+   * Never a second failure. The storage that made a handler throw may not answer a read, and the
+   * line it is for must still be written.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  async #roomIdForLog(): Promise<string> {
+    try {
+      return (await this.stored())?.id ?? this.ctx.id.name ?? this.ctx.id.toString();
+    } catch {
+      return this.ctx.id.name ?? this.ctx.id.toString();
+    }
   }
 
   /**
@@ -2116,6 +2145,35 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // and dropping it leaves every test green. It stays so that a purged room arms nothing
     // however the storage behaves, and worker-tests/purge.test.ts asserts that outcome.
     await this.ctx.storage.deleteAlarm();
+    this.#settleWatchers();
+  }
+
+  /**
+   * Tell the room's watchers it is gone (#65, review M3): a purged room has no future for them to wait on.
+   * A long poll in flight is settled with nothing, as MemoryStore.purgeNow settles it, where it would wait
+   * out its own timer on an empty object. A socket is closed, where it would stay attached to an empty
+   * object until its client gave up on it.
+   *
+   * The close is the ordinary 1000, with a reason for the developer reading their client's close event.
+   * No close code means "room gone" to the bridge: src/room-socket.ts reconnects after any close, whatever
+   * its code, and learns the room's state from the upgrade's answer or from its poll.
+   *
+   * It never throws. The purge has committed, and a socket that will not close must not turn it into an
+   * error for the runtime to retry, nor leave the rest of the sockets open: each is its own try, for
+   * #wake's reason.
+   *
+   * `#private`, for the reason #purgeIfDue gives.
+   */
+  #settleWatchers(): void {
+    for (const waiter of this.waiters.splice(0)) waiter.resolve([]);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        if (!isOpen(ws)) continue;
+        ws.close(1000, "room purged");
+      } catch (err) {
+        console.error("closing a purged room's socket failed:", err);
+      }
+    }
   }
 
   /**
@@ -2972,9 +3030,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
-  async schedulePurge(
-    sessionId: string, at: number, by: string | null,
-  ): Promise<"scheduled" | "open" | "missing"> {
+  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
   }
 

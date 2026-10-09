@@ -1,7 +1,7 @@
 {
   "name": "bellman",
   "description": "Two skills for Bellman rooms. room-manifest: author a room's .bellman/room.yaml, choose between the pair, swarm, review and social presets, declare a hosted seat, and decide which verbs each role should hold. canvas: write, arrange and read a room's working surface, the plan, decisions, diagrams, links and files every member reads.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": {
     "name": "mcfearsome"
   },

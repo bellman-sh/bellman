@@ -33,6 +33,7 @@ import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHouseke
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
+import { presetInNewWords } from "./presets.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -1444,6 +1445,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await this.driver.deliverNow();
     }
     return outcome;
+  }
+
+  /**
+   * `BellmanStore.unpublishSession`, for this room. One transaction, so two requests cannot both
+   * find the room public: the first time is the one kept. An empty object is left empty.
+   */
+  async unpublishSession(at: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.unpublishedAt != null) return;
+      await txn.put("session", { ...s, unpublishedAt: at });
+    });
   }
 
   /**
@@ -3133,13 +3146,13 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     const map = await this.ctx.storage.list<SavedPreset>({ prefix });
     // A key under this prefix whose rest is not its own preset's name belongs to someone whose id
     // extends this one past a colon, which an operator-issued id may hold. It is not this person's.
-    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => p);
+    return [...map].filter(([key, p]) => key === prefix + p.name).map(([, p]) => presetInNewWords(p));
   }
 
   /** The listing's guard for one name: the record under the key must be the preset asked for. */
   async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
     const p = await this.ctx.storage.get<SavedPreset>(`pr:${userId}:${name}`);
-    return p && p.name === name ? p : undefined;
+    return p && p.name === name ? presetInNewWords(p) : undefined;
   }
 
   /**
@@ -3451,6 +3464,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
+  }
+
+  async unpublishSession(sessionId: string, at: number): Promise<void> {
+    await this.session(sessionId).unpublishSession(at);
   }
 
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {

@@ -40,7 +40,8 @@ function roomCard(room: RoomSummary, seen: Map<string, number>, now: number, onS
     el("h2", {},
       room.room.text.data.room,
       el("span", { class: "chip" }, room.status),
-      el("span", { class: "chip" }, room.room.preset ?? room.room.mode)),
+      el("span", { class: "chip" }, room.room.preset ?? room.room.mode),
+      room.room.public ? el("span", { class: "chip" }, "public") : null),
     el("p", { class: "muted" },
       `Your seat: ${room.room.your_role} (${room.room.your_verbs.join(", ") || "read only"}) · ` +
         `${room.active_members} of ${room.max_members} seats · expires ${countdown(room.expires_at, now)} · ` +

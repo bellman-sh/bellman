@@ -152,7 +152,11 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *   promised no window, and a purge is the one irreversible act here, so only a
  *   delete on demand reaches it (`purgeDueAt` in retention.ts).
  *
- * All fourteen live here, in one gate, rather than in separate functions that could drift.
+ * - **unpublishedAt** (public rooms) defaults to `null`: a room written before it was never
+ *   made private. Whether it is public at all is the manifest's `public`, read false for such
+ *   a row.
+ *
+ * All fifteen live here, in one gate, rather than in separate functions that could drift.
  */
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
@@ -191,6 +195,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     openRequests: (row as { openRequests?: Session["openRequests"] }).openRequests ?? {},
     lastMemberEventAt: (row as { lastMemberEventAt?: number | null }).lastMemberEventAt ?? null,
     thawedAt: (row as { thawedAt?: number | null }).thawedAt ?? null,
+    unpublishedAt: (row as { unpublishedAt?: number | null }).unpublishedAt ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),
@@ -200,7 +205,8 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 /**
  * A manifest as every consumer may assume it is: `heartbeatOnMs` a number or
  * null, `housekeeping` an object or null, `host` a config or null, `reports` a boolean on
- * every role, and `report` null on every role that has none (heartbeat instructions).
+ * every role, `report` null on every role that has none (heartbeat instructions), and
+ * `public` a boolean (public rooms; a room stored before it is private).
  *
  * The types already say so, because every row written since each of them landed
  * has it. The `??` is for the rows that predate it. New objects all the way down
@@ -213,6 +219,7 @@ function withManifestDefaults(m: RoomManifest): RoomManifest {
     heartbeatOnMs: m.heartbeatOnMs ?? null,
     housekeeping: m.housekeeping ?? null,
     host: m.host ?? null,
+    public: m.public ?? false,
     roles: Object.fromEntries(
       Object.entries(m.roles).map(([key, def]) => [key, { ...def, reports: def.reports ?? false, report: def.report ?? null }]),
     ),

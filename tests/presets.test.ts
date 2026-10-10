@@ -30,15 +30,16 @@ describe("checkPreset", () => {
         name: "my_review",
         description: "Review where the reviewer may ask too",
         mode: "pair",
-        heartbeat_on: "5m",
+        heartbeat: "5m",
         housekeeping: null,
         roles: {
-          author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", reports: true, report: null },
-          reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, reports: false, report: null },
+          author: { can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"], description: "Brought the work.", heartbeat_on: true },
+          reviewer: { can: ["send", "request_actions", "respond_actions"], description: null, heartbeat_on: false },
         },
         default_role: "reviewer",
         creator_role: "author",
         host: null,
+        public: false,
         updated_at: "2026-10-09T12:00:00.000Z",
       },
     });
@@ -226,14 +227,14 @@ describe("builtinPresets", () => {
     for (const p of all) {
       expect(p.updated_at).toBeNull();
       expect(typeof p.description).toBe("string");
-      const clone = { description: p.description, mode: p.mode, heartbeat_on: p.heartbeat_on, housekeeping: p.housekeeping, roles: p.roles, default_role: p.default_role, creator_role: p.creator_role, host: p.host };
+      const clone = { description: p.description, mode: p.mode, heartbeat: p.heartbeat, housekeeping: p.housekeeping, roles: p.roles, default_role: p.default_role, creator_role: p.creator_role, host: p.host };
       expect(checkPreset(`my_${p.name}`, clone, NOW), p.name).toMatchObject({ ok: true, preset: { housekeeping: null } });
     }
   });
 
   it("shows social with its host and its hour, so a clone of it saves a hosted preset", () => {
     const social = builtinPresets().find((p) => p.name === "social")!;
-    expect(social).toMatchObject({ mode: "swarm", heartbeat_on: "1h", host: { role: "host", model: "haiku", instructions: null } });
+    expect(social).toMatchObject({ mode: "swarm", heartbeat: "1h", host: { role: "host", model: "haiku", instructions: null } });
     const { name: _name, updated_at: _at, ...shape } = social;
     const check = checkPreset("my_social", shape, NOW);
     if (!check.ok) throw new Error(check.description);
@@ -241,12 +242,25 @@ describe("builtinPresets", () => {
       host: { role: "host", model: "haiku", instructions: null }, heartbeatOnMs: 3_600_000, defaultRole: "guest",
     });
     for (const p of builtinPresets().filter((b) => b.name !== "social")) {
-      expect({ name: p.name, heartbeat_on: p.heartbeat_on, host: p.host }).toEqual({ name: p.name, heartbeat_on: null, host: null });
+      expect({ name: p.name, heartbeat: p.heartbeat, host: p.host }).toEqual({ name: p.name, heartbeat: null, host: null });
     }
   });
 
   it("hands out fresh copies: changing one leaves the next call alone", () => {
     builtinPresets()[0].roles.peer_a.can.push("send");
     expect(builtinPresets()[0].roles.peer_a.can.filter((v) => v === "send")).toHaveLength(1);
+  });
+});
+
+describe("a preset in the heartbeat's words", () => {
+  it("saves the new words as the old ones, and refuses each in its own words", () => {
+    const now = checkPreset("my_review", body({ heartbeat_on: undefined, heartbeat: "5m", roles: {
+      author: { can: ["send"], heartbeat_on: "What changed" }, reviewer: { can: ["send"] },
+    } }), NOW);
+    expect(now.ok && now.preset).toMatchObject({ heartbeat: "5m", roles: { author: { heartbeat_on: "What changed" }, reviewer: { heartbeat_on: false } } });
+    expect(checkPreset("my_review", body({ heartbeat_on: undefined, heartbeat: "10s" }), NOW))
+      .toMatchObject({ ok: false, description: expect.stringContaining("heartbeat must be between") });
+    expect(checkPreset("my_review", body({ heartbeat_on: "10s" }), NOW))
+      .toMatchObject({ ok: false, description: expect.stringContaining("heartbeat_on must be between") });
   });
 });

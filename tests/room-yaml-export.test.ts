@@ -1,7 +1,8 @@
 /**
  * The room.yaml the panel's Copy button writes (designer spec D8) loads through
  * the bridge's loader and starts the room it spells out. EXPORTED is the dash
- * repo's src/lib/presets.test.ts fixture byte for byte: change one, change both.
+ * repo's src/lib/presets.test.ts fixture byte for byte: change one, change both. OLD_WORDS is
+ * what it was before the heartbeat's vocabulary changed, and still loads.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,8 +11,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadRoomManifest } from "../src/bridge.js";
 import { resolveManifest } from "../src/manifest.js";
 
-const EXPORTED = `room: "my_review"
+const OLD_WORDS = `room: "my_review"
 purpose: "Review where the reviewer may ask too"
+public: true
 mode: "pair"
 heartbeat_on: "5m"
 housekeeping:
@@ -28,6 +30,27 @@ roles:
   "reviewer":
     can: ["send", "request_actions", "respond_actions"]
     reports: false
+default_role: "reviewer"
+creator_role: "author"
+`;
+
+const EXPORTED = `room: "my_review"
+purpose: "Review where the reviewer may ask too"
+public: true
+mode: "pair"
+heartbeat: "5m"
+housekeeping:
+  quiet_after: "2h"
+  answer_within: "30m"
+  idle_after: "1d"
+  repeat_after: "4h"
+roles:
+  "author":
+    can: ["send", "invite", "revoke", "request_actions", "respond_actions", "write_surface"]
+    description: "Brought the work."
+    heartbeat_on: "What changed, and what \\"done\\" means\\nfor the next step"
+  "reviewer":
+    can: ["send", "request_actions", "respond_actions"]
 default_role: "reviewer"
 creator_role: "author"
 `;
@@ -51,7 +74,7 @@ describe("the panel's room.yaml export", () => {
     const m = resolveManifest(load(EXPORTED));
     expect(m).toMatchObject({
       room: "my_review", purpose: "Review where the reviewer may ask too", mode: "pair", preset: null,
-      defaultRole: "reviewer", creatorRole: "author", heartbeatOnMs: 300_000,
+      defaultRole: "reviewer", creatorRole: "author", heartbeatOnMs: 300_000, public: true,
     });
     expect(m.roles).toEqual({
       author: {
@@ -62,11 +85,11 @@ describe("the panel's room.yaml export", () => {
     });
   });
 
-  // Housekeeping (#66), integration ruling M3: the block is carried as heartbeat_on is, by the
+  // Housekeeping (#66), integration ruling M3: the block is carried as heartbeat is, by the
   // loader that hands the file over and by the resolver that reads it.
-  it("hands over its housekeeping block as the file spells it, beside heartbeat_on", () => {
+  it("hands over its housekeeping block as the file spells it, beside heartbeat", () => {
     const loaded = load(EXPORTED);
-    expect(loaded.heartbeat_on).toBe("5m");
+    expect(loaded.heartbeat).toBe("5m");
     expect(loaded.housekeeping).toEqual({ quiet_after: "2h", answer_within: "30m", idle_after: "1d", repeat_after: "4h" });
   });
 
@@ -77,7 +100,7 @@ describe("the panel's room.yaml export", () => {
   });
 
   // A preset that sets none exports without the key, as one that sets no cadence exports without
-  // heartbeat_on, and so does every file exported before the field existed.
+  // heartbeat, and so does every file exported before the field existed.
   it("starts a room with none from an export that carries no block", () => {
     const without = EXPORTED.replace(/housekeeping:\n(?:  .+\n)+/, "");
     expect(without).not.toBe(EXPORTED);
@@ -85,5 +108,16 @@ describe("the panel's room.yaml export", () => {
     const m = resolveManifest(load(without));
     expect(m.housekeeping).toBeNull();
     expect(m.heartbeatOnMs).toBe(300_000);
+  });
+
+  it("reads the old words a room.yaml was exported in before as the same room", () => {
+    const load = (text: string) => {
+      const dir = mkdtempSync(join(tmpdir(), "bellman-export-"));
+      dirs.push(dir);
+      mkdirSync(join(dir, ".bellman"));
+      writeFileSync(join(dir, ".bellman", "room.yaml"), text);
+      return resolveManifest(loadRoomManifest(dir));
+    };
+    expect(load(OLD_WORDS)).toEqual(load(EXPORTED));
   });
 });

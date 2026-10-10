@@ -829,8 +829,9 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
   });
 
   it("refuses a host with no heartbeat, and one faster than an hour", () => {
+    // Written in no heartbeat words at all, it is told the new one (vocabulary plan ruling R2, amended).
     expect(() => resolveManifest(hosted({ heartbeat_on: undefined })))
-      .toThrow(/a room with a host must set heartbeat_on \(at least 1h\)/);
+      .toThrow(/a room with a host must set heartbeat \(at least 1h\)/);
     expect(() => resolveManifest(hosted({ heartbeat_on: "30m" })))
       .toThrow(/a room with a host must tick no faster than 1h \(got "30m"\)/);
   });

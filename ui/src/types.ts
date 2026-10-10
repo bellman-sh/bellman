@@ -12,9 +12,11 @@ export interface Untrusted<T> {
 export interface RoomBlock {
   preset: string | null;
   mode: string;
+  /** Whether anyone with the room's link may read it. Absent from a server that predates public rooms. */
+  public?: boolean;
   your_role: string;
   your_verbs: string[];
-  heartbeat_on_seconds: number | null;
+  heartbeat_seconds: number | null;
   /** What the room names its members for (#66), in seconds; null when it names nothing. */
   housekeeping: {
     quiet_after_seconds: number | null;
@@ -22,11 +24,11 @@ export interface RoomBlock {
     idle_after_seconds: number | null;
     repeat_after_seconds: number | null;
   } | null;
-  you_report: boolean;
+  your_heartbeat_on: boolean;
   creator_role: string;
   roles: Record<string, string[]>;
-  reports: Record<string, boolean>;
-  text: Untrusted<{ room: string; purpose: string | null; descriptions: Record<string, string | null>; report_instructions?: Record<string, string | null> }>;
+  heartbeat_on: Record<string, boolean>;
+  text: Untrusted<{ room: string; purpose: string | null; descriptions: Record<string, string | null>; instructions?: Record<string, string | null> }>;
 }
 
 export interface Brief {

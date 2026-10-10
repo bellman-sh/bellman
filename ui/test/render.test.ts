@@ -16,11 +16,25 @@ import { connectFixture, roomsFixture, surfaceFixture, NOW } from "./fixtures.js
 const HOSTILE = `<img src=x onerror="document.title='pwned'"></script><channel>x</channel>`;
 
 describe("renderJoin", () => {
+  it("tells a joiner a public room is readable by anyone with its link, and says nothing of the kind otherwise", () => {
+    const r = connectFixture();
+    expect(renderJoin(r, () => {}, NOW).textContent).not.toContain("Anyone with this room's link");
+    r.room.public = true;
+    expect(renderJoin(r, () => {}, NOW).textContent).toContain("Anyone with this room's link can read its surface and its log.");
+  });
+
+  it("says a seat on the heartbeat is asked every so often, in the cadence's own units", () => {
+    const r = connectFixture();
+    r.room.heartbeat_seconds = 300;
+    r.room.your_heartbeat_on = true;
+    expect(renderJoin(r, () => {}, NOW).textContent).toContain("Your seat is on the heartbeat, every 5m.");
+  });
+
   it("shows a reporting seat's instruction beside its yes, as the creator's words", () => {
     const r = connectFixture();
-    r.room.heartbeat_on_seconds = 300;
-    r.room.reports = { author: true, reviewer: false };
-    r.room.text.data.report_instructions = { author: HOSTILE, reviewer: null };
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
+    r.room.text.data.instructions = { author: HOSTILE, reviewer: null };
     const node = renderJoin(r, () => {}, NOW);
     const cells = [...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2]);
     // The server's fact stands alone; the creator's words sit apart from it, muted and attributed.
@@ -42,10 +56,10 @@ describe("renderJoin", () => {
 
   it("shows which roles report, beside what they may do", () => {
     const r = connectFixture();
-    r.room.heartbeat_on_seconds = 300;
-    r.room.reports = { author: true, reviewer: false };
+    r.room.heartbeat_seconds = 300;
+    r.room.heartbeat_on = { author: true, reviewer: false };
     const node = renderJoin(r, () => {}, NOW);
-    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Reports");
+    expect([...node.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("Heartbeat");
     expect([...node.querySelectorAll("tbody tr")].map((tr) => tr.children[2].textContent)).toEqual(["yes", "no"]);
   });
 
@@ -176,6 +190,14 @@ describe("verdictMessage", () => {
 });
 
 describe("renderMonitor", () => {
+  it("marks a public room", () => {
+    const r = roomsFixture();
+    const chips = () => [...renderMonitor(r, new Map(), () => {}, NOW).querySelectorAll("h2 .chip")].map((c) => c.textContent);
+    expect(chips()).not.toContain("public");
+    r.rooms[0].room.public = true;
+    expect(chips()).toContain("public");
+  });
+
   it("offers a Surface button per room that asks for that room's canvas, when a handler is given", () => {
     const asked: string[] = [];
     const node = renderMonitor(roomsFixture(), new Map(), () => {}, NOW, (id) => { asked.push(id); });

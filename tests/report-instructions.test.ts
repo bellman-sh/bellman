@@ -54,8 +54,8 @@ describe("a role's report instruction", () => {
   it("is saved with a preset and given back", () => {
     const body = { mode: "swarm", heartbeat_on: "5m", roles: authored({ report: "What you shipped" }).roles, default_role: "observer", creator_role: "lead" };
     const check = checkPreset("my_review", body, 0);
-    expect(check.ok && check.preset.roles.lead.report).toBe("What you shipped");
-    expect(check.ok && check.preset.roles.observer.report).toBeNull();
+    expect(check.ok && check.preset.roles.lead.heartbeat_on).toBe("What you shipped");
+    expect(check.ok && check.preset.roles.observer.heartbeat_on).toBe(false);
   });
 });
 
@@ -70,12 +70,16 @@ describe("the preview", () => {
   it("carries each role's instruction inside the creator's envelope, and nothing new in its trusted part", () => {
     const p = roomPreview(room({ report: "What you shipped" }), "observer");
     expect(p.text.origin).toEqual({ memberId: "m_creator", label: "jesse@codenerd" });
-    expect(p.text.data.report_instructions).toEqual({ lead: "What you shipped", observer: null });
-    expect("report_instructions" in p).toBe(false);
+    expect(p.text.data.instructions).toEqual({ lead: "What you shipped", observer: null });
+    expect("instructions" in p).toBe(false);
   });
 });
 
 describe("the tick", () => {
+  it("keeps its shape: ticks are stored and replayed", () => {
+    expect(Object.keys(snapshotOf(room({ report: "x" }), 10 * 60_000)).sort()).toEqual(["ask", "cadence_seconds", "instructions", "members"]);
+  });
+
   it("hands each answering seat its instruction as the creator's words, and names each row's role", () => {
     const snap = snapshotOf(room({ report: "What you shipped" }), 10 * 60_000);
     expect(snap.instructions).toEqual({

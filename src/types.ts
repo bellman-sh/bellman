@@ -181,6 +181,11 @@ export interface Session {
   /** Whether the close-time sweep of unnamed objects has run (#65, D3). */
   blobsSwept: boolean;
   /**
+   * When the creator made a public room private (public rooms spec D2), or null. Set once:
+   * nothing makes a room public again. Read as null for a row written before it.
+   */
+  unpublishedAt: number | null;
+  /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
    * the plan is restored. Losing the room would be the wrong punishment for a
@@ -386,6 +391,14 @@ export interface RoomManifest {
   } | null;
   /** The hosted seat, or null for a room with none. Immutable with the rest. */
   host: HostConfig | null;
+  /**
+   * Whether anyone with the room's link may read it (public rooms spec D1): chosen when the
+   * room starts, false unless given. Optional in the type because a row written before it has
+   * none; `withHeartbeatDefaults` reads it as false, and readers test `=== true` for the
+   * in-memory store, which does not hydrate (plan ruling R1). Immutable with the rest: a room
+   * made private is marked on the session (`unpublishedAt`), never here.
+   */
+  public?: boolean;
 }
 
 /**
@@ -398,7 +411,8 @@ export interface SavedPreset {
   name: string;
   description: string | null;
   mode: SessionMode;
-  heartbeat_on: string | null;
+  /** How often the room ticks, as written (vocabulary spec D6); null for no heartbeat. */
+  heartbeat: string | null;
   /**
    * The housekeeping thresholds (#66) in the author arm's own keys, durations as
    * written, and only the keys the preset sets. Null when it sets none, which is
@@ -406,7 +420,8 @@ export interface SavedPreset {
    * existed, and read as null: none, as `host` is read.
    */
   housekeeping?: Partial<Record<"quiet_after" | "answer_within" | "idle_after" | "repeat_after", string>> | null;
-  roles: Record<string, { can: Verb[]; description: string | null; reports: boolean; report?: string | null }>;
+  /** Each role's place on the heartbeat (vocabulary spec D6): false, true, or what it reports. */
+  roles: Record<string, { can: Verb[]; description: string | null; heartbeat_on: boolean | string }>;
   default_role: string;
   creator_role: string;
   /**
@@ -414,6 +429,8 @@ export interface SavedPreset {
    * (#188) reached the presets, and read as null: no host.
    */
   host?: HostConfig | null;
+  /** The default for the rooms started from it (public rooms spec D1). Absent on a preset saved before it, and read as false. */
+  public?: boolean;
   /** ISO 8601 when it was saved; null for a built-in, which never was. */
   updated_at: string | null;
 }

@@ -58,3 +58,13 @@ export const JOIN_URL_BASE = "https://bellman.sh/j/";
 export function joinUrl(code: string): string {
   return `${JOIN_URL_BASE}${code}`;
 }
+
+/**
+ * The page a public room is read at (public rooms spec D6): dash, outside sign-in, by the room's id.
+ * A page to read and not a door: it seats nobody, where a join URL hands a seat to the first to open it.
+ */
+export const PUBLIC_ROOM_URL_BASE = "https://dash.bellman.sh/r/";
+
+export function publicRoomUrl(sessionId: string): string {
+  return `${PUBLIC_ROOM_URL_BASE}${sessionId}`;
+}

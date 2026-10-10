@@ -14,6 +14,7 @@ import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
+import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -1007,6 +1008,13 @@ export interface BellmanStore {
    */
   schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
   /**
+   * Make a public room private for good (public rooms spec D2): set `unpublishedAt` to `at`, once.
+   * The first time stands, so a retry changes nothing, and a room that is not there is left not
+   * there: nothing is written for it. Who may ask is the route's to decide, as for `schedulePurge`.
+   * An open room and a closed one alike: a closed public room is readable until its purge (D7).
+   */
+  unpublishSession(sessionId: string, at: number): Promise<void>;
+  /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
    * uploads that never reached an item: a put whose answer was lost, and a charge that threw and
@@ -1767,6 +1775,12 @@ export class MemoryStore implements BellmanStore {
     return { ok: true, purgeAt: at };
   }
 
+  async unpublishSession(sessionId: string, at: number): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s || s.unpublishedAt != null) return;
+    s.unpublishedAt = at;
+  }
+
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
     const mine = this.byCreator.get(userId);
     if (!mine) return [];
@@ -2135,12 +2149,12 @@ export class MemoryStore implements BellmanStore {
     const mine = this.presets.get(userId);
     if (!mine) return [];
     // Code-unit order, which is the registry's key order.
-    return detach([...mine.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
+    return detach([...mine.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))).map(presetInNewWords);
   }
 
   async getPreset(userId: string, name: string): Promise<SavedPreset | undefined> {
     const p = this.presets.get(userId)?.get(name);
-    return p && detach(p);
+    return p && presetInNewWords(detach(p));
   }
 
   async putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full"> {

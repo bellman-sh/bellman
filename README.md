@@ -94,7 +94,8 @@ that way; the surface is where things stand.
   says so (the frame is the dash repo's).
 - A `shape` is drawn from its own field, `shape: { form, color?, flip? }`: `form` is
   `rect`, `ellipse`, `diamond`, `arrow` or `line`, `color` is one of six names (`slate`
-  by default, then `blue`, `green`, `amber`, `red` and `violet`), and `flip: true` draws
+  by default, then `blue`, `green`, `amber`, `red` and `violet`) or a hex colour (`#rgb`
+  or `#rrggbb`, stored as lowercase `#rrggbb`), and `flip: true` draws
   an arrow or a line from the bottom-left to the top-right. A shape needs `placement`
   with `x`, `y`, `w` and `h`, because its size is the placement's, and takes no `body`,
   because its label is the `title`; `flip: true` on any other form is refused, and so

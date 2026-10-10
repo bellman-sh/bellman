@@ -848,8 +848,8 @@ sandbox that renders `html` and `diagram` items (`bellman-sh/dash#14`) are the
 control panel's.
 
 The `shape` kind (#197) is a few numbers the canvas draws: its own field,
-`shape { form, color, flip }`, beside `ends` and `blob`, with five forms and six
-colours by name, stored with their defaults (`slate`, `false`) applied so a
+`shape { form, color, flip }`, beside `ends` and `blob`, with five forms and a
+colour that is one of six names or a hex stored as lowercase `#rrggbb`, stored with their defaults (`slate`, `false`) applied so a
 reader never branches on absence. Its rules are `normalizeSurfaceWrite`'s: a
 shape needs `placement { x, y, w, h }`, because its size is the placement's, and
 takes no `body`, because its label is the `title`; `flip: true` is for an arrow
@@ -1787,7 +1787,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,031** | every request, whether or not you are in a room |
+| Tool definitions | **~8,043** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
@@ -1807,6 +1807,8 @@ instructions (#229, below), which changed only `bellman_start`, the listing is t
 Merged again over public rooms (#233) and the heartbeat vocabulary (#237), whose main measures
 7,958 by this method, the listing measures 8,031: the same 73 (`bellman_send` 1,294 to 1,365,
 `bellman_surface` 281 to 283).
+Then a shape's colour became a name or a hex (D3, amended at Jesse's request): 12 more, all
+`bellman_send`'s (1,365 to 1,377), for "or a hex such as #3b82f6" in the `shape` clause: 8,043.
 
 Re-measured on 2026-10-09 for public rooms, on top of the heartbeat's vocabulary: 150
 tokens over main. `bellman_start` is up 111, to 2,317, for the manifest's `public` on

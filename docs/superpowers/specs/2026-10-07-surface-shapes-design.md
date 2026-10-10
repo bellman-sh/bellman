@@ -53,13 +53,18 @@ drag or a resize makes, and the server's existing positive-finite rule bounds
 them as it bounds every placement. No maximum is added here: a placement has
 none today for any kind, and a shape does not change that.
 
-### D3 — Colors are names.
+### D3 — Colors are names or hex.
 
-`color` is one of `slate`, `blue`, `green`, `amber`, `red`, `violet`. The
-panel maps each name to a class in its own stylesheet; the name is never
-written into a `style` attribute. A hex string would be the first
-peer-controlled string to reach CSS, and the one way the canvas has of
-rendering peer content — as text, never as markup or style — holds.
+`color` is one of `slate`, `blue`, `green`, `amber`, `red`, `violet`, or a hex
+colour, `#rgb` or `#rrggbb`, which the server stores as lowercase `#rrggbb`.
+The panel maps a name to a class in its own stylesheet. A hex it checks again
+against `^#[0-9a-f]{6}$` and sets only as the CSS custom property `--shape`,
+through React's `style` (the CSS object model, which the panel's policy
+allows); anything that fails draws slate. Amended on 2026-10-09 at Jesse's
+request: the first design kept hex out because it would be the first
+peer-controlled string to reach CSS. A value that must be six hex digits on
+both sides carries nothing but a colour, so the canvas's rule (peer content
+as text, never as markup or style) holds for everything else.
 
 ### D4 — An arrow or a line spans the box.
 
@@ -114,9 +119,11 @@ its field. `bellman_connect`'s index shows a shape as `kind: "shape"` with
 // src/surface.ts
 export const SHAPE_FORMS = ["rect", "ellipse", "diamond", "arrow", "line"] as const;
 export const SHAPE_COLORS = ["slate", "blue", "green", "amber", "red", "violet"] as const;
+// a name, or #rgb / #rrggbb stored as lowercase #rrggbb; anything else refused
+const ShapeColorShape = z.string().transform(/* … */);
 const ShapeShape = z.strictObject({
   form: z.enum(SHAPE_FORMS),
-  color: z.enum(SHAPE_COLORS).default("slate"),
+  color: ShapeColorShape.default("slate"),
   flip: z.boolean().default(false),
 });
 // SurfaceItemShape gains:  shape: ShapeShape.nullish(),
@@ -140,8 +147,9 @@ in `src/lib/api.ts` mirror it.
 ## Security
 
 The only peer string in a shape is its `title`, rendered as text like every
-title. The numbers are finite and positive by the server's rule. The color is
-an enum name resolved to a class, never a style. The SVG carries no link, no
+title. The numbers are finite and positive by the server's rule. The colour is a
+name resolved to a class, or six hex digits set as one CSS variable, checked
+on both sides. The SVG carries no link, no
 reference and no script, and a test asserts the element set. Shapes ship in
 the untrusted envelope like every item, so an agent reading the surface sees
 whose box this is before it sees the box.
@@ -184,7 +192,7 @@ classes), the tests above.
 
 ## Out of scope
 
-Freeform paths (a whiteboard's pen), hex or arbitrary colors, rotation,
+Freeform paths (a whiteboard's pen), colours beyond the six names and hex (alpha, named CSS colours, gradients), rotation,
 z-order and layers, text styling, group membership, snapping and alignment
 guides, a maximum size on the server, shapes in the MCP Apps monitor. Each is
 its own decision when asked for.

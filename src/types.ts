@@ -464,10 +464,16 @@ export interface BlobRef {
   name: string;      // as stored, after D6
 }
 
-/** A shape (#197, D1): its form, its colour by name, and for an arrow or a line which diagonal it spans. */
+/** A shape's six named colours (#197, D3). */
+export type ShapeColorName = "slate" | "blue" | "green" | "amber" | "red" | "violet";
+
+/**
+ * A shape (#197, D1): its form, its colour, and for an arrow or a line which diagonal it spans. The colour is
+ * a name or a hex colour, stored as lowercase `#rrggbb` (D3).
+ */
 export interface Shape {
   form: "rect" | "ellipse" | "diamond" | "arrow" | "line";
-  color: "slate" | "blue" | "green" | "amber" | "red" | "violet";
+  color: ShapeColorName | `#${string}`;
   flip: boolean;
 }
 

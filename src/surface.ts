@@ -10,7 +10,7 @@
  * `clearSilence` in store.ts rather than heartbeat.ts.
  */
 import { z } from "zod";
-import type { SessionEvent, Shape, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
+import type { SessionEvent, Shape, ShapeColorName, SurfaceItem, SurfaceKind, SurfaceRow } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { slugShape } from "./manifest.js";
 import { BLOB_ID } from "./blobs.js";
@@ -85,15 +85,28 @@ const BlobShape = z.strictObject({
   id: z.string().regex(BLOB_ID, "must be the 32 hex characters an upload returned"),
 });
 
-/** A shape's forms and colours (#197, D1, D3): names, resolved by the panel to its own classes, never a value a stylesheet reads. */
+/** A shape's forms and its six named colours (#197, D1, D3). A name resolves in the panel to its own class. */
 export const SHAPE_FORMS = ["rect", "ellipse", "diamond", "arrow", "line"] as const satisfies readonly Shape["form"][];
-export const SHAPE_COLORS = ["slate", "blue", "green", "amber", "red", "violet"] as const satisfies readonly Shape["color"][];
+export const SHAPE_COLORS = ["slate", "blue", "green", "amber", "red", "violet"] as const satisfies readonly ShapeColorName[];
+
+/**
+ * A shape's colour (D3): one of the six names, or a hex colour, `#rgb` or `#rrggbb`, stored as lowercase
+ * `#rrggbb` so a reader checks one form. Nothing else passes, so the one peer string that reaches the
+ * panel's CSS is six hex digits, which the panel checks again before it sets one.
+ */
+const ShapeColorShape = z.string().transform((c, ctx): Shape["color"] => {
+  if ((SHAPE_COLORS as readonly string[]).includes(c)) return c as ShapeColorName;
+  if (/^#[0-9a-f]{6}$/i.test(c)) return c.toLowerCase() as Shape["color"];
+  if (/^#[0-9a-f]{3}$/i.test(c)) return `#${[...c.slice(1).toLowerCase()].map((d) => d + d).join("")}` as Shape["color"];
+  ctx.addIssue({ code: "custom", message: 'must be slate, blue, green, amber, red or violet, or a hex colour such as "#3b82f6"' });
+  return z.NEVER;
+});
 const LINE_FORMS: ReadonlySet<string> = new Set(["arrow", "line"]);
 
 /** What a shape is (D1). The defaults apply here, so a stored shape spells both and a reader never branches on absence. */
 const ShapeShape = z.strictObject({
   form: z.enum(SHAPE_FORMS),
-  color: z.enum(SHAPE_COLORS).default("slate"),
+  color: ShapeColorShape.default("slate"),
   flip: z.boolean().default(false),
 });
 

@@ -89,7 +89,7 @@ If a write times out, retry it with the same `idempotency_key` (an optional
 | `file` | `blob: { id }` | No `body`. The item carries the bytes, type and name the server stored. |
 | `image` | `blob: { id }` of a blob stored as `image/png`, `image/jpeg`, `image/gif` or `image/webp` | No `body`. Any other type is placed as a `file`. |
 | `html` | `body` with the page inline, or `blob: { id }` of a blob stored as `text/html`, never both | See below. |
-| `shape` | `shape: { form, color?, flip? }` and `placement: { x, y, w, h }` | No `body`: its label is `title`. `form` is `rect`, `ellipse`, `diamond`, `arrow` or `line`; `color` is `slate` (the default), `blue`, `green`, `amber`, `red` or `violet`; `flip: true` draws an arrow or a line from the bottom-left to the top-right. |
+| `shape` | `shape: { form, color?, flip? }` and `placement: { x, y, w, h }` | No `body`: its label is `title`. `form` is `rect`, `ellipse`, `diamond`, `arrow` or `line`; `color` is `slate` (the default), `blue`, `green`, `amber`, `red` or `violet`, or a hex colour such as `#3b82f6` (`#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`); `flip: true` draws an arrow or a line from the bottom-left to the top-right. |
 
 **An `html` item is a self-contained page.** The control panel renders it only
 inside a sandboxed frame on another origin. Its inline script and style and its

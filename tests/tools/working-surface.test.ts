@@ -813,7 +813,7 @@ describe("shape items (#197)", () => {
     await refusedWith(p, box({ placement: null }), "a shape needs placement { x, y, w, h }");
     await refusedWith(p, { ...plan(), shape: { form: "rect" } }, 'surface text "plan": only a shape has shape');
     await refusedWith(p, box({ shape: { form: "star" } }), "shape.form");
-    await refusedWith(p, box({ shape: { form: "rect", color: "#ff0000" } }), "shape.color");
+    await refusedWith(p, box({ shape: { form: "rect", color: "teal" } }), "shape.color");
     await refusedWith(p, box({ shape: { form: "rect", stroke: 2 } }), "shape");
   });
 
@@ -871,6 +871,20 @@ describe("shape items (#197)", () => {
       { key: "i", kind: "image", blob: { id: newBlobId() } }, { key: "demo", kind: "html", body: "<p>hi</p>" },
     ]) {
       await refusedWith(p, { ...other, shape: { form: "rect" } }, "only a shape has shape");
+    }
+  });
+  it("takes a colour by name or as a hex, stored as lowercase #rrggbb, and refuses anything else", async () => {
+    const p = await pairUp(h);
+    for (const [key, color, stored] of [["hex6", "#3B82F6", "#3b82f6"], ["hex3", "#AbC", "#aabbcc"], ["named", "amber", "amber"]] as const) {
+      const out = await write(p, box({ key, shape: { form: "rect", color } }));
+      expect(out.isError, out.text).toBe(false);
+      expect((await rows(p)).find((r) => r.key === key)!.shape).toEqual({ form: "rect", color: stored, flip: false });
+    }
+    for (const color of ["#12345", "#3b82f680", "#gggggg", "teal", "3b82f6", "url(x)", "#3b82f6;", ""]) {
+      await refusedWith(
+        p, box({ key: "bad", shape: { form: "rect", color } }),
+        'shape.color: must be slate, blue, green, amber, red or violet, or a hex colour such as "#3b82f6"',
+      );
     }
   });
 });

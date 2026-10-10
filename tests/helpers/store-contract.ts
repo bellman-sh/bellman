@@ -2261,7 +2261,7 @@ export function describeStoreContract(
      */
     describe("the surface rows", () => {
       const plan = (body = "1. read\n2. write"): SurfaceItem => ({
-        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null, blob: null,
+        key: "plan", kind: "text", title: "Plan", body, ends: null, placement: null, blob: null, shape: null,
       });
       const wrote = (item: SurfaceItem | null = plan()): EventBody => ({
         type: "surface",
@@ -2288,6 +2288,25 @@ export function describeStoreContract(
           { ...plan(), cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
         ]);
         expect(await cursorOf(s.id)).toBe(event.cursor);
+      });
+
+      // #197: a shape's own field rides the row as a placement does, and the row of any other kind holds null.
+      // Both stores keep what they are handed, so the field is read back from each.
+      it("keeps a shape item's own field on its row, and the row of any other kind holds null", async () => {
+        const s = session({});
+        await store.createSession(s);
+        const box: SurfaceItem = {
+          ...plan(), key: "box", kind: "shape", title: "Group A", body: null,
+          placement: { x: 10, y: 20, w: 200, h: 120 }, shape: { form: "arrow", color: "violet", flip: true },
+        };
+
+        const event = (await store.appendEvent(s.id, wrote(box), { surface: { key: "box", item: box } }))!;
+        await store.appendEvent(s.id, wrote(plan()), { surface: { key: "plan", item: plan() } });
+
+        expect(await store.surfaceOf(s.id)).toEqual([
+          { ...box, cursor: event.cursor, at: event.at, byMemberId: "m_creator", byLabel: "jesse@codenerd" },
+          expect.objectContaining({ key: "plan", shape: null }),
+        ]);
       });
 
       /** Type-agnostic: a `surface` event with no extra writes no row. */
@@ -4015,7 +4034,7 @@ export function describeStoreContract(
     const nameBlob = (roomId: string, blobId: string, bytes: number) => {
       const item: SurfaceItem = {
         key: `file_${blobId}`, kind: "file", title: null, body: null, ends: null, placement: null,
-        blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` },
+        blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` }, shape: null,
       };
       return store.appendEvent(
         roomId,
@@ -4148,7 +4167,7 @@ export function describeStoreContract(
       it("leaves nothing of a purged room for a reader to be handed", async () => {
         const s = session({ id: "qs_nothing", retainAfterCloseMs: 60_000, blobBytesCeiling: 100, joinCodes: {} });
         await store.createSession(s);
-        const item: SurfaceItem = { key: "plan", kind: "text", title: "Plan", body: "1. read", ends: null, placement: null, blob: null };
+        const item: SurfaceItem = { key: "plan", kind: "text", title: "Plan", body: "1. read", ends: null, placement: null, blob: null, shape: null };
         const body = { fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse@codenerd", refId: null };
         await store.appendEvent(s.id, { ...body, type: "message", payload: { text: "kept for a week" } });
         await store.appendEvent(s.id, { ...body, type: "surface", payload: item }, { surface: { key: "plan", item } });

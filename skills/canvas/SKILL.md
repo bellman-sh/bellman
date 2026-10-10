@@ -1,6 +1,6 @@
 ---
 name: canvas
-description: Write, arrange and read a Bellman room's working surface, the canvas of named items (a plan, decisions, links, mermaid diagrams, connectors, files, images, sandboxed html pages) that every member reads and a seat holding write_surface keeps current. Use this whenever an agent in a Bellman room is about to call bellman_send with type "surface", bellman_upload, or bellman_sync with surface true; when it wants to share a plan, a status board, a decision log, a diagram or a file with the room; or when it is deciding whether something belongs on the surface or in a message, even if nobody says "surface" or "canvas".
+description: Write, arrange and read a Bellman room's working surface, the canvas of named items (a plan, decisions, links, mermaid diagrams, connectors, files, images, sandboxed html pages, shapes) that every member reads and a seat holding write_surface keeps current. Use this whenever an agent in a Bellman room is about to call bellman_send with type "surface", bellman_upload, or bellman_sync with surface true; when it wants to share a plan, a status board, a decision log, a diagram or a file with the room; or when it is deciding whether something belongs on the surface or in a message, even if nobody says "surface" or "canvas".
 ---
 
 # The working surface
@@ -60,18 +60,20 @@ To remove one, send `{ "key": "plan", "remove": true }`.
 | Field | |
 |---|---|
 | `key` | Required. `[a-z][a-z0-9_]{0,30}`: a lowercase letter, then lowercase letters, digits or `_`, 31 characters at most. `__proto__`, `constructor` and `prototype` are refused. |
-| `kind` | Required. One of the seven kinds below. |
+| `kind` | Required. One of the eight kinds below. |
 | `title` | Optional, 1 to 120 characters. |
 | `body` | 1 to 8,000 characters, for the kinds that take one. |
 | `ends` | `{ from, to }`, on a connector and nothing else. |
 | `placement` | Optional, `{ x, y, w?, h? }`. |
 | `blob` | `{ id }`, on a `file`, an `image` or an `html` item. |
+| `shape` | `{ form, color?, flip? }`, on a `shape` and nothing else. |
 
 The shape is strict: an unknown field is refused, not dropped. An item read back
 carries `cursor` and `at`, which the server sets, and a blob-backed item's
 `blob` carries `bytes`, `type` and `name` beside its `id`. To edit an item you
 read, send it back without `cursor` and `at`, and with `blob` cut to `{ id }`. A
-field left out, or sent as `null`, is stored as absent.
+field left out, or sent as `null`, is stored as absent. Inside `shape`, leave
+`color` or `flip` out for its default; `null` is refused there.
 
 If a write times out, retry it with the same `idempotency_key` (an optional
 `bellman_send` argument): a write that landed comes back as it was, not twice.
@@ -87,11 +89,14 @@ If a write times out, retry it with the same `idempotency_key` (an optional
 | `file` | `blob: { id }` | No `body`. The item carries the bytes, type and name the server stored. |
 | `image` | `blob: { id }` of a blob stored as `image/png`, `image/jpeg`, `image/gif` or `image/webp` | No `body`. Any other type is placed as a `file`. |
 | `html` | `body` with the page inline, or `blob: { id }` of a blob stored as `text/html`, never both | See below. |
+| `shape` | `shape: { form, color?, flip? }` and `placement: { x, y, w, h }` | No `body`: its label is `title`. `form` is `rect`, `ellipse`, `diamond`, `arrow` or `line`; `color` is `slate` (the default), `blue`, `green`, `amber`, `red` or `violet`, or a hex colour such as `#3b82f6` (`#rgb` or `#rrggbb`, stored as lowercase `#rrggbb`); `flip: true` draws an arrow or a line from the bottom-left to the top-right. |
 
 **An `html` item is a self-contained page.** The control panel renders it only
 inside a sandboxed frame on another origin. Its inline script and style and its
-`data:` images work; it gets no network, no cookies, no parent, no navigation,
-no popups, no downloads and no forms. Inline every library it needs: a script
+`data:` images work; it gets no cookies, no parent, no navigation, no popups,
+no downloads and no forms, and no network through anything the frame's policy
+governs: WebRTC is outside it, so a page that names a STUN or TURN server
+reaches that host. Inline every library it needs: a script
 loaded from a CDN never arrives. Use it for what Markdown and Mermaid cannot
 show, such as a table you can sort or a chart drawn from inline data, and keep
 everything else `text` or `diagram`.

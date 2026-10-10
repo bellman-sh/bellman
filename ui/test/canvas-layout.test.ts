@@ -11,7 +11,7 @@ import type { SurfaceItemWire, Untrusted } from "../src/types.js";
 const env = (key: string, over: Partial<SurfaceItemWire> = {}): Untrusted<SurfaceItemWire> => ({
   trust: "untrusted",
   origin: { memberId: "m", label: "m" },
-  data: { key, kind: "text", title: null, body: null, ends: null, placement: null, blob: null, cursor: 1, at: "2026-03-15T12:00:00Z", ...over },
+  data: { key, kind: "text", title: null, body: null, ends: null, placement: null, blob: null, shape: null, cursor: 1, at: "2026-03-15T12:00:00Z", ...over },
 });
 
 describe("layout", () => {

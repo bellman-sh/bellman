@@ -357,7 +357,7 @@ describe("createCanvas", () => {
   it("disables Open for a link that is not http(s), and renders an unknown kind by name", () => {
     const r = surfaceFixture();
     r.surface.items[1].data.body = "javascript:alert(1)";
-    r.surface.items.push({ trust: "untrusted", origin: { memberId: "m", label: "m" }, data: { key: "blob1", kind: "shape", title: "A box", body: null, ends: null, placement: null, blob: null, cursor: 9, at: r.surface.items[0].data.at } });
+    r.surface.items.push({ trust: "untrusted", origin: { memberId: "m", label: "m" }, data: { key: "blob1", kind: "shape", title: "A box", body: null, ends: null, placement: null, blob: null, shape: { form: "rect", color: "slate", flip: false }, cursor: 9, at: r.surface.items[0].data.at } });
     const { deps: d, opened } = deps();
     const c = createCanvas(r, d, NOW);
     const spec = card(c.root, "The spec");

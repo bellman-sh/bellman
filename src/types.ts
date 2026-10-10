@@ -439,9 +439,10 @@ export interface SavedPreset {
  * The kinds a surface item can be (#129). Closed, like SEND_KINDS: every kind a
  * client is shown maps to a shape the server validates, and a kind lands with
  * its validator. `file` and `image` (#183) reference a blob; `html` (#185) is
- * a page inline in body or a blob, never both.
+ * a page inline in body or a blob, never both; `shape` (#197) is a few numbers
+ * the canvas draws, with its own field and no body.
  */
-export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html";
+export type SurfaceKind = "text" | "link" | "diagram" | "connector" | "file" | "image" | "html" | "shape";
 
 /** Where an item sits on the canvas. Nothing bounds x or y: the canvas is infinite. */
 export interface Placement {
@@ -463,13 +464,26 @@ export interface BlobRef {
   name: string;      // as stored, after D6
 }
 
+/** A shape's six named colours (#197, D3). */
+export type ShapeColorName = "slate" | "blue" | "green" | "amber" | "red" | "violet";
+
+/**
+ * A shape (#197, D1): its form, its colour, and for an arrow or a line which diagonal it spans. The colour is
+ * a name or a hex colour, stored as lowercase `#rrggbb` (D3).
+ */
+export interface Shape {
+  form: "rect" | "ellipse" | "diamond" | "arrow" | "line";
+  color: ShapeColorName | `#${string}`;
+  flip: boolean;
+}
+
 /**
  * An item as written, normalised: every optional field present as null, so a
  * reader never tells "absent" from "null". `ends` is a connector's two keys;
  * every other kind has none. `body` is markdown for `text`, a URL for `link`,
  * mermaid source for `diagram`, a label for `connector`, the page for `html`
  * unless it names a blob, and absent for `file` and `image`, whose bytes are the
- * blob's.
+ * blob's, and for `shape`, which is drawn from its own field and labelled by its title.
  */
 export interface SurfaceItem {
   key: string;
@@ -480,6 +494,8 @@ export interface SurfaceItem {
   placement: Placement | null;
   /** The blob a `file`, an `image` or a blob-backed `html` item names; null for every other. */
   blob: BlobRef | null;
+  /** A shape's own field (#197); null for every other kind. */
+  shape: Shape | null;
 }
 
 /** An item as stored: the item plus the write that put it there. */

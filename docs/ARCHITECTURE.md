@@ -7,7 +7,7 @@ applies-when: |
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
-last-verified-against-source: 87ad161
+last-verified-against-source: 21f13b4
 last-updated: 2026-10-09
 ---
 
@@ -840,11 +840,24 @@ tests run the seat; ADR 0002 records when production does.
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally
 placed items — `text`, `link`, `diagram`, `connector`, the blob-backed `file`
-and `image`, and `html` — that members read and a seat holding `write_surface`
-keeps current. The log is how the surface got that way; the surface is where
-things stand. Blobs, piece 2, are the next subsection. The `html` kind (#185) is
-the server's half of piece 4; the canvas (piece 3) and the sandbox that renders
-`html` and `diagram` items (`bellman-sh/dash#14`) are the control panel's.
+and `image`, `html`, and `shape` — that members read and a seat holding
+`write_surface` keeps current. The log is how the surface got that way; the
+surface is where things stand. Blobs, piece 2, are the next subsection. The
+`html` kind (#185) is the server's half of piece 4; the canvas (piece 3) and the
+sandbox that renders `html` and `diagram` items (`bellman-sh/dash#14`) are the
+control panel's.
+
+The `shape` kind (#197) is a few numbers the canvas draws: its own field,
+`shape { form, color, flip }`, beside `ends` and `blob`, with five forms and a
+colour that is one of six names or a hex stored as lowercase `#rrggbb`, stored with their defaults (`slate`, `false`) applied so a
+reader never branches on absence. Its rules are `normalizeSurfaceWrite`'s: a
+shape needs `placement { x, y, w, h }`, because its size is the placement's, and
+takes no `body`, because its label is the `title`; `flip: true` is for an arrow
+or a line and is refused on any other form, while `flip: false`, the default
+every stored shape carries, is accepted so that a shape read back can be sent
+back; and no other kind may carry the field. The stores keep it with the row, as
+they keep `blob`, the projection carries it for every item and reads `null` for a
+row written before it, and the canvas side is `bellman-sh/dash#15`.
 
 Each item is a row, `sf:<key>`, beside the event rows and not in the session
 record, so a poll that does not ask for the surface never reads one. The row
@@ -1774,12 +1787,28 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~7,958** | every request, whether or not you are in a room |
+| Tool definitions | **~8,043** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~254 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 71 tokens
+over the 7,651 that `bfebd30` measures by the same method, all of them `bellman_send`'s
+(1,294 to 1,365): 69 for the `shape` clause in the `surface` line's `Kinds:` sentence,
+which names the field, its forms and colours and `flip`, and says that the size is the
+placement's and the label is the title, and 2 for `shape?` in the payload's field list.
+No other entry changed and no tool was added. Merged over per-role heartbeat
+instructions (#229, below), which changed only `bellman_start`, the listing is the sum:
+7,670 and 71, 7,741. The review then named `shape` in `bellman_surface`'s `Returns:` line: 2 more,
+7,743, and that tool's row reads 283 (281 since the `room_id` alias, measured at `bfebd30`, `a1bcce7` and
+`a93217c`; the 254 it read before that was stale).
+Merged again over public rooms (#233) and the heartbeat vocabulary (#237), whose main measures
+7,958 by this method, the listing measures 8,031: the same 73 (`bellman_send` 1,294 to 1,365,
+`bellman_surface` 281 to 283).
+Then a shape's colour became a name or a hex (D3, amended at Jesse's request): 12 more, all
+`bellman_send`'s (1,365 to 1,377), for "or a hex such as #3b82f6" in the `shape` clause: 8,043.
 
 Re-measured on 2026-10-09 for public rooms, on top of the heartbeat's vocabulary: 150
 tokens over main. `bellman_start` is up 111, to 2,317, for the manifest's `public` on

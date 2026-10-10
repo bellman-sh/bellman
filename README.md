@@ -71,8 +71,8 @@ members read and one seat keeps current. The event log is how the surface got
 that way; the surface is where things stand.
 
 - Write with `bellman_send type: "surface"`, payload `{ key, kind, title?,
-  body?, ends?, placement?, blob? }`, or remove with `{ key, remove: true }`. Kinds:
-  `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`. Items replace by key;
+  body?, ends?, placement?, blob?, shape? }`, or remove with `{ key, remove: true }`. Kinds:
+  `text`, `link`, `diagram`, `connector`, `file`, `image`, `html`, `shape`. Items replace by key;
   every version stays in the log at its cursor.
 - A `file` or an `image` names a blob. Upload the bytes first — `POST
   /rooms/:id/blobs?member_id=…&name=…`, raw body, `Content-Length` required,
@@ -92,6 +92,14 @@ that way; the surface is where things stand.
   where it gets no cookies and no network through anything the frame's policy
   governs; WebRTC is outside that policy, and the `html` line in `bellman_send`
   says so (the frame is the dash repo's).
+- A `shape` is drawn from its own field, `shape: { form, color?, flip? }`: `form` is
+  `rect`, `ellipse`, `diamond`, `arrow` or `line`, `color` is one of six names (`slate`
+  by default, then `blue`, `green`, `amber`, `red` and `violet`) or a hex colour (`#rgb`
+  or `#rrggbb`, stored as lowercase `#rrggbb`), and `flip: true` draws
+  an arrow or a line from the bottom-left to the top-right. A shape needs `placement`
+  with `x`, `y`, `w` and `h`, because its size is the placement's, and takes no `body`,
+  because its label is the `title`; `flip: true` on any other form is refused, and so
+  is a non-null `shape` on any other kind.
 - The verb is `write_surface`. Every preset gives it to the creator's seat
   alone; a manifest may give it to any seat. Reading is never gated.
 - A joiner's preview lists what the surface holds — keys, kinds and sizes — and

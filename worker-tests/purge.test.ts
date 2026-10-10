@@ -399,7 +399,7 @@ it("closes the sockets attached to the room when it is purged", async () => {
 function nameBlob(store: DurableObjectStore, roomId: string, blobId: string, bytes: number) {
   const item: SurfaceItem = {
     key: `file_${blobId}`, kind: "file", title: null, body: null, ends: null, placement: null,
-    blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` },
+    blob: { id: blobId, bytes, type: "text/plain", name: `${blobId}.txt` }, shape: null,
   };
   return store.appendEvent(
     roomId,

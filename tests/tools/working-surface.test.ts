@@ -66,7 +66,7 @@ describe("writing an item", () => {
     expect(out.data.room_members).toEqual([p.joiner.identity.label]);
 
     expect(await rows(p)).toEqual([{
-      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null,
+      key: "plan", kind: "text", title: "Plan", body: "1. read\n2. write", ends: null, placement: null, blob: null, shape: null,
       cursor: last.cursor, at: last.at, byMemberId: p.creatorMemberId, byLabel: p.creator.identity.label,
     }]);
   });
@@ -126,6 +126,7 @@ describe("writing an item", () => {
       { key: "pr", kind: "link", title: "The PR", body: "https://github.com/bellman-sh/bellman/pull/1" },
       { key: "arch", kind: "diagram", body: "flowchart LR\n  A --> B" },
       { key: "c1", kind: "connector", ends: { from: "plan", to: "arch" } },
+      { key: "box", kind: "shape", title: "Group A", shape: { form: "rect" }, placement: { x: 10, y: 20, w: 200, h: 120 } },
     ]) {
       const out = await write(p, item);
       expect(out.isError, out.text).toBe(false);
@@ -137,13 +138,16 @@ describe("writing an item", () => {
     expect(read.isError, read.text).toBe(false);
     const asRead = (read.data.surface as { items: { data: Record<string, unknown> }[] }).items
       .map((i) => i.data);
-    expect(asRead.map((i) => i.key)).toEqual(["arch", "c1", "plan", "pr"]);
+    expect(asRead.map((i) => i.key)).toEqual(["arch", "box", "c1", "plan", "pr"]);
     const item = (key: string) => asRead.find((i) => i.key === key)!;
     // The positive control: what was left out reads back as null and not as absent,
     // and the server's own fields are on the item. Without it the sends below would
     // pass just as well for a read that had dropped them.
-    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, blob: null, cursor: expect.any(Number) });
+    expect(item("plan")).toMatchObject({ title: null, ends: null, placement: null, blob: null, shape: null, cursor: expect.any(Number) });
     expect(item("c1")).toMatchObject({ title: null, body: null, placement: null });
+    // A shape reads back with its defaults spelled out, `flip: false` on a rectangle among them: the loop
+    // below sends it back as it reads, so a rule that refused the default would fail it there.
+    expect(item("box")).toMatchObject({ body: null, shape: { form: "rect", color: "slate", flip: false } });
 
     const asWritten = (data: Record<string, unknown>) =>
       Object.fromEntries(Object.entries(data).filter(([k]) => k !== "cursor" && k !== "at"));
@@ -661,7 +665,7 @@ describe("file and image items (#183)", () => {
   // Review Focus 3: read, edit, send back works for a blob-backed item too, once the server's
   // fields come off — the three inside `blob` as well as the two on top. zod reports the nested
   // issue before the top-level one and the refusal names only the first, so each step asserts
-  // its first issue by its path (`blob: `; the refusal's own prefix says `blob? }`, never
+  // its first issue by its path (`blob: `; the refusal's own prefix says `blob?, shape? }`, never
   // `blob: `) and by the key it names, and says which issue is not the first.
   it("reads a file item back with its blob, and accepts it back once the server's fields are stripped", async () => {
     const p = await pairUp(h);
@@ -753,5 +757,134 @@ describe("html items (#185)", () => {
   it("holds an inline page to the body bound", async () => {
     const p = await pairUp(h);
     await refusedWith(p, { key: "long", kind: "html", body: "<p>" + "x".repeat(MAX_SURFACE_BODY_CHARS) }, "must be at most 8000 characters");
+  });
+});
+
+describe("shape items (#197)", () => {
+  const box = (over: Record<string, unknown> = {}) => ({
+    key: "box", kind: "shape", title: "Group A", shape: { form: "rect" },
+    placement: { x: 10, y: 20, w: 200, h: 120 }, ...over,
+  });
+  const read = async (p: PairedSession) => {
+    const out = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, surface: true,
+    });
+    expect(out.isError, out.text).toBe(false);
+    return (out.data.surface as { items: { data: Record<string, unknown> }[] }).items.map((i) => i.data);
+  };
+
+  it("places a shape with its defaults applied, and reads every other kind back with shape: null", async () => {
+    const p = await pairUp(h);
+    const out = await write(p, box());
+    expect(out.isError, out.text).toBe(false);
+    expect((await rows(p))[0]).toMatchObject({
+      key: "box", kind: "shape", title: "Group A", body: null,
+      shape: { form: "rect", color: "slate", flip: false }, placement: { x: 10, y: 20, w: 200, h: 120 },
+    });
+    await write(p, plan());
+    const items = await read(p);
+    expect(items.find((i) => i.key === "box")!.shape).toEqual({ form: "rect", color: "slate", flip: false });
+    expect(items.find((i) => i.key === "plan")!.shape).toBeNull();
+  });
+
+  it("draws an arrow or a line either way, refuses a flip on any other form, and takes back the default", async () => {
+    const p = await pairUp(h);
+    for (const form of ["arrow", "line"]) {
+      const out = await write(p, box({ key: form, shape: { form, color: "violet", flip: true } }));
+      expect(out.isError, out.text).toBe(false);
+    }
+    // What was asked for is what the row holds: `flip: true` and the colour survive the normalisation.
+    const placed = await rows(p);
+    for (const form of ["arrow", "line"]) {
+      expect(placed.find((r) => r.key === form)!.shape).toEqual({ form, color: "violet", flip: true });
+    }
+    await refusedWith(p, box({ key: "r", shape: { form: "rect", flip: true } }), 'surface shape "r": flip is for an arrow or a line');
+    const back = await write(p, box({ key: "r2", shape: { form: "rect", color: "slate", flip: false } }));
+    expect(back.isError, back.text).toBe(false);
+  });
+
+  it("holds a shape to its rules, each in its own words", async () => {
+    const p = await pairUp(h);
+    await refusedWith(p, box({ shape: undefined }), 'surface shape "box": a shape needs shape { form, color?, flip? }');
+    await refusedWith(p, box({ shape: null }), "a shape needs shape { form, color?, flip? }");
+    await refusedWith(p, box({ body: "words" }), "a shape has no body; its label is the title");
+    await refusedWith(p, box({ placement: { x: 0, y: 0 } }), "a shape needs placement { x, y, w, h }");
+    await refusedWith(p, box({ placement: { x: 0, y: 0, w: 10 } }), "a shape needs placement { x, y, w, h }");
+    await refusedWith(p, box({ placement: null }), "a shape needs placement { x, y, w, h }");
+    await refusedWith(p, { ...plan(), shape: { form: "rect" } }, 'surface text "plan": only a shape has shape');
+    await refusedWith(p, box({ shape: { form: "star" } }), "shape.form");
+    await refusedWith(p, box({ shape: { form: "rect", color: "teal" } }), "shape.color");
+    await refusedWith(p, box({ shape: { form: "rect", stroke: 2 } }), "shape");
+  });
+
+  it("takes any positive finite size, as every placement does", async () => {
+    const p = await pairUp(h);
+    for (const [key, w, hh] of [["thin", 0.5, 40], ["tall", 40, 1e9]] as const) {
+      const out = await write(p, box({ key, placement: { x: 0, y: 0, w, h: hh } }));
+      expect(out.isError, out.text).toBe(false);
+    }
+    await refusedWith(p, box({ key: "flat", placement: { x: 0, y: 0, w: 0, h: 10 } }), "placement.w");
+  });
+
+  it("shows a shape in the joiner's index as a shape with no characters", async () => {
+    // As the index tests under "joining a room with a surface" read it: kind "shape", chars 0. The
+    // title is the shape's label and prose, so the index leaves it out as it leaves out every title.
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: manifestFixture({ preset: "swarm" }), brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const memberId = String(started.data.member_id);
+    const wrote = await creator.call("bellman_send", {
+      session_id: String(started.data.session_id), member_id: memberId, type: "surface", payload: box(),
+    });
+    expect(wrote.isError, wrote.text).toBe(false);
+
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+    expect(preview.isError, preview.text).toBe(false);
+    const surface = preview.data.surface as { cursor: number; items: Record<string, unknown>[] };
+    expect(surface.items).toEqual([{
+      key: "box", kind: "shape", chars: 0, cursor: Number(wrote.data.cursor),
+      at: expect.any(String), by: { member_id: memberId, label: creator.identity.label },
+    }]);
+    expect(JSON.stringify(preview.data)).not.toContain("Group A");
+  });
+  it("holds every form, colour and kind to the rules, not one of each", async () => {
+    const p = await pairUp(h);
+    for (const form of ["rect", "ellipse", "diamond", "arrow", "line"]) {
+      for (const flip of [false, true]) {
+        const out = await write(p, box({ key: `${form}_${flip}`, shape: { form, flip } }));
+        expect(out.isError, `${form} flip ${flip}: ${out.text}`).toBe(flip && form !== "arrow" && form !== "line");
+      }
+    }
+    for (const color of ["slate", "blue", "green", "amber", "red", "violet"]) {
+      const out = await write(p, box({ key: `c_${color}`, shape: { form: "rect", color } }));
+      expect(out.isError, `${color}: ${out.text}`).toBe(false);
+    }
+    await refusedWith(p, box({ key: "no_w", placement: { x: 0, y: 0, h: 10 } }), "a shape needs placement { x, y, w, h }");
+    await refusedWith(p, box({ ends: { from: "plan", to: "arch" } }), "only a connector has ends");
+    await refusedWith(p, box({ blob: { id: newBlobId() } }), "only a file, an image or an html item names a blob");
+    for (const other of [
+      plan(), { key: "pr", kind: "link", body: "https://example.com" }, { key: "arch", kind: "diagram", body: "flowchart LR" },
+      { key: "c1", kind: "connector", ends: { from: "plan", to: "arch" } }, { key: "f", kind: "file", blob: { id: newBlobId() } },
+      { key: "i", kind: "image", blob: { id: newBlobId() } }, { key: "demo", kind: "html", body: "<p>hi</p>" },
+    ]) {
+      await refusedWith(p, { ...other, shape: { form: "rect" } }, "only a shape has shape");
+    }
+  });
+  it("takes a colour by name or as a hex, stored as lowercase #rrggbb, and refuses anything else", async () => {
+    const p = await pairUp(h);
+    for (const [key, color, stored] of [["hex6", "#3B82F6", "#3b82f6"], ["hex3", "#AbC", "#aabbcc"], ["named", "amber", "amber"]] as const) {
+      const out = await write(p, box({ key, shape: { form: "rect", color } }));
+      expect(out.isError, out.text).toBe(false);
+      expect((await rows(p)).find((r) => r.key === key)!.shape).toEqual({ form: "rect", color: stored, flip: false });
+    }
+    for (const color of ["#12345", "#3b82f680", "#gggggg", "teal", "3b82f6", "url(x)", "#3b82f6;", ""]) {
+      await refusedWith(
+        p, box({ key: "bad", shape: { form: "rect", color } }),
+        'shape.color: must be slate, blue, green, amber, red or violet, or a hex colour such as "#3b82f6"',
+      );
+    }
   });
 });

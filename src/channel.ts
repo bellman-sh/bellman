@@ -35,7 +35,7 @@
  *                     refused: name it here to allow that much. "/" is any file. Read on
  *                     each upload.
  *
- * The sign-in is NOT lazy, and it is worth being plain about it. Claude Code
+ * The sign-in is NOT lazy. Claude Code
  * lists a server's tools as soon as it connects, the bridge proxies tools/list
  * to Bellman, and proxying it means connecting — so on a machine with no cached
  * credential the browser opens at Claude Code LAUNCH, not at the first bellman_*

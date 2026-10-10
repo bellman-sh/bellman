@@ -155,8 +155,8 @@ export function csrfRefusal(
  * should cost one origin, not the whole allowlist — and an unparseable entry left
  * in place would throw from inside allowedOrigin on every request.
  *
- * `trim()` is right here where it is wrong in cookies.ts, and the difference is
- * worth stating because the two sit one import apart. This reads a deploy-time
+ * `trim()` is right here where it is wrong in cookies.ts, though the two sit
+ * one import apart. This reads a deploy-time
  * configuration string an operator wrote; trimOws reads a header an attacker
  * controls, where accepting a Unicode space let a padded cookie name pass for the
  * protected one. Being generous about whitespace costs nothing when the writer is

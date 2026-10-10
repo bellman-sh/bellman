@@ -2,10 +2,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { APP_HTML } from "./assets.js";
 
 /**
- * The one UI resource (#28). Both screens, the join preview and the room
- * monitor, live in this single page, which dispatches on the tool result the
- * host hands it (spec D10). `ui://` is the scheme the MCP Apps extension
- * reserves for resources a host renders rather than reads.
+ * The one UI resource (#28). Its three screens, the join preview, the room
+ * monitor and the canvas, live in this single page, which picks one from the
+ * tool result the host hands it (`pickScreen`; spec D10, canvas spec D4).
+ * `ui://` is the scheme the MCP Apps extension reserves for resources a host
+ * renders rather than reads.
  */
 export const APP_RESOURCE_URI = "ui://bellman/app.html";
 
@@ -33,7 +34,7 @@ export function registerAppResource(server: McpServer): void {
     APP_RESOURCE_URI,
     {
       title: "Bellman",
-      description: "The join preview and the room monitor, rendered by hosts that support MCP Apps.",
+      description: "The join preview, the room monitor and the room's canvas, rendered by hosts that support MCP Apps.",
       mimeType: APP_MIME_TYPE,
     },
     async () => ({

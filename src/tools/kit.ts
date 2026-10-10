@@ -111,7 +111,7 @@ export const CapabilitiesShape = z
  * sentence the requester is shown.
  *
  * Not strict, unlike the shapes above: an `action_response` payload is also
- * carried to the peer as content, and a build that adds a field to it should
+ * carried to the room's members as content, and a build that adds a field to it should
  * not have the whole answer refused.
  */
 export const ActionResponseShape = z.object({
@@ -161,8 +161,8 @@ export class FrozenError extends Error {
  * **Nothing catches `FrozenError`.** It is thrown here and caught nowhere in
  * `src/`, so it leaves the handler as an exception rather than as the `fail()`
  * refusal the frozen guards produce — a caller that races a freeze gets a
- * different shape from one that arrives after it. Worth knowing before relying
- * on the two reading alike. (This docblock was stranded in `projections.ts` by
+ * different shape from one that arrives after it, so do not rely on the
+ * two reading alike. (This docblock was stranded in `projections.ts` by
  * the #92 split, above no declaration, and claimed "the tool's catch turns it
  * into the same refusal as the guards"; there is no such catch.)
  */

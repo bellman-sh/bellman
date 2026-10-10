@@ -61,8 +61,9 @@ export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStor
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);
 
-  // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect
-  // and bellman_rooms through it; every other host ignores it (D10).
+  // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect,
+  // bellman_confirm, bellman_rooms and bellman_surface through it; every other
+  // host ignores it (D10).
   registerAppResource(server);
 
   return server;

@@ -260,7 +260,7 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
 
-/** Every handle this person holds in the room, in roster order. Empty means a stranger. Structural, so a test can hand it a fixture. */
+/** Every handle this person holds in the room, in roster order. Empty means a stranger. It takes any object of the right shape, so a test can hand it a fixture. */
 export const handlesOf = (session: Pick<StoredSession, "members">, identity: Pick<Identity, "userId">): Member[] =>
   session.members.filter((m) => m.userId === identity.userId);
 
@@ -689,8 +689,8 @@ export async function revokeInvite(
 /**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
- * One operation for both transports — `bellman_send type: "surface"` now, and
- * piece 3's `PUT /rooms/:id/surface/:key` next — for the reason this module
+ * One operation for both transports — `bellman_send type: "surface"` and
+ * `PUT`/`DELETE /rooms/:id/surface/:key` (#184) — for the reason this module
  * exists: a second transport re-typing the sequence is a second chance to skip
  * the verb guard or the audit row. The order is the write path the spec gives:
  * the seat's guards (`gateSeat`, which also touches the caller), the payload's

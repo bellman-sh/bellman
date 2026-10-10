@@ -28,6 +28,11 @@ describe("renderJoin", () => {
     r.room.heartbeat_seconds = 300;
     r.room.your_heartbeat_on = true;
     expect(renderJoin(r, () => {}, NOW).textContent).toContain("Your seat is on the heartbeat, every 5m.");
+    // Exact, never rounded: this is the number the joiner agrees to.
+    for (const [seconds, said] of [[90, "90s"], [5_400, "90m"]] as const) {
+      r.room.heartbeat_seconds = seconds;
+      expect(renderJoin(r, () => {}, NOW).textContent).toContain(`Your seat is on the heartbeat, every ${said}.`);
+    }
   });
 
   it("shows a reporting seat's instruction beside its yes, as the creator's words", () => {

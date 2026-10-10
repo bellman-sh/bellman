@@ -38,6 +38,17 @@ describe("the new words", () => {
     expect(() => lead({ heartbeat_on: "x".repeat(301) })).toThrow(/roles\.lead\.heartbeat_on/);
   });
 
+  // YAML 1.2 reads off, no, on and yes as text, and a model can quote a boolean. As instructions,
+  // each would put on the heartbeat a seat its author may have meant to keep off it.
+  it("refuse an instruction that reads as a yes or no, and keep one that only mentions one", () => {
+    for (const word of ["off", "No", "YES", " on ", "false", "True", "y", "N"]) {
+      expect(() => lead({ heartbeat_on: word }), word).toThrow(
+        `role "lead": heartbeat_on: ${JSON.stringify(word.trim())} is text, not a yes or no; give true, false, or what this seat reports`,
+      );
+    }
+    expect(lead({ heartbeat_on: "Yes or no: did it ship?" })).toMatchObject({ reports: true, report: "Yes or no: did it ship?" });
+  });
+
   it("name heartbeat_on when a seat on the heartbeat cannot send", () => {
     expect(() => resolveManifest(authored({ heartbeat: "5m", roles: roles({}, { heartbeat_on: true }) })))
       .toThrow('role "observer" sets heartbeat_on but does not hold the verb "send" (it holds: none)');

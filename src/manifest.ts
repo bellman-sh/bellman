@@ -146,7 +146,8 @@ export function roomBeat(v: { heartbeat?: string | null; heartbeat_on?: string |
  * A role's place on the heartbeat from either spelling, as the model holds it (vocabulary spec
  * D1 to D4): `heartbeat_on` true, false or the instruction; or the old `reports` and `report`,
  * with #229's rule in its own words. Both spellings is refused, naming the old field to drop.
- * An instruction is trimmed: a blank new one is refused, and a blank old one reads as none.
+ * An instruction is trimmed: a blank new one is refused, and a blank old one reads as none. A new
+ * one that reads as a yes or no is refused too, since it would put its seat on the heartbeat.
  */
 export function roleBeat(
   key: string,
@@ -160,6 +161,10 @@ export function roleBeat(
     if (typeof def.heartbeat_on === "string") {
       const report = def.heartbeat_on.trim();
       if (report === "") throw new ManifestError(`role "${key}": heartbeat_on: give true, false, or what this seat reports`);
+      // YAML 1.1's booleans: YAML 1.2 reads most of them as text, and a model can quote a boolean.
+      if (/^(y|yes|n|no|true|false|on|off)$/i.test(report)) {
+        throw new ManifestError(`role "${key}": heartbeat_on: ${JSON.stringify(report)} is text, not a yes or no; give true, false, or what this seat reports`);
+      }
       return { reports: true, report, word: "heartbeat_on" };
     }
     return { reports: def.heartbeat_on === true, report: null, word: "heartbeat_on" };

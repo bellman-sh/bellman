@@ -1,4 +1,4 @@
-import { countdown, duration, el } from "./shared.js";
+import { countdown, el } from "./shared.js";
 import type { ConnectResult, RoomBlock } from "./types.js";
 
 /** What a joiner may grant peers. The same three the server's CapabilitiesShape accepts, and its defaults. */
@@ -132,7 +132,7 @@ export function renderJoin(
 
   const seat = `You may: ${r.room.your_verbs.length > 0 ? r.room.your_verbs.join(", ") : "read only"}.` +
     (r.room.your_heartbeat_on && r.room.heartbeat_seconds !== null
-      ? ` Your seat is on the heartbeat, every ${duration(r.room.heartbeat_seconds)}.`
+      ? ` Your seat is on the heartbeat, every ${exact(r.room.heartbeat_seconds)}.`
       : "");
 
   const naming = housekeepingLine(r.room.housekeeping);

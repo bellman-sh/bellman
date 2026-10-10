@@ -12,6 +12,7 @@ import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { PNG, text } from "../helpers/blob-bytes.js";
 import { MemoryStore } from "../../src/store.js";
+import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { IMAGE_TYPES, newBlobId } from "../../src/blobs.js";
 import {
@@ -403,6 +404,27 @@ describe("bellman_sync and the surface", () => {
       expect(item.trust).toBe("untrusted");
       expect(item.origin.memberId).toBe(p.creatorMemberId);
     }
+  });
+
+  // ADR 0008, decision 1: a result that carries peer content starts with the preamble.
+  // A poll that asks for the surface after it has read the events that changed it has no
+  // foreign event, so the surface block is the only peer content the result holds.
+  it("leads with the untrusted preamble when the surface is the only peer content", async () => {
+    const p = await pairUp(h);
+    const nothing = await poll(p, { surface: true });
+    expect(nothing.isError, nothing.text).toBe(false);
+    expect((nothing.data.surface as { items: unknown[] }).items).toEqual([]);
+    expect(nothing.text).not.toContain(UNTRUSTED_PREAMBLE);
+
+    await write(p, plan());
+    const caughtUp = await poll(p);
+    expect(caughtUp.data.events).toHaveLength(1);
+
+    const out = await poll(p, { since_cursor: Number(caughtUp.data.cursor), surface: true });
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data.events).toEqual([]);
+    expect((out.data.surface as { items: unknown[] }).items).toHaveLength(1);
+    expect(out.text.startsWith(UNTRUSTED_PREAMBLE)).toBe(true);
   });
 
   // Review Focus 5, first half: read after the wait, like session_status.

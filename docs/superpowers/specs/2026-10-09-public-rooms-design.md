@@ -88,6 +88,13 @@ at the preview, before they join.
 members' own: a surface read answered from the record on an `ETag` match, and
 an events read bounded at 200.
 
+**D10. A paid plan's (decided 2026-10-10, after D1 to D9 shipped).** `publicRooms` in
+`ENTITLEMENTS` is false on free and true on pro, max and team. `bellman_start` refuses a
+public room on free after the manifest resolves, so a cite's `public` and a saved preset's
+default meet the same check, and the refusal creates and counts nothing. Like every plan
+gate it is read at creation only: rooms already public stay public, a plan that lapses does
+not unpublish one, and a free account may still save a preset that defaults to public.
+
 ## Testing
 
 Every assertion runs against a broken version first and must fail there.

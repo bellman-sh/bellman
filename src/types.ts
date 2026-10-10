@@ -300,6 +300,11 @@ export interface Entitlements {
    * D1): null keeps them until a creator or an org admin deletes the room.
    */
   retainAfterCloseMs: number | null;
+  /**
+   * Whether a room this plan creates may be public (public rooms spec, D10): a paid
+   * plan's. Checked at creation, the only time a room becomes public.
+   */
+  publicRooms: boolean;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.

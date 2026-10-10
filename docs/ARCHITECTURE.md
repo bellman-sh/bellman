@@ -240,7 +240,7 @@ finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true` and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in.
 
 ### Two delivery paths
 
@@ -1787,7 +1787,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,043** | every request, whether or not you are in a room |
+| Tool definitions | **~8,061** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
@@ -1809,6 +1809,8 @@ Merged again over public rooms (#233) and the heartbeat vocabulary (#237), whose
 `bellman_surface` 281 to 283).
 Then a shape's colour became a name or a hex (D3, amended at Jesse's request): 12 more, all
 `bellman_send`'s (1,365 to 1,377), for "or a hex such as #3b82f6" in the `shape` clause: 8,043.
+Then public rooms became a paid plan's: 18 more, all `bellman_start`'s (2,317 to 2,335), for
+"(pro, max or team plan)" on `public` and the refusal named in its `Errors:` line: 8,061.
 
 Re-measured on 2026-10-09 for public rooms, on top of the heartbeat's vocabulary: 150
 tokens over main. `bellman_start` is up 111, to 2,317, for the manifest's `public` on

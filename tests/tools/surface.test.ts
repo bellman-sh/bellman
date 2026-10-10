@@ -86,6 +86,7 @@ describe("tool surface", () => {
     const rejections: [string, Peer, Record<string, unknown>][] = [
       ["invalid manifest — ", jesse, { manifest: dangling }],
       ["swarm mode requires", peer, { manifest: manifestFixture({ preset: "swarm" }) }],
+      ["a public room requires", peer, { manifest: manifestFixture({ public: true }) }],
       ["org_only sessions require", peer, { manifest: manifestFixture(), org_only: true }],
       ["org_only was set but", teamless, { manifest: manifestFixture(), org_only: true }],
       ["monthly session limit", spent, { manifest: manifestFixture() }],

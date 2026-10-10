@@ -60,7 +60,7 @@ server/                 dist/ — from the npm tarball, or from this checkout
 node_modules/           those, installed --omit=dev, checked against the server's imports
 ```
 
-Four decisions are worth explaining.
+The bundle makes four decisions.
 
 **1. It bundles every dependency the package declares, then checks the
 artifact.** The staging `package.json` once pinned `@modelcontextprotocol/sdk`
@@ -88,8 +88,8 @@ but nothing is lost either.
 **3. There is no key to paste.** The bridge signs itself in: with `BELLMAN_KEY`
 unset, `src/channel.ts` opens a browser and caches the credential under
 `~/.config/bellman/`. The manifest declared a *required*
-`user_config.bellman_key` and fed it to the server's environment for two
-releases after that stopped being necessary — an install field collecting a
+`user_config.bellman_key` and fed it to the server's environment for a
+release after that stopped being necessary — an install field collecting a
 secret for nothing. `bellman_url` is the one setting left that is about the
 server, for pointing the bundle at your own deployment; the other, **Upload
 folder** (`upload_root`, passed to the bridge as `BELLMAN_UPLOAD_ROOT`), is the
@@ -97,7 +97,7 @@ root `bellman_upload` may read from, and it has no default. Unset, the bridge
 falls back to the directory it was started in, which it refuses when that
 directory contains your home directory (the filesystem root included).
 
-One consequence worth stating plainly: the bridge proxies `tools/list`, and
+The bridge proxies `tools/list`, and
 proxying it means connecting, so on a machine with no cached credential the
 browser opens when **Claude Desktop launches** rather than at the first
 `bellman_*` call. Sign-in binds `127.0.0.1` on the first free port in

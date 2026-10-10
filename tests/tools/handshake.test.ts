@@ -1,7 +1,8 @@
 /**
  * INVARIANT 1: plan entitlements gate session CREATION only — joining is free.
  * INVARIANT 2: two-phase connect. Nothing of the joiner crosses until confirm.
- *              Join codes are single-use with a 15-minute unused TTL.
+ *              A join code lives 15 minutes and seats every joiner who redeems
+ *              it until then, unless it is retired first (ADR 0010, decision 4).
  * INVARIANT 7: member_id is per-connection, and a handle is drivable only by
  *              the identity that minted it.
  * INVARIANT 10: every room is declared. bellman_start needs a manifest and

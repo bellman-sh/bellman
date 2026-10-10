@@ -38,17 +38,21 @@ import { presetInNewWords } from "./presets.js";
 /**
  * Durable Objects implementation of BellmanStore.
  *
- * Topology — three classes, each matching a real scope in the data:
+ * Topology — the three classes in this file, of the five Durable Object classes
+ * (AuthDO is in src/oauth/store.ts, HostDO in src/host-do.ts), each matching a
+ * real scope in the data:
  *
- *   SessionDO   one per session. Holds the session record, its events, and the
- *               live long-poll waiters. Every request for a session routes to
- *               the same instance, which is what makes an in-memory waiter list
- *               correct here and what gives read-then-register its atomicity.
- *   RegistryDO  singleton. The join-code index, pending connect tokens, and
- *               per-user monthly create counts — the three lookups that cannot
- *               live inside a session because they are how you FIND one.
+ *   SessionDO   one per room. Holds the session record, its events, its surface
+ *               rows and outbox, the live long-poll waiters and the room's
+ *               sockets. Every request for a room routes to the same instance,
+ *               which is what makes an in-memory waiter list correct here and
+ *               what gives read-then-register its atomicity.
+ *   RegistryDO  singleton. What resolves without a room in hand: join codes,
+ *               pending connect tokens, plan grants, create counts, the creator,
+ *               joined-rooms and org-rooms indexes, saved presets and hosted-room
+ *               slots.
  *   AuditDO     one per org, so an org's audit stream is physically its own
- *               object. A cross-org session writes to both, and neither org's
+ *               object. A cross-org room writes to each, and neither org's
  *               DO is reachable from the other.
  *
  * On sweep(): MemoryStore scans every session on a timer. There is no cheap
@@ -2280,7 +2284,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * - A **frozen** room gets ticks naming members silent who cannot report out
    *   of it, and a freeze must cost nobody their standing — the same rule that
-   *   keeps `reclaimStaleSeats` out of a frozen room.
+   *   keeps `seatMember` from reclaiming a seat in a frozen room.
    * - A **closed** room gets a tick nobody can answer, because every send into
    *   it is refused.
    * - An **abandoned** room gets the same, and it is reachable where the other

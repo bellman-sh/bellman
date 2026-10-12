@@ -244,7 +244,7 @@ polling with an ETag came first.
 
 ### Two delivery paths
 
-A room can be watched two ways, and one function serves both: **`wake()` in
+A room can be watched two ways, and one function serves both: **`#wake` in
 `SessionDO` resolves the long polls held on `bellman_sync` and sends to the
 sockets held at `/ws`.** That is why the two cannot drift apart by accident. A
 hosted connector can only call tools and has no local process to hold a socket,
@@ -337,7 +337,7 @@ would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
 closes by registering its waiter with no `await` after its read (invariant 2
 below). The rule governs both paths and only the registration mechanism
 differs, a waiter pushed onto an in-memory list or a cursor attached to a socket
-the runtime holds. `wake()` is synchronous for the same reason. Since #113 the
+the runtime holds. `#wake` is synchronous for the same reason. Since #113 the
 roster is read just ahead of the events, for the check above, and both reads are
 storage reads, so the events read is still the last await before the attach.
 
@@ -413,9 +413,11 @@ bus. So a socket that fails does not undo the collapse into one connection per
 room, and a bus that fails does not cost anyone their messages. Neither is a
 dependency (invariant 6 below).
 
-And it can be chosen rather than waited for: `BELLMAN_BUS=off` makes every
-bridge poll as it did before there was a bus. A delivery path with no way out
-is a bad trade, so the escape hatch is a variable rather than a code change.
+And it can be chosen rather than waited for: `BELLMAN_BUS=off` makes a bridge
+poll for its own members as it did before there was a bus. It is read per bridge
+at launch, so bridges launched without it still share a bus. A delivery path
+with no way out is a bad trade, so the escape hatch is a variable rather than a
+code change.
 An unrecognised value reads as off, deliberately unlike `BELLMAN_DELIVERY`'s
 unknown-means-default: a typo should leave a room on the path that has been
 in production for months, not move it onto the new one.
@@ -524,11 +526,13 @@ Staleness is reversible because nothing is written when a member goes quiet: it
 calls anything, `lastSeenAt` moves, and it is present again with the same
 `memberId` and the same history. The single moment staleness becomes a write is
 when a seat is **contested** — a joiner wants in and the room has none spare —
-and then `reclaimStaleSeats` turns stale into departed and announces
-`member_timed_out`. A room with a spare seat reaps nobody, however long they
-have been quiet. The reap retires no join code, because freeing the seat is the
-point, and never closes the room, because a joiner is waiting directly behind
-the call.
+and then `seatMember` turns stale into departed, in the transaction that seats
+the joiner, and `announceReclaimed` writes `member_timed_out` for each seat it
+took. A room with a spare seat reaps nobody, however long they have been quiet.
+The reap itself retires no join code, unlike an eviction, because freeing the
+seat is the point; the seating it makes room for retires every code when no
+further joiner could be seated (#168). It never closes the room, because a
+joiner is waiting directly behind the call.
 
 Removing a member is authority, so the reclaim is confined accordingly:
 
@@ -542,8 +546,8 @@ Removing a member is authority, so the reclaim is confined accordingly:
   `bellman_connect` and `issueInvite` want seats too, so they *count* with
   `seatedMembers` and write nothing. That matters because `bellman_connect` is
   reachable by anyone holding a join code without joining, and never consumes
-  the code — a reclaim there would have let one caller empty a quiet 25-seat hub
-  room of every member, creator included, repeatedly for the code's 15 minutes.
+  the code — a reclaim there would have let one caller empty a quiet hub room
+  of every member, creator included, repeatedly for the code's 15 minutes.
   `evictMember` is creator-only and deliberately outside the verb set; a second
   removal path must not be looser than the first.
 - **One seat, longest-quiet first**, so the blast radius is the size of the
@@ -614,7 +618,7 @@ vouches for it.
   fetched cannot disagree with it. The reclaim is still confined to
   `bellman_confirm`, and none of these removes anybody.
 - **A socket this object is closing does not count.** `isOpen` is the one
-  definition of a live socket, shared with `wake()`: the runtime keeps listing a
+  definition of a live socket, shared with `#wake`: the runtime keeps listing a
   socket this object has closed until its peer acknowledges.
 
 **The gap after a socket drops is closed (#152).** The object stops listing the
@@ -875,9 +879,10 @@ shown instead, because the record's could claim a change it never saw.
 
 `writeSurface` in `src/rooms.ts` is the one write path — guards, shape, the
 rows for the cap and a connector's ends, the append, the audit row — and
-`bellman_send` calls it as the HTTP route will. The reads are projections: the
-join preview gets an index with no prose, and everything else gets the whole
-item inside an untrusted envelope with its writer as origin (invariant 3).
+`bellman_send` and the `PUT` and `DELETE /rooms/:id/surface/:key` routes (#184)
+both call it. The reads are projections: the join preview gets an index with no
+prose, and everything else gets the whole item inside an untrusted envelope with
+its writer as origin (invariant 3).
 
 A closed room's storage is kept for the window the creator's plan promised and
 then purged (#65, [section 9](#9-nothing-spans-two-objects)), and until then
@@ -946,15 +951,15 @@ store deletes the key, whatever the put said. The route maps that one class to
 stores, over R2 in workerd.
 
 The quota is two numbers on the session record: `blobBytesCeiling`, stamped
-at creation from the creator's plan (`blobBytesPerRoom`: 50 MB on free, 500 MB on pro, 5 GB on max and team)
-as `maxMembers` is, so a room never consults a plan again and every member
+at creation from the creator's plan (`blobBytesPerRoom`: 50 MB on free, 500 MB on pro, 5 GB on max and team),
+so a room never consults a plan again and every member
 shares the room's ceiling; and `blobBytes`, the sum charged so far, raised in
 one `SessionDO` transaction by `chargeBlobBytes`. That call takes no ceiling:
 the object reads its own record's, and both stores decide with one function,
 `decideBlobCharge`, so they cannot drift. A room written before the ceiling
-existed reads the free plan's until it expires. The route puts the object and
-then charges — section 9 says why that order — and deletes the object when the
-charge refuses.
+existed reads the free plan's for as long as it lives. The route puts the object
+and then charges — section 9 says why that order — and deletes the object when
+the charge refuses.
 
 Both servers serve the routes. The Worker dispatches `/rooms` and `/rooms/`
 ahead of the OAuth routes, under the same fail-closed guard `/ws` has, so a
@@ -964,8 +969,8 @@ reaches the route as the stream it was sent as, translating Express's req/res
 to the Request/Response the module speaks; its only caller is the static key
 map, as there is no OAuth and no panel there.
 
-`bellman_upload` is the bridge's own tool, not the server's: the server still
-lists nine. Only a path under the upload root is read, links followed — the
+`bellman_upload` is the bridge's own tool, not the server's: the server lists
+eleven. Only a path under the upload root is read, links followed — the
 directory the bridge was started in, or `BELLMAN_UPLOAD_ROOT` when that is set
 (`/` for any file) — so a line that arrives as peer content cannot send a key
 file to the room. The working-directory default is refused when that directory
@@ -1028,12 +1033,13 @@ Three paths, and no operator in any of them:
   need to be pre-registered.
 - **The bridge signs itself in.** It is a local stdio process, so it cannot be
   redirected to by a hosted callback. Instead it binds loopback on one of
-  ports 51004–51008, opens a browser once, and stores its own tokens under
-  `~/.bellman` (`src/signin.ts`, `src/credentials.ts`). Because `tools/list` is
-  itself a call to Bellman, this happens at Claude Code launch rather than on
-  the first `bellman_*` call. A file lock keeps concurrent sessions from each
-  opening a tab, and a refresh race from failing the loser's call
-  ([#50](../../../issues/50), [#77](../../../issues/77)).
+  ports 51004–51008, opens a browser once, and stores its own tokens
+  (`src/signin.ts`, `src/credentials.ts`) under `~/.config/bellman`
+  (`$XDG_CONFIG_HOME/bellman` when that is an absolute path). Because
+  `tools/list` is itself a call to Bellman, this happens at Claude Code launch
+  rather than on the first `bellman_*` call. A file lock keeps concurrent
+  sessions from each opening a tab, and a refresh race from failing the loser's
+  call ([#50](../../../issues/50), [#77](../../../issues/77)).
 - **`BELLMAN_KEY`** stays as the non-interactive path: CI, `npm run smoke`, a
   headless box, or anywhere there is no browser to open.
 
@@ -1121,7 +1127,7 @@ loud:
   Stop hook and `bellman_wait` call it, through `renderBatch`, for the events
   `deliver` queued. An event is escaped and framed as untrusted whichever path
   brought it, and it does not become trusted by passing through a local process.
-- **`<` is escaped to `<`** so a payload cannot close the `<channel>` tag
+- **`<` is escaped to `\u003c`** so a payload cannot close the `<channel>` tag
   and impersonate the harness.
 - **A blob is served under membership, typed by the server, and never as
   HTML.** The bucket has no public URL and no presigned one; every byte leaves
@@ -1701,14 +1707,16 @@ abandonment time. A build older than #18 does not know that name: for a row #18
 rewrote, its `reArm()` calls `setAlarm(undefined)`, which workerd rejects, so
 rolling back past #18 is not supported (ADR 0001).
 
-**Where it is not applied.** `DurableObjectStore.createSession` writes two
-registry indexes after the session commits, both outside the outbox and both
+**Where it is not applied.** `DurableObjectStore.createSession` writes three
+registry indexes after the session commits, all outside the outbox and all
 through `writeIndex`, which logs a failure instead of throwing: `us:` so a
-lapsed plan can find a person's rooms, and `um:` so a room appears in each
-seated member's joined listing. `addMember` writes `um:` the same way. These are
-derived from state already committed, so a miss costs a row in one listing — a
-room that a lapsed plan does not freeze, or a room missing from a joined listing
-— never the room itself. That is the reasoning for logging rather than
+lapsed plan can find a person's rooms, `um:` so a room appears in each seated
+member's joined listing, and `uo:` so an org's admin can find a closed room its
+people sat in (#65). `seatMember` and `addMember` write `um:` and `uo:` the same
+way. These are derived from state already committed, so a miss costs a row in
+one listing — a room that a lapsed plan does not freeze, a room missing from a
+joined listing, or a closed room missing from an admin's list — never the room
+itself. That is the reasoning for logging rather than
 retrying, and it is the same window the outbox closes elsewhere. Room activity
 is audited by `audit()` in `src/rooms.ts`, which calls `AuditDO.append`
 directly with no intent id and no queue, so only grant changes and the rows of a
@@ -1787,12 +1795,22 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,043** | every request, whether or not you are in a room |
+| Tool definitions | **~8,084** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-10 for the ADR branch's wording fixes, by the method below: 41
+tokens over the 8,043 that main (`dc67962`) measures. `bellman_connect` is up 36, to
+698: its Errors line now says a code seats every joiner who redeems it until it
+expires, the room fills, its role's code is reissued or revoked, or the room closes
+(ADR 0010), where it said codes are single-use, and confirming ships the brief to the
+room rather than to the peer. `bellman_start` is up 3, to 2,320, for a join URL that
+seats whoever redeems it until it expires. `bellman_send` is up 2, to 1,379, for
+message text addressed to the room's agents and their humans. `bellman_confirm`'s brief
+now crosses to the room, at no cost. No tool was added. That is 8,084.
 
 Re-measured on 2026-10-09 for the `shape` kind (#197), by the method below: 71 tokens
 over the 7,651 that `bfebd30` measures by the same method, all of them `bellman_send`'s

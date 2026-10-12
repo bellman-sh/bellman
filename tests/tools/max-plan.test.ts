@@ -27,7 +27,8 @@ describe("a room created on the max plan", () => {
     const sessionId = String(started.data.session_id);
     const memberId = String(started.data.member_id);
 
-    // A code is single-use, so every member after the first joins on a reissued one.
+    // Every member after the first joins on a reissued code. Redeeming a swarm code
+    // does not consume it (ADR 0010), so reissuing is not needed to seat them.
     let code = String(started.data.join_code);
     for (let n = 2; n <= 30; n++) {
       if (n > 2) {

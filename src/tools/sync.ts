@@ -317,7 +317,10 @@ If a room's creator has removed you, you still get the history up to and includi
           ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
           ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },
-        foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
+        // The surface block is peer content as the events are. A poll that asks for it
+        // after reading the events that changed it has no foreign event, and the block is
+        // then all the result holds (ADR 0008, decision 1).
+        foreign.length > 0 || (surfaceBlock?.items.length ?? 0) > 0 ? UNTRUSTED_PREAMBLE : undefined
       );
     }
   );

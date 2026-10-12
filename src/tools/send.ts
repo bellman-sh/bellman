@@ -23,7 +23,7 @@ export function registerSend(server: McpServer, identity: Identity, s: BellmanSt
 Args:
   - session_id, member_id: your handles from start/confirm
   - type:
-      "message"        — free-form text for the peer agent+human
+      "message"        — free-form text for the room's agents and their humans
       "artifact"       — code/doc/data payload ({ name, content })
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
                          It ends in exactly one of three states and cannot sit between them: answered, declined (a human said no), or expired (30 minutes passed and nobody did). Silence and refusal are different answers, and this is what tells them apart. Until it ends it appears in every member's bellman_sync as \`outstanding\`. An answer that arrives after the deadline still lands and still counts.

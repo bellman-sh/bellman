@@ -46,8 +46,9 @@
  * `lastSeenAt` moves, and it is present again with the same `memberId` and the
  * same history. Nothing about going quiet is written down, so there is nothing
  * to undo. The one moment staleness becomes a write is when somebody actually
- * needs the seat: `reclaimStaleSeats` in rooms.ts turns stale into departed,
- * and only then, because that is the only moment the question is forced.
+ * needs the seat: `seatMember` turns stale into departed, inside the
+ * transaction that seats the joiner, and only then, because that is the only
+ * moment the question is forced.
  *
  * This module must stay importable by both builds: no `cloudflare:workers`,
  * directly or transitively (see src/oauth/storage.ts for the same rule).

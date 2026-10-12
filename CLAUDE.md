@@ -61,7 +61,8 @@ or *peers*, where a peer is any other member rather than a counterpart.
   frame, the Stop-hook fallback — may be late or dropped, so `bellman_sync` is
   authoritative and a push is a convenience. A tool's return says what the call
   *established*, never what it probably caused: `bellman_send` returns
-  `room_members` (who was in the room at append — not a read receipt), and
+  `room_members` (the other active members the call read just before appending,
+  and on a replay the roster at the retry — not a read receipt), and
   `session_status` is read after a poll's wait so it is never older than the
   events beside it (#74), while still saying nothing about whether anyone is
   listening. Naming a return for its likely effect rather than its actual claim

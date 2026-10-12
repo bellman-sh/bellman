@@ -197,7 +197,11 @@ export function describeStoreContract(
       expect((await store.getSessionByJoinCode("BELL-TTL0-01"))).toBeUndefined();
     });
 
-    /** INVARIANT 2: join codes are single-use. */
+    /**
+     * INVARIANT 2: a consumed join code resolves nothing, and consuming it twice is
+     * harmless. Redeeming a code does not consume it: a swarm code seats joiner after
+     * joiner until it expires or the room fills (ADR 0010).
+     */
     it("consumeJoinCode makes the code unusable and idempotent", async () => {
       const s = session({ joinCodes: oneCode("BELL-ONCE-01") });
       (await store.createSession(s));

@@ -61,12 +61,13 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
 };
 
 /**
- * Identity resolution boundary.
+ * Identity resolution for static bearer keys: the operator's BELLMAN_KEYS map,
+ * or the dev table below when no map is set. The Worker never calls
+ * resolveIdentity without a map.
  *
- * v1: static bearer keys (works with Claude custom connectors today).
- * Cross-provider path: replace this function with OAuth 2.1 + Dynamic Client
- * Registration token introspection — ChatGPT-style remote connectors require
- * it. Nothing outside this file changes when that lands.
+ * OAuth 2.1 with dynamic client registration did not replace this; it landed
+ * beside it (#7, PR #21). resolveCaller in src/worker.ts tries an access token
+ * first and falls back to resolveIdentity.
  */
 const DEV_KEYS: Record<string, Identity> = {
   "qk_dev_jesse": {

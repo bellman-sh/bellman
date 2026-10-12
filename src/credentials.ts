@@ -105,14 +105,6 @@ export function readServer(dir: string, serverUrl: string): ServerCredential {
 }
 
 /**
- * Replace one server's entry, leaving every other server alone — production and
- * a `wrangler dev` server share the file and must never clobber each other.
- *
- * Throws on a filesystem failure — EPERM from the chmods on a path another user
- * owns, EACCES, ENOSPC — and writes nothing if it cannot first secure the
- * directory or an existing file.
- */
-/**
  * Create the credential directory, and leave it at 0700 whether or not this call
  * was the one that created it.
  *
@@ -132,6 +124,14 @@ function ensureCredentialsDir(dir: string): void {
   chmodSync(dir, 0o700);
 }
 
+/**
+ * Replace one server's entry, leaving every other server alone — production and
+ * a `wrangler dev` server share the file and must never clobber each other.
+ *
+ * Throws on a filesystem failure — EPERM from the chmods on a path another user
+ * owns, EACCES, ENOSPC — and writes nothing if it cannot first secure the
+ * directory or an existing file.
+ */
 export function writeServer(dir: string, serverUrl: string, cred: ServerCredential): void {
   // Modes are set twice on purpose: the `mode` option covers creation (a fresh
   // file is never on disk at the default mode), the chmod covers a directory or

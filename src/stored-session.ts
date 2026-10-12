@@ -57,7 +57,7 @@ export interface StoredSession extends Omit<Session, "events"> {
    * Absent on records written before this landed, which reads as "no requests"
    * — wrong for a room that had one in the last half hour at the moment of
    * deploy, and self-correcting on its next `action_request`. A listing that is
-   * briefly short beats a migration over rooms that expire anyway.
+   * briefly short beats a migration over requests that expire anyway.
    */
   lastActionRequestAt?: number;
   /**
@@ -87,7 +87,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Fourteen changes to the stored shape landed after the sessions now in production
+ * Fifteen changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one

@@ -11,7 +11,6 @@ import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConfirm(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // ------------------------------------------------------------ bellman_confirm
   server.registerTool(
     "bellman_confirm",
     {

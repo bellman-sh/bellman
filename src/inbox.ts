@@ -78,7 +78,7 @@ export function fromEnvelope(m: Membership, env: WireEnvelope): PeerEvent {
  * Serialize peer-controlled data for the model. Every `<` is escaped: Claude
  * Code wraps a channel event in a `<channel>` tag, and a payload containing
  * `</channel>` must not be able to close that tag and continue as text that
- * looks like it came from outside. `<` is a valid JSON string escape, and
+ * looks like it came from outside. `\u003c` is a valid JSON string escape, and
  * `<` can only occur inside JSON strings, so the result still parses.
  */
 export function safeJson(value: unknown): string {

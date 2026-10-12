@@ -13,7 +13,6 @@ import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 
 export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
-  // --------------------------------------------------------------- bellman_send
   server.registerTool(
     "bellman_send",
     {

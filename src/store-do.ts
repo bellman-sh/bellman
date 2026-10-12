@@ -4,7 +4,7 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
+  AuditEntry, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -579,7 +579,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Which members this user owns here, and whether the room is closed.
    *
    * The authorization check for a /ws upgrade. Deliberately mirrors
-   * findMember (src/server.ts), leftAt and all: bellman_sync serves a
+   * findMember (src/rooms.ts), leftAt and all: bellman_sync serves a
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *
@@ -885,10 +885,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * window. The instant it closes the socket stops vouching — correctly, since
    * reading the live list is the whole design — and the member falls back to
    * `lastSeenAt`. For a member fed by this socket or by the local bus that field
-   * has not moved since it joined, because nothing it does calls `bellman_sync`
-   * or `bellman_send`, the only two things that touch it (src/server.ts). So it
-   * read stale the moment its socket dropped, with its window already spent, and
-   * the next contested `bellman_confirm` took its seat.
+   * has not moved since it joined, because nothing it does runs `touchMember`
+   * (src/rooms.ts): `bellman_sync` and `bellman_send` run it, and so does
+   * `gateSeat`, for an invite, a revoke or a surface write. So it read stale the
+   * moment its socket dropped, with its window already spent, and the next
+   * contested `bellman_confirm` took its seat.
    *
    * Here rather than on the upgrade, which was the other candidate. This covers a
    * socket that has been open for hours, where a stamp at connect buys one window
@@ -2248,7 +2249,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const rows = await this.driver.enqueue(txn, intents);
       const expired: SessionEvent = {
         cursor: await this.nextCursor(txn),
-        type: "session_expired" as EventType,
+        type: "session_expired",
         fromMemberId: "system",
         fromUserId: "system",
         fromLabel: "bellman",
@@ -2335,7 +2336,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
       const tick: SessionEvent = {
         cursor: await this.nextCursor(txn),
-        type: "heartbeat" as EventType,
+        type: "heartbeat",
         // The server is not a member and holds no role, so it needs no verb.
         fromMemberId: "system",
         fromUserId: "system",
@@ -2411,7 +2412,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         raised[f.key] = { at: now, repeat: f.payload.repeat, since: f.payload.since };
         events.push({
           cursor: cursor++,
-          type: "housekeeping" as EventType,
+          type: "housekeeping",
           // The room speaks, not a member: no seat and no verb, as the tick has none.
           fromMemberId: "system",
           fromUserId: "system",

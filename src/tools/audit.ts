@@ -7,7 +7,6 @@ import { entitlementsFor } from "../auth.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerAudit(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // -------------------------------------------------------------- bellman_audit
   server.registerTool(
     "bellman_audit",
     {

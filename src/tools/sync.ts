@@ -13,7 +13,6 @@ import { publicEvent } from "../public-event.js";
 import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // --------------------------------------------------------------- bellman_sync
   server.registerTool(
     "bellman_sync",
     {
@@ -200,7 +199,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // snapshot the stamp was absent, so the read was skipped and the response
       // carried the request event with no `outstanding` entry beside it — the
       // one case the field exists for, missing it.
-      const stampedAt = (answering as { lastActionRequestAt?: number }).lastActionRequestAt;
+      const stampedAt = answering.lastActionRequestAt;
 
       // Or the slice itself carries one. The stamp is a separate write from the
       // event, so between this poll's record read and its event read a request
@@ -221,8 +220,8 @@ If a room's creator has removed you, you still get the history up to and includi
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
       // exists because an eviction that committed after `me` was read leaves
-      // `cut === undefined` on a record that is already stale — the race line 148
-      // caps `all` for. Testing only `cut` here handed a member the room past
+      // `cut === undefined` on a record that is already stale — the race `all` is
+      // capped for above. Testing only `cut` here handed a member the room past
       // their own removal through this field: every action_request appended after
       // they were cut, with its sender's member id, label and cursor.
       const stopAt = cut ?? removal?.cursor;
@@ -274,8 +273,8 @@ If a room's creator has removed you, you still get the history up to and includi
           // when it looks, which is what looking is for.
           ...(outstanding.length > 0 ? { outstanding } : {}),
           // Only when true, as `replayed` and `ambient` are: a client that has
-          // never heard of it keeps working, and the twelve-field shape every
-          // other poll returns does not change.
+          // never heard of it keeps working, and the shape every other poll
+          // returns does not change.
           //
           // It exists because the cut is otherwise INVISIBLE to the caller. A
           // member polling from past it gets an empty slice and

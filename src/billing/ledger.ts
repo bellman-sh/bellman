@@ -1,5 +1,5 @@
 import { ENTITLEMENTS } from "../auth.js";
-import type { Identity, Plan } from "../types.js";
+import type { Plan } from "../types.js";
 import { readSubscription, type SubscriptionSource } from "./subscription.js";
 
 export { isPaidPlan } from "./subscription.js";

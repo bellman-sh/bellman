@@ -26,8 +26,8 @@ const MAX_ROLES = 16;
 /**
  * The longest legal role key: a leading letter plus up to 30 more characters
  * (RoleKeyShape's regex, built from this below). Exported so codes.ts can size
- * the join code that has to carry a role name whole, and so server.ts can bound
- * `role` arguments against the same number it validates `join_code` against —
+ * the join code that has to carry a role name whole, and so the tools can bound
+ * `role` arguments against the same number they validate `join_code` against —
  * one constant rather than two literals that can drift apart.
  */
 export const MAX_ROLE_KEY_LENGTH = 31;

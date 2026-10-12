@@ -691,7 +691,7 @@ export const WINDOW_MAX_BYTES = 2 * 1024 * 1024;
  * hole looks exactly like events that were never sent, so a subscriber walking
  * across one would skip them without knowing.
  *
- * Bounded twice, because `MAX_PAYLOAD_CHARS` is 20,000 (src/server.ts) and 500 of
+ * Bounded twice, because `MAX_PAYLOAD_CHARS` is 20,000 (src/payload.ts) and 500 of
  * those is a 10 MB worst case per room, per coordinator. Bytes are measured as the
  * event serializes, in UTF-8 bytes, not as a character count.
  */

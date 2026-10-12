@@ -41,7 +41,10 @@ const fakeStripe = (async (input: RequestInfo | URL, init?: RequestInit) => {
   if (stripeDown) return new Response("unavailable", { status: 500 });
   const id = decodeURIComponent(url.replace("https://api.stripe.com/v1/subscriptions/", ""));
   const sub = stripeNow.get(id);
-  return sub ? Response.json(sub) : Response.json({ error: { code: "resource_missing" } }, { status: 404 });
+  if (sub) return Response.json(sub);
+  // What Stripe says when the key cannot see the subscription, as it said to a test key in production.
+  const message = `No such subscription: '${id}'; a similar object exists in live mode, but a test mode key was used to make this request.`;
+  return Response.json({ error: { code: "resource_missing", message } }, { status: 404 });
 }) as typeof fetch;
 
 /** Every user the webhook asked to have reconciled, in order. */
@@ -582,13 +585,33 @@ describe("events Stripe delivers out of order", () => {
     expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
   });
 
-  it("treats a subscription Stripe no longer has as over", async () => {
+  it("answers 502 and keeps the plan when Stripe has no such subscription, which only a wrong key causes", async () => {
+    // Stripe keeps a cancelled subscription readable, so a 404 says the key
+    // cannot see it: a test key reading a live one. Read as "cancelled", that
+    // recorded the first live purchase as over.
     await checkout("cus_A", "u_github_1");
     await subscription("created");
     stripeNow.delete("sub_1");
-    await subscription("updated", { stale: true });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await subscription("updated", { stale: true });
 
+    expect(res.status).toBe(502);
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+    // Stripe's own explanation reaches the log, so the misconfigured key names itself.
+    expect(logged.mock.calls.flat().map(String).join(" ")).toContain("a test mode key was used");
+    logged.mockRestore();
+  });
+
+  it("puts right a subscription an earlier read recorded as cancelled by mistake", async () => {
+    // What a 404 read left behind. Stripe never moves a subscription out of
+    // cancelled, so a live read that says active means the record is wrong.
+    await billing.recordSubscription("cus_A", "sub_1", { plan: null, status: "canceled", eventAt: Date.now() + 60_000 });
+    await checkout("cus_A", "u_github_1");
     expect(await billing.paidPlan("u_github_1")).toBeUndefined();
+
+    await subscription("created");
+    expect((await billing.paidPlan("u_github_1"))?.plan).toBe("pro");
+    expect(await grantedPlan("u_github_1")).toBe("pro");
   });
 
   it("answers 502 and records nothing when Stripe cannot be read, so Stripe retries", async () => {

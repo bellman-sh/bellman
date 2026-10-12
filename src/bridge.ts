@@ -106,13 +106,12 @@ export interface Remote {
   close(): Promise<void>;
 }
 
-export async function connectRemote(url: string, key: string): Promise<Remote> {
-  const client = new Client({ name: "bellman-bridge", version: VERSION });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(url), {
-      requestInit: { headers: { Authorization: `Bearer ${key}` } },
-    })
-  );
+/**
+ * A connected client as the bridge's Remote: the tool calls, and the three resource calls a host
+ * rendering MCP Apps makes (#28). Both ways of connecting build their Remote here. The signed-in
+ * one once built its own, without the resource calls, and every browser sign-in served no UI.
+ */
+export function remoteOf(client: Client): Remote {
   return {
     listTools: () => client.listTools(),
     callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
@@ -121,6 +120,16 @@ export async function connectRemote(url: string, key: string): Promise<Remote> {
     readResource: (params) => client.readResource(params),
     close: () => client.close(),
   };
+}
+
+export async function connectRemote(url: string, key: string): Promise<Remote> {
+  const client = new Client({ name: "bellman-bridge", version: VERSION });
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(url), {
+      requestInit: { headers: { Authorization: `Bearer ${key}` } },
+    })
+  );
+  return remoteOf(client);
 }
 
 /**

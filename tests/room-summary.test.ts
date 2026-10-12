@@ -59,6 +59,15 @@ describe("roomSummary", () => {
     expect(roomSummary(s, lead, NONE, [], T0).join_codes).toEqual([]);
   });
 
+  // ADR 0020: a permanent code is live at any hour, and has no time to give.
+  it("lists a permanent code a week on, with no expiry", () => {
+    const s = stored({ joinCodes: { helper: { code: "BELL-AAAA-11-HELPER", expiresAt: null } } });
+    expect(roomSummary(s, lead, NONE, [], T0 + 7 * 86_400_000).join_codes).toEqual([{
+      role: "helper", expires_at: null,
+      code: "BELL-AAAA-11-HELPER", join_url: "https://bellman.sh/j/BELL-AAAA-11-HELPER",
+    }]);
+  });
+
   it("reads the room from the caller's seat, and lists live members with their roles", () => {
     const gone = member({ memberId: "m_gone", userId: "u_gone", label: "gone@c", roomRole: "helper", leftAt: T0 });
     const s = stored({ members: [lead, helper, gone] });

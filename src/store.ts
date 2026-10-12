@@ -35,6 +35,27 @@ export type MemberPatch = Partial<
 // would be a second way to write it — one that could set a cursor no event has.
 
 /**
+ * Whether a join code is live at `now`: a permanent one always is, and a temporary one until
+ * its expiry, inclusive (ADR 0020). The one place liveness is decided, read
+ * by both stores, by `revokeInvite` and by the `join_codes` projection, so a code cannot be live
+ * to one of them and expired to another. Nothing prunes an expired record, which is why every
+ * one of them has to ask.
+ */
+export const codeIsLive = (rec: { expiresAt: number | null }, now: number): boolean =>
+  rec.expiresAt === null || now <= rec.expiresAt;
+
+/**
+ * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
+ * started, and not made private since. `=== true` and `== null` because the in-memory store does
+ * not hydrate, so a record there may carry neither field.
+ *
+ * Here, and re-exported by rooms.ts, because the stores decide it too: `setJoinCode` refuses a
+ * permanent code to a room that is not public, in the operation that writes the code (ADR 0020).
+ */
+export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
+  s.manifest.public === true && s.unpublishedAt == null;
+
+/**
  * Whether a member is still in the room: they have not left.
  *
  * Here, and not in rooms.ts, because the stores now decide a room is empty
@@ -503,9 +524,11 @@ export interface RemovalRequest {
  * for a joiner that never got in.
  *
  * `codesCleared` says what the seating did: it filled the room and retired the codes
- * the room held, in the same operation that seated the member. A room that fills with
- * no code left in it reports false, because nothing was cleared, and so does every
- * refusal, which writes nothing. "Filled" means a further joiner would be refused,
+ * the room held, in the same operation that seated the member. A permanent code is
+ * kept (ADR 0020): joins are refused while the room is full, and the link on a public
+ * page works again when a seat frees. A room that fills with no temporary code left
+ * in it reports false, because nothing was cleared, and so does every refusal, which
+ * writes nothing. "Filled" means a further joiner would be refused,
  * with no free seat and none reclaimable, which is not the same as every seat being
  * occupied: a stale seat is occupied and still reclaimable, so a room holding one
  * keeps its codes.
@@ -519,7 +542,7 @@ export interface RemovalRequest {
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
   reclaimed: Member[];
-  /** The seating filled the room and retired the codes it held. False when it held none. */
+  /** The seating filled the room and retired the temporary codes it held. False when it held none. */
   codesCleared: boolean;
 }
 
@@ -612,7 +635,7 @@ export type EventWrite =
  */
 export type SetJoinCode =
   | { ok: true; replacedLive: boolean }
-  | { ok: false; reason: "frozen" | "live_code_exists" };
+  | { ok: false; reason: "frozen" | "live_code_exists" | "not_public" };
 
 /** What a blob charge did (#183, D3). `used` is the room's total after the call, or as it stood when refused. */
 export type BlobCharge =
@@ -836,12 +859,17 @@ export interface BellmanStore {
    * `now` is a parameter so that liveness is the caller's clock, as it is for
    * `seatMember`: an expired code is not a live one, and minting over it is
    * opening a shut door rather than replacing an open one.
+   *
+   * A null `expiresAt` is a permanent code (ADR 0020), refused `not_public` unless
+   * the room is public, decided here for the reason `replaceLive` is: a room made
+   * private between the caller's read and this write has already retired the
+   * permanent codes it held, and would otherwise keep this one.
    */
   setJoinCode(
     sessionId: string,
     role: string,
     code: string,
-    expiresAt: number,
+    expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode>;
   /**
@@ -893,8 +921,9 @@ export interface BellmanStore {
    * Refuses rather than partially reaping. Reclaiming one of two seats a joiner
    * needs would remove a member for somebody who never got in.
    *
-   * When the seat it took fills the room, it also retires every role's join code,
-   * and `codesCleared` says whether there was one to retire. That was
+   * When the seat it took fills the room, it also retires every role's temporary join
+   * code, keeping a permanent one (ADR 0020), and `codesCleared` says whether there was
+   * one to retire. That was
    * `bellman_confirm`'s second call, made once the seat had committed with nothing
    * spanning the two, and a failure there left the member in the room with no event,
    * no audit row and no member_id returned, and a connect token that is single use
@@ -1038,6 +1067,9 @@ export interface BellmanStore {
    * The first time stands, so a retry changes nothing, and a room that is not there is left not
    * there: nothing is written for it. Who may ask is the route's to decide, as for `schedulePurge`.
    * An open room and a closed one alike: a closed public room is readable until its purge (D7).
+   *
+   * The same write retires the room's permanent codes (ADR 0020): a private room's door is a
+   * code that runs out. Its temporary codes are left to run out as they would have.
    */
   unpublishSession(sessionId: string, at: number): Promise<void>;
   /**
@@ -1450,7 +1482,7 @@ export class MemoryStore implements BellmanStore {
     const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
     if (!hit) return undefined; // consumed or rotated
     const [role, rec] = hit;
-    if (Date.now() > rec.expiresAt) return undefined;
+    if (!codeIsLive(rec, Date.now())) return undefined;
     return { session, role };
   }
 
@@ -1470,15 +1502,16 @@ export class MemoryStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number,
+    sessionId: string, role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "frozen" };
     if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+    if (expiresAt === null && !isPublic(s)) return { ok: false, reason: "not_public" };
     const previous = s.joinCodes[role];
     // Live, not merely present: an expired record shuts no door.
-    const live = previous !== undefined && guard.now <= previous.expiresAt;
+    const live = previous !== undefined && codeIsLive(previous, guard.now);
     if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
     // No awaits between the test above and the writes below, which is what makes
     // this atomic here — the same arrangement appendEvent and addMember use. The
@@ -1537,7 +1570,7 @@ export class MemoryStore implements BellmanStore {
     this.indexMember(member.userId, sessionId);
     this.indexOrg(member.orgId, sessionId);
 
-    // A full room has no seat for ANY role, so every code goes — decided and
+    // A full room has no seat for ANY role, so every temporary code goes — decided and
     // written here rather than by the caller afterwards. As a second call made
     // once the seat had committed it had nothing spanning it: a failure left the
     // joiner seated with the codes still redeemable (#116).
@@ -1549,7 +1582,7 @@ export class MemoryStore implements BellmanStore {
     // counting would have retired its code.
     //
     // Cleared by presence, where removeMember retires only a code that is still live
-    // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+    // (`codeIsLive(rec, req.now)`). The two ask different questions. A removal
     // announces a door shutting, so it must not announce one that had already shut,
     // and an expired record is not a door. A seating announces nothing: it tidies
     // rows, and a full room needs no code at all, so an expired record goes with the
@@ -1557,11 +1590,15 @@ export class MemoryStore implements BellmanStore {
     // `codesCleared: true`, which answers this question and does not contradict the
     // other. The contract suite pins this side, and its expired-code cases for
     // removeMember pin the other.
+    //
+    // A permanent code stays (ADR 0020). It is a public room's link, put where people
+    // find it, and the room refuses joiners while it is full: when a seat frees, the
+    // link works again, where a cleared one would have to be found and replaced.
     const full = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected) === null;
-    const codes = full ? Object.values(s.joinCodes) : [];
-    if (full) {
-      for (const rec of codes) this.byJoinCode.delete(rec.code);
-      s.joinCodes = {};
+    const codes = full ? Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt !== null) : [];
+    for (const [role, rec] of codes) {
+      this.byJoinCode.delete(rec.code);
+      delete s.joinCodes[role];
     }
     // What the call did, and not only whether the room filled: a room that fills
     // with no code left in it had nothing to retire.
@@ -1593,7 +1630,7 @@ export class MemoryStore implements BellmanStore {
     // state is looked at, because a live door is owed to one who is already out as
     // much as to one who is not.
     const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
-    const retiring = req.retire && rec && req.now <= rec.expiresAt
+    const retiring = req.retire && rec && codeIsLive(rec, req.now)
       ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
       : null;
 
@@ -1833,6 +1870,11 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s || s.unpublishedAt != null) return;
     s.unpublishedAt = at;
+    for (const [role, rec] of Object.entries(s.joinCodes)) {
+      if (rec.expiresAt !== null) continue;
+      this.byJoinCode.delete(rec.code);
+      delete s.joinCodes[role];
+    }
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

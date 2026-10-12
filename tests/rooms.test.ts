@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { manifestFixture, member, oneCode, session, swarmSession } from "./helpers/fixtures.js";
+import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
 import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
@@ -385,6 +385,58 @@ describe("issueInvite", () => {
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
   });
+
+  // Refused for what it asks, before anything is asked of the store: the store's own
+  // check is for a room made private after this read (ADR 0020).
+  it("refuses a permanent code to a room that is not public without asking the store", async () => {
+    await store.createSession(session());
+    const setJoinCode = vi.spyOn(store, "setJoinCode");
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator", undefined, true);
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+    expect(r.reason).toContain("not public");
+    expect(setJoinCode).not.toHaveBeenCalled();
+  });
+
+  // Made private between the gate's read and the write: the store refuses the permanent
+  // code (ADR 0020), and the caller hears that, not the live-code refusal, with nothing
+  // announced or audited.
+  it("says the room is not public when the store refuses a permanent code for that", async () => {
+    await store.createSession(session({ manifest: roomManifest({ public: true }) }));
+    vi.spyOn(store, "setJoinCode").mockResolvedValueOnce({ ok: false, reason: "not_public" });
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator", undefined, true);
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+    expect(r.reason).toContain("not public");
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.filter((a) => a.action === "invite_issued")).toHaveLength(0);
+  });
+
+  // A permanent code never expires, so a seat that may not replace it is not told to
+  // wait until it does.
+  it("does not tell a seat holding invite alone to wait out a permanent code", async () => {
+    const base = roomManifest({ public: true });
+    await store.createSession(session({
+      manifest: { ...base, roles: { ...base.roles, peer_a: { ...base.roles.peer_a, can: ["send", "invite"] } } },
+      joinCodes: { peer_b: { code: "BELL-PERM-01", expiresAt: null } },
+    }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("forbidden");
+    expect(r.reason).toContain("permanent and will not expire");
+    expect(r.reason).not.toContain("Wait for that code to expire");
+  });
 });
 
 describe("revokeInvite", () => {
@@ -409,6 +461,24 @@ describe("revokeInvite", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.roles).toEqual([]);
+  });
+
+  // ADR 0020: a permanent code has no expiry to compare against, and is live until
+  // something retires it, so revoking it is a door shutting and is announced.
+  it("retires a permanent code, reports its role and announces it", async () => {
+    await store.createSession(session({
+      manifest: roomManifest({ public: true }),
+      joinCodes: { peer_b: { code: "BELL-PERM-01", expiresAt: null } },
+    }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual(["peer_b"]);
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_revoked")).toHaveLength(1);
+    expect(await store.getSessionByJoinCode("BELL-PERM-01")).toBeUndefined();
   });
 
   // Without the guard a mistyped role retires nothing and answers { roles: [] },

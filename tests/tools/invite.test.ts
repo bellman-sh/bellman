@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
 import { pairUp } from "../helpers/flows.js";
 import { DEV_KEY, Harness, envelopes } from "../helpers/harness.js";
@@ -330,5 +330,92 @@ describe("bellman_invite", () => {
     await h.store.freezeSession(sessionId, null);
     const outsider = await h.connect(DEV_KEY.outsider);
     expect((await outsider.call("bellman_connect", { join_code: String(helper.data.join_code) })).isError).toBe(false);
+  });
+});
+
+/**
+ * A public room's default seat may take a code with no expiry (ADR 0020): a link put
+ * on a page, working until it is revoked, the room is made private, or the room closes.
+ */
+describe("bellman_invite permanent", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A public swarm room. Its creator is the lead, holding invite and revoke; helper is the default seat. */
+  async function publicRoom() {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", {
+      manifest: manifestFixture({ preset: "swarm", public: true }), brief: brief(),
+    });
+    expect(started.isError, started.text).toBe(false);
+    return { creator, sessionId: String(started.data.session_id), memberId: String(started.data.member_id) };
+  }
+
+  it("is refused for a room that is not public, and issues nothing", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
+    const sessionId = String(started.data.session_id);
+    const before = await eventCount(sessionId);
+
+    const r = await creator.call("bellman_invite", { session_id: sessionId, member_id: started.data.member_id, permanent: true });
+
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain("not public");
+    expect(await eventCount(sessionId)).toBe(before);
+    // The room's own code stands: the refusal replaced nothing.
+    const joiner = await h.connect(DEV_KEY.peer);
+    expect((await joiner.call("bellman_connect", { join_code: started.data.join_code })).isError).toBe(false);
+  });
+
+  it("is refused for any role but the room's default", async () => {
+    const { creator, sessionId, memberId } = await publicRoom();
+    const before = await eventCount(sessionId);
+
+    const r = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, role: "lead", permanent: true });
+
+    expect(r.isError).toBe(true);
+    expect(r.text).toContain('default role, "helper"');
+    expect(await eventCount(sessionId)).toBe(before);
+  });
+
+  it("issues a public room's default seat a code with no expiry, named or not, and says so", async () => {
+    const { creator, sessionId, memberId } = await publicRoom();
+
+    for (const role of [{}, { role: "helper" }]) {
+      const r = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true, ...role });
+      expect(r.isError, r.text).toBe(false);
+      expect(r.data).toMatchObject({ role: "helper", permanent: true, join_code_expires_at: null });
+      expect(String(r.data.share_instructions)).toContain("does not expire");
+    }
+  });
+
+  it("seats a joiner a week after it was issued", async () => {
+    const { creator, sessionId, memberId } = await publicRoom();
+    const issued = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true });
+    const temporary = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, role: "observer" });
+    expect(temporary.data.permanent, "the control's code is a temporary one").toBe(false);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 7 * 24 * 3_600_000);
+
+    const joiner = await h.connect(DEV_KEY.peer);
+    // The control that a week is long enough to matter: the code issued beside it has expired.
+    expect((await joiner.call("bellman_connect", { join_code: temporary.data.join_code })).text).toContain("not found or expired");
+    const preview = await joiner.call("bellman_connect", { join_code: issued.data.join_code });
+    expect(preview.isError, preview.text).toBe(false);
+    const joined = await joiner.call("bellman_confirm", { connect_token: preview.data.connect_token, brief: brief() });
+    expect(joined.isError, joined.text).toBe(false);
+  });
+
+  it("tells the members, and the audit log, that the code is permanent", async () => {
+    const { creator, sessionId, memberId } = await publicRoom();
+
+    await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true });
+
+    const issued = (await h.store.eventsAfter(sessionId, 0)).filter((e) => e.type === "invite_issued");
+    expect(issued.map((e) => e.payload)).toEqual([{ role: "helper", expires_at: null, permanent: true }]);
+    const rows = (await h.store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "invite_issued");
+    expect(rows.map((a) => a.detail)).toEqual([{ role: "helper", replaced_previous: true, permanent: true }]);
   });
 });

@@ -34,7 +34,7 @@ function roomCard(room: RoomSummary, seen: Map<string, number>, now: number, onS
       el("span", { class: "chip" }, c.role),
       " ",
       c.code ? el("code", {}, c.code) : el("span", { class: "muted" }, "live code"),
-      ` · ${countdown(c.expires_at, now)}`),
+      ` · ${c.expires_at === null ? "no expiry" : countdown(c.expires_at, now)}`),
   );
   return el("article", { class: "card" },
     el("h2", {},

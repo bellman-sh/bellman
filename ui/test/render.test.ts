@@ -227,6 +227,16 @@ describe("renderMonitor", () => {
     expect(t).toContain("10m left");
   });
 
+  // ADR 0020: a public room's permanent code comes with no expiry, so there is nothing to count down.
+  it("says a permanent code has no expiry", () => {
+    const r = roomsFixture();
+    r.rooms[0].join_codes[0].expires_at = null;
+    const codes = renderMonitor(r, new Map(), () => {}, NOW).querySelector(".codes")!.textContent!;
+    expect(codes).toContain("BELL-AAAA-11-HELPER");
+    expect(codes).toContain("no expiry");
+    expect(codes).not.toContain("left");
+  });
+
   it("counts events since the view first saw the room, from its own memory", () => {
     const seen = new Map<string, number>();
     const first = renderMonitor(roomsFixture(), seen, () => {}, NOW);

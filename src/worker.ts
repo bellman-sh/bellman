@@ -100,12 +100,6 @@ function oauthConfig(
   };
 }
 
-/**
- * Shadow mode: everything runs, nothing is granted. The ledger still records
- * what Stripe says, so the webhook can be exercised against real purchases
- * before a plan depends on it.
- */
-
 const unauthorized = (oauth?: OAuthConfig) =>
   Response.json(
     {

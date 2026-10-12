@@ -1,6 +1,6 @@
 # ADR 0001 — Rooms persist
 
-**Date:** 2026-10-07 · **Status:** accepted · **Closes:** #18 · **Spec:** `docs/superpowers/specs/2026-10-07-rooms-persist-design.md`
+**Date:** 2026-10-08 · **Status:** accepted · **Closes:** #18 · **Spec:** `docs/superpowers/specs/2026-10-07-rooms-persist-design.md`
 
 ## Context
 

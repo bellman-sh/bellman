@@ -14,7 +14,7 @@
  * Names, not descriptions. The manifest's one-liners are deliberately shorter than the
  * tool descriptions the model is shown; holding them identical would force marketing
  * copy into a tool schema. Sibling of tests/tools/surface.test.ts, which pins the
- * server's eight.
+ * server's eleven.
  */
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

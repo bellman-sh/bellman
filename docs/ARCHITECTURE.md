@@ -446,7 +446,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface and brief rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>one alarm for abandonment,<br/>sweep and purge, freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -573,11 +573,11 @@ code — proof it is there — and be chosen as the longest-quiet victim by the 
 joiner it had just let in.
 
 The liveness write is throttled to once per half-window. In the Durable Objects
-store an `updateMember` is a read-modify-write of the whole session blob, so a
-write on every 25-second poll would cost more than the per-beat event row this
-design rejects; half the window leaves `lastSeenAt` at worst five minutes behind
-inside a ten-minute window, which is never the difference between present and
-stale.
+store an `updateMember` reads the room, the members in it included, and writes
+the member's row (ADR 0019), so a write on every 25-second poll would cost more
+than the per-beat event row this design rejects; half the window leaves
+`lastSeenAt` at worst five minutes behind inside a ten-minute window, which is
+never the difference between present and stale.
 
 `activeMembers` (`leftAt === null`) and `seatedMembers` (present only) are two
 readings of one roster, deliberately. The stores decide a room has emptied from
@@ -882,15 +882,25 @@ row went in with the event in one transaction, so there is nothing to repair,
 and a removal leaves no tombstone, so re-applying could only put back what was
 removed. The record gains one number, `surfaceCursor`, moved in the same put,
 so `bellman_sync` reports "the surface moved" off the record it already read.
-
-Briefs are rows too, `bf:<memberId>` (ADR 0018). A member on the session record
-keeps only its brief's `agent`, for the roster, and `getBriefs` reads the briefs a
-caller names: `bellman_connect` the creator's, `bellman_confirm` the 25 present
-members heard from most recently. Each store writes a brief in the transaction that
-seats its member, so the record stays small enough for a room of 1,000. A room stored
-before then keeps its briefs inline until its next seat moves them.
 A member a creator removed (#113) is told a number derived from the items it is
 shown instead, because the record's could claim a change it never saw.
+
+Briefs are rows too, `bf:<memberId>` (ADR 0018). A member keeps only its brief's
+`agent`, for the roster, and `getBriefs` reads the briefs a caller names:
+`bellman_connect` the creator's, `bellman_confirm` the 25 present members heard
+from most recently. Each store writes a brief in the transaction that seats its
+member.
+
+So are members, `mb:<memberId>`, in the room or gone from it (ADR 0019). The record
+keeps `present`, the ids of the members in the room in join order, the counts the
+next seat numbers from, the room's `creator` and every org that has sat in it, so it
+keeps its size however many come and go; a write puts the rows of the members it
+changed, and the record only when a field on it changed. `getSession` hands back the
+members in the room, and the store reads one who has left by id, by person (`mu:`,
+a person's handles) or as a list. A label's public number is a row, `lb:<label>`,
+given at its first seat. A room stored before then is moved to rows by its object's
+constructor, its inline briefs with it, before any request reaches it. A swarm room
+seats 5,000: every call still loads the members in the room, about 300 bytes each.
 
 `writeSurface` in `src/rooms.ts` is the one write path — guards, shape, the
 rows for the cap and a connector's ends, the append, the audit row — and
@@ -1157,10 +1167,11 @@ loud:
   nothing else is refused as a blank), and never derives a key.
 - **An org admin reads a closed room its org sat in, and only that** (#65, D4).
   The conditions are the ones `bellman_audit` asks of a reader of an org's log
-  (the team plan, the admin role, an org), plus the org tie on the roster, which
-  keeps a member who left or was removed: an org whose only member was cut still
-  sat in the room, and the cut a creator's removal records is a seat's, so an
-  admin, which holds none, reads past it. It never reaches an open room: that is
+  (the team plan, the admin role, an org), plus the org tie, from the orgs the
+  record keeps, which count a member who left or was removed (ADR 0019): an org
+  whose only member was cut still sat in the room, and the cut a creator's
+  removal records is a seat's, so an admin, which holds none, reads past it. It
+  never reaches an open room: that is
   its members', and the audit log is an admin's window into it while it runs, so
   a 404 for an open room says to an admin what it says to a stranger. Membership
   is tried first, so an admin who sits in the room reads it as the member it is.

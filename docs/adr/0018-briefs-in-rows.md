@@ -1,6 +1,6 @@
 # ADR 0018 — Briefs live in rows of their own, and a room seats 1,000
 
-**Date:** 2026-10-12 · **Status:** accepted · **Amends:** ADR 0001, decision 2
+**Date:** 2026-10-12 · **Status:** accepted; decisions 2 and 3 amended by ADR 0019 · **Amends:** ADR 0001, decision 2
 
 ## Context
 

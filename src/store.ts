@@ -129,9 +129,31 @@ export function seatInOrder(
   return { members, briefs, numbered, memberSeq, labelSeq };
 }
 
-/** The room's first seat as its record keeps it (ADR 0019). */
-export const creatorOf = (m: Member): RoomCreator =>
-  ({ memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt });
+/**
+ * The room's first seat as its record keeps it (ADR 0019). A room is created with its creator
+ * seated, so a creation with nobody to seat is refused here, before either store writes.
+ */
+export function creatorOf(m: Member | undefined): RoomCreator {
+  if (!m) throw new Error("a room is created with its creator seated, and this one names no member");
+  return { memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt };
+}
+
+/**
+ * What `departedMembers` answers, from every member a room has seated (ADR 0019, D7): those
+ * who have left, after `leftAfter` when it is given, and of those the `limit` who left most
+ * recently, a later joiner first where two left at once. Handed back in join order. Both
+ * stores answer through here, so they cannot choose different members to show.
+ */
+export function departures(
+  members: readonly Member[],
+  { limit, leftAfter }: { limit?: number; leftAfter?: number } = {},
+): DepartedMembers {
+  const gone = members.filter((m) => m.leftAt !== null && (leftAfter === undefined || m.leftAt > leftAfter));
+  const shown = limit === undefined
+    ? gone
+    : [...gone].sort((a, b) => b.leftAt! - a.leftAt! || b.seq - a.seq).slice(0, Math.max(0, limit));
+  return { members: [...shown].sort((a, b) => a.seq - b.seq), omitted: gone.length - shown.length };
+}
 
 /**
  * Whether the room's hosted seat is still in it (C1). Evicting the host is the
@@ -1415,6 +1437,11 @@ function detach<T>(value: T): T {
 }
 
 export class MemoryStore implements BellmanStore {
+  /**
+   * The rooms, each with every member it has seated, those who have left included: one array
+   * where the Durable Objects store keeps a row per member (ADR 0019). `getSession` hands back
+   * the members in the room now, and the member reads reach the rest.
+   */
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
   private byCreator = new Map<string, Set<string>>();
@@ -1457,8 +1484,8 @@ export class MemoryStore implements BellmanStore {
   }
 
   async createSession(s: NewSession): Promise<void> {
-    const { members, briefs } = splitBriefs(s.members);
-    const stored: Session = detach({ ...s, members });
+    const { members, briefs } = seatInOrder(s.members, { memberSeq: 0, labelSeq: 0 });
+    const stored: Session = detach({ ...s, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });
     this.keepBriefs(stored.id, briefs);
     this.sessions.set(stored.id, stored);
     for (const rec of Object.values(stored.joinCodes)) this.byJoinCode.set(rec.code, stored.id);
@@ -1469,7 +1496,7 @@ export class MemoryStore implements BellmanStore {
     // hands over the creator in `members` and never calls addMember — so they
     // are indexed here. addMember indexes everyone who joins afterwards.
     for (const m of stored.members) this.indexMember(m.userId, stored.id);
-    for (const orgId of orgsOnRoster(stored)) this.indexOrg(orgId, stored.id);
+    for (const orgId of stored.orgs) this.indexOrg(orgId, stored.id);
   }
 
   /**
@@ -1504,8 +1531,10 @@ export class MemoryStore implements BellmanStore {
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
     // away. closeIfAbandoned has already run on `s`, so nothing it did is skipped by cloning later.
-    const { events: _events, ...rest } = s;
-    return detach(rest);
+    // The members who have left come off the same way (ADR 0019): the record holds who is in
+    // the room now, and the member reads reach the others.
+    const { events: _events, members, ...rest } = s;
+    return detach({ ...rest, members: members.filter(isActiveMember) });
   }
 
   async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
@@ -1563,13 +1592,25 @@ export class MemoryStore implements BellmanStore {
     // this write, and a close in the gap would otherwise seat a member in a room
     // that is over. closeSessionIfEmpty is the other half.
     if (s.closed) return false;
-    const { members: [arrived], briefs } = splitBriefs([member]);
-    s.members.push(detach(arrived));
-    this.keepBriefs(sessionId, briefs);
     // After the guards, so a refused add leaves no trace in the listing.
-    this.indexMember(member.userId, sessionId);
-    this.indexOrg(member.orgId, sessionId);
+    this.seat(s, member);
     return true;
+  }
+
+  /**
+   * Seat one member, the rule both joins share (ADR 0019): the next `seq`, its label's public
+   * number or the next one (`seatInOrder`), its brief beside the room, its org on the record,
+   * and the listings. No awaits, for the reason the callers give.
+   */
+  private seat(s: Session, member: ArrivingMember): void {
+    const labelSeq = s.members.reduce((n, m) => Math.max(n, m.publicNumber ?? 0), 0);
+    const known = (label: string) => s.members.find((m) => m.label === label && m.publicNumber !== null)?.publicNumber ?? undefined;
+    const { members: [arrived], briefs } = seatInOrder([member], { memberSeq: s.members.length, labelSeq }, known);
+    s.members.push(detach(arrived));
+    this.keepBriefs(s.id, briefs);
+    if (arrived.orgId && !s.orgs.includes(arrived.orgId)) s.orgs.push(arrived.orgId);
+    this.indexMember(member.userId, s.id);
+    this.indexOrg(member.orgId, s.id);
   }
 
   async seatMember(
@@ -1596,12 +1637,8 @@ export class MemoryStore implements BellmanStore {
       row.leftAt = now;
       reclaimed.push(detach(row));
     }
-    const { members: [arrived], briefs } = splitBriefs([member]);
-    s.members.push(detach(arrived));
-    this.keepBriefs(sessionId, briefs);
     // After the guards, so a refused seating leaves no trace in the listing.
-    this.indexMember(member.userId, sessionId);
-    this.indexOrg(member.orgId, sessionId);
+    this.seat(s, member);
 
     // A full room has no seat for ANY role, so every code goes — decided and
     // written here rather than by the caller afterwards. As a second call made
@@ -1759,6 +1796,37 @@ export class MemoryStore implements BellmanStore {
     return out;
   }
 
+  /** Every member this room has seated, in join order, or none for an unknown room. */
+  private everyMember(sessionId: string): Member[] {
+    return this.sessions.get(sessionId)?.members ?? [];
+  }
+
+  async getMember(sessionId: string, memberId: string): Promise<Member | undefined> {
+    const m = this.everyMember(sessionId).find((mm) => mm.memberId === memberId);
+    return m && detach(m);
+  }
+
+  async getMembers(sessionId: string, memberIds: readonly string[]): Promise<Member[]> {
+    const wanted = new Set(memberIds);
+    return detach(this.everyMember(sessionId).filter((m) => wanted.has(m.memberId)));
+  }
+
+  async membersOfUser(sessionId: string, userId: string): Promise<Member[]> {
+    return detach(this.everyMember(sessionId).filter((m) => m.userId === userId));
+  }
+
+  async departedMembers(sessionId: string, opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers> {
+    return detach(departures(this.everyMember(sessionId), opts));
+  }
+
+  async publicNumbers(sessionId: string, labels: readonly string[]): Promise<Record<string, number>> {
+    const members = this.everyMember(sessionId);
+    return Object.fromEntries(labels.flatMap((label) => {
+      const n = members.find((m) => m.label === label && m.publicNumber !== null)?.publicNumber;
+      return n == null ? [] : [[label, n]];
+    }));
+  }
+
   async closeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
@@ -1891,7 +1959,7 @@ export class MemoryStore implements BellmanStore {
     // Asked already: the first request stands, is on the record once, and is the time the answer gives.
     if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
     return { ok: true, purgeAt: at };
   }
 
@@ -2489,9 +2557,9 @@ export class MemoryStore implements BellmanStore {
     this.byCreator.get(s.createdBy)?.delete(s.id);
     this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
-    for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
+    for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, now)));
+    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);

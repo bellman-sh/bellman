@@ -561,11 +561,13 @@ export function describeStoreContract(
         capabilities: ["read_context"],
         leftAt: Date.now(),
       }));
-      const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members[0].capabilities).toEqual(["read_context"]);
-      expect(fresh.members[0].leftAt).toBe(Date.now());
+      // Gone from the room's record, and read by id (ADR 0019).
+      expect((await store.getSession(s.id))!.members).toEqual([]);
+      const fresh = (await store.getMember(s.id, "m_creator"))!;
+      expect(fresh.capabilities).toEqual(["read_context"]);
+      expect(fresh.leftAt).toBe(Date.now());
       // untouched fields survive the patch
-      expect(fresh.members[0].label).toBe("jesse@codenerd");
+      expect(fresh.label).toBe("jesse@codenerd");
     });
 
     /**
@@ -648,8 +650,8 @@ export function describeStoreContract(
       expect(outcome.reclaimed[0].leftAt).toBe(at(9_000_000));
 
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(at(9_000_000));
+      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBe(at(9_000_000));
       expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
     });
 
@@ -891,7 +893,8 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
       const after = (await store.getSession(s.id))!;
-      expect(after.members, "the premise: three rows").toHaveLength(3);
+      expect(after.members.map((m) => m.memberId), "the premise: two in the room").toEqual(["m_creator", "m_late"]);
+      expect((await store.getMember(s.id, "m_gone"))?.leftAt, "and one gone").toBe(5_000);
       expect(after.joinCodes, "the door is untouched").toEqual(doors);
     });
 
@@ -2213,8 +2216,9 @@ export function describeStoreContract(
 
       const books = async (id: string) => {
         const row = (await store.getSession(id))!;
+        const everyone = [...row.members, ...(await store.departedMembers(id)).members];
         return {
-          lastSent: Object.fromEntries(row.members.map((m) => [m.memberId, m.lastSentAt])),
+          lastSent: Object.fromEntries(everyone.map((m) => [m.memberId, m.lastSentAt])),
           openRequests: row.openRequests,
           lastMemberEventAt: row.lastMemberEventAt,
         };
@@ -2359,7 +2363,7 @@ export function describeStoreContract(
           const row = (await store.getSession(s.id))!;
           // The books replace the roster's member objects, and the leave must land on the
           // roster that is stored, not on one the append just replaced.
-          expect(row.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect((await store.getMember(s.id, "m_peer"))!.leftAt).toBe(9_000_000);
           expect(row.openRequests).toEqual(mineOnly(mine));
           const departure = (await store.eventsAfter(s.id, 0)).at(-1)!;
           expect(row.lastMemberEventAt, "a member's own leaving is that member's last act").toBe(departure.at);
@@ -2376,7 +2380,7 @@ export function describeStoreContract(
           expect(outcome.removed).toBe(true);
           const row = (await store.getSession(s.id))!;
           expect(row.openRequests).toEqual(mineOnly(mine));
-          expect(row.members.find((m) => m.memberId === "m_peer")!.removedAtCursor).toBeDefined();
+          expect((await store.getMember(s.id, "m_peer"))!.removedAtCursor).toBeDefined();
           expect(row.lastMemberEventAt, "an eviction is the server's word, not a member's").toBe(before);
         });
 
@@ -2420,7 +2424,7 @@ export function describeStoreContract(
           expect(await books(s.id)).toEqual({
             lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
           });
-          expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect((await store.getMember(s.id, "m_peer"))!.leftAt).toBe(9_000_000);
         });
       });
     });
@@ -3046,8 +3050,7 @@ export function describeStoreContract(
           markRemoved: target,
         }))!;
 
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         // One write, not two: a store that set only one of these is the bug
         // this rides in the transaction to prevent.
         expect(m.removedAtCursor).toBe(event.cursor);
@@ -3092,8 +3095,7 @@ export function describeStoreContract(
 
         await store.appendEvent(s.id, removal(target), { markRemoved: target });
 
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         // Otherwise a second eviction widens the window the first one closed.
         expect(m.removedAtCursor).toBe(first.cursor);
       });
@@ -3124,8 +3126,7 @@ export function describeStoreContract(
         // The announcement still lands, as it does for an unknown member: the
         // rule declines to write the member, and nothing about the append.
         expect(event).not.toBeNull();
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBeUndefined();
         expect(m.leftAt).toBe(leftAt);
       });
@@ -3141,8 +3142,7 @@ export function describeStoreContract(
 
         // The two go together or the design's atomicity claim is false.
         expect(event).toBeNull();
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBeUndefined();
         expect(m.leftAt).toBeNull();
       });
@@ -3156,8 +3156,7 @@ export function describeStoreContract(
         );
 
         expect(write.outcome).toBe("appended");
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBe(write.outcome === "appended" ? write.event.cursor : -1);
       });
 
@@ -3181,8 +3180,7 @@ export function describeStoreContract(
         );
 
         expect(retry.outcome).toBe("replayed");
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBe(first.event.cursor);
         expect(m.leftAt).not.toBeNull();
         // And still one event: the repair is a cut, not a second append.
@@ -3206,9 +3204,8 @@ export function describeStoreContract(
           { creditReport: true, markRemoved: target },
         ))!;
 
-        const after = (await store.getSession(s.id))!;
-        const sender = after.members.find((mm) => mm.memberId === "m_creator")!;
-        const removed = after.members.find((mm) => mm.memberId === target)!;
+        const sender = (await store.getMember(s.id, "m_creator"))!;
+        const removed = (await store.getMember(s.id, target))!;
         expect(sender.lastReportAt).toBe(event.at);
         expect(removed.removedAtCursor).toBe(event.cursor);
         expect(removed.leftAt).not.toBeNull();
@@ -4141,8 +4138,8 @@ export function describeStoreContract(
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(false);
-      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt]))
-        .toEqual([["m_creator", Date.now()], ["m_gone", AGED()]]);
+      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_creator", Date.now()]]);
+      expect((await store.getMember(s.id, "m_gone"))?.lastSeenAt).toBe(AGED());
       // And the sweep agrees: the window restarted at the thaw.
       (await store.sweep(Date.now()));
       expect((await store.getSession(s.id))?.closed).toBe(false);
@@ -4588,7 +4585,7 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBe(9_000_000);
       expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_left"]);
     });
@@ -4626,7 +4623,7 @@ export function describeStoreContract(
       expect(outcome.removed).toBe(true);
       const departure = (await store.eventsAfter(s.id, 0))
         .filter((e) => e.type === "member_evicted").at(-1)!;
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // The cursor the removal's own event carries, read back from the log rather
       // than computed here: a store numbering its events differently would still
       // have to agree with itself.
@@ -4651,7 +4648,7 @@ export function describeStoreContract(
       });
 
       expect(outcome.removed).toBe(true);
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // Out, and still reading. R2: a member who chose to go keeps the open feed,
       // and a store that cut here would be the symmetry `announceReclaimed` warns
       // against. The departure is written either way — this is not a no-op path.
@@ -4673,7 +4670,7 @@ export function describeStoreContract(
       const events = await store.eventsAfter(s.id, 0);
       expect(events.map((e) => e.type), "arrangement: two events, so the cursors differ")
         .toEqual(["member_evicted", "invite_revoked"]);
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // The removal writes two events and the cut names the FIRST. Pinned because
       // the last one written is the easier thing to reach for, and a cut one cursor
       // too high admits the evicted member past the door's own announcement — an
@@ -4852,7 +4849,7 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
       // The original stamp stands: a retry must not restate when they went.
-      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")?.leftAt)
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt)
         .toBe(5_000);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
@@ -4880,8 +4877,8 @@ export function describeStoreContract(
       });
 
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.removedAtCursor).toBeUndefined();
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBeNull();
+      expect((await store.getMember(s.id, "m_peer"))?.removedAtCursor).toBeUndefined();
       // The record as planted, code and expiry: pinning the code alone passes a store
       // that kept the entry and expired it.
       expect(fresh.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
@@ -4969,7 +4966,7 @@ export function describeStoreContract(
       // Two answers, not one: nobody was removed, and a code was retired.
       expect(outcome).toEqual({ refused: null, removed: false, codeRetired: "peer_b" });
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt, "the original stamp stands")
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt, "the original stamp stands")
         .toBe(5_000);
       expect(fresh.joinCodes["peer_b"]).toBeUndefined();
       expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();

@@ -786,7 +786,7 @@ describe("the hosted seat and liveness (hosted seat spec, D5)", () => {
 
   it("never reclaims the host's seat", () => {
     const stale = NOW - STALE_AFTER_MS - 1;
-    const host = { ...hostMember(hostedManifest(), NOW), lastSeenAt: stale };
+    const host = member({ ...hostMember(hostedManifest(), NOW), lastSeenAt: stale });
     const quiet = member({ memberId: "m_q", lastSeenAt: stale });
     const victims = seatVictims([host, quiet], 2, NOW - STALE_AFTER_MS, new Set());
     expect(victims?.map((m) => m.memberId)).toEqual(["m_q"]);

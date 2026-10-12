@@ -312,7 +312,7 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
   });
   const person = (over = {}) =>
     member({ memberId: "m_person", roomRole: "lead", joinedAt: T0, lastSeenAt: T0, ...over });
-  const host = (over = {}) => ({ ...hostMember(hosted, T0), ...over });
+  const host = (over = {}) => member({ ...hostMember(hosted, T0), ...over });
   const room = (over: Partial<StoredSession> = {}): StoredSession => {
     const { events, ...rest } = session({ manifest: hosted, members: [person(), host()] });
     return { ...rest, ...over } as StoredSession;

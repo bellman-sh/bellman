@@ -85,7 +85,7 @@ describe("a handle's page through the Worker (bylines spec D4, D5)", () => {
     // Without the grammar check this is a 404 too: this workerd's registry takes a key of any length and finds nothing.
     // So this pins the answer over the real registry (never a 500); the check itself, which keeps these segments from
     // reaching the registry at all, is pinned against a spy in tests/http-bylines.test.ts.
-    for (const segment of ["a".repeat(3_000), "jesse-", "admin"]) {
+    for (const segment of ["a".repeat(3_000), "jesse-", "9lives"]) {
       const res = await call(`/public/handles/${segment}`);
       expect([res.status, await res.json()], segment.slice(0, 12)).toEqual([404, { error: "not_found", error_description: "no such handle" }]);
     }

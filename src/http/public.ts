@@ -18,7 +18,7 @@
  */
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { publicRoomUrl } from "../codes.js";
-import { checkHandle } from "../handles.js";
+import { HANDLE_PATTERN } from "../handles.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, roomNamed } from "../public-names.js";
@@ -196,20 +196,20 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
 /**
  * A handle's page (D5): its signed rooms that are still public and open, newest signature first,
  * each wrapped as the creator's words under the handle (plan ruling R2), never their label.
- * A path segment that breaks the handle grammar names no one, so it is a 404 before the registry is
- * asked anything. Signatures are keyed by user, so a freed handle someone else claims lists only their
- * rooms. At most `HANDLE_PAGE_SCAN` signatures are looked at, one session read each, and at most
- * `MAX_ROOMS_LISTED` rooms listed.
+ * A path segment whose shape breaks the handle grammar names no one, so it is a 404 before the registry
+ * is asked anything. Only the shape: the reserved list governs claims, and a read still reaches a name
+ * reserved after someone took it, as the byline on that holder's rooms still does. Signatures are keyed
+ * by user, so a freed handle someone else claims lists only their rooms. At most `HANDLE_PAGE_SCAN`
+ * signatures are looked at, one session read each, and at most `MAX_ROOMS_LISTED` rooms listed.
  */
 async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response> {
   let handle: string;
   try {
-    const check = checkHandle(decodeURIComponent(raw));
-    if (!check.ok) return notFound("no such handle");
-    handle = check.handle;
+    handle = decodeURIComponent(raw).trim().toLowerCase();
   } catch {
     return notFound("no such handle");
   }
+  if (!HANDLE_PATTERN.test(handle)) return notFound("no such handle");
   const userId = await deps.store.userOfHandle(handle);
   if (userId === undefined) return notFound("no such handle");
   // The scan's cut is the newest signatures, so the page orders them itself and does not lean on the registry's order.

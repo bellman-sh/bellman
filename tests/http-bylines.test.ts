@@ -355,8 +355,9 @@ describe("GET /public/handles/:handle", () => {
     expect(reads).toHaveBeenCalledTimes(MAX_ROOMS_LISTED);
   });
 
-  // A handle that breaks the grammar names no one, so the page answers it before the registry is asked anything:
-  // the path segment is the caller's, and a 3,000-character one is a registry key of the caller's choosing.
+  // A handle whose shape breaks the grammar names no one, so the page answers it before the registry is asked anything:
+  // the path segment is the caller's, and a 3,000-character one is a registry key of the caller's choosing. The reserved
+  // list is no part of the shape: see the test after this block.
   describe("answers a handle that cannot exist with the handle 404, and asks the registry nothing", () => {
     it.each<[string, string]>([
       ["3,000 characters", "a".repeat(3_000)],
@@ -365,7 +366,6 @@ describe("GET /public/handles/:handle", () => {
       ["starting with a digit", "9lives"],
       ["ending in a hyphen", "jesse-"],
       ["with a space inside", "two%20words"],
-      ["reserved", "admin"],
     ])("%s", async (_why, segment) => {
       const asked = vi.spyOn(store, "userOfHandle");
       const res = (await pub(`/public/handles/${segment}`))!;
@@ -378,6 +378,18 @@ describe("GET /public/handles/:handle", () => {
       expect((await pub("/public/handles/nobody-here"))!.status).toBe(404);
       expect(asked).toHaveBeenCalledWith("nobody-here");
     });
+  });
+
+  // Reservation governs claims, and the claim route would refuse "admin". A name reserved after someone took it is still
+  // theirs: the byline on their rooms' reads names it, so the page, which checks a handle's shape and never the reserved
+  // list, reaches it too. The record goes straight into the store, as one made before the reservation would be.
+  it("reads a handle that is reserved but well-formed and held, and the byline on its room says the same", async () => {
+    await store.claimHandle("u_jesse", "admin");
+    await store.signRoom("u_jesse", PUB, Date.now());
+    const res = (await pub("/public/handles/admin"))!;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ handle: "admin", rooms: [{ id: PUB, text: { origin: { label: "@admin" } } }] });
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "admin", as: "member 1" } });
   });
 
   // A signature outlives its room (closing, unpublishing and purging leave the row), and every signature the page

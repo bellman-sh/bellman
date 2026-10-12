@@ -102,3 +102,76 @@ describe("the handle routes", () => {
     expect(await res.json()).toMatchObject({ error: "invalid_request" });
   });
 });
+
+describe("signing a room", () => {
+  const PRIVATE = "qs_private";
+  beforeEach(async () => {
+    await store.createSession(session({ id: PRIVATE, manifest: roomManifest({ public: false }), members: [member(), peer()] }));
+  });
+
+  it("answers 404 to someone with no seat, and 403 to a member who is not the creator", async () => {
+    await handleCall(DEV_KEY.peer, "PUT", { handle: "peer-one" });
+    expect((await roomCall(DEV_KEY.outsider, "PUT", `/rooms/${PUB}/byline`))!.status).toBe(404);
+    const forbidden = (await roomCall(DEV_KEY.peer, "PUT", `/rooms/${PUB}/byline`))!;
+    expect(forbidden.status).toBe(403);
+    expect(await store.signedRooms("u_peer")).toEqual([]);
+  });
+
+  it("refuses the creator with no handle, and a room that is not public", async () => {
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`))).toMatchObject({ error: "no_handle" });
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PRIVATE}/byline`))).toMatchObject({ error: "room_not_public" });
+  });
+
+  it("signs and unsigns for the creator, and the room detail says which", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
+    const signed = (await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`))!;
+    expect(signed.status).toBe(200);
+    expect(await signed.json()).toEqual({ handle: "jesse" });
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: true });
+    expect(await bodyOf(await roomCall(DEV_KEY.peer, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
+    expect((await roomCall(DEV_KEY.jesse, "DELETE", `/rooms/${PUB}/byline`))!.status).toBe(204);
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
+  });
+
+  it("takes PUT and DELETE alone: a GET answers 405 and signs nothing", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    const res = (await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}/byline`))!;
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "PUT, DELETE"]);
+    expect(await store.signedRooms("u_jesse")).toEqual([]);
+  });
+
+  it("refuses no credential, and a cookie with no panel Origin, and takes the panel's", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    expect((await roomCall(null, "PUT", `/rooms/${PUB}/byline`))!.status).toBe(401);
+    const panel = "https://dash.example.test";
+    const viaCookie: RoomRouteDeps = {
+      ...deps,
+      panelOrigins: [panel],
+      caller: async (request) => {
+        const who = await caller(request);
+        return who && { ...who, via: "cookie" };
+      },
+    };
+    const forged = (await roomRoutes(req(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`), viaCookie))!;
+    expect(forged.status).toBe(403);
+    expect(await store.signedRooms("u_jesse")).toEqual([]);
+    const fromPanel = new Request(`${ISSUER}/rooms/${PUB}/byline`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${DEV_KEY.jesse}`, origin: panel },
+    });
+    expect((await roomRoutes(fromPanel, viaCookie))!.status).toBe(200);
+  });
+
+  it("carries signed on an org admin's envelope too, false: the admin holds no seat to sign from", async () => {
+    await store.createSession(session({ id: "qs_org_closed", createdBy: "u_peer", closed: true, closedAt: 1_700_000_000_000, members: [peer()] }));
+    expect(await bodyOf(await roomCall(DEV_KEY.jesse, "GET", "/rooms/qs_org_closed"))).toMatchObject({ viewer: "admin", signed: false });
+  });
+
+  it("says signed to the creator alone, whatever signature another person's record holds", async () => {
+    await store.claimHandle("u_peer", "peer-one");
+    await store.signRoom("u_peer", PUB, 1);
+    expect(await bodyOf(await roomCall(DEV_KEY.peer, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
+  });
+});

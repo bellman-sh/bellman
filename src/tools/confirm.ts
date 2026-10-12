@@ -18,7 +18,6 @@ import { APP_UI_META } from "../ui/resource.js";
 export const BRIEFS_ON_JOIN = 25;
 
 export function registerConfirm(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // ------------------------------------------------------------ bellman_confirm
   server.registerTool(
     "bellman_confirm",
     {

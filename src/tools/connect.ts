@@ -12,7 +12,6 @@ import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
 export function registerConnect(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // ------------------------------------------------------------ bellman_connect
   server.registerTool(
     "bellman_connect",
     {

@@ -10,7 +10,6 @@ import { issueInvite, revokeInvite } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerInvite(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // ------------------------------------------------------------- bellman_invite
   server.registerTool(
     "bellman_invite",
     {

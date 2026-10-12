@@ -628,7 +628,7 @@ export function openRoomSocket(options: RoomSocketOptions): RoomSocket {
    * everything above its cursor, and now it will not be. Whatever the room said between the cursor
    * and its closing (the session_expired notice among it) is therefore only to be had from a poll,
    * which still answers for a closed room (bellman_sync returns the events after the cursor and
-   * reports session_status; src/server.ts). Failing to get it changes nothing about stopping.
+   * reports session_status; src/tools/sync.ts). Failing to get it changes nothing about stopping.
    */
   async function tail(): Promise<void> {
     const controller = new AbortController();

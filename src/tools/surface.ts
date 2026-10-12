@@ -13,7 +13,6 @@ import { APP_UI_META } from "../ui/resource.js";
 export const NO_SEAT = "no such room, or no member of yours in it";
 
 export function registerSurface(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // ------------------------------------------------------------ bellman_surface
   server.registerTool(
     "bellman_surface",
     {

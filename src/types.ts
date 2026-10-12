@@ -11,7 +11,7 @@ export interface Identity {
   label: string; // display name, e.g. "jesse@codenerd"
 }
 
-/** Provider-neutral description of the agent on this side of the wire. */
+/** Provider-neutral description of the agent that wrote the brief. */
 export interface AgentInfo {
   provider: string; // "anthropic" | "openai" | "google" | ...
   model: string;    // "claude-fable-5", "gpt-5", ...
@@ -374,7 +374,7 @@ export interface RoleDef {
    * What this seat reports when the heartbeat ticks: the room creator's words, at
    * most 300 characters, only on a seat that answers it (heartbeat instructions
    * spec D1, D2). Optional in the type because a row written before it has none,
-   * and read as null on every row (`withHeartbeatDefaults`): plan ruling R1.
+   * and read as null on every row (`withManifestDefaults`): plan ruling R1.
    */
   report?: string | null;
 }
@@ -413,7 +413,7 @@ export interface RoomManifest {
   /**
    * Whether anyone with the room's link may read it (public rooms spec D1): chosen when the
    * room starts, false unless given. Optional in the type because a row written before it has
-   * none; `withHeartbeatDefaults` reads it as false, and readers test `=== true` for the
+   * none; `withManifestDefaults` reads it as false, and readers test `=== true` for the
    * in-memory store, which does not hydrate (plan ruling R1). Immutable with the rest: a room
    * made private is marked on the session (`unpublishedAt`), never here.
    */

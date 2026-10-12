@@ -246,7 +246,7 @@ export function roomSummary(
   tail: SessionEvent[],
   now: number,
 ) {
-  const canInvite = (verbsOfRole(s.manifest, me.roomRole) as readonly Verb[]).includes("invite");
+  const canInvite = verbsOfRole(s.manifest, me.roomRole).includes("invite");
   const latestNote = new Map<string, SessionEvent>();
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = tail[i];

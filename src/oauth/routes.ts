@@ -47,8 +47,7 @@ export interface OAuthConfig {
    *
    * Absent or empty means no browser may hold a session: see allowedOrigin.
    * Browser authentication is a capability this list grants, not a default the
-   * list restricts. Optional so that the Worker program keeps compiling between
-   * here and Task 10, which is where the value arrives.
+   * list restricts.
    */
   panelOrigins?: string[];
   /**
@@ -809,9 +808,6 @@ export async function handleOAuth(
     if (available.length === 0) {
       return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
     }
-    // Validated now as well as on the way out. Sealing an unusable destination
-    // into a signed blob and discovering it after the provider round trip is a
-    // worse error message for the same outcome.
     // Binds this sign-in to this browser. Without it the signed state is a
     // bearer credential anyone can replay: an attacker completes the provider
     // half as themselves, keeps the callback URL, and gets a victim to open it
@@ -820,6 +816,9 @@ export async function handleOAuth(
     // account is theirs. SameSite=Lax does not help, because the callback is a
     // top-level GET navigation, which is the case Lax deliberately allows.
     const nonce = randomId();
+    // Validated now as well as on the way out. Sealing an unusable destination
+    // into a signed blob and discovering it after the provider round trip is a
+    // worse error message for the same outcome.
     const pending: SessionRequest = {
       return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
       nonce,

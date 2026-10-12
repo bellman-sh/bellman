@@ -95,7 +95,7 @@ export interface Remote {
   listTools(): Promise<{ tools: Tool[] }>;
   callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<CallToolResult>;
   /**
-   * The two requests a host that renders MCP Apps makes, forwarded unchanged
+   * The three requests a host that renders MCP Apps makes, forwarded unchanged
    * (#28). Optional, because a Remote is also what tests hand in, and most of
    * them have no resources to serve: absent, the bridge lists none and refuses
    * a read as not found.
@@ -444,10 +444,10 @@ const REMOVAL_EVENTS: readonly EventType[] = ["member_evicted", "member_timed_ou
 /**
  * Whether these events show `memberId` being evicted.
  *
- * One definition for the two places the bridge reads a member's events: the
- * watcher's poll, and an agent's own bellman_sync as observe() sees it. Two
- * copies would drift, and the drift would go toward one of them matching too
- * much.
+ * One definition for every place the bridge reads a member's events: the
+ * watcher's poll, an agent's own bellman_sync as observe() sees it, and an event
+ * off the local bus. Copies would drift, and the drift would go toward one of
+ * them matching too much.
  *
  * The type is checked before the payload because the payload of everything a
  * peer can send is the peer's: a message can carry any member_id, and a joiner
@@ -673,9 +673,9 @@ export function createBridge(opts: BridgeOptions) {
    * past that, the dead Remote answers every later call with the same 401 until
    * Claude Code is restarted, which is indistinguishable from Bellman being down.
    *
-   * Wrapped once here rather than checked at each of the three call sites
-   * (tools/list, the tool handler, and the watcher's poll), so a fourth cannot
-   * forget.
+   * Wrapped once here rather than checked at each call site (tools/list, the
+   * resource handlers, the tool handler, the watcher's poll and the upload), so
+   * the next one cannot forget.
    *
    * The error still propagates: this call fails, and the NEXT one reconnects —
    * re-entering connectSignedIn, which is what may have to open a browser. It is

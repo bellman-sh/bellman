@@ -8,7 +8,6 @@ import { leaveRoom } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerLeave(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // -------------------------------------------------------------- bellman_leave
   server.registerTool(
     "bellman_leave",
     {

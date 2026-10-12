@@ -5,7 +5,7 @@ import { BriefShape, CapabilitiesShape, fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { roomPreview } from "../projections.js";
 import { hostMember } from "../host.js";
-import type { ArrivingMember, Brief, Capability, Identity, NewSession, RoomManifest } from "../types.js";
+import type { ArrivingMember, Identity, NewSession, RoomManifest } from "../types.js";
 import { entitlementsFor } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
@@ -16,7 +16,6 @@ import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 
 export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean }): void {
-  // -------------------------------------------------------------- bellman_start
   server.registerTool(
     "bellman_start",
     {
@@ -139,9 +138,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         userId: identity.userId,
         label: identity.label,
         orgId: identity.orgId,
-        capabilities: capabilities as Capability[],
+        capabilities,
         roomRole: manifest.creatorRole,
-        brief: brief as Brief,
+        brief,
         joinedAt: now,
         lastSeenAt: now,
         leftAt: null,

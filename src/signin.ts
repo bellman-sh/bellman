@@ -619,14 +619,6 @@ function makePersist(
   };
 }
 
-/**
- * Merge a credential into the file, under the lock.
- *
- * The lock options are the caller's, and the difference matters: a post-connect
- * refresh passes no signal, because a shutdown must not cost it the rotation,
- * while a write that happens INSIDE connectSignedIn passes one, because an
- * uninterruptible wait there is a shutdown the process cannot complete.
- */
 /** What a credential that could not be saved costs, said the same way everywhere. */
 const saveFailed = (dir: string, error: unknown): string =>
   `could not save the sign-in under ${dir}: ${error instanceof Error ? error.message : String(error)}. ` +
@@ -670,6 +662,14 @@ function saveOrCarryOn(
   }
 }
 
+/**
+ * Merge a credential into the file, under the lock.
+ *
+ * The lock options are the caller's, and the difference matters: a post-connect
+ * refresh passes no signal, because a shutdown must not cost it the rotation,
+ * while a write that happens INSIDE connectSignedIn passes one, because an
+ * uninterruptible wait there is a shutdown the process cannot complete.
+ */
 async function writeMerged(
   dir: string,
   serverUrl: string,

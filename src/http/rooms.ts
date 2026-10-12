@@ -629,21 +629,6 @@ export const etagMatches = (header: string | null, tag: string): boolean =>
   });
 
 /**
- * The surface read (D2): the same envelopes `bellman_sync surface: true`
- * returns, with the surface cursor as the ETag. A member still in the room is
- * answered from the record alone on a match — no row read, which is what makes
- * a four-second poll cheap. A removed member reads to its cut, and its cursor
- * is derived from the rows it is shown, as the tool derives it: the record's
- * number would claim a change the member never saw. The record and the rows are
- * two reads, so an eviction that commits between them leaves this one poll
- * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
- * gap from the `member_evicted` event in its slice, and this route reads no events.
- *
- * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
- * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
- * Its ETag is the record's cursor, as a member still in the room has.
- */
-/**
  * The room's log, for the panel's Log view: the envelopes `bellman_sync` returns, the caller's own
  * included, because a person reading the log reads the whole conversation. Without `?after`, the
  * newest MAX_EVENTS_READ; with it, the next MAX_EVENTS_READ past that cursor, so a poll that carries
@@ -682,6 +667,21 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   }, origin);
 }
 
+/**
+ * The surface read (D2): the same envelopes `bellman_sync surface: true`
+ * returns, with the surface cursor as the ETag. A member still in the room is
+ * answered from the record alone on a match — no row read, which is what makes
+ * a four-second poll cheap. A removed member reads to its cut, and its cursor
+ * is derived from the rows it is shown, as the tool derives it: the record's
+ * number would claim a change the member never saw. The record and the rows are
+ * two reads, so an eviction that commits between them leaves this one poll
+ * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
+ * gap from the `member_evicted` event in its slice, and this route reads no events.
+ *
+ * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
+ * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
+ * Its ETag is the record's cursor, as a member still in the room has.
+ */
 async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);

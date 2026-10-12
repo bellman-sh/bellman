@@ -566,22 +566,6 @@ export function seatVictims(
 }
 
 /**
- * Storage boundary. Everything stateful goes through this interface so the
- * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
- * without touching tool logic.
- *
- * EVERY METHOD IS ASYNC, including ones an in-memory store answers instantly.
- * That is not incidental. A Durable Objects port resolves a join code in one
- * DO and the session it names in another, and every cross-DO hop is RPC. A
- * synchronous signature here would be implementable only by MemoryStore, which
- * would make this interface a comment rather than a seam.
- *
- * Read methods return DETACHED copies. Callers must never mutate what they read
- * back and expect it to stick — every write has an explicit method here. That
- * rule is what makes the interface portable: a database-backed store cannot
- * hand out live references, so relying on them would silently break the port.
- */
-/**
  * What a source-guarded write replaced: `previous` here, `removed` on
  * GrantDelete.
  *
@@ -621,27 +605,6 @@ export type EventWrite =
   | { outcome: "frozen" }
   | { outcome: "conflict" };
 
-/**
- * What an append writes BESIDES the event, in the event's own transaction.
- *
- * An explicit argument rather than the store reading `e.type`: nothing in either
- * store branches on an event's kind, and these are the writes that would have
- * made it. The caller already knows it is handling a `progress` send — it checked
- * the verb and validated the payload to get there — so saying so costs it a flag
- * and leaves the store a log that does not interpret what it logs. An eviction is
- * the same: `evictMember` is the one writing the `member_evicted` event.
- *
- * One exception, and it is not a flag: housekeeping's books (#66). `noteAppend` reads
- * an event's type and sender, because the departures that close a member's requests
- * are written by paths no caller flags (`removeMember`, `announceReclaimed`), and a
- * flag every caller had to remember is how the books would go stale. Both stores
- * apply it at the write, for a room that declared housekeeping.
- *
- * It is not an optimisation. The stamp and the event have to commit together or
- * a due tick can read one without the other, and the cut and its event have to
- * commit together or a reader can be refused at a cursor no stored event
- * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
- */
 /**
  * What `setJoinCode` did, which a boolean could not say once the write became
  * conditional: `frozen` and `live_code_exists` are different refusals and the
@@ -754,6 +717,27 @@ export type PurgeSchedule =
  */
 export const JOINED_SCAN = 500;
 
+/**
+ * What an append writes BESIDES the event, in the event's own transaction.
+ *
+ * An explicit argument rather than the store reading `e.type`: nothing in either
+ * store branches on an event's kind, and these are the writes that would have
+ * made it. The caller already knows it is handling a `progress` send — it checked
+ * the verb and validated the payload to get there — so saying so costs it a flag
+ * and leaves the store a log that does not interpret what it logs. An eviction is
+ * the same: `evictMember` is the one writing the `member_evicted` event.
+ *
+ * One exception, and it is not a flag: housekeeping's books (#66). `noteAppend` reads
+ * an event's type and sender, because the departures that close a member's requests
+ * are written by paths no caller flags (`removeMember`, `announceReclaimed`), and a
+ * flag every caller had to remember is how the books would go stale. Both stores
+ * apply it at the write, for a room that declared housekeeping.
+ *
+ * It is not an optimisation. The stamp and the event have to commit together or
+ * a due tick can read one without the other, and the cut and its event have to
+ * commit together or a reader can be refused at a cursor no stored event
+ * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
+ */
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -795,6 +779,22 @@ export interface AppendExtras {
   surface?: SurfaceWrite;
 }
 
+/**
+ * Storage boundary. Everything stateful goes through this interface so the
+ * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
+ * without touching tool logic.
+ *
+ * EVERY METHOD IS ASYNC, including ones an in-memory store answers instantly.
+ * That is not incidental. A Durable Objects port resolves a join code in one
+ * DO and the session it names in another, and every cross-DO hop is RPC. A
+ * synchronous signature here would be implementable only by MemoryStore, which
+ * would make this interface a comment rather than a seam.
+ *
+ * Read methods return DETACHED copies. Callers must never mutate what they read
+ * back and expect it to stick — every write has an explicit method here. That
+ * rule is what makes the interface portable: a database-backed store cannot
+ * hand out live references, so relying on them would silently break the port.
+ */
 export interface BellmanStore {
   createSession(s: NewSession): Promise<void>;
   /**
@@ -1188,8 +1188,8 @@ export interface BellmanStore {
   ): Promise<EventWrite>;
   /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
-   * when a limit is given. The hosted seat's read is the bounded one (I4); every other
-   * caller reads the tail whole.
+   * when a limit is given. The hosted seat's read (I4) and a public room's events route
+   * are the bounded ones; every other caller reads the tail whole.
    */
   eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]>;
   /**
@@ -1366,7 +1366,8 @@ export class MemoryStore implements BellmanStore {
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
    * record: that type is the one SessionDO persists and hydrateStoredSession
    * validates, and a field there would need a hydration rule it does not need.
-   * Same lifetime either way — a session is never deleted from this store.
+   * Same lifetime either way — a session leaves this store only by the purge,
+   * and its keys go with it.
    */
   private keys = new Map<string, Map<string, IdempotencyRecord>>();
   /**

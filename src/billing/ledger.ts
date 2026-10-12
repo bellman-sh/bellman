@@ -129,8 +129,13 @@ export class BillingLedger implements BillingStorage {
       const reading = await readSubscription(subscriptionId, source);
       const record = (await this.kv.get<CustomerRecord>(`${CUSTOMER}${customerId}`)) ?? { subscriptions: {} };
       const previous = record.subscriptions[subscriptionId];
-      const eventAt = Math.max(Date.now(), (previous?.eventAt ?? 0) + 1);
-      await this.writeSubscription(customerId, subscriptionId, { ...reading, eventAt });
+      // Written over whatever is stored, a terminal status included. This is
+      // Stripe's word now, and Stripe never moves a subscription out of a
+      // terminal status, so a live read disagrees with a stored "canceled" only
+      // when the stored one is wrong, as a 404 read once left it. The terminal
+      // rule in writeSubscription is for states recorded without a read.
+      record.subscriptions[subscriptionId] = { ...reading, eventAt: Math.max(Date.now(), (previous?.eventAt ?? 0) + 1) };
+      await this.kv.put(`${CUSTOMER}${customerId}`, record);
     });
   }
 

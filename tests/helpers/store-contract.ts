@@ -2575,8 +2575,10 @@ export function describeStoreContract(
       const NOW = () => Date.now();
       const hostedRoom = (over: Partial<Session> = {}) => {
         const m = hostedManifest();
+        // As if its host had just asked: a host that has never asked is due the moment its room
+        // starts, and the Durable Object's alarm would fire that question into these cases.
         return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
-          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, lastTickAt: NOW(), lastHostTickAt: NOW(), ...over });
       };
       /** What the host writes on a tick: a thread root, the tick's cursor in its payload (I1). */
       const question = (): Omit<SessionEvent, "cursor" | "at"> => ({

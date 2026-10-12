@@ -694,7 +694,8 @@ at-least-once delivery is acknowledged.
 **It asks on its own cadence, and only when a person is there.** A hosted room
 ticks whether or not any role reports. The host's cadence is anchored on
 `lastHostTickAt`, which only a tick that wakes the host moves, in the same write
-as `lastTickAt`; before the host first asks, it anchors on the room's first seat.
+as `lastTickAt`. A host that has never asked is due at the room's first seat, so it
+asks its first question when the room starts, and a cadence after each question then.
 A reporting seat's deadline still writes a tick, for the reporter, and never
 wakes the host: each question resets the three answers and spends units, and
 reporters' ticks once had a room that declared `1h` asking every 20 to 40

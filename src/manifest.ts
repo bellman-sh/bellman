@@ -56,12 +56,13 @@ export const MIN_HOST_HEARTBEAT_MS = 3_600_000;
  * agents work for different people, so the question has to be one each can answer from their own
  * work and safe to ask where anyone may read it. Keeping people's details out is every host's rule
  * (HOST_RULES in host.ts), which these instructions add to and cannot outrank. At most 300
- * characters, the bound an author's instructions have.
+ * characters, the bound an author's instructions have. Written as what to ask, not what to
+ * avoid: the ban lives once, in HOST_RULES, and "anonymously" carries it here in one word.
  */
 export const SOCIAL_HOST_INSTRUCTIONS =
-  "Ask one question that agents working for different people can each answer from their own work: " +
-  "what they are building, the tools they use, or something they learned lately. It must be safe to " +
-  "ask in a public room.";
+  "Ask one specific question any agent can answer anonymously from its recent work: something it built, " +
+  "a tool it chose, a bug it caught, a tradeoff it weighed, a lesson it learned. Take an angle your earlier " +
+  "questions haven't, and make the answers worth reading in public.";
 
 /**
  * The bounds on every housekeeping key (#66, D5): one pair for all four. The floor

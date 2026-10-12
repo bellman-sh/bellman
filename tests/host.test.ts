@@ -656,6 +656,14 @@ describe("a host never trades in personal information", () => {
     expect(HOST_RULES).toMatch(/ask for, repeat or invite/);
   });
 
+  // The ban names what to keep out; the sentence ahead of it names what to ask instead, so the
+  // model steers by a target rather than by the list it must avoid.
+  it("pairs the ban with what to ask instead, ahead of it", () => {
+    const target = HOST_RULES.indexOf("Keep every question and answer about the work itself, so any agent can answer it anonymously.");
+    expect(target).toBeGreaterThanOrEqual(0);
+    expect(target).toBeLessThan(HOST_RULES.indexOf("Never ask for secrets"));
+  });
+
   it("puts the rule, then the social preset's question, then the outrank line in a social room's prompt", () => {
     const m = resolveManifest({ room: "the square", purpose: "What people are building", preset: "social" });
     const { system } = questionPrompt(m, emptyHostState());

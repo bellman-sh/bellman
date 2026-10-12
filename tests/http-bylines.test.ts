@@ -2,11 +2,11 @@
  * Bylines (bylines spec): the handle routes, the room's sign and unsign, and the public reads that
  * show them. A Request in, a Response out, over one MemoryStore.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
-import { publicRoutes } from "../src/http/public.js";
+import { HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { HOST_USER_ID, MemoryStore } from "../src/store.js";
 import { member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
@@ -251,6 +251,17 @@ describe("the byline on the public reads", () => {
     expect(byName).toMatchObject({ id: PUB, by: { handle: "jesse", as: "member 1" } });
     expect(byName).toEqual(await bodyOf(await pub(`/public/rooms/${PUB}`)));
   });
+
+  // A decision, not an accident: D4 gates `by` on the signature alone, and a closed room's own read stands until its
+  // purge. Only the handle page drops a closed room (D5), so a room can carry a byline its handle's page does not list.
+  it("still names the creator on a closed room's read, until its purge", async () => {
+    await store.createSession(session({
+      id: "qs_closed_signed", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: 1_700_000_000_000, joinCodes: {},
+    }));
+    await store.claimHandle("u_jesse", "jesse");
+    await store.signRoom("u_jesse", "qs_closed_signed", 1);
+    expect(await bodyOf(await pub("/public/rooms/qs_closed_signed"))).toMatchObject({ status: "closed", by: { handle: "jesse", as: "member 1" } });
+  });
 });
 
 describe("GET /public/handles/:handle", () => {
@@ -301,6 +312,17 @@ describe("GET /public/handles/:handle", () => {
     expect(rooms.map((r) => [r.id, r.text.origin.memberId])).toEqual([[PUB, "m_creator"]]);
   });
 
+  // A public room's page is its name's link while it holds one, and its id's otherwise (public names spec, D7).
+  it("links a listed room by its public name while it holds one", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    const link = async () => ((await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { public_url: string }[] }).rooms[0].public_url;
+    expect(await link()).toBe(`https://dash.bellman.sh/r/${PUB}`);
+    await store.claimPublicName("open-review", { id: PUB, at: Date.now() }, null);
+    await store.setPublicName(PUB, "open-review");
+    expect(await link()).toBe("https://dash.bellman.sh/r/open-review");
+  });
+
   it("answers the handle and its rooms and nothing more", async () => {
     await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
     await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
@@ -319,16 +341,82 @@ describe("GET /public/handles/:handle", () => {
     expect([res.status, await res.json()]).toEqual([404, { error: "not_found", error_description: "no such handle" }]);
   });
 
-  it("lists the newest signatures first, at most MAX_ROOMS_LISTED of them", async () => {
+  it("lists the newest signatures first, at most MAX_ROOMS_LISTED of them, and stops reading once the page is full", async () => {
     await store.claimHandle("u_jesse", "jesse");
     const total = MAX_ROOMS_LISTED + 3;
     for (let i = 0; i < total; i++) {
       await store.createSession(session({ id: `qs_many_${i}`, manifest: roomManifest({ public: true }), members: [member()] }));
       await store.signRoom("u_jesse", `qs_many_${i}`, 1_000 + i);
     }
+    const reads = vi.spyOn(store, "getSession");
     const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string; signed_at: string }[] };
     expect(rooms.map((r) => r.id)).toEqual(Array.from({ length: MAX_ROOMS_LISTED }, (_, k) => `qs_many_${total - 1 - k}`));
     expect(rooms[0].signed_at).toBe(new Date(1_000 + total - 1).toISOString());
+    expect(reads).toHaveBeenCalledTimes(MAX_ROOMS_LISTED);
+  });
+
+  // A handle that breaks the grammar names no one, so the page answers it before the registry is asked anything:
+  // the path segment is the caller's, and a 3,000-character one is a registry key of the caller's choosing.
+  describe("answers a handle that cannot exist with the handle 404, and asks the registry nothing", () => {
+    it.each<[string, string]>([
+      ["3,000 characters", "a".repeat(3_000)],
+      ["31 characters, one past the grammar", "a".repeat(31)],
+      ["two characters", "ab"],
+      ["starting with a digit", "9lives"],
+      ["ending in a hyphen", "jesse-"],
+      ["with a space inside", "two%20words"],
+      ["reserved", "admin"],
+    ])("%s", async (_why, segment) => {
+      const asked = vi.spyOn(store, "userOfHandle");
+      const res = (await pub(`/public/handles/${segment}`))!;
+      expect([res.status, await res.json()]).toEqual([404, { error: "not_found", error_description: "no such handle" }]);
+      expect(asked).not.toHaveBeenCalled();
+    });
+
+    it("asks the registry about one that fits the grammar: the control for the cases above", async () => {
+      const asked = vi.spyOn(store, "userOfHandle");
+      expect((await pub("/public/handles/nobody-here"))!.status).toBe(404);
+      expect(asked).toHaveBeenCalledWith("nobody-here");
+    });
+  });
+
+  // A signature outlives its room (closing, unpublishing and purging leave the row), and every signature the page
+  // looks at costs a session read on a request anyone can make. So the reads are bounded by HANDLE_PAGE_SCAN, newest
+  // signatures first, and not by what the handle holds.
+  describe("looks at no more than HANDLE_PAGE_SCAN signatures", () => {
+    type Row = { sessionId: string; signedAt: number };
+    const signGone = async (count: number) => {
+      for (let i = 0; i < count; i++) await store.signRoom("u_jesse", `qs_gone_${i}`, 10_000 + i);
+    };
+    const signLive = async (id: string, at: number) => {
+      await store.createSession(session({ id, manifest: roomManifest({ public: true }), members: [member()] }));
+      await store.signRoom("u_jesse", id, at);
+    };
+
+    it.each<[string, (rows: Row[]) => Row[]]>([
+      ["newest first", (rows) => rows],
+      ["oldest first", (rows) => [...rows].reverse()],
+    ])("reads at most that many sessions however many signatures the handle holds, the registry listing them %s", async (_order, inOrder) => {
+      await store.claimHandle("u_jesse", "jesse");
+      await signGone(HANDLE_PAGE_SCAN + 50);
+      await signLive("qs_deep", 1_000); // older than every dead signature, so past the scan
+      const listed = store.signedRooms.bind(store);
+      vi.spyOn(store, "signedRooms").mockImplementation(async (userId) => inOrder(await listed(userId)));
+      const reads = vi.spyOn(store, "getSession");
+      expect(await bodyOf(await pub("/public/handles/jesse"))).toEqual({ handle: "jesse", rooms: [] });
+      expect(reads).toHaveBeenCalledTimes(HANDLE_PAGE_SCAN);
+    });
+
+    it("looks at the last signature inside the scan and at none past it", async () => {
+      await store.claimHandle("u_jesse", "jesse");
+      await signGone(HANDLE_PAGE_SCAN - 1);
+      await signLive("qs_edge", 9_000); // the last one the scan reaches
+      await signLive("qs_past", 8_000); // the first one it does not
+      const reads = vi.spyOn(store, "getSession");
+      const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string }[] };
+      expect(rooms.map((r) => r.id)).toEqual(["qs_edge"]);
+      expect(reads).toHaveBeenCalledTimes(HANDLE_PAGE_SCAN);
+    });
   });
 
   // One case for each way a signed room leaves the page, beside a control that stays on it. The extra room is signed

@@ -17,7 +17,8 @@
  * beside it: a web Request in, a Response out, for both servers and the tests.
  */
 import { isBlobId, type BlobStore } from "../blobs.js";
-import { PUBLIC_ROOM_URL_BASE } from "../codes.js";
+import { publicRoomUrl } from "../codes.js";
+import { checkHandle } from "../handles.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, roomNamed } from "../public-names.js";
@@ -36,6 +37,15 @@ const PATH = /^\/public\/rooms\/([^/]+)(?:\/(surface|events)|\/blobs\/([^/]+))?$
 
 /** `/public/handles/:handle`: a handle's signed public rooms (bylines spec D5). */
 const HANDLE_PAGE = /^\/public\/handles\/([^/]+)$/;
+
+/**
+ * How many of a handle's signatures one page request looks at, newest first, each costing a `getSession`
+ * (a Durable Object call) on a request anyone can make. A signature outlives its room, because closing,
+ * unpublishing and purging a room leave the row, so what a handle holds is not what a request may spend.
+ * ponytail: a handle whose newest `HANDLE_PAGE_SCAN` signatures are all dead loses its older live rooms from
+ * the page. The upgrade is to drop the row when a room closes or goes private, or a summary the page reads.
+ */
+export const HANDLE_PAGE_SCAN = 200;
 
 /** Every origin, and no credentials: there is nothing here a credential could grant. */
 const OPEN: Record<string, string> = { "access-control-allow-origin": "*" };
@@ -186,26 +196,33 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
 /**
  * A handle's page (D5): its signed rooms that are still public and open, newest signature first,
  * each wrapped as the creator's words under the handle (plan ruling R2), never their label.
- * Signatures are keyed by user, so a freed handle someone else claims lists only their rooms.
+ * A path segment that breaks the handle grammar names no one, so it is a 404 before the registry is
+ * asked anything. Signatures are keyed by user, so a freed handle someone else claims lists only their
+ * rooms. At most `HANDLE_PAGE_SCAN` signatures are looked at, one session read each, and at most
+ * `MAX_ROOMS_LISTED` rooms listed.
  */
 async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response> {
   let handle: string;
   try {
-    handle = decodeURIComponent(raw).trim().toLowerCase();
+    const check = checkHandle(decodeURIComponent(raw));
+    if (!check.ok) return notFound("no such handle");
+    handle = check.handle;
   } catch {
     return notFound("no such handle");
   }
   const userId = await deps.store.userOfHandle(handle);
   if (userId === undefined) return notFound("no such handle");
+  // The scan's cut is the newest signatures, so the page orders them itself and does not lean on the registry's order.
+  const newest = [...(await deps.store.signedRooms(userId))].sort((a, b) => b.signedAt - a.signedAt).slice(0, HANDLE_PAGE_SCAN);
   const rooms: unknown[] = [];
-  for (const { sessionId, signedAt } of await deps.store.signedRooms(userId)) {
+  for (const { sessionId, signedAt } of newest) {
     if (rooms.length === MAX_ROOMS_LISTED) break;
     const s = await deps.store.getSession(sessionId);
     if (!s || !isPublic(s) || sessionStatus(s) === "closed" || s.createdBy !== userId) continue;
     rooms.push({
       id: s.id,
       text: untrusted({ memberId: s.creator.memberId, label: `@${handle}` }, { room: s.manifest.room, purpose: s.manifest.purpose }),
-      public_url: `${PUBLIC_ROOM_URL_BASE}${s.id}`,
+      public_url: publicRoomUrl(s),
       signed_at: new Date(signedAt).toISOString(),
     });
   }

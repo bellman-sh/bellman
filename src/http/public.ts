@@ -1,8 +1,9 @@
 /**
  * The public reads (public rooms spec D3, D4): a room its creator marked public when it started,
- * read by anyone with its link. `GET` under `/public/rooms/:id` and nothing else: the room's name
- * and purpose, its surface with the surface cursor as an ETag, its log, and the bytes of a blob an
- * item on its surface names.
+ * read by anyone with its link. `GET` under `/public/rooms/:id`: the room's name and purpose, its
+ * byline when its creator signed it (bylines spec D4), its surface with the surface cursor as an
+ * ETag, its log, and the bytes of a blob an item on its surface names. And `GET
+ * /public/handles/:handle`: the public rooms a handle has signed (D5). Nothing else.
  *
  * No credential is read here, by design. A cookie or a bearer changes nothing, so a member's
  * credential cannot open a private room through these paths, and every origin is answered
@@ -16,13 +17,14 @@
  * beside it: a web Request in, a Response out, for both servers and the tests.
  */
 import { isBlobId, type BlobStore } from "../blobs.js";
+import { PUBLIC_ROOM_URL_BASE } from "../codes.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, sessionStatus } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 import { surfaceCursor } from "../surface.js";
-import { MAX_EVENTS_READ, blobResponse, etagMatches, surfaceTag } from "./rooms.js";
+import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, blobResponse, etagMatches, surfaceTag } from "./rooms.js";
 
 export interface PublicRouteDeps {
   store: BellmanStore;
@@ -31,6 +33,9 @@ export interface PublicRouteDeps {
 
 /** `/public/rooms/:id`, then `/surface`, `/events` or `/blobs/:blobId`. */
 const PATH = /^\/public\/rooms\/([^/]+)(?:\/(surface|events)|\/blobs\/([^/]+))?$/;
+
+/** `/public/handles/:handle`: a handle's signed public rooms (bylines spec D5). */
+const HANDLE_PAGE = /^\/public\/handles\/([^/]+)$/;
 
 /** Every origin, and no credentials: there is nothing here a credential could grant. */
 const OPEN: Record<string, string> = { "access-control-allow-origin": "*" };
@@ -103,6 +108,8 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
   if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET", ...OPEN } });
 
   try {
+    const page = HANDLE_PAGE.exec(path);
+    if (page) return await handlePage(page[1], deps);
     const m = PATH.exec(path);
     if (!m) return notFound("no such route");
     const [, key, part, blobId] = m;
@@ -151,7 +158,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
     }
 
     const creator = session.creator;
-    return answer(200, await numbered(deps.store, id, {
+    const room = {
       id: session.id,
       status: sessionStatus(session),
       closed_at: retentionOf(session).closed_at,
@@ -160,9 +167,47 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
         { memberId: creator.memberId, label: creator.label },
         { room: session.manifest.room, purpose: session.manifest.purpose },
       ),
-    }));
+    };
+    // The byline (D4): the creator's handle while they hold one and have signed this room, with the
+    // number byNumber gives the creator, which the page swaps for @handle wherever it appears. The
+    // names are read off the room's own labels, as `numbered` reads them, and serve both.
+    const [names, handle] = await Promise.all([
+      publicNames(deps.store, id, room),
+      deps.store.bylineFor(session.createdBy, id),
+    ]);
+    const as = names.get(creator.label);
+    return answer(200, byNumber({ ...room, by: handle !== undefined && as !== undefined ? { handle, as } : null }, names));
   } catch (err) {
     console.error(`${request.method} ${path} failed:`, err);
     return answer(500, { error: "internal", error_description: "the request failed on the server" });
   }
+}
+
+/**
+ * A handle's page (D5): its signed rooms that are still public and open, newest signature first,
+ * each wrapped as the creator's words under the handle (plan ruling R2), never their label.
+ * Signatures are keyed by user, so a freed handle someone else claims lists only their rooms.
+ */
+async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response> {
+  let handle: string;
+  try {
+    handle = decodeURIComponent(raw).trim().toLowerCase();
+  } catch {
+    return notFound("no such handle");
+  }
+  const userId = await deps.store.userOfHandle(handle);
+  if (userId === undefined) return notFound("no such handle");
+  const rooms: unknown[] = [];
+  for (const { sessionId, signedAt } of await deps.store.signedRooms(userId)) {
+    if (rooms.length === MAX_ROOMS_LISTED) break;
+    const s = await deps.store.getSession(sessionId);
+    if (!s || !isPublic(s) || sessionStatus(s) === "closed" || s.createdBy !== userId) continue;
+    rooms.push({
+      id: s.id,
+      text: untrusted({ memberId: s.creator.memberId, label: `@${handle}` }, { room: s.manifest.room, purpose: s.manifest.purpose }),
+      public_url: `${PUBLIC_ROOM_URL_BASE}${s.id}`,
+      signed_at: new Date(signedAt).toISOString(),
+    });
+  }
+  return answer(200, { handle, rooms });
 }

@@ -7,9 +7,9 @@ import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
 import { publicRoutes } from "../src/http/public.js";
-import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
-import { MemoryStore } from "../src/store.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import { HOST_USER_ID, MemoryStore } from "../src/store.js";
+import { member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -173,5 +173,202 @@ describe("signing a room", () => {
     await store.claimHandle("u_peer", "peer-one");
     await store.signRoom("u_peer", PUB, 1);
     expect(await bodyOf(await roomCall(DEV_KEY.peer, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
+  });
+});
+
+describe("the byline on the public reads", () => {
+  const sign = async (handle: string) => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+  };
+
+  it("is null until the creator signs, then names the handle and the creator's public number", async () => {
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
+    await sign("jesse");
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "jesse", as: "member 1" } });
+  });
+
+  it("names the creator in the log by the same number the byline gives", async () => {
+    await sign("jesse");
+    const creator = member();
+    await store.appendEvent(PUB, { type: "message", fromMemberId: creator.memberId, fromUserId: creator.userId, fromLabel: creator.label, payload: { text: "hi" }, refId: null });
+    const { by } = (await bodyOf(await pub(`/public/rooms/${PUB}`))) as { by: { as: string } };
+    const { events } = (await bodyOf(await pub(`/public/rooms/${PUB}/events`))) as { events: { origin: { label: string } }[] };
+    expect(events.at(-1)!.origin.label).toBe(by.as);
+  });
+
+  it("follows a changed handle, and goes when the handle is released", async () => {
+    await sign("jesse");
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse-two" });
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "jesse-two" } });
+    await handleCall(DEV_KEY.jesse, "DELETE");
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
+  });
+
+  it("carries the handle and the number and nothing more", async () => {
+    await sign("jesse");
+    expect((await bodyOf(await pub(`/public/rooms/${PUB}`))).by).toEqual({ handle: "jesse", as: "member 1" });
+  });
+
+  it("reads the creator's signature alone: another member's, written straight to the registry, shows no byline", async () => {
+    await store.claimHandle("u_peer", "peer-one");
+    await store.signRoom("u_peer", PUB, 1);
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
+    await sign("jesse");
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "jesse" } });
+  });
+
+  it("is null when the creator's seat has no public number for the page to swap, signed or not", async () => {
+    // publicNames never numbers the hosted seat, so a room whose first seat is the host has no `as` to give.
+    await store.createSession(session({
+      id: "qs_host_first",
+      manifest: roomManifest({ public: true }),
+      members: [member({ memberId: "m_host", userId: HOST_USER_ID, label: "host" }), peer()],
+    }));
+    await store.claimHandle("u_jesse", "jesse");
+    await store.signRoom("u_jesse", "qs_host_first", 1);
+    expect(await bodyOf(await pub("/public/rooms/qs_host_first"))).toMatchObject({ by: null });
+  });
+
+  // The creator's seat stays on the room's record when it leaves (ADR 0019), so the byline names it by the number it
+  // was given at seating, and not whichever member now sits first.
+  it("names the creator's seat after the creator has left the room", async () => {
+    await sign("jesse");
+    await store.updateMember(PUB, "m_creator", { leftAt: Date.now() });
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({
+      text: { origin: { memberId: "m_creator", label: "member 1" } },
+      by: { handle: "jesse", as: "member 1" },
+    });
+  });
+
+  // A public room is read by its name as by its id (public names spec, D6). The byline is looked up for the room the
+  // name resolves to, never for the name itself.
+  it("names the creator on a read by the room's public name, as on a read by its id", async () => {
+    await sign("jesse");
+    await store.claimPublicName("open-review", { id: PUB, at: Date.now() }, null);
+    await store.setPublicName(PUB, "open-review");
+    const byName = await bodyOf(await pub("/public/rooms/open-review"));
+    expect(byName).toMatchObject({ id: PUB, by: { handle: "jesse", as: "member 1" } });
+    expect(byName).toEqual(await bodyOf(await pub(`/public/rooms/${PUB}`)));
+  });
+});
+
+describe("GET /public/handles/:handle", () => {
+  it("lists the handle's signed public rooms, wrapped as the creator's words, in any case of the handle", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    const res = (await pub("/public/handles/JESSE"))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    const body = (await res.json()) as { handle: string; rooms: Record<string, unknown>[] };
+    expect(body.handle).toBe("jesse");
+    expect(body.rooms).toHaveLength(1);
+    expect(body.rooms[0]).toMatchObject({
+      id: PUB,
+      public_url: `https://dash.bellman.sh/r/${PUB}`,
+      text: { trust: "untrusted", origin: { label: "@jesse" }, data: { room: "Open review", purpose: "Read along" } },
+    });
+    expect(typeof body.rooms[0].signed_at).toBe("string");
+    expect(JSON.stringify(body)).not.toContain("jesse@codenerd");
+  });
+
+  it("is 404 for a handle nobody holds", async () => {
+    expect((await pub("/public/handles/nobody"))!.status).toBe(404);
+  });
+
+  it("lists none of an old owner's rooms under a freed handle someone else claimed", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse-two" });
+    await handleCall(DEV_KEY.peer, "PUT", { handle: "jesse" });
+    expect(await bodyOf(await pub("/public/handles/jesse"))).toEqual({ handle: "jesse", rooms: [] });
+  });
+
+  it("drops a room once it is unpublished", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    await store.unpublishSession(PUB, Date.now());
+    expect(await bodyOf(await pub("/public/handles/jesse"))).toEqual({ handle: "jesse", rooms: [] });
+  });
+
+  // As the byline does: the creator's seat, which stays on the record when it leaves (ADR 0019), and not whichever
+  // member now sits first.
+  it("lists a signed room under its creator's seat after the creator has left it", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    await store.updateMember(PUB, "m_creator", { leftAt: Date.now() });
+    const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string; text: { origin: { memberId: string } } }[] };
+    expect(rooms.map((r) => [r.id, r.text.origin.memberId])).toEqual([[PUB, "m_creator"]]);
+  });
+
+  it("answers the handle and its rooms and nothing more", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+    const body = await bodyOf(await pub("/public/handles/jesse"));
+    expect(Object.keys(body).sort()).toEqual(["handle", "rooms"]);
+    expect(Object.keys((body.rooms as object[])[0]).sort()).toEqual(["id", "public_url", "signed_at", "text"]);
+  });
+
+  it("reads the handle as a claim does: percent-decoded, trimmed and lowercased", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    expect(await bodyOf(await pub("/public/handles/%20%4AESSE%20"))).toMatchObject({ handle: "jesse" });
+  });
+
+  it("answers a malformed percent-escape with the handle 404, not a 500", async () => {
+    const res = (await pub("/public/handles/%E0%A4%A"))!;
+    expect([res.status, await res.json()]).toEqual([404, { error: "not_found", error_description: "no such handle" }]);
+  });
+
+  it("lists the newest signatures first, at most MAX_ROOMS_LISTED of them", async () => {
+    await store.claimHandle("u_jesse", "jesse");
+    const total = MAX_ROOMS_LISTED + 3;
+    for (let i = 0; i < total; i++) {
+      await store.createSession(session({ id: `qs_many_${i}`, manifest: roomManifest({ public: true }), members: [member()] }));
+      await store.signRoom("u_jesse", `qs_many_${i}`, 1_000 + i);
+    }
+    const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string; signed_at: string }[] };
+    expect(rooms.map((r) => r.id)).toEqual(Array.from({ length: MAX_ROOMS_LISTED }, (_, k) => `qs_many_${total - 1 - k}`));
+    expect(rooms[0].signed_at).toBe(new Date(1_000 + total - 1).toISOString());
+  });
+
+  // One case for each way a signed room leaves the page, beside a control that stays on it. The extra room is signed
+  // straight through the store with the newest signature, so whichever condition lets it through puts it first.
+  // (The route refuses some of these signatures; the registry is what the page must not trust.)
+  describe("keeps off the page a signed room a reader may not see", () => {
+    const idsWith = async (over: SessionSeed) => {
+      await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+      await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+      await store.createSession(session({ id: "qs_extra", manifest: roomManifest({ public: true }), members: [member(), peer()], ...over }));
+      await store.signRoom("u_jesse", "qs_extra", Date.now() + 60_000);
+      const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string }[] };
+      return rooms.map((r) => r.id);
+    };
+
+    it("lists a second room that is public, open and the creator's own, newest signature first: the control", async () => {
+      expect(await idsWith({})).toEqual(["qs_extra", PUB]);
+    });
+
+    it.each<[string, SessionSeed]>([
+      ["was never public", { manifest: roomManifest({ public: false }) }],
+      ["is closed, which isPublic still passes until the purge", { closed: true, closedAt: 1_700_000_000_000, joinCodes: {} }],
+      ["someone else created", { createdBy: "u_peer" }],
+    ])("drops a signed room that %s", async (_why, over) => {
+      expect(await idsWith(over)).toEqual([PUB]);
+    });
+
+    it("drops a signed room once it is purged, and still answers", async () => {
+      await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+      await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+      await store.createSession(session({
+        id: "qs_purged", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: Date.now() - 1_000, joinCodes: {},
+      }));
+      await store.signRoom("u_jesse", "qs_purged", Date.now() + 60_000);
+      await store.schedulePurge("qs_purged", Date.now(), "u_jesse");
+      await store.sweep(Date.now());
+      expect(await store.getSession("qs_purged")).toBeUndefined();
+      const res = (await pub("/public/handles/jesse"))!;
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { rooms: { id: string }[] }).rooms.map((r) => r.id)).toEqual([PUB]);
+    });
   });
 });

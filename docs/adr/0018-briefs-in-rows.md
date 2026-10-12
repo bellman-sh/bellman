@@ -26,8 +26,10 @@ a full room of maximal briefs rewrote about 1.5 MB to note that one member spoke
    inline, inside the old budget. Its next seat or add moves every one of them to
    rows in the same transaction, and `getBriefs` reads an inline brief where no row
    exists yet. Nothing runs at startup, and nothing is backfilled.
-3. **A swarm room seats 1,000.** A member on the record is about 2 KB with every
-   field at its maximum in two-byte text, and a few hundred bytes as members are.
+3. **A swarm room seats 1,000.** A member on the record is about 1.5 KB with every
+   field at its maximum in two-byte text, so a full room of them is about 1.5 MB of
+   the 2 MB, leaving room for the manifest, the codes and members who have left. As
+   members are, one is about 300 bytes.
    `worker-tests/briefs-in-rows.test.ts` stores a full room at the maximum, and its
    control shows the same members with their briefs inline could not be stored.
 4. **A joiner is handed 25 briefs, not everyone's.** `bellman_confirm` returns the

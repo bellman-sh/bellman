@@ -2492,8 +2492,9 @@ export const SWEEP_RPC_BUDGET = 300;
  * Object storage, and a value holds 2 MB. It was 100 while the record carried every
  * brief, at up to 14,710 characters each (ADR 0001). Briefs now live in rows of their
  * own (ADR 0018), as events and surface items do, so a member on the record is its ids,
- * label, role, agent and times: about 2 KB with every field at its maximum and in
- * two-byte text, and a few hundred bytes as members are. worker-tests/briefs-in-rows
+ * label, role, agent and times: about 1.5 KB with every field at its maximum and in
+ * two-byte text, so 1,000 of them are about 1.5 MB, with room left for the manifest, the
+ * codes and members who have left; about 300 bytes as members are. worker-tests/briefs-in-rows
  * stores a full room at the maximum, and shows the same members with their briefs
  * inline could not be stored at all.
  *

@@ -28,11 +28,11 @@ import {
 } from "../src/outbox.js";
 import { JOIN_CODE_TTL } from "../src/store.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
-import type { Member } from "../src/types.js";
 // The shared fixture, not a hand-rolled literal: hydrateStoredSession returns
 // undefined for a session whose manifest has no roles object, so a `manifest: null`
 // fixture reads as GONE and every assertion below would fail against correct code.
 import { member, oneCode, roomManifest, session } from "../tests/helpers/fixtures.js";
+import { editRoom } from "../tests/helpers/rows.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -161,12 +161,8 @@ const parkAlarm = async (id: string) => {
 
 /** Put the session's members past the window, as alarms.test.ts does. */
 const lapse = (id: string) =>
-  runInDurableObject(sessionStub(id), async (_i: SessionDO, ctx) => {
-    const stored = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", {
-      ...stored, members: (stored!.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
-    });
-  });
+  runInDurableObject(sessionStub(id), (_i: SessionDO, ctx) =>
+    editRoom(ctx.storage, { member: (m) => ({ ...m, lastSeenAt: 1 }) }));
 
 /**
  * Turn the inline delivery off, on the instance the session's calls are served by. With

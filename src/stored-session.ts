@@ -79,6 +79,14 @@ export interface StoredSession extends Omit<Session, "events"> {
    * store, which does not hydrate.
    */
   blobBytes?: number;
+  /**
+   * The last `seq` the room gave a member, so the next seat takes the one after it (ADR
+   * 0019). The Durable Objects record keeps it, because the members who have left are rows
+   * it does not read on every call; MemoryStore counts the members it keeps instead.
+   */
+  memberSeq?: number;
+  /** The last public number the room gave a label (ADR 0019, D6), kept and counted as `memberSeq` is. */
+  labelSeq?: number;
 }
 
 /** The UTC calendar month a time falls in, as the hosted-seat meter keys it. */
@@ -87,7 +95,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
 /**
  * Gate every session read out of Durable Object storage.
  *
- * Fifteen changes to the stored shape landed after the sessions now in production
+ * Sixteen changes to the stored shape landed after the sessions now in production
  * were written, and they want different treatment:
  *
  * - **manifest** cannot be defaulted. It is a declaration, and inventing one
@@ -155,8 +163,13 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  * - **unpublishedAt** (public rooms) defaults to `null`: a room written before it was never
  *   made private. Whether it is public at all is the manifest's `public`, read false for such
  *   a row.
+ * - **members** (ADR 0019) are not on a record written since: they are rows, and `present`
+ *   names those in the room. That one is not lifted here, because it is a move of rows and
+ *   not a default: SessionDO's constructor moves an older record's members out before
+ *   anything reads it (`legacyRows` in member-rows.ts), and that move reads its members
+ *   through this gate.
  *
- * All fifteen live here, in one gate, rather than in separate functions that could drift.
+ * All sixteen live here, in one gate or beside it, rather than in separate places that could drift.
  */
 /** What a member reads as when its record names no agent at all, which no member written by Bellman lacks. */
 const UNKNOWN_AGENT: AgentInfo = { provider: "unknown", model: "unknown", client: "unknown" };
@@ -169,16 +182,18 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!roles || typeof roles !== "object" || Array.isArray(roles)) return undefined;
 
   const {
-    joinCode, joinCodeExpiresAt, expiresAt: _clock, maxMembers: _cap, ...row
+    joinCode, joinCodeExpiresAt, expiresAt: _clock, maxMembers: _cap, present: _present, ...row
   } = raw as StoredSession & {
-    joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number; maxMembers?: number;
+    joinCode?: string | null; joinCodeExpiresAt?: number; expiresAt?: number; maxMembers?: number; present?: string[];
   };
 
   return {
     ...row,
-    // A member stored before ADR 0018 carries its brief inline and no `agent` beside it. The
-    // agent is lifted from the brief, and the brief stays where it is until the room's next
-    // seat moves it to a row of its own.
+    // A record holds no members since ADR 0019: they are rows, and the Durable Object reads
+    // those in the room by the ids in `present`, which come off here so the session does not
+    // carry two lists of one roster. A record stored before then holds them, and one stored
+    // before ADR 0018 holds each brief inline and no `agent` beside it: the agent is lifted
+    // from the brief, and the brief stays on the member for the move to rows to find.
     members: (row.members ?? []).map((m) => (m as Partial<Member>).agent
       ? m
       : { ...m, agent: (m as { brief?: Brief }).brief?.agent ?? UNKNOWN_AGENT }),

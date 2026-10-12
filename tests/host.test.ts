@@ -92,9 +92,9 @@ describe("decide", () => {
   // Read after that write, as the seat reads the room, the same test would refuse every
   // tick, so the seat asks on whatever wake reaches it.
   it("asks on a tick however long since anyone was seen, because the store guards presence", () => {
-    const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), hostMember(hosted(), NOW)] });
+    const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), member(hostMember(hosted(), NOW))] });
     expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toEqual({ kind: "question", tick: 9 });
-    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), hostMember(hosted(), NOW)] });
+    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), member(hostMember(hosted(), NOW))] });
     expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toEqual({ kind: "question", tick: 9 });
   });
 
@@ -153,7 +153,7 @@ describe("decide", () => {
 
   // Evicting the host is the creator's off-switch (C1): a wake that reaches it anyway settles, with no model call.
   it("skips any wake once the host has left the room", () => {
-    const evicted = room({ members: [member({ lastSeenAt: NOW - 60_000 }), { ...hostMember(hosted(), NOW), leftAt: NOW - 1 }] });
+    const evicted = room({ members: [member({ lastSeenAt: NOW - 60_000 }), member({ ...hostMember(hosted(), NOW), leftAt: NOW - 1 })] });
     expect(decide(emptyHostState(), tick(9), evicted, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/left the room/) });
     const asked = { ...emptyHostState(), cursor: 10, questions: [{ cursor: 10, text: "q", askedAt: NOW, answers: 0 }] };
     expect(decide(asked, reply(11), evicted, [ev({ cursor: 11, refId: "10" })], NOW))

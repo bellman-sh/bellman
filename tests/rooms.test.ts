@@ -59,8 +59,9 @@ describe("leaveRoom", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
     expect(r.value.sessionStatus).toBe("active");
-    const after = await store.getSession("qs_test");
-    expect(after?.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
+    // Gone from the room, so read by id (ADR 0019).
+    expect((await store.getSession("qs_test"))?.members.map((m) => m.memberId)).toEqual(["m_creator"]);
+    expect((await store.getMember("qs_test", "m_peer"))?.leftAt).toEqual(expect.any(Number));
   });
 
   it("refuses a handle that belongs to someone else", async () => {
@@ -1092,8 +1093,8 @@ describe("evictMember", () => {
     const out = await evictMember(store, creator, session.id, target.memberId);
     expect(out.ok).toBe(true);
 
-    const after = (await store.getSession(session.id))!;
-    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    // Gone from the room, so read by id (ADR 0019).
+    const m = (await store.getMember(session.id, target.memberId))!;
     const announcement = (await store.eventsAfter(session.id, 0))
       .filter((e) => e.type === "member_evicted")
       .at(-1)!;
@@ -1140,8 +1141,8 @@ describe("evictMember", () => {
     const out = await evictMember(store, creator, session.id, target.memberId);
     expect(out.ok).toBe(true);
 
-    const after = (await store.getSession(session.id))!;
-    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    const m = (await store.getMember(session.id, target.memberId))!;
+    expect(m.leftAt, "control: the member had left before the eviction").not.toBeNull();
     // Spec D6: the cut rides the announcement, and the early return writes
     // none. A voluntary leaver keeps the open feed (R2); the late eviction is
     // about the door, not their reading.
@@ -1177,7 +1178,9 @@ describe("evictMember", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     const after = await store.getSession("qs_test");
     expect(after?.frozenAt, "control: the freeze landed after the removal").not.toBeNull();
-    const m = after?.members.find((mm) => mm.memberId === "m_peer");
+    // Gone from the room, so read by id (ADR 0019).
+    expect(after?.members.some((mm) => mm.memberId === "m_peer")).toBe(false);
+    const m = await store.getMember("qs_test", "m_peer");
     expect(m?.leftAt).not.toBeNull();
     // Out AND cut, not out alone: the cut rides the removal's own transaction, so
     // a freeze arriving after it cannot have taken one without the other (#113).

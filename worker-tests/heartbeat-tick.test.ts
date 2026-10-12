@@ -11,8 +11,8 @@ import {
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { hostMember } from "../src/host.js";
 import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
-import type { Member } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
+import { editRoom, roomIn } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   await reset();
@@ -56,13 +56,8 @@ const rows = (stub: DurableObjectStub) =>
  */
 const ageRoom = (stub: DurableObjectStub) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<{ members: { joinedAt: number }[] }>("session");
     const ago = Date.now() - FIVE_MIN;
-    await ctx.storage.put("session", {
-      ...s,
-      lastTickAt: ago,
-      members: s!.members.map((m) => ({ ...m, joinedAt: ago })),
-    });
+    await editRoom(ctx.storage, { record: (s) => ({ ...s, lastTickAt: ago }), member: (m) => ({ ...m, joinedAt: ago }) });
   });
 
 /**
@@ -186,7 +181,7 @@ it("arms nothing for a room without a host whose roles ask for no reports", asyn
     env.SESSION.get(env.SESSION.idFromName("qs_none")),
     async (_i: SessionDO, ctx) => {
       // Only the abandonment time, which is not a tick.
-      const s = await ctx.storage.get<{ closed: boolean; frozenAt: number | null; members: Member[] }>("session");
+      const s = await roomIn<{ closed: boolean; frozenAt: number | null }>(ctx.storage);
       expect(await ctx.storage.getAlarm()).toBe(abandonedAt(s!));
     },
   );
@@ -258,10 +253,7 @@ it("writes no tick into a closed room even when the alarm names it", async () =>
  */
 const lapseRoom = (stub: DurableObjectStub, lastSeenAt: number) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<Record<string, unknown>>("session");
-    await ctx.storage.put("session", {
-      ...s, members: (s!.members as Member[]).map((m) => ({ ...m, lastSeenAt })),
-    });
+    await editRoom(ctx.storage, { member: (m) => ({ ...m, lastSeenAt }) });
   });
 
 /**
@@ -431,7 +423,7 @@ const helper = (memberId: string) =>
 
 const alarmAndAbandonment = (stub: DurableObjectStub) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const row = await ctx.storage.get<{ closed: boolean; frozenAt: number | null; members: Member[] }>("session");
+    const row = await roomIn<{ closed: boolean; frozenAt: number | null }>(ctx.storage);
     return { alarm: await ctx.storage.getAlarm(), abandonedAt: abandonedAt(row!)! };
   });
 
@@ -619,13 +611,8 @@ it("arms, fires, and goes quiet once the seated member reports", async () => {
  */
 const ageBy = (stub: DurableObjectStub, cadences: number) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<{ members: { joinedAt: number }[] }>("session");
     const ago = Date.now() - cadences * FIVE_MIN;
-    await ctx.storage.put("session", {
-      ...s,
-      lastTickAt: ago,
-      members: s!.members.map((m) => ({ ...m, joinedAt: ago })),
-    });
+    await editRoom(ctx.storage, { record: (s) => ({ ...s, lastTickAt: ago }), member: (m) => ({ ...m, joinedAt: ago }) });
   });
 
 /** Who every tick in the log named silent, across all of them. */
@@ -659,17 +646,9 @@ const namedSilent = async (stub: DurableObjectStub) => {
  */
 const waitOneCadenceAfterTheThaw = (stub: DurableObjectStub) =>
   runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<{
-      members: { lastReportAt?: number }[];
-      lastTickAt?: number;
-    }>("session");
-    await ctx.storage.put("session", {
-      ...s,
-      lastTickAt: (s!.lastTickAt ?? Date.now()) - FIVE_MIN,
-      members: s!.members.map((m) => ({
-        ...m,
-        lastReportAt: m.lastReportAt === undefined ? undefined : m.lastReportAt - FIVE_MIN,
-      })),
+    await editRoom(ctx.storage, {
+      record: (s) => ({ ...s, lastTickAt: ((s.lastTickAt as number | undefined) ?? Date.now()) - FIVE_MIN }),
+      member: (m) => ({ ...m, lastReportAt: m.lastReportAt === undefined ? undefined : m.lastReportAt - FIVE_MIN }),
     });
   });
 
@@ -795,12 +774,9 @@ async function hostedRoom(
   }));
   const stub = env.SESSION.get(env.SESSION.idFromName(id));
   await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const s = await ctx.storage.get<{ members: Member[] }>("session");
-    await ctx.storage.put("session", {
-      ...s,
-      lastTickAt: Date.now() - tickAgo,
-      ...(host ? { lastHostTickAt: Date.now() - tickAgo } : {}),
-      members: s!.members.map((x) => (x.memberId === "m_creator" ? { ...x, joinedAt, lastSeenAt: seenAt } : x)),
+    await editRoom(ctx.storage, {
+      record: (s) => ({ ...s, lastTickAt: Date.now() - tickAgo, ...(host ? { lastHostTickAt: Date.now() - tickAgo } : {}) }),
+      member: (x) => (x.memberId === "m_creator" ? { ...x, joinedAt, lastSeenAt: seenAt } : x),
     });
   });
   return stub;

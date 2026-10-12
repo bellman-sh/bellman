@@ -608,38 +608,30 @@ describe("bellman_evict", () => {
       });
       expect(out.isError, out.text).toBe(false);
 
-      // The one surface that ships a member's CURRENT record is a confirm's
-      // roster, which lists everyone the room has held, departed included — so
-      // it takes a joiner after the removal for the removed handle to be on it
-      // with its cut already recorded. Not `bellman_whoami`, which is the
-      // bridge's own tool and answers about the caller, and not a replayed
-      // member_joined payload, which is a snapshot taken before any cut exists.
+      // A confirm after the removal is the latest roster a tool ships, and it is
+      // the members in the room now (ADR 0019, D3): the removed handle is not on
+      // it, cut or no cut. Not `bellman_whoami`, which is the bridge's own tool
+      // and answers about the caller, and not a replayed member_joined payload,
+      // which is a snapshot taken before any cut exists. The panel's roster does
+      // list a member who has left, and tests/http-rooms.test.ts holds it to the
+      // same rule.
       const invited = await s.creator.call("bellman_invite", {
         session_id: s.sessionId, member_id: s.creatorMemberId,
       });
       expect(invited.isError, invited.text).toBe(false);
       const rejoined = await join(third.peer, invited.data.join_code);
       expect(rejoined.isError, rejoined.text).toBe(false);
-      const roster = rejoined.data.members as Record<string, unknown>[];
+      const roster = (rejoined.data.members as Record<string, unknown>[]).map((m) => m.member_id);
 
-      const removed = roster.find((m) => m.member_id === third.memberId);
-      const live = roster.find((m) => m.member_id === s.creatorMemberId);
-      // The controls: the removed handle is on this roster, and as departed, so
-      // what is absent below is about its cut and not about a roster that left
-      // it out.
-      expect(removed, "the removed member is on the roster").toBeDefined();
-      expect(removed!.active).toBe(false);
-      expect(live, "a member still in is on the roster").toBeDefined();
+      expect(roster, "a member still in is on the roster").toContain(s.creatorMemberId);
+      expect(roster, "the removed handle has left the room").not.toContain(third.memberId);
 
-      // The point is not secrecy for its own sake: the roster already says a
+      // The point is not secrecy for its own sake: the panel's roster says a
       // member is departed. It is that no client needs the exact cursor at
       // which another member stopped being able to read (#113 D8).
       const serialized = JSON.stringify(rejoined.data);
       expect(serialized).not.toContain("removedAtCursor");
       expect(serialized).not.toContain("removed_at_cursor");
-      // A leak need not be called either of those, so the shape is compared as
-      // well: a removed member's entry carries nothing a live one's does not.
-      expect(Object.keys(removed!).sort()).toEqual(Object.keys(live!).sort());
     });
 
     it("is not a ban: a fresh code seats them again, under a new handle", async () => {

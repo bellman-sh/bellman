@@ -277,7 +277,7 @@ describe("removeMember, with a second call let in while the first is held", () =
     const [outcome] = await Promise.all([removal, freeze]);
 
     const after = (await s.getSession(ID))!;
-    const peer = after.members.find((m) => m.memberId === "m_peer")!;
+    const peer = (await s.getMember(ID, "m_peer"))!;
     const events = (await s.eventsAfter(ID, 0)).map((e) => e.type);
     const where = `the freeze ${frozeFirst ? "landed while the eviction was held" : "waited for the eviction"}; `
       + `the eviction answered ${JSON.stringify(outcome)}, the member is ${peer.leftAt === null ? "still in" : "out"} `
@@ -428,8 +428,7 @@ describe("removeMember when the audit stream cannot take the row", () => {
 
     expect(outcome, "the removal answers, though its audit row could not be delivered")
       .toEqual({ refused: null, removed: true, codeRetired: null });
-    const after = (await s.getSession(ID))!;
-    expect(after.members.find((m) => m.memberId === "m_peer")!.leftAt).not.toBeNull();
+    expect((await s.getMember(ID, "m_peer"))!.leftAt).not.toBeNull();
     expect((await s.eventsAfter(ID, 0)).map((e) => e.type)).toEqual(["member_left"]);
     // Tried once and refused, and still queued: the attempt count is how this knows the
     // delivery was made and failed, and not that it never ran.

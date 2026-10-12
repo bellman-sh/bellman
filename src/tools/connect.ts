@@ -82,8 +82,9 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
       if (seatedMembers(session, Date.now(), connected).length >= capacityOf(session.manifest)) {
         return fail(fullMessage(session.manifest));
       }
-      const creator = session.members[0];
-      // From its row beside the room (ADR 0018).
+      // The room's first seat, which the record keeps whether or not it is still in the room
+      // (ADR 0019), and its brief from its row beside the room (ADR 0018).
+      const creator = session.creator;
       const creatorBrief = (await s.getBriefs(session.id, [creator.memberId]))[creator.memberId] ?? null;
       const token = generateConnectToken();
       await s.putPendingConnect({

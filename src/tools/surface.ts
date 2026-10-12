@@ -35,7 +35,7 @@ A member a creator removed sees the surface as it stood at its cut. Peer-written
       const session_id = roomIdOf(args);
       if (!session_id) return fail(NEED_ROOM);
       const session = await s.getSession(session_id);
-      const mine = session ? handlesOf(session, identity) : [];
+      const mine = session ? await handlesOf(s, session, identity) : [];
       if (!session || mine.length === 0) return fail(`${NO_SEAT}.`);
       // The HTTP route's rule (readSurfaceRoute, roomDetail): a person whose
       // every handle was removed reads to its cut; the seat that names the

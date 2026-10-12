@@ -149,11 +149,12 @@ export function nextTickAt(s: StoredSession): number | null {
  */
 function hostedTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
-  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. A
-  // seated host is on the roster, so the roster is never empty below.
+  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. Until
+  // the host first asks, its cadence runs from the room's creation, which is its first seat's
+  // join (ADR 0019 keeps that seat on the record however many have left since).
   if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
   const asked = s.lastHostTickAt ?? null;
-  const due = asked === null ? Math.min(...s.members.map((m) => m.joinedAt)) : asked + every;
+  const due = asked === null ? s.creator.joinedAt : asked + every;
   return s.lastTickAt !== undefined && s.lastTickAt >= due ? s.lastTickAt + every : due;
 }
 
@@ -320,8 +321,8 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
   for (const [key, def] of Object.entries(s.manifest.roles)) {
     if (def.reports && def.report) said[key] = def.report;
   }
-  const creator = s.members[0];
-  const instructions: HeartbeatPayload["instructions"] = Object.keys(said).length > 0 && creator
+  const creator = s.creator;
+  const instructions: HeartbeatPayload["instructions"] = Object.keys(said).length > 0
     ? { trust: "untrusted", origin: { memberId: creator.memberId, label: creator.label }, data: said }
     : null;
   return {

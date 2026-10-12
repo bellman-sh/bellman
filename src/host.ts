@@ -12,7 +12,7 @@
  * `isHostMember`, `isReplyToHost`, the hourly cap), which this module re-exports,
  * and this module is a consumer of the store like a tool is.
  */
-import type { Brief, HostModelName, Member, Plan, RoomManifest, SessionEvent } from "./types.js";
+import type { ArrivingMember, HostModelName, Member, Plan, RoomManifest, SessionEvent } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
 import type { OutboxIntent } from "./outbox.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, decideHostCharge, hostSeated, type HostAppend } from "./store.js";
@@ -90,7 +90,7 @@ export type HostDecision =
   | { kind: "question"; tick: number }
   | { kind: "answer"; question: HostQuestion; replies: SessionEvent[] };
 
-export function hostMember(manifest: RoomManifest, now: number): Member & { brief: Brief } {
+export function hostMember(manifest: RoomManifest, now: number): ArrivingMember {
   if (manifest.host === null) throw new Error("hostMember: the manifest declares no host");
   return {
     memberId: HOST_MEMBER_ID,
@@ -106,7 +106,6 @@ export function hostMember(manifest: RoomManifest, now: number): Member & { brie
       open_questions: [],
       agent: { provider: "anthropic", model: HOST_MODELS[manifest.host.model].id, client: "bellman-host" },
     },
-    agent: { provider: "anthropic", model: HOST_MODELS[manifest.host.model].id, client: "bellman-host" },
     joinedAt: now,
     lastSeenAt: now,
     leftAt: null,

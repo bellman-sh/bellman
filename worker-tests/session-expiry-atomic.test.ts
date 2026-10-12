@@ -34,8 +34,8 @@ import {
 } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { JOIN_CODE_TTL } from "../src/store.js";
-import type { Member } from "../src/types.js";
 import { session } from "../tests/helpers/fixtures.js";
+import { editRoom } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   await reset();
@@ -91,12 +91,8 @@ const lapsedRoom = async (store: DurableObjectStore, id: string) => {
     type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse",
     fromLabel: "jesse", payload: { text: "before" }, refId: null,
   });
-  await runInDurableObject(sessionStub(id), async (_i: SessionDO, ctx) => {
-    const stored = await ctx.storage.get<{ members: Member[] }>("session");
-    await ctx.storage.put("session", {
-      ...stored, members: stored!.members.map((m) => ({ ...m, lastSeenAt: 1 })),
-    });
-  });
+  await runInDurableObject(sessionStub(id), (_i: SessionDO, ctx) =>
+    editRoom(ctx.storage, { member: (m) => ({ ...m, lastSeenAt: 1 }) }));
 };
 
 /**

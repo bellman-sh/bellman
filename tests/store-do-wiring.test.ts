@@ -21,7 +21,9 @@
  * exclusion.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { serialize } from "node:v8";
+import { legacyRows, memberKey } from "../src/member-rows.js";
 import { PING, PONG } from "../src/keepalive.js";
 
 // store-do.ts imports `cloudflare:workers`, which exists only inside workerd. Here
@@ -91,8 +93,14 @@ const LEGACY_CODE = "BELL-OLD-01";
  * reference. `writes` and `alarms` let a test assert that a path wrote nothing.
  */
 function fakeStorage(seed: Record<string, unknown> = {}) {
+  // A seeded record that holds its members is stored as SessionDO's constructor leaves it,
+  // each member a row of its own (ADR 0019, `legacyRows`), which is the room every request
+  // reads. A record the gate reads as gone is not moved by the constructor and is seeded as
+  // written. "SessionDO's constructor" below stores a raw one and watches it move.
+  const { session: record, ...others } = seed;
+  const moved = record === undefined ? null : legacyRows(record);
   const rows = new Map<string, unknown>(
-    Object.entries(seed).map(([k, v]) => [k, structuredClone(v)]),
+    Object.entries(moved ? { ...others, ...moved } : seed).map(([k, v]) => [k, structuredClone(v)]),
   );
   let writes = 0;
   let puts = 0;
@@ -114,7 +122,13 @@ function fakeStorage(seed: Record<string, unknown> = {}) {
     get lists() { return lists; },
     alarms,
     snapshot: (): Record<string, unknown> => structuredClone(Object.fromEntries(rows)),
-    get: async (key: string) => (rows.has(key) ? structuredClone(rows.get(key)) : undefined),
+    /** Both shapes the real one offers: one key, or a list of them answered as a Map of those it holds. */
+    get: async (key: string | string[]) => {
+      if (Array.isArray(key)) {
+        return new Map(key.filter((k) => rows.has(k)).map((k) => [k, structuredClone(rows.get(k))]));
+      }
+      return rows.has(key) ? structuredClone(rows.get(key)) : undefined;
+    },
     /**
      * Both shapes the real DurableObjectStorage offers: put(key, value) and the
      * batched put(entries). createSession uses the batched one so the session,
@@ -243,13 +257,38 @@ function fakeSocket() {
 function fakeCtx(storage: ReturnType<typeof fakeStorage>) {
   const sockets: ReturnType<typeof fakeSocket>[] = [];
   const autoResponses: unknown[] = [];
+  // `blockConcurrencyWhile` as workerd runs it: while the callback runs, nothing else
+  // reaches the object's storage. Every storage call from outside the callback waits for
+  // it to settle; the callback's own calls, which `inside` tells apart, go straight
+  // through. With no callback running a call is not delayed at all, so the order of
+  // every other test's awaits is what it was.
+  const inside = new AsyncLocalStorage<true>();
+  let held: Promise<unknown> | null = null;
+  const gated = new Proxy(storage, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver) as unknown;
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        if (held === null || inside.getStore()) return (value as (...a: unknown[]) => unknown).apply(target, args);
+        return held.then(() => (value as (...a: unknown[]) => unknown).apply(target, args));
+      };
+    },
+  });
   return {
-    storage,
+    storage: gated,
     sockets,
     autoResponses,
     acceptWebSocket: (ws: unknown) => { sockets.push(ws as ReturnType<typeof fakeSocket>); },
     getWebSockets: () => [...sockets],
     setWebSocketAutoResponse: (r: unknown) => { autoResponses.push(r); },
+    blockConcurrencyWhile: <T>(callback: () => Promise<T>): Promise<T> => {
+      const run = inside.run(true, callback);
+      const settled: Promise<unknown> = run.then(() => undefined, () => undefined).then(() => {
+        if (held === settled) held = null;
+      });
+      held = settled;
+      return run;
+    },
   };
 }
 
@@ -823,16 +862,14 @@ describe("SessionDO.appendEventOnce", () => {
       { creditReport: true },
     );
 
-    // The event, the cursor, the key row and the session record.
+    // The event, the cursor, the key row and the member's own row: a stamp leaves the
+    // room's record alone (ADR 0019).
     expect(legacyStorage.writes - before).toBe(4);
     expect(legacyStorage.puts - putsBefore).toBe(1);
 
     if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
-    const row = legacyStorage.snapshot().session as {
-      members: { memberId: string; lastReportAt?: number }[];
-    };
-    expect(row.members.find((m) => m.memberId === "m_creator")?.lastReportAt)
-      .toBe(write.event.at);
+    const row = legacyStorage.snapshot()[memberKey("m_creator")] as { lastReportAt?: number };
+    expect(row.lastReportAt).toBe(write.event.at);
   });
 
   /**
@@ -883,13 +920,13 @@ describe("SessionDO.appendEventOnce", () => {
       LEGACY_ID, eviction(), "evict-0001", { markRemoved: "m_peer" },
     );
 
-    // The event, the cursor, the key row and the session record.
-    expect(legacyStorage.writes - before).toBe(4);
+    // The event, the cursor, the key row, the member's row and the record, whose roster
+    // the member has left.
+    expect(legacyStorage.writes - before).toBe(5);
     expect(legacyStorage.puts - putsBefore).toBe(1);
 
     if (write.outcome !== "appended") throw new Error(`eviction said ${write.outcome}`);
-    const row = legacyStorage.snapshot().session as { members: Member[] };
-    const peer = row.members.find((m) => m.memberId === "m_peer")!;
+    const peer = legacyStorage.snapshot()[memberKey("m_peer")] as Member;
     expect(peer.removedAtCursor).toBe(write.event.cursor);
     expect(peer.leftAt).not.toBeNull();
   });
@@ -902,12 +939,11 @@ describe("SessionDO.appendEventOnce", () => {
     const putsBefore = legacyStorage.puts;
     const event = (await store.appendEvent(LEGACY_ID, eviction(), { markRemoved: "m_peer" }))!;
 
-    // The event, the cursor and the session record.
-    expect(legacyStorage.writes - before).toBe(3);
+    // The event, the cursor, the member's row and the record.
+    expect(legacyStorage.writes - before).toBe(4);
     expect(legacyStorage.puts - putsBefore).toBe(1);
 
-    const row = legacyStorage.snapshot().session as { members: Member[] };
-    const peer = row.members.find((m) => m.memberId === "m_peer")!;
+    const peer = legacyStorage.snapshot()[memberKey("m_peer")] as Member;
     expect(peer.removedAtCursor).toBe(event.cursor);
     expect(peer.leftAt).not.toBeNull();
   });
@@ -1001,11 +1037,13 @@ describe("SessionDO keeps housekeeping's books", () => {
     event: said({ type: "member_left", fromMemberId: id, payload: { label: id } }), audit: [],
   });
   type Books = {
-    members: Array<Member & { lastSentAt?: number }>;
     openRequests: Record<string, { at: number; fromMemberId: string }>;
     lastMemberEventAt: number | null;
   };
   const rowOf = (storage: { snapshot: () => Record<string, unknown> }) => storage.snapshot().session as Books;
+  /** A member's own row (ADR 0019), where its last send is kept. */
+  const memberOf = (storage: { snapshot: () => Record<string, unknown> }, id: string) =>
+    storage.snapshot()[memberKey(id)] as Member & { lastSentAt?: number };
 
   it("writes them in the same put as an unkeyed append's event", async () => {
     const { store, legacyStorage } = await worldOn(storeDo, kept());
@@ -1014,12 +1052,11 @@ describe("SessionDO keeps housekeeping's books", () => {
     const putsBefore = legacyStorage.puts;
     const event = (await store.appendEvent(LEGACY_ID, said()))!;
 
-    // The event, the cursor and the session record, in ONE call.
-    expect(legacyStorage.writes - before).toBe(3);
+    // The event, the cursor, the record and the sender's row, in ONE call.
+    expect(legacyStorage.writes - before).toBe(4);
     expect(legacyStorage.puts - putsBefore).toBe(1);
-    const row = rowOf(legacyStorage);
-    expect(row.lastMemberEventAt).toBe(event.at);
-    expect(row.members.find((m) => m.memberId === "m_creator")?.lastSentAt).toBe(event.at);
+    expect(rowOf(legacyStorage).lastMemberEventAt).toBe(event.at);
+    expect(memberOf(legacyStorage, "m_creator").lastSentAt).toBe(event.at);
   });
 
   it("writes them in the same put as a keyed append's event and its key", async () => {
@@ -1029,8 +1066,8 @@ describe("SessionDO keeps housekeeping's books", () => {
     const putsBefore = legacyStorage.puts;
     const write = await store.appendEventOnce(LEGACY_ID, said(), "send-0001");
 
-    // The event, the cursor, the key row and the session record.
-    expect(legacyStorage.writes - before).toBe(4);
+    // The event, the cursor, the key row, the record and the sender's row.
+    expect(legacyStorage.writes - before).toBe(5);
     expect(legacyStorage.puts - putsBefore).toBe(1);
     if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
     expect(rowOf(legacyStorage).lastMemberEventAt).toBe(write.event.at);
@@ -1104,7 +1141,7 @@ describe("SessionDO keeps housekeeping's books", () => {
     expect(hkDelta).toEqual(noneDelta);
     const row = rowOf(hk.legacyStorage);
     expect(row.openRequests, `the leaver's request ${request.cursor} closed`).toEqual({});
-    expect(row.members.find((m) => m.memberId === "m_peer")).toMatchObject({ leftAt: 9_000_000 });
+    expect(memberOf(hk.legacyStorage, "m_peer")).toMatchObject({ leftAt: 9_000_000 });
     expect(row.lastMemberEventAt).toBeGreaterThanOrEqual(request.at);
     expect(rowOf(none.legacyStorage).lastMemberEventAt ?? null).toBeNull();
   });
@@ -1131,6 +1168,48 @@ describe("SessionDO read cost", () => {
     expect(got).not.toHaveProperty("events");
     // The whole point of #25: a session read is O(1) keys, not O(events).
     expect(storage.lists - before).toBe(0);
+  });
+});
+
+/**
+ * SessionDO's constructor moves an older room's members out of its record and into rows of
+ * their own before any event reaches it (ADR 0019, D5). The storage here is filled after it is
+ * made, so the record goes in as an older build wrote it and only the constructor moves it.
+ * worker-tests/members-as-rows.test.ts does the same in workerd.
+ */
+describe("SessionDO's constructor", () => {
+  it("moves an older room's members to rows before anything reads it, numbered in join order", async () => {
+    const storage = fakeStorage();
+    // Each with its brief inline, as a room stored before ADR 0018 held them.
+    await storage.put("session", currentRow({ members: [
+      member(),
+      member({ memberId: "m_gone", userId: "u_gone", label: "gone@elsewhere", orgId: "org_gone", leftAt: 5 }),
+      member({ memberId: "m_again", userId: "u_jesse", label: "jesse@codenerd" }),
+    ] }));
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    expect((await doi.getSession())!.members.map((m) => [m.memberId, m.seq])).toEqual([["m_creator", 1], ["m_again", 3]]);
+    expect(await doi.getMember("m_gone")).toMatchObject({ leftAt: 5, seq: 2, publicNumber: 2 });
+    expect(await doi.publicNumbers(["jesse@codenerd", "gone@elsewhere"])).toEqual({ "jesse@codenerd": 1, "gone@elsewhere": 2 });
+    expect((await doi.membersOf("u_jesse")).memberIds).toEqual(["m_creator", "m_again"]);
+    expect(Object.keys(await doi.getBriefs(["m_creator", "m_gone", "m_again"])).sort())
+      .toEqual(["m_again", "m_creator", "m_gone"]);
+    const record = storage.snapshot().session;
+    expect(record).not.toHaveProperty("members");
+    expect(record).toMatchObject({
+      present: ["m_creator", "m_again"], memberSeq: 3, labelSeq: 2,
+      creator: { memberId: "m_creator", userId: "u_jesse" }, orgs: ["org_codenerd", "org_gone"],
+    });
+  });
+
+  it("leaves a record written since alone, and writes nothing", async () => {
+    const storage = fakeStorage({ session: currentRow(), cursor: 0 });
+    const before = storage.snapshot();
+    const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
+
+    expect((await doi.getSession())!.members.map((m) => m.memberId)).toEqual(["m_creator"]);
+    expect(storage.writes).toBe(0);
+    expect(storage.snapshot()).toEqual(before);
   });
 });
 
@@ -1253,7 +1332,7 @@ describe("membersOf", () => {
     // refuses an upgrade onto a row that already reads closed, as an aged row with
     // no socket does.
     expect((await doiVouched.fetch(open(vouched, 0))).status).toBe(101);
-    await vouchedStorage.put("session", row);
+    await vouchedStorage.put(legacyRows(row)!);
     expect((await doiVouched.membersOf("u1")).closed).toBe(false);
     // fetch is the other reader: a second upgrade while m1's socket vouches is served.
     expect((await doiVouched.fetch(open(vouched, 0))).status).toBe(101);
@@ -1271,16 +1350,22 @@ describe("membersOf", () => {
     const storage = fakeStorage({ session: withMembers({ memberId: "m1", userId: "u1" }), cursor: 0 });
     const doi = new storeDo.SessionDO(fakeCtx(storage) as never, {} as never);
     // list() is how the log is scanned and get() is how one event is fetched
-    // (eventAt). A list counter alone cannot see the second.
+    // (eventAt), so both are watched for the event prefix. membersOf does list:
+    // the person's own index rows (ADR 0019), which name their handles.
     const eventGets: string[] = [];
+    const listed: string[] = [];
     const get = storage.get;
-    storage.get = async (key: string) => {
-      if (key.startsWith("e:")) eventGets.push(key);
+    storage.get = (async (key: string | string[]) => {
+      eventGets.push(...[key].flat().filter((k) => k.startsWith("e:")));
       return get(key);
-    };
-    const before = storage.lists;
+    }) as typeof storage.get;
+    const list = storage.list;
+    storage.list = (async (opts: { prefix?: string } = {}) => {
+      listed.push(opts.prefix ?? "");
+      return list(opts);
+    }) as typeof storage.list;
     await doi.membersOf("u1");
-    expect(storage.lists - before).toBe(0);
+    expect(listed).toEqual(["mu:u1:"]);
     expect(eventGets).toEqual([]);
   });
 });
@@ -1665,9 +1750,9 @@ describe("wake: socket delivery", () => {
     const ctx = fakeCtx(storage);
     const doi = new storeDo.SessionDO(ctx as never, {} as never);
     await doi.fetch(open(ctx, 0)); // the socket names m1, who has left
-    await storage.put("session", {
+    await storage.put(legacyRows({
       ...live, members: (live.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
-    });
+    })!);
     await doi.alarm();
     expect(ctx.sockets[0].sent.map((s) => JSON.parse(s).type)).toEqual(["session_expired"]);
   });
@@ -1684,16 +1769,16 @@ describe("wake: socket delivery", () => {
     // fetch refuses an upgrade onto a room that already reads closed (#133), and an
     // aged row with no socket yet does.
     expect((await doi.fetch(open(ctx, 0))).status).toBe(101);
-    await storage.put("session", {
+    await storage.put(legacyRows({
       ...live, members: (live.members as Member[]).map((m) => ({ ...m, lastSeenAt: 1 })),
-    });
+    })!);
     const before = Date.now();
 
     await doi.alarm();
 
-    const row = (await storage.get("session")) as { closed: boolean; members: { lastSeenAt: number }[] };
+    const row = (await storage.get("session")) as { closed: boolean };
     expect(row.closed).toBe(false);
-    expect(row.members[0].lastSeenAt).toBeGreaterThanOrEqual(before);
+    expect(((await storage.get(memberKey("m1"))) as Member).lastSeenAt).toBeGreaterThanOrEqual(before);
     expect(ctx.sockets[0].sent).toEqual([]);
     expect(storage.alarms.at(-1)).toBeGreaterThanOrEqual(before + ABANDONED_AFTER_MS);
   });
@@ -2271,14 +2356,15 @@ describe("a failed index write does not fail the operation it indexes", () => {
   it("addMember still seats the member, and still says it did", async () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const { store, registryStorage } = await worldOn(storeDo);
-    await store.createSession(session({ id: "qs_idx", members: [] }));
+    // A room is created with its creator (ADR 0019); the case is about who joins it after.
+    await store.createSession(session({ id: "qs_idx", members: [member({ memberId: "m_owner", userId: "u_owner" })] }));
     refuse(registryStorage, ["um:"]);
 
     expect(await store.addMember("qs_idx", member({ memberId: "m_joiner", userId: "u_peer" })))
       .toBe(true);
 
     expect((await store.getSession("qs_idx"))?.members.map((m) => m.memberId))
-      .toEqual(["m_joiner"]);
+      .toEqual(["m_owner", "m_joiner"]);
     // The whole cost: one row missing from one listing.
     expect(await store.sessionsJoinedBy("u_peer", 10)).toEqual([]);
     expect(logged).toHaveBeenCalledTimes(1);

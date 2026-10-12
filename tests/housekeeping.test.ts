@@ -773,7 +773,7 @@ describe("the hosted seat is not a person (H3)", () => {
     housekeeping: thresholds,
   });
   /** The seat as `bellman_start` seats it, `joinedAt` when the room was made. */
-  const seat = (joinedAt = T0 - 1_000) => hostMember(hostedManifest(), joinedAt);
+  const seat = (joinedAt = T0 - 1_000) => member(hostMember(hostedManifest(), joinedAt));
   const hostSays = (over: Partial<SessionEvent> = {}) =>
     ev({ fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: "host@bellman", ...over });
 

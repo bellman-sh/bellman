@@ -30,9 +30,11 @@ export function untrusted<T>(origin: { memberId: string; label: string }, data: 
 
 /**
  * A member as a fact about the record: nothing here is derived from the clock,
- * so it is safe to persist in an event payload that will be replayed.
+ * so it is safe to persist in an event payload that will be replayed. It takes
+ * the fields it reads, so a member still arriving, with no place in the join
+ * order yet, can be shown as one.
  */
-export function storedMember(m: Member) {
+export function storedMember(m: Pick<Member, "memberId" | "label" | "orgId" | "agent" | "capabilities" | "roomRole" | "leftAt">) {
   return {
     member_id: m.memberId,
     label: m.label,
@@ -80,9 +82,15 @@ export function publicMember(m: Member, connected: ReadonlySet<string>) {
  * member who left later was still in. Nothing off the clock: no `presence`, which
  * is the live roster's (`publicMember`), and live data is what such a viewer is
  * not owed. A join in the very millisecond of the removal counts as before it.
+ *
+ * `members` is the members in the room now and those who left after `at`
+ * (`departedMembers({ leftAfter })`, ADR 0019, D7): the ones who were in the room
+ * at `at`, in whatever order; they come back in join order. One who had left
+ * before then is not read.
  */
 export function rosterAsOf(members: readonly Member[], at: number) {
-  return members
+  return [...members]
+    .sort((a, b) => a.seq - b.seq)
     .filter((m) => m.joinedAt <= at)
     .map((m) => ({ ...storedMember(m), active: m.leftAt === null || m.leftAt > at }));
 }
@@ -133,7 +141,7 @@ export function rosterAsOf(members: readonly Member[], at: number) {
 export function roomPreview(session: StoredSession, viewerRole: string | null) {
   const m = session.manifest;
   const seconds = (ms: number | null): number | null => (ms === null ? null : Math.round(ms / 1000));
-  const creator = session.members[0];
+  const creator = session.creator;
   /**
    * Whether a seat is asked to report. Shown before a joiner's human accepts
    * the seat: this is the consent point, and a member that will be named silent
@@ -296,19 +304,22 @@ export function retentionOf(s: StoredSession) {
  * where `roomPreview` wraps it for a joiner's MODEL. `status` is handed in
  * because `sessionStatus` lives in rooms.ts, which imports this module.
  *
- * `cutAt` is given when the viewer was removed from the room (#113): `members`
- * is then the count of the roster as of that moment (`rosterAsOf`), the number
- * the detail's roster would give it, and not how many are in now.
+ * `cut` is given when the viewer was removed from the room (#113): its moment, and
+ * the members who left after it (ADR 0019, D7). `members` is then the count of the
+ * roster as of that moment (`rosterAsOf`), the number the detail's roster would give
+ * it, and not how many are in now.
  */
-export function roomListEntry(s: StoredSession, viewerUserId: string, status: string, cutAt?: number) {
+export function roomListEntry(
+  s: StoredSession, viewerUserId: string, status: string, cut?: { at: number; departed: readonly Member[] },
+) {
   return {
     id: s.id,
     room: s.manifest.room,
     mode: s.manifest.mode,
     status,
-    members: cutAt === undefined
+    members: cut === undefined
       ? s.members.filter((m) => m.leftAt === null).length
-      : rosterAsOf(s.members, cutAt).filter((m) => m.active).length,
+      : rosterAsOf([...s.members, ...cut.departed], cut.at).filter((m) => m.active).length,
     mine: s.createdBy === viewerUserId,
   };
 }

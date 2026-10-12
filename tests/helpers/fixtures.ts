@@ -2,7 +2,8 @@ import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../..
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { monthKey } from "../../src/stored-session.js";
-import { JOIN_CODE_TTL } from "../../src/store.js";
+import { JOIN_CODE_TTL, creatorOf, seatInOrder, type Seating } from "../../src/store.js";
+import { orgsOnRoster } from "../../src/retention.js";
 
 export const anthropicAgent = {
   provider: "anthropic",
@@ -61,6 +62,8 @@ export function member(over: Partial<SeededMember> = {}): SeededMember {
     joinedAt: Date.now(),
     lastSeenAt: Date.now(),
     leftAt: null,
+    seq: 1,
+    publicNumber: 1,
     ...over,
   };
 }
@@ -70,21 +73,36 @@ export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeR
   return { [role]: { code, expiresAt: Date.now() + JOIN_CODE_TTL } };
 }
 
-/** Session fields to seed from, whose members may be read back from a store and so carry no brief. */
+/**
+ * Session fields to seed from. Its members may be arriving ones (a brief and no agent, as
+ * `hostMember` makes) or read back from a store (an agent and no brief).
+ */
 export type SessionSeed = Partial<Omit<SeededSession, "members">> & {
-  members?: (Member & { brief?: Brief })[];
+  members?: Seating[];
   /** The tick clocks a stored room carries (`StoredSession`), for a case that starts a room with history. */
   lastTickAt?: number;
   lastHostTickAt?: number | null;
 };
 
-/** A member read back from a store, given a brief again so a room built from it can be created. */
-const seeded = (m: Member & { brief?: Brief }): SeededMember => ({ ...m, brief: m.brief ?? brief({ agent: m.agent }) });
+/** A member given both a brief and its agent, so a room built from it can be created and read as a record. */
+const seeded = (m: Seating): SeededMember => {
+  const b = m.brief ?? brief(m.agent ? { agent: m.agent } : {});
+  return { ...m, brief: b, agent: m.agent ?? b.agent, seq: 0, publicNumber: null };
+};
 
+/**
+ * A session to create, or one standing in for what a store reads back. Its members are numbered
+ * as a store seats them, and it carries the `creator` and `orgs` a store keeps (ADR 0019), so a
+ * pure function handed one sees the record a store would hand it. A room with no members has the
+ * fixture creator.
+ */
 export function session(seed: SessionSeed = {}): SeededSession {
   const { members: given, ...over } = seed;
   const now = Date.now();
   const manifest = over.manifest ?? roomManifest();
+  const unnumbered = given ? given.map(seeded) : [member()];
+  const numbers = seatInOrder(unnumbered, { memberSeq: 0, labelSeq: 0 }).members;
+  const members = unnumbered.map((m, i) => ({ ...m, seq: numbers[i].seq, publicNumber: numbers[i].publicNumber }));
   return {
     id: "qs_test",
     manifest,
@@ -105,7 +123,11 @@ export function session(seed: SessionSeed = {}): SeededSession {
     lastMemberEventAt: null,
     thawedAt: null,
     unpublishedAt: null,
-    members: given ? given.map(seeded) : [member()],
+    members,
+    creator: members.length > 0
+      ? creatorOf(members[0])
+      : { memberId: "m_creator", userId: over.createdBy ?? "u_jesse", label: "jesse@codenerd", joinedAt: now },
+    orgs: orgsOnRoster({ members }),
     events: [],
     closed: false,
     ...over,

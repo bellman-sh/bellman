@@ -11,7 +11,7 @@ import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../co
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { audit } from "../rooms.js";
-import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING, splitBriefs } from "../store.js";
+import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 import { APP_UI_META } from "../ui/resource.js";
@@ -194,8 +194,10 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         throw err;
       }
       await s.recordCreate(identity.userId);
-      // The room as the store keeps it: each member with its brief's agent, the brief beside it (ADR 0018).
-      const room = { ...session, members: splitBriefs(session.members).members };
+      // The room as the store keeps it, read back: each member numbered and with its brief's agent,
+      // the brief beside it, and the creator and orgs the store took from them (ADR 0018, ADR 0019).
+      const room = await s.getSession(session.id);
+      if (!room) throw new Error(`room ${session.id} was created and cannot be read back`);
       await audit(s, room, identity, "session_created", {
         mode: manifest.mode, org_only, preset: manifest.preset, hosted: manifest.host !== null,
       });

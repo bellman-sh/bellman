@@ -8,7 +8,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import {
+  MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, roomRoutes, type RoomCaller, type RoomRouteDeps,
+} from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
 import { JOINED_SCAN, MemoryStore } from "../src/store.js";
@@ -169,12 +171,15 @@ describe("GET /rooms", () => {
   // #113 on the list: a person every one of whose handles was removed is told the member count as it stood at the
   // removal, not how many are in now. The creator, still in, is the control: it sees the late joiner.
   it("counts a removed member's room as it stood at the removal", async () => {
+    // In the room at the removal and gone since: counted as of the removal, from the members who left after it (ADR 0019, D7).
+    await store.addMember(ROOM, member({ memberId: "m_after", userId: "u_after", label: "after@codenerd", roomRole: "peer_b" }));
     await evictThroughTool("m_peer");
-    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    const cutAt = (await store.getMember(ROOM, "m_peer"))!.leftAt!;
+    await store.updateMember(ROOM, "m_after", { leftAt: cutAt + 1_000 });
     await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
     const count = async (key: string) =>
       ((await bodyOf(await call(key, "/rooms"))) as { rooms: { id: string; members: number }[] }).rooms.find((r) => r.id === ROOM)!.members;
-    expect(await count(DEV_KEY.peer)).toBe(1);
+    expect(await count(DEV_KEY.peer)).toBe(2);
     expect(await count(DEV_KEY.jesse)).toBe(2);
   });
 
@@ -344,7 +349,7 @@ describe("GET /rooms/:id", () => {
   // joiner and the presence the removed member must not.
   it("serves a removed member the roster as of its removal, with no presence", async () => {
     await evictThroughTool("m_peer");
-    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    const cutAt = (await store.getMember(ROOM, "m_peer"))!.leftAt!;
     await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
     type Roster = { members: Record<string, unknown>[]; my_handles: { removed: boolean }[] };
     const asPeer = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`)) as Roster;
@@ -381,12 +386,14 @@ describe("GET /rooms/:id", () => {
     await store.addMember(ROOM, joined("m_after"));
     await store.updateMember(ROOM, "m_before", { leftAt: Date.now() });
     await evictThroughTool("m_peer");
-    const cutAt = (await store.getSession(ROOM))!.members.find((m) => m.memberId === "m_peer")!.leftAt!;
+    const cutAt = (await store.getMember(ROOM, "m_peer"))!.leftAt!;
     // Leaves after the removal: still in, as far as the removed member may know.
     await store.updateMember(ROOM, "m_after", { leftAt: cutAt + 1_000 });
     const active = async (key: string) =>
       Object.fromEntries(((await bodyOf(await call(key, `/rooms/${ROOM}`))) as { members: { member_id: string; active: boolean }[] }).members.map((m) => [m.member_id, m.active]));
-    expect(await active(DEV_KEY.peer)).toEqual({ m_creator: true, m_peer: false, m_before: false, m_after: true });
+    // A member who had left before the removal is not in the room as it stood (ADR 0019, D7); the
+    // person's own handle is, as the one that was cut.
+    expect(await active(DEV_KEY.peer)).toEqual({ m_creator: true, m_peer: false, m_after: true });
     expect(await active(DEV_KEY.jesse)).toEqual({ m_creator: true, m_peer: false, m_before: false, m_after: false });
   });
 
@@ -403,6 +410,39 @@ describe("GET /rooms/:id", () => {
     await store.addMember(ROOM, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b" }));
     const body = await bodyOf(await call(DEV_KEY.peer, `/rooms/${ROOM}`)) as { members: { member_id: string }[] };
     expect(body.members.map((m) => m.member_id).sort()).toEqual(["m_creator", "m_peer", "m_peer2"]);
+  });
+
+  // #113 D8 on the panel: the live roster lists a member the creator removed, as departed, and its entry says nothing of
+  // where that member's reading stopped. A leak need not be called either name below, so the shape is compared as well:
+  // a removed member's entry carries nothing a live one's does not.
+  it("lists a removed member as departed, and never the cursor that cut it", async () => {
+    await evictThroughTool("m_peer");
+    const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`)) as { members: Record<string, unknown>[] };
+    const removed = body.members.find((m) => m.member_id === "m_peer");
+    const live = body.members.find((m) => m.member_id === "m_creator");
+    expect(removed, "the removed member is on the roster").toMatchObject({ active: false, presence: "departed" });
+    expect(live, "a member still in is on the roster").toBeDefined();
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("removedAtCursor");
+    expect(serialized).not.toContain("removed_at_cursor");
+    expect(Object.keys(removed!).sort()).toEqual(Object.keys(live!).sort());
+  });
+
+  // ADR 0019, D7: a room that has seen thousands come and go sends the members in it and the ROSTER_DEPARTED who left most
+  // recently, in join order, and counts the rest. The two who left first are the ones left out, though they joined after
+  // two who are shown, and the member who joined last and stayed comes last.
+  it("shows every member in the room and the ROSTER_DEPARTED who left most recently, in join order, and counts the rest", async () => {
+    const joiner = (memberId: string) => member({ memberId, userId: `u_${memberId}`, label: `${memberId}@codenerd`, roomRole: "peer_b" });
+    const gone = Array.from({ length: ROSTER_DEPARTED + 2 }, (_, i) => `m_d${String(i).padStart(3, "0")}`);
+    for (const id of gone) await store.addMember(ROOM, joiner(id));
+    await store.addMember(ROOM, joiner("m_last"));
+    // In join order, but for the first two, who leave last.
+    const t0 = Date.now();
+    for (const [i, id] of [...gone.slice(2), ...gone.slice(0, 2)].entries()) await store.updateMember(ROOM, id, { leftAt: t0 + i });
+
+    const body = await bodyOf(await call(DEV_KEY.jesse, `/rooms/${ROOM}`)) as { members: { member_id: string }[]; departed_omitted: number };
+    expect(body.members.map((m) => m.member_id)).toEqual(["m_creator", "m_peer", gone[0], gone[1], ...gone.slice(4), "m_last"]);
+    expect(body.departed_omitted).toBe(2);
   });
 });
 
@@ -1034,7 +1074,7 @@ describe("an org admin's read of a closed room (#65)", () => {
       const before = await write("before");
       const evicted = await owner.call("bellman_evict", { session_id: id, member_id: removed.memberId });
       expect(evicted.isError, evicted.text).toBe(false);
-      const cutAt = (await store.getSession(id))!.members.find((m) => m.memberId === removed.memberId)!.leftAt!;
+      const cutAt = (await store.getMember(id, removed.memberId))!.leftAt!;
       await store.addMember(id, member({ memberId: "m_late", userId: "u_late", label: "late@codenerd", roomRole: "peer_b", joinedAt: cutAt + 1 }));
       const after = await write("after");
       await h.close();

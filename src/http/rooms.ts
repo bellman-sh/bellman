@@ -121,6 +121,26 @@ export const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
 
 /**
+ * The refusal for a JSON write whose declared length rules it out, or `undefined` when its body may be
+ * read. Decided from the Content-Length header, before a byte of the body is parsed: a length that is
+ * present must be a digit string (400), because `Number` would read "garbage" as NaN and "1e3" as 1000
+ * and pass both under the bound, and it may not pass `max` (413). An absent one is a chunked body,
+ * which is allowed; the bound on those is a follow-up, not this check. `what` names the body in the
+ * 413's words ("a preset", "a surface write"). The presets, the surface writes and the handle all
+ * bound their bodies here, each with its own `max`.
+ */
+export function lengthRefusal(request: Request, max: number, what: string, origin: string | undefined): Response | undefined {
+  const length = request.headers.get("content-length");
+  if (length !== null && !/^\d+$/.test(length)) {
+    return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
+  }
+  if (Number(length ?? "0") > max) {
+    return problem(413, "too_large", `${what} is at most ${max} bytes of JSON`, origin);
+  }
+  return undefined;
+}
+
+/**
  * The room routes. `undefined` for a path that is neither `/rooms` (the list)
  * nor under `/rooms/`, so the Worker carries on to the next module; everything
  * under the prefix is answered here, a path this module does not know and a
@@ -782,17 +802,8 @@ async function writeSurfaceRoute(
   if (request.method === "DELETE") {
     payload = { key, remove: true };
   } else {
-    // A length that is present must be a digit string: `Number` would read
-    // "garbage" as NaN and "1e3" as 1000 and pass both under the bound. An
-    // absent one is a chunked body, which is allowed; the bound on those is a
-    // follow-up, not this check.
-    const length = request.headers.get("content-length");
-    if (length !== null && !/^\d+$/.test(length)) {
-      return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
-    }
-    if (Number(length ?? "0") > MAX_SURFACE_WRITE_BYTES) {
-      return problem(413, "too_large", `a surface write is at most ${MAX_SURFACE_WRITE_BYTES} bytes of JSON`, origin);
-    }
+    const refused = lengthRefusal(request, MAX_SURFACE_WRITE_BYTES, "a surface write", origin);
+    if (refused) return refused;
     const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the item, without its key or with the path's", origin);
     let body: unknown;
     try {

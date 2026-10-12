@@ -6,10 +6,12 @@
  */
 import { checkHandle } from "../handles.js";
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
-import { MAX_PRESET_BYTES } from "./presets.js";
-import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
+import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type HandleRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
+
+// ponytail: 1 KB, not tuned. A handle is at most 30 characters, so its JSON body is a few dozen bytes.
+export const MAX_HANDLE_BYTES = 1024;
 
 const PATH = "/account/handle";
 
@@ -34,16 +36,8 @@ export async function handleRoutes(request: Request, deps: HandleRouteDeps): Pro
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
-    // The length before the body, as the preset and surface writes check it: a present length must be a
-    // digit string. The presets' limit: a handle's body is far under it, and the bound only keeps a large
-    // one from being read.
-    const length = request.headers.get("content-length");
-    if (length !== null && !/^\d+$/.test(length)) {
-      return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
-    }
-    if (Number(length ?? "0") > MAX_PRESET_BYTES) {
-      return problem(413, "too_large", `a handle request is at most ${MAX_PRESET_BYTES} bytes of JSON`, origin);
-    }
+    const refused = lengthRefusal(request, MAX_HANDLE_BYTES, "a handle request", origin);
+    if (refused) return refused;
 
     let body: unknown;
     try {

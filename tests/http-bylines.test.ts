@@ -5,8 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
-import { handleRoutes } from "../src/http/handles.js";
-import { MAX_PRESET_BYTES } from "../src/http/presets.js";
+import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
 import { publicRoutes } from "../src/http/public.js";
 import { roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/store.js";
@@ -84,12 +83,15 @@ describe("the handle routes", () => {
     expect(await bodyOf(await handleCall(DEV_KEY.jesse, "GET"))).toEqual({ handle: null });
   });
 
-  it("refuse a body over the presets' bound before reading it, and read one at the bound", async () => {
-    const over = (await putWithLength(String(MAX_PRESET_BYTES + 1)))!;
+  it("refuse a body just over a handle's bound before reading it, and read one at the bound", async () => {
+    const over = (await putWithLength(String(MAX_HANDLE_BYTES + 1)))!;
     expect(over.status).toBe(413);
-    expect(await over.json()).toMatchObject({ error: "too_large" });
+    expect(await over.json()).toMatchObject({
+      error: "too_large",
+      error_description: `a handle request is at most ${MAX_HANDLE_BYTES} bytes of JSON`,
+    });
     // At the bound the body is read, and is then refused as a handle: that is how this tells the bound from the body.
-    const at = (await putWithLength(String(MAX_PRESET_BYTES)))!;
+    const at = (await putWithLength(String(MAX_HANDLE_BYTES)))!;
     expect(at.status).toBe(400);
     expect(await at.json()).toMatchObject({ error: "handle_invalid" });
   });

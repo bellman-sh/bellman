@@ -979,16 +979,19 @@ export function describeStoreContract(
       expect(after.members.map((m) => m.memberId), "nobody was seated").not.toContain("m_late");
     });
 
-    it("seatMember seats a 100th member into a swarm room and refuses a 101st", async () => {
+    // One person on every machine: a seat is a member and not a person, so the room fills all the
+    // same, and a store that indexes each person a room is created with does it once, not once a seat.
+    it("seatMember seats a swarm room's last member and refuses one more", async () => {
       const present = (i: number) =>
-        member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "peer_b", lastSeenAt: Date.now() });
+        member({ memberId: `m_${i}`, userId: "u_crowd", roomRole: "peer_b", lastSeenAt: Date.now() });
       const s = swarmSession({ members: Array.from({ length: ROOM_MEMBER_CEILING - 1 }, (_, i) => present(i)) });
       (await store.createSession(s));
 
-      const hundredth = await store.seatMember(s.id, present(100), 1, Date.now());
-      const beyond = await store.seatMember(s.id, present(101), 1, Date.now());
+      // Ids the room has not seated: a member id is the member's row (ADR 0019).
+      const last = await store.seatMember(s.id, present(ROOM_MEMBER_CEILING - 1), 1, Date.now());
+      const beyond = await store.seatMember(s.id, present(ROOM_MEMBER_CEILING), 1, Date.now());
 
-      expect(hundredth).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      expect(last).toEqual({ refused: null, reclaimed: [], codesCleared: true });
       expect(beyond).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt === null)).toHaveLength(ROOM_MEMBER_CEILING);
     });

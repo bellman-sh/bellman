@@ -13,7 +13,7 @@ import { APP_UI_META } from "../ui/resource.js";
 
 /**
  * How many briefs a joiner is handed: those of the members heard from most recently
- * (ADR 0018). A room seats a thousand, and a joiner's agent reads all it is handed.
+ * (ADR 0018). A room seats thousands, and a joiner's agent reads all it is handed.
  */
 export const BRIEFS_ON_JOIN = 25;
 
@@ -139,7 +139,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       });
 
       // The briefs of the members heard from most recently, not everyone's (ADR 0018): a room
-      // seats a thousand, and a joiner's agent reads all it is handed. A member who has left
+      // seats thousands, and a joiner's agent reads all it is handed. A member who has left
       // is not among them, and `briefs_omitted` counts the present members not shown.
       const peers = joined.members
         .filter((m) => m.memberId !== memberId && isActiveMember(m))

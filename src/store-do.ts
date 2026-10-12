@@ -829,8 +829,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The 16 KB is reachable only by churn. What goes in is the ids one identity
    * owns in this room, departed members included, except one a creator removed
    * (#113): membersOf returns the others on purpose, so /ws and bellman_sync
-   * agree about who may watch the open feed, and nothing removes a member from
-   * the roster. The list grows with seatings, not with the room's capacity
+   * agree about who may watch the open feed, and nothing deletes a member's
+   * row (ADR 0019). The list grows with seatings, not with the room's capacity
    * (`capacityOf`), so it takes over a thousand seatings by one identity in one
    * room's life. That is churn, not a breach of the capacity.
    */
@@ -3508,10 +3508,10 @@ export class DurableObjectStore implements BellmanStore {
     // The members a session is created with are seated directly — bellman_start hands
     // over the creator in `members` and never calls addMember — so the joined index is
     // written here as well as in addMember. A missed entry leaves the room out of that
-    // person's joined listing.
-    for (const m of s.members) {
-      await this.writeIndex("um", m.userId, s.id, () =>
-        this.registry.indexMembership(m.userId, s.id));
+    // person's joined listing. Once a person, however many of the seats are theirs.
+    for (const userId of new Set(s.members.map((m) => m.userId))) {
+      await this.writeIndex("um", userId, s.id, () =>
+        this.registry.indexMembership(userId, s.id));
     }
     // `uo:` is how an org's admin finds a closed room its people sat in (#65, D5): one row for each
     // org on the roster it starts with, the creator's included. A missed entry leaves the room out of

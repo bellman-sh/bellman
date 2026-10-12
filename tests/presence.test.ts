@@ -765,10 +765,10 @@ describe("capacity is the manifest's (#18)", () => {
     expect(capacityOf(roomManifest({ mode: "swarm" }))).toBe(ROOM_MEMBER_CEILING);
   });
 
-  it("puts the ceiling at 100, which a room of maximal briefs keeps under one stored value", () => {
-    // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
-    // of a 2 MB Durable Object value. 250 would be 3.7 MB.
-    expect(ROOM_MEMBER_CEILING).toBe(1000);
+  it("puts the ceiling at 5,000, the roster every call still loads", () => {
+    // Storage no longer bounds it: each member is a row of its own (ADR 0019). Every call
+    // still reads the members in the room, about 300 bytes each, so 5,000 is about 1.5 MB.
+    expect(ROOM_MEMBER_CEILING).toBe(5000);
   });
 });
 

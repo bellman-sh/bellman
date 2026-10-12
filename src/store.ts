@@ -2608,20 +2608,19 @@ export const SWEEP_RPC_BUDGET = 300;
  *
  * A ceiling, not a plan fact. A room's record is one value in SQLite-backed Durable
  * Object storage, and a value holds 2 MB. It was 100 while the record carried every
- * brief, at up to 14,710 characters each (ADR 0001). Briefs now live in rows of their
- * own (ADR 0018), as events and surface items do, so a member on the record is its ids,
- * label, role, agent and times: about 1.5 KB with every field at its maximum and in
- * two-byte text, so 1,000 of them are about 1.5 MB, with room left for the manifest, the
- * codes and members who have left; about 300 bytes as members are. worker-tests/briefs-in-rows
- * stores a full room at the maximum, and shows the same members with their briefs
- * inline could not be stored at all.
+ * brief (ADR 0001), and 1,000 once briefs had rows of their own (ADR 0018) and the
+ * record still carried every member who had ever sat in the room. Members are rows of
+ * their own now (ADR 0019): the record names those in the room and keeps the counts, so
+ * storage no longer bounds the ceiling, and however many come and go the record keeps
+ * its size.
  *
- * Members who have left stay on the record: a public read numbers members by when
- * they joined. A room that sees thousands of joins over its life therefore nears the
- * limit, and the transaction turns reaching it into one failed join rather than a
- * broken room. Members as rows of their own is what lifts that.
+ * What bounds it is the read. Every call still loads the members in the room, about
+ * 300 bytes each as members are, so 5,000 is about 1.5 MB a call, and about 7.5 MB with
+ * every field at its maximum in two-byte text. worker-tests/members-as-rows seats a full
+ * room at that maximum and refuses one more. Narrowing what each call reads is the next
+ * step, and the one that lifts this.
  */
-export const ROOM_MEMBER_CEILING = 1000;
+export const ROOM_MEMBER_CEILING = 5000;
 
 /**
  * How many members this room holds. A `pair` room holds two because the preset

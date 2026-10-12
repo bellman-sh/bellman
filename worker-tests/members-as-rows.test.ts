@@ -8,8 +8,9 @@ import { it, expect, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { MEMBER_PREFIX } from "../src/member-rows.js";
+import { ROOM_MEMBER_CEILING } from "../src/store.js";
 import type { Member } from "../src/types.js";
-import { member, swarmSession } from "../tests/helpers/fixtures.js";
+import { brief, member, swarmSession } from "../tests/helpers/fixtures.js";
 
 afterEach(async () => {
   await reset();
@@ -101,4 +102,39 @@ it("keeps the record the same size however many members have come and gone", { t
   expect(afterThousands - afterTen).toBeLessThanOrEqual(4);
   expect(afterThousands).toBeLessThan(64 * 1024);
   expect((await store.getSession("qs_churn"))!.members.map((m) => m.memberId)).toEqual(["m_creator"]);
+});
+
+/** Outside Latin-1, so the string is stored at two bytes a character: the most text can weigh. */
+const wide = (n: number) => "\u{142}".repeat(n);
+/** A member with every field its row keeps at its maximum, the agent from a brief that is otherwise ordinary. */
+const largest = (i: number) => {
+  const agent = { provider: wide(50), model: wide(80), client: wide(80) };
+  return member({
+    memberId: `m_${String(i).padStart(4, "0")}`,
+    userId: `u_${"x".repeat(194)}${String(i).padStart(4, "0")}`,
+    label: wide(250) + String(i).padStart(4, "0"),
+    roomRole: "peer_b",
+    agent,
+    brief: brief({ agent }),
+  });
+};
+
+// The ceiling (D8): storage no longer bounds it, and every call still loads the members in the room.
+// At their largest that is about 1.5 KB a member, 7.5 MB a read; as members are, about 300 bytes. The
+// room is created in one call to its object, which seats its first members as `bellman_start` does,
+// because the store's createSession then indexes each member in the registry one call at a time.
+it("seats a full room of members at their largest, reads every one back in join order, and refuses one more", { timeout: 180_000 }, async () => {
+  const store = new DurableObjectStore(env as never);
+  await stubOf("qs_full").createSession(swarmSession({
+    id: "qs_full", members: Array.from({ length: ROOM_MEMBER_CEILING - 1 }, (_, i) => largest(i)),
+  }));
+
+  // The last seat goes through the join path, which reads the whole roster in its transaction.
+  expect((await store.seatMember("qs_full", largest(ROOM_MEMBER_CEILING - 1), 0, Date.now())).refused).toBeNull();
+  const read = (await store.getSession("qs_full"))!;
+  expect(read.members.map((m) => m.seq)).toEqual(Array.from({ length: ROOM_MEMBER_CEILING }, (_, i) => i + 1));
+  expect(read.members.at(-1)).toMatchObject({ memberId: largest(ROOM_MEMBER_CEILING - 1).memberId, label: largest(ROOM_MEMBER_CEILING - 1).label });
+
+  // Full is a refusal, never a write that breaks the room.
+  expect((await store.seatMember("qs_full", largest(ROOM_MEMBER_CEILING), 0, Date.now())).refused).toBe("full");
 });

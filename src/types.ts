@@ -11,7 +11,7 @@ export interface Identity {
   label: string; // display name, e.g. "jesse@codenerd"
 }
 
-/** Provider-neutral description of the agent on this side of the wire. */
+/** Provider-neutral description of the agent that wrote the brief. */
 export interface AgentInfo {
   provider: string; // "anthropic" | "openai" | "google" | ...
   model: string;    // "claude-fable-5", "gpt-5", ...

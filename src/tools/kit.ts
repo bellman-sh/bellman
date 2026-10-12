@@ -78,7 +78,7 @@ export const AgentShape = z.object({
     .describe('Model identifier, e.g. "claude-fable-5", "gpt-5"'),
   client: z.string().min(1).max(80)
     .describe('Client surface, e.g. "claude-code", "claude-chat", "cursor", "chatgpt", "gemini-cli"'),
-}).describe("Provider-neutral description of the agent on this side");
+}).describe("Provider-neutral description of the agent writing this brief");
 
 export const BriefShape = z.object({
   goal: z.string().min(1).max(500).describe("One sentence: what this session is trying to accomplish"),

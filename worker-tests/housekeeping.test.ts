@@ -19,6 +19,7 @@ import { ABANDONED_AFTER_MS, abandonedAt } from "../src/presence.js";
 import { publicEvent } from "../src/public-event.js";
 import type { RoomManifest, Session, SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
+import { roomIn } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   vi.useRealTimers();
@@ -56,7 +57,7 @@ const fireNamed = (id: string) =>
 
 const rows = (id: string) =>
   runInDurableObject(stubOf(id), async (_i: SessionDO, ctx) => ({
-    session: await ctx.storage.get<Session>("session"),
+    session: await roomIn<Session>(ctx.storage),
     events: [...(await ctx.storage.list<SessionEvent>({ prefix: "e:" })).values()],
   }));
 const proposals = async (id: string) => (await rows(id)).events.filter((e) => e.type === "housekeeping");
@@ -234,7 +235,7 @@ it("lets an alarm armed before the last member left fire into nothing, and arms 
     now: T0 + 1_000, frozen: "allow", cut: false, audit: [],
     event: { type: "member_left", fromMemberId: "m_a", fromUserId: "u_a", fromLabel: "a@x", payload: {}, refId: null },
   });
-  expect((await rows("qs_left")).session!.members[0].leftAt).toBe(T0 + 1_000);
+  expect((await store.getMember("qs_left", "m_a"))!.leftAt).toBe(T0 + 1_000);
 
   setClock(T0 + 5 * MIN);
   await fire("qs_left");

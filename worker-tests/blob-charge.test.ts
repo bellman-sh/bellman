@@ -11,8 +11,8 @@ import { it, expect, afterEach } from "vitest";
 import { env, reset, runInDurableObject, abortAllDurableObjects } from "cloudflare:test";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
-import type { Member } from "../src/types.js";
 import { session } from "../tests/helpers/fixtures.js";
+import { editRoom } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   await reset();
@@ -29,9 +29,7 @@ it("answers closed to a charge on an abandoned room whose alarm has not fired", 
   // Every member last seen past the window, and the alarm gone: the state between
   // the window closing and the alarm's delivery.
   await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const stored = await ctx.storage.get<{ members: Member[] }>("session");
-    const aged = stored!.members.map((m) => ({ ...m, lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 }));
-    await ctx.storage.put("session", { ...stored, members: aged });
+    await editRoom(ctx.storage, { member: (m) => ({ ...m, lastSeenAt: Date.now() - ABANDONED_AFTER_MS - 1 }) });
     await ctx.storage.deleteAlarm();
   });
 

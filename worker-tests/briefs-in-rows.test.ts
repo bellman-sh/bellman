@@ -2,7 +2,7 @@
  * Briefs in rows of their own (ADR 0018), against the storage that sets the limit: a value
  * holds 2 MB. A room's record now carries each member's small fields and no brief, so a full
  * room stays storable with every field at its maximum, and an old room's inline briefs move
- * out on its next seat.
+ * out when its object is next constructed (ADR 0019, D5).
  */
 import { it, expect, afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
@@ -59,31 +59,35 @@ it("could not store those members as one value with their briefs inline", { time
   });
 });
 
-it("reads an old room's inline briefs, and moves them into rows on its next seat", async () => {
+it("moves an old room's inline briefs into rows when its object is next constructed", async () => {
   const store = new DurableObjectStore(env as never);
   await store.createSession(swarmSession({ id: "qs_old" }));
   await runInDurableObject(stubOf("qs_old"), async (_i: SessionDO, ctx) => {
-    const row = (await ctx.storage.get<Record<string, unknown>>("session"))!;
-    // As a room stored before ADR 0018: each brief inline on its member, and no `agent` beside it.
+    const { present: _present, creator: _creator, orgs: _orgs, memberSeq: _seq, labelSeq: _labels, ...row } =
+      (await ctx.storage.get<Record<string, unknown>>("session"))!;
+    // As a room stored before ADR 0018: each brief inline on its member, and no `agent` beside it,
+    // and before ADR 0019, every member on the record.
     const legacy = [0, 1].map((i) => {
       const { agent: _agent, ...m } = member({ memberId: `m_old${i}`, userId: `u_old${i}`, brief: brief({ goal: `old ${i}` }) });
       return m;
     });
+    await ctx.storage.deleteAll();
     await ctx.storage.put("session", { ...row, members: legacy });
-    await ctx.storage.delete("bf:m_creator");
   });
+  // The record is moved when its object is next constructed (ADR 0019, D5), as every object is
+  // on a deploy; storage outlives the instance until `reset()`.
+  await abortAllDurableObjects();
 
   expect(await store.getBriefs("qs_old", ["m_old0", "m_old1"]))
     .toEqual({ m_old0: brief({ goal: "old 0" }), m_old1: brief({ goal: "old 1" }) });
   expect((await store.getSession("qs_old"))!.members.map((m) => m.agent)).toEqual([brief().agent, brief().agent]);
+  await runInDurableObject(stubOf("qs_old"), async (_i: SessionDO, ctx) => {
+    expect(await ctx.storage.get("session")).not.toHaveProperty("members");
+    for (const id of ["m_old0", "m_old1"]) expect(await ctx.storage.get(`mb:${id}`), id).not.toHaveProperty("brief");
+  });
 
   const seated = await store.seatMember("qs_old", member({ memberId: "m_new", userId: "u_new", brief: brief({ goal: "new" }) }), 0, Date.now());
   expect(seated.refused).toBeNull();
-  await runInDurableObject(stubOf("qs_old"), async (_i: SessionDO, ctx) => {
-    const row = (await ctx.storage.get<{ members: Record<string, unknown>[] }>("session"))!;
-    for (const m of row.members) expect(m, String(m.memberId)).not.toHaveProperty("brief");
-    expect(await ctx.storage.get("bf:m_old0")).toEqual(brief({ goal: "old 0" }));
-  });
   expect(await store.getBriefs("qs_old", ["m_old0", "m_old1", "m_new"])).toEqual({
     m_old0: brief({ goal: "old 0" }), m_old1: brief({ goal: "old 1" }), m_new: brief({ goal: "new" }),
   });

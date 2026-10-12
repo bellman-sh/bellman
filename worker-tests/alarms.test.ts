@@ -8,8 +8,8 @@ import { env, SELF, reset, runInDurableObject, abortAllDurableObjects } from "cl
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import { DUE_PREFIX } from "../src/outbox.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
-import type { Member } from "../src/types.js";
 import { member, session } from "../tests/helpers/fixtures.js";
+import { editRoom, roomIn } from "../tests/helpers/rows.js";
 
 afterEach(async () => {
   await reset();
@@ -72,11 +72,9 @@ it("still closes an abandoned room that has no stored due row, and ignores a leg
   await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
     // Forge the pre-migration shape: abandoned, not one `due:` row anywhere, and the
     // alarm that would have fired already consumed, as workerd consumes it.
-    const stored = await ctx.storage.get<{ members: Member[] }>("session");
     // The pre-#18 shape as well: a clock in the past, which nothing reads any more.
-    await ctx.storage.put("session", {
-      ...stored, expiresAt: Date.now() - 1,
-      members: stored!.members.map((m) => ({ ...m, lastSeenAt: 1 })),
+    await editRoom(ctx.storage, {
+      record: (s) => ({ ...s, expiresAt: Date.now() - 1 }), member: (m) => ({ ...m, lastSeenAt: 1 }),
     });
     for (const key of (await ctx.storage.list({ prefix: DUE_PREFIX })).keys()) {
       await ctx.storage.delete(key);
@@ -154,18 +152,14 @@ it("stamps and re-arms instead of closing when a socket vouches for a member", a
   // Opened while the room is fresh, then aged under it: the route and fetch refuse an
   // upgrade onto a room that already reads closed, and an aged room with no socket does.
   await open("qs_held");
-  await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
-    const stored = await ctx.storage.get<{ members: Member[] }>("session");
-    await ctx.storage.put("session", {
-      ...stored, members: stored!.members.map((m) => ({ ...m, lastSeenAt: 1 })),
-    });
-  });
+  await runInDurableObject(stub, (_i: SessionDO, ctx) =>
+    editRoom(ctx.storage, { member: (m) => ({ ...m, lastSeenAt: 1 }) }));
   const before = Date.now();
 
   await runInDurableObject(stub, (instance: SessionDO) => instance.alarm());
 
   const after = await runInDurableObject(stub, async (_i: SessionDO, ctx) => ({
-    session: await ctx.storage.get<{ closed: boolean; members: { lastSeenAt: number }[] }>("session"),
+    session: await roomIn<{ closed: boolean }>(ctx.storage),
     alarm: await ctx.storage.getAlarm(),
     events: [...(await ctx.storage.list({ prefix: "e:" })).keys()],
   }));

@@ -1,6 +1,6 @@
 import type {
-  AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomManifest,
-  Session, SessionEvent, EventType, SavedPreset, SurfaceRow,
+  AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
+  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -95,6 +95,44 @@ export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId ===
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
 
+/** A member as it comes to be seated: a brief to keep beside the room, or the agent of one kept there already. */
+export type Seating = Omit<Member, "agent" | "seq" | "publicNumber"> & { agent?: AgentInfo; brief?: Brief };
+
+/**
+ * Members as a room seats them, in the order given (ADR 0018, ADR 0019). Each brief leaves
+ * its member for a row of its own, and the member keeps the brief's `agent`. Each member
+ * takes the next `seq`. Each label takes a public number: the one the room gave it before
+ * (`known`), or the next one, and none for the hosted seat, whose label names no person.
+ *
+ * `counts` are the last `seq` and the last public number the room has given. What comes
+ * back is the members, their briefs, the labels this numbered for the first time, and the
+ * counts after. Both stores seat through here, and so does the Durable Object's move of an
+ * older room's members into rows, so the three cannot number a member differently.
+ */
+export function seatInOrder(
+  arriving: readonly Seating[],
+  counts: { memberSeq: number; labelSeq: number },
+  known: (label: string) => number | undefined = () => undefined,
+): { members: Member[]; briefs: Record<string, Brief>; numbered: Map<string, number>; memberSeq: number; labelSeq: number } {
+  let { memberSeq, labelSeq } = counts;
+  const briefs: Record<string, Brief> = {};
+  const numbered = new Map<string, number>();
+  const members = arriving.map(({ brief, ...m }): Member => {
+    if (brief) briefs[m.memberId] = brief;
+    let publicNumber: number | null = null;
+    if (!isHostMember(m)) {
+      publicNumber = numbered.get(m.label) ?? known(m.label) ?? null;
+      if (publicNumber === null) numbered.set(m.label, (publicNumber = ++labelSeq));
+    }
+    return { ...m, agent: brief ? brief.agent : m.agent!, seq: ++memberSeq, publicNumber };
+  });
+  return { members, briefs, numbered, memberSeq, labelSeq };
+}
+
+/** The room's first seat as its record keeps it (ADR 0019). */
+export const creatorOf = (m: Member): RoomCreator =>
+  ({ memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt });
+
 /**
  * Whether the room's hosted seat is still in it (C1). Evicting the host is the
  * creator's one control over it, so once it has left nothing wakes it and the room
@@ -174,6 +212,12 @@ export function connectedAmong(
  * presence.ts imports this module.
  */
 export const ABANDONED_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** What `departedMembers` found: the members it hands back, and how many more matched past its `limit`. */
+export interface DepartedMembers {
+  members: Member[];
+  omitted: number;
+}
 
 /** What the abandonment rule reads: a session, or a stored one. */
 export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
@@ -973,6 +1017,28 @@ export interface BellmanStore {
    * and an unknown session answers none.
    */
   getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>>;
+  /**
+   * A member of this room by id, in the room or gone from it (ADR 0019). `getSession` holds
+   * only the members in the room now, so this is how a caller who has left is read. Undefined
+   * for an id the room never seated, and for an unknown room.
+   */
+  getMember(sessionId: string, memberId: string): Promise<Member | undefined>;
+  /** The members with these ids, in join order, gone or not. An id the room never seated is left out. */
+  getMembers(sessionId: string, memberIds: readonly string[]): Promise<Member[]>;
+  /** Every handle this person has held in the room, in join order, those that have left included. */
+  membersOfUser(sessionId: string, userId: string): Promise<Member[]>;
+  /**
+   * The members who have left, in join order (ADR 0019, D7). With `leftAfter`, only those
+   * who left after that time. With `limit`, only the `limit` who left most recently, and
+   * `omitted` counts the others that matched.
+   */
+  departedMembers(sessionId: string, opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers>;
+  /**
+   * The public number of each of these labels (ADR 0019, D6), which a public room shows as
+   * "member N". A label the room has not numbered is left out: the hosted seat's, and any
+   * label no member of the room holds.
+   */
+  publicNumbers(sessionId: string, labels: readonly string[]): Promise<Record<string, number>>;
   /**
    * Mark a session closed, whoever is in it. Idempotent. To close a room because
    * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then

@@ -78,7 +78,26 @@ export interface Member {
    * wrong, and every legacy row would have read as reclaimable.
    */
   removedAtCursor?: number;
+  /**
+   * Where this member comes in the room's join order, from 1 (ADR 0019). The store gives it
+   * at seating. A member is a row of its own beside the room, and this is what puts rows
+   * read back separately into the order they joined in.
+   */
+  seq: number;
+  /**
+   * The number a public room names this member's label by, "member 3" (public rooms spec
+   * D4). Given when the room first seats the label, and shared by every later seat with that
+   * label, so one person's handles share it; null for the hosted seat, whose label names no
+   * person (ADR 0019, D6).
+   */
+  publicNumber: number | null;
 }
+
+/**
+ * Who started the room: its first seat, kept on the room's record because the record no
+ * longer holds its members (ADR 0019). It stays when that member leaves.
+ */
+export type RoomCreator = Pick<Member, "memberId" | "userId" | "label" | "joinedAt">;
 
 export type EventType =
   | "member_joined"
@@ -138,12 +157,16 @@ export interface JoinCodeRecord {
 
 /**
  * A member as it is seated: with the brief it brings. The store keeps the brief in a row of
- * its own beside the room (ADR 0018), and the member with only the brief's `agent`.
+ * its own beside the room (ADR 0018), and the member with only the brief's `agent`. Its
+ * `seq` and `publicNumber` are the store's to give (ADR 0019).
  */
-export type ArrivingMember = Omit<Member, "agent"> & { brief: Brief };
+export type ArrivingMember = Omit<Member, "agent" | "seq" | "publicNumber"> & { brief: Brief };
 
-/** A session as it is created: its first members arriving with their briefs. */
-export type NewSession = Omit<Session, "members"> & { members: ArrivingMember[] };
+/**
+ * A session as it is created: its first members arriving with their briefs, the creator
+ * first. The store takes `creator` and `orgs` from them.
+ */
+export type NewSession = Omit<Session, "members" | "creator" | "orgs"> & { members: ArrivingMember[] };
 
 export interface Session {
   id: string;
@@ -183,7 +206,20 @@ export interface Session {
   hostUnitsPerMonth: number;
   /** The meter. See `HostUnits`. */
   hostUnits: HostUnits;
+  /**
+   * The members in the room now, `leftAt` null, in join order. A member who has left is a
+   * row of its own beside the room (ADR 0019), read by id (`BellmanStore.getMember`), by
+   * person (`membersOfUser`) or in a list (`departedMembers`).
+   */
   members: Member[];
+  /** The room's first seat (ADR 0019), which no departure removes from the record. */
+  creator: RoomCreator;
+  /**
+   * Every org that has sat in the room, in the order each first did, the orgs of members who
+   * have left included (ADR 0019): the orgs a delete and a purge owe an audit row, and the
+   * orgs whose admin may read the room once it has closed (#65, D4).
+   */
+  orgs: string[];
   events: SessionEvent[];
   closed: boolean;
   /** When `closed` was set (#65). null while open, and on rows closed before #65. */

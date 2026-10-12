@@ -25,7 +25,7 @@ import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
-import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
+import { brief, member, oneCode, openaiAgent, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
 const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -160,14 +160,50 @@ export function describeStoreContract(
       const read = (await store.getSession(s.id))!;
       read.closed = true;
       read.members.push(member({ memberId: "m_smuggled" }));
-      read.members[0].brief.goal = "mutated";
+      read.members[0].agent.model = "mutated";
       read.orgOnly = true;
+      (await store.getBriefs(s.id, ["m_creator"])).m_creator.goal = "mutated";
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(false);
       expect(fresh.members).toHaveLength(1);
-      expect(fresh.members[0].brief.goal).not.toBe("mutated");
+      expect(fresh.members[0].agent.model).not.toBe("mutated");
       expect(fresh.orgOnly).toBe(false);
+      expect((await store.getBriefs(s.id, ["m_creator"])).m_creator.goal).not.toBe("mutated");
+    });
+
+    /**
+     * Briefs live beside the room, one row per member (ADR 0018), so the record a room is
+     * stored as stays small however many join. A member keeps its brief's `agent`, which the
+     * roster shows, and the brief comes back by member id.
+     */
+    it("keeps each member's brief beside the room, and hands it back by member id", async () => {
+      const s = swarmSession({ members: [member({ brief: brief({ goal: "the creator's" }) })] });
+      await store.createSession(s);
+      expect(await store.addMember(s.id, member({ memberId: "m_added", userId: "u_added", brief: brief({ goal: "added", agent: openaiAgent }) }))).toBe(true);
+      const seat = await store.seatMember(s.id, member({ memberId: "m_seated", userId: "u_seated", brief: brief({ goal: "seated" }) }), 0, Date.now());
+      expect(seat.refused).toBeNull();
+
+      const read = (await store.getSession(s.id))!;
+      for (const m of read.members) expect(m, m.memberId).not.toHaveProperty("brief");
+      expect(read.members.find((m) => m.memberId === "m_added")!.agent).toEqual(openaiAgent);
+      expect(await store.getBriefs(s.id, ["m_creator", "m_added", "m_seated", "m_nobody"])).toEqual({
+        m_creator: brief({ goal: "the creator's" }),
+        m_added: brief({ goal: "added", agent: openaiAgent }),
+        m_seated: brief({ goal: "seated" }),
+      });
+      expect(await store.getBriefs(s.id, [])).toEqual({});
+      expect(await store.getBriefs("qs_nowhere", ["m_creator"])).toEqual({});
+    });
+
+    it("replaces a member's brief on updateMember, and the agent the record keeps with it", async () => {
+      const s = session();
+      await store.createSession(s);
+      const newer = brief({ goal: "newer", agent: openaiAgent });
+      await store.updateMember(s.id, "m_creator", { brief: newer });
+
+      expect((await store.getBriefs(s.id, ["m_creator"])).m_creator).toEqual(newer);
+      expect((await store.getSession(s.id))!.members[0].agent).toEqual(openaiAgent);
     });
 
     it("does not let the caller's original object mutate stored state either", async () => {

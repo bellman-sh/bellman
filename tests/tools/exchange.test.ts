@@ -466,8 +466,8 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
 describe("INVARIANT 8 — message-passing only, no shared mutable state", () => {
   it("lets a member update only their own brief", async () => {
     const p = await pairUp(h);
-    const before = (await h.store.getSession(p.sessionId))!;
-    const creatorGoalBefore = before.members[0].brief.goal;
+    const briefOf = async (memberId: string) => (await h.store.getBriefs(p.sessionId, [memberId]))[memberId];
+    const creatorGoalBefore = (await briefOf(p.creatorMemberId)).goal;
 
     const updated = brief({ goal: "Narrowed to the webhook retry path", agent: openaiAgent });
     const res = await p.joiner.call("bellman_send", {
@@ -476,12 +476,8 @@ describe("INVARIANT 8 — message-passing only, no shared mutable state", () => 
     });
     expect(res.isError, res.text).toBe(false);
 
-    const after = (await h.store.getSession(p.sessionId))!;
-    const creator = after.members.find((m) => m.memberId === p.creatorMemberId)!;
-    const joiner = after.members.find((m) => m.memberId === p.joinerMemberId)!;
-
-    expect(joiner.brief.goal).toBe(updated.goal);
-    expect(creator.brief.goal).toBe(creatorGoalBefore);
+    expect((await briefOf(p.joinerMemberId)).goal).toBe(updated.goal);
+    expect((await briefOf(p.creatorMemberId)).goal).toBe(creatorGoalBefore);
   });
 
   it("rejects a brief_update that is not a full Brief", async () => {

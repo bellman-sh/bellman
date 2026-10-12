@@ -33,7 +33,12 @@ export interface Member {
   orgId: string | null;
   capabilities: Capability[];
   roomRole: string; // the manifest role this member holds — NOT Identity.role (admin/member)
-  brief: Brief;
+  /**
+   * The agent this member's brief names, kept on the record for the roster. The brief
+   * itself lives beside the room in a row of its own (`BellmanStore.getBriefs`), so the
+   * record stays small however many join (ADR 0018).
+   */
+  agent: AgentInfo;
   joinedAt: number;
   leftAt: number | null;
   /**
@@ -130,6 +135,15 @@ export interface JoinCodeRecord {
   code: string;
   expiresAt: number;
 }
+
+/**
+ * A member as it is seated: with the brief it brings. The store keeps the brief in a row of
+ * its own beside the room (ADR 0018), and the member with only the brief's `agent`.
+ */
+export type ArrivingMember = Omit<Member, "agent"> & { brief: Brief };
+
+/** A session as it is created: its first members arriving with their briefs. */
+export type NewSession = Omit<Session, "members"> & { members: ArrivingMember[] };
 
 export interface Session {
   id: string;

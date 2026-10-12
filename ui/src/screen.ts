@@ -1,4 +1,4 @@
-import type { ConnectResult, RoomsResult, SurfaceResult } from "./types.js";
+import type { ConnectResult, RoomsResult, StartResult, SurfaceResult } from "./types.js";
 
 /** The part of a CallToolResult this page reads. */
 export interface ToolOutcome {
@@ -9,6 +9,7 @@ export interface ToolOutcome {
 
 export type Screen =
   | { kind: "join"; data: ConnectResult }
+  | { kind: "card"; data: StartResult }
   | { kind: "monitor"; data: RoomsResult }
   | { kind: "canvas"; data: SurfaceResult }
   | { kind: "error"; text: string }
@@ -17,12 +18,14 @@ export type Screen =
 const firstText = (r: ToolOutcome): string | undefined =>
   r.content?.find((c) => c.type === "text" && typeof c.text === "string")?.text;
 
-/** Which screen a result is (spec D10, canvas spec D4): a connect preview, a rooms listing, a surface, or text. */
+/** Which screen a result is (spec D10, canvas spec D4): a connect preview, a room card, a rooms listing, a surface, or text. */
 export function pickScreen(r: ToolOutcome): Screen {
   if (r.isError) return { kind: "error", text: firstText(r) ?? "The call failed." };
   const data = r.structuredContent;
   if (data && typeof data === "object") {
     if ("connect_token" in data) return { kind: "join", data: data as ConnectResult };
+    // bellman_start's result: the room just made, with its code to share.
+    if ("join_code" in data && "session_id" in data) return { kind: "card", data: data as StartResult };
     if ("rooms" in data) return { kind: "monitor", data: data as RoomsResult };
     // After connect_token: bellman_connect's result carries a surface index under the same key (canvas spec D4).
     if ("surface" in data) return { kind: "canvas", data: data as SurfaceResult };

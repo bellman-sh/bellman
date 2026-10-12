@@ -197,12 +197,12 @@ describe("tool surface", () => {
   // The host renders a tool through the resource its _meta names. A tool that
   // named a resource this server does not serve would render nothing, so every
   // ui meta present must point at the one resource.
-  it("attaches the app to bellman_connect, bellman_confirm, bellman_rooms and bellman_surface, and to no other tool", async () => {
+  it("attaches the app to bellman_start, bellman_connect, bellman_confirm, bellman_rooms and bellman_surface, and to no other tool", async () => {
     const { tools } = await jesse.listTools();
     const uiOf = (t: { _meta?: Record<string, unknown> }) =>
       (t._meta as { ui?: { resourceUri?: string } } | undefined)?.ui;
     const withApp = tools.filter((t) => uiOf(t)?.resourceUri === APP_RESOURCE_URI).map((t) => t.name).sort();
-    expect(withApp).toEqual(["bellman_confirm", "bellman_connect", "bellman_rooms", "bellman_surface"]);
+    expect(withApp).toEqual(["bellman_confirm", "bellman_connect", "bellman_rooms", "bellman_start", "bellman_surface"]);
     for (const t of tools) {
       const ui = uiOf(t);
       if (ui) expect(ui.resourceUri, t.name).toBe(APP_RESOURCE_URI);

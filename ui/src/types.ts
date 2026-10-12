@@ -74,8 +74,23 @@ export interface RoomSummary {
   your_member_id: string;
   room: RoomBlock;
   members: MemberRow[];
-  join_codes: { role: string; expires_at: string; code?: string; join_url?: string }[];
+  /** `expires_at` is null for a public room's permanent code (ADR 0020). */
+  join_codes: { role: string; expires_at: string | null; code?: string; join_url?: string }[];
   last_event: { cursor: number; type: string; at: string } | null;
+}
+
+/** bellman_start's structuredContent: the room just made, from the creator's seat (the room card). */
+export interface StartResult {
+  session_id: string;
+  member_id: string;
+  join_code: string;
+  join_url: string;
+  join_code_expires_at: string;
+  /** A public room's page to read. Absent for a room that is not public. */
+  public_url?: string;
+  plan: string;
+  room: RoomBlock;
+  share_instructions: string;
 }
 
 /** bellman_rooms's structuredContent. */

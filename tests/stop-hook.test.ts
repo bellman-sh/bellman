@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { enqueue, inboxDirFor, pendingCount, writeMemberships, type PeerEvent } from "../src/inbox.js";
 
 /**
@@ -13,10 +14,11 @@ import { enqueue, inboxDirFor, pendingCount, writeMemberships, type PeerEvent } 
 
 const hookInput = JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false });
 
-function runHook(root: string, env: Record<string, string> = {}) {
+const SOURCE = `"${process.execPath}" --import tsx src/stop-hook.ts`;
+
+function runHook(root: string, env: Record<string, string> = {}, command = SOURCE) {
   return new Promise<{ code: number | null; stderr: string; ms: number }>((resolve, reject) => {
     const started = Date.now();
-    const command = `"${process.execPath}" --import tsx src/stop-hook.ts`;
     const child = spawn("sh", ["-c", command], {
       env: { ...process.env, BELLMAN_INBOX_ROOT: root, ...env },
     });
@@ -92,5 +94,35 @@ describe("Bellman Stop hook", () => {
 
     expect(run.code).toBe(0);
     expect(run.ms).toBeLessThan(4000);
+  });
+});
+
+/**
+ * The committed bundle, run by the command plugin/hooks/hooks.json declares. Claude Code
+ * substitutes ${CLAUDE_PLUGIN_ROOT} and also exports it to the hook, so the shell here
+ * expands it from the environment to the same path.
+ */
+describe("the plugin's Stop hook, plugin/bridge/stop-hook.mjs", () => {
+  const PLUGIN = fileURLToPath(new URL("../plugin", import.meta.url));
+  const declared = (): string => {
+    const { hooks } = JSON.parse(readFileSync(join(PLUGIN, "hooks", "hooks.json"), "utf8"));
+    return hooks.Stop[0].hooks[0].command;
+  };
+
+  it("lets the turn end when this session has no Bellman bridge", async () => {
+    const run = await runHook(root, { CLAUDE_PLUGIN_ROOT: PLUGIN }, declared());
+
+    expect({ code: run.code, stderr: run.stderr }).toEqual({ code: 0, stderr: "" });
+  });
+
+  it("blocks the stop and hands a queued peer event to Claude", async () => {
+    enqueue(inbox, event({ payload: { text: "queued for the bundled hook" } }));
+
+    const run = await runHook(root, { CLAUDE_PLUGIN_ROOT: PLUGIN }, declared());
+
+    expect(run.code).toBe(2);
+    expect(run.stderr).toContain("UNTRUSTED PEER CONTENT");
+    expect(run.stderr).toContain("queued for the bundled hook");
+    expect(pendingCount(inbox)).toBe(0);
   });
 });

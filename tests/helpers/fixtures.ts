@@ -77,7 +77,12 @@ export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeR
  * Session fields to seed from. Its members may be arriving ones (a brief and no agent, as
  * `hostMember` makes) or read back from a store (an agent and no brief).
  */
-export type SessionSeed = Partial<Omit<SeededSession, "members">> & { members?: Seating[] };
+export type SessionSeed = Partial<Omit<SeededSession, "members">> & {
+  members?: Seating[];
+  /** The tick clocks a stored room carries (`StoredSession`), for a case that starts a room with history. */
+  lastTickAt?: number;
+  lastHostTickAt?: number | null;
+};
 
 /** A member given both a brief and its agent, so a room built from it can be created and read as a record. */
 const seeded = (m: Seating): SeededMember => {

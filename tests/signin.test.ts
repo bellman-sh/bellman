@@ -15,6 +15,7 @@ import type { Remote } from "../src/bridge.js";
 import { acquireLock, readServer, writeServer } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
+import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
 // the default, so a test can ask a real launcher to fail; the tests that must
@@ -616,6 +617,18 @@ describe("connectSignedIn", () => {
       return bellman.fetch(input, init);
     };
   }
+
+  // A host rendering MCP Apps reads the page a tool's _meta names over the bridge, and the bridge
+  // forwards that read to this connection. The signed-in connection once carried only the tool
+  // calls, so every browser sign-in served no UI (#28 had added the resource calls to connectRemote alone).
+  it("lists and reads the app's page through the signed-in connection", async () => {
+    const remote = await connect(fakeBellman(), []);
+    expect(remote.readResource, "the signed-in connection carries the resource calls").toBeDefined();
+    expect((await remote.listResources!()).resources.map((r) => r.uri)).toContain(APP_RESOURCE_URI);
+    const page = await remote.readResource!({ uri: APP_RESOURCE_URI });
+    expect(page.contents[0]?.mimeType).toBe(APP_MIME_TYPE);
+    await remote.close();
+  });
 
   it("registers, signs in, and caches tokens and identity", async () => {
     const bellman = fakeBellman();

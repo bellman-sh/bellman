@@ -1,6 +1,6 @@
 {
   "name": "@bellman-sh/mcp-server",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Cross-session, cross-provider agent collaboration over MCP",
   "author": "mcfearsome",
   "license": "MIT",
@@ -44,6 +44,7 @@
     "build:ui": "vite build --config ui/vite.config.ts && tsx scripts/wrap-ui.ts",
     "typecheck:ui": "tsc -p ui/tsconfig.json",
     "build": "npm run build:ui && tsc",
+    "build:plugin": "tsx scripts/build-plugin.ts",
     "start": "node dist/index.js",
     "dev": "npm run build:ui && tsx src/index.ts",
     "test": "npm run build:ui && vitest run",
@@ -71,6 +72,7 @@
     "@modelcontextprotocol/ext-apps": "^2.0.3",
     "@types/express": "^5.0.6",
     "@types/node": "^26.5.0",
+    "esbuild": "0.28.2",
     "jsdom": "^29.1.1",
     "tsx": "^4.23.13",
     "typescript": "^7.0.2",

@@ -526,6 +526,168 @@ export function describeStoreContract(
       });
     });
 
+    // ------------------------------------------- permanent codes (ADR 0020)
+    //
+    // A public room may hold a code with no expiry for its default seat, so a link put on
+    // a page keeps seating people until it is revoked, the room goes private, or the room
+    // closes. Each case reads the door back before the call it is about: a store that
+    // never resolved a permanent code would pass every case that asks for one to be gone.
+    describe("a permanent code", () => {
+      const PERMANENT = "BELL-PERM-01-PEER-B";
+      /** The default seat's door, with no expiry. `session()`'s default role is peer_b. */
+      const door = () => ({ peer_b: { code: PERMANENT, expiresAt: null } });
+      const publicRoom = (over: Parameters<typeof session>[0] = {}) =>
+        session({ manifest: roomManifest({ public: true }), joinCodes: door(), ...over });
+      const isOpen = async (what = "the permanent door resolves") =>
+        expect(await store.getSessionByJoinCode(PERMANENT), what).toMatchObject({ role: "peer_b" });
+      const joiner = (memberId: string) =>
+        member({ memberId, userId: `u_${memberId}`, roomRole: "peer_b" });
+      const body = (type: EventBody["type"], memberId: string): EventBody => ({
+        type, fromMemberId: memberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null,
+      });
+
+      it("still resolves a week on, when a temporary code beside it has long expired", async () => {
+        const s = publicRoom({ joinCodes: { ...door(), ...oneCode("BELL-TEMP-01", "peer_a") } });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves at once");
+
+        vi.setSystemTime(Date.now() + 7 * 24 * 3_600_000);
+
+        // The control that the clock moved far enough to matter: the temporary code is gone.
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toBeUndefined();
+        expect(await store.getSessionByJoinCode(PERMANENT)).toMatchObject({ session: { id: s.id }, role: "peer_b" });
+      });
+
+      it("stays when a seating fills the room, while every temporary code goes", async () => {
+        const doors = { ...door(), ...oneCode("BELL-TEMP-01", "peer_a") };
+        const s = publicRoom({ joinCodes: doors, members: [member({ memberId: "m_creator" })] });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01"), "control: the temporary door resolves before the call")
+          .toMatchObject({ role: "peer_a" });
+
+        const outcome = await store.seatMember(s.id, joiner("m_late"), 1, 9_000_000);
+
+        // It cleared the temporary code, so it says so.
+        expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(door());
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toBeUndefined();
+        await isOpen();
+      });
+
+      it("refuses joiners while the room is full and seats one again once a seat frees", async () => {
+        const s = publicRoom({ members: [member({ memberId: "m_creator" })] });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        const filled = await store.seatMember(s.id, joiner("m_late"), 1, 9_000_000);
+
+        // The room filled holding only the permanent code, which stays, so nothing was cleared.
+        expect(filled).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(door());
+        expect((await store.seatMember(s.id, joiner("m_later"), 1, 9_000_000)).refused, "the premise: the room is full")
+          .toBe("full");
+
+        await store.removeMember(s.id, "m_late", {
+          now: 9_000_001, frozen: "allow", cut: false, event: body("member_left", "m_late"), audit: [],
+        });
+
+        await isOpen("the door is still open after the seat frees");
+        expect((await store.seatMember(s.id, joiner("m_later"), 1, 9_000_002)).refused).toBeNull();
+      });
+
+      it("is retired by a revoke of its role, and by a revoke of every role", async () => {
+        const one = publicRoom();
+        const all = publicRoom({ id: "qs_perm_all", joinCodes: { peer_b: { code: "BELL-PERM-02-PEER-B", expiresAt: null } } });
+        await store.createSession(one);
+        await store.createSession(all);
+        await isOpen("control: the first door resolves");
+        expect(await store.getSessionByJoinCode("BELL-PERM-02-PEER-B"), "control: the second door resolves")
+          .toMatchObject({ role: "peer_b" });
+
+        await store.consumeJoinCode(one.id, "peer_b");
+        await store.clearJoinCodes(all.id);
+
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        expect(await store.getSessionByJoinCode("BELL-PERM-02-PEER-B")).toBeUndefined();
+        expect((await store.getSession(one.id))!.joinCodes).toEqual({});
+        expect((await store.getSession(all.id))!.joinCodes).toEqual({});
+      });
+
+      it("is retired when the room is made private, and a temporary code is left to run out", async () => {
+        const temporary = oneCode("BELL-TEMP-01", "peer_a");
+        const s = publicRoom({ joinCodes: { ...door(), ...temporary } });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        await store.unpublishSession(s.id, Date.now());
+
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        // The record, and not only what resolves: a store that stopped resolving the code
+        // and kept it listed would show a private room a door it does not have.
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(temporary);
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toMatchObject({ role: "peer_a" });
+      });
+
+      it("is a live code, so replacing it takes replaceLive", async () => {
+        const s = publicRoom();
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEWW-02", null, { replaceLive: false, now: Date.now() }))
+          .toEqual({ ok: false, reason: "live_code_exists" });
+        await isOpen("a refusal leaves the door as it was");
+        expect(await store.getSessionByJoinCode("BELL-NEWW-02")).toBeUndefined();
+
+        expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEWW-02", null, { replaceLive: true, now: Date.now() }))
+          .toEqual({ ok: true, replacedLive: true });
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        expect((await store.getSession(s.id))!.joinCodes).toEqual({ peer_b: { code: "BELL-NEWW-02", expiresAt: null } });
+        expect(await store.getSessionByJoinCode("BELL-NEWW-02")).toMatchObject({ role: "peer_b" });
+      });
+
+      it("is refused to a room that is not public, and nothing is written", async () => {
+        // Decided where the write happens, as replaceLive is (#90): a room made private
+        // between a caller's read and this write would otherwise keep a permanent code
+        // that unpublishing had already run past.
+        const rooms = [
+          session({ id: "qs_private", joinCodes: {} }),
+          session({ id: "qs_unpublished", manifest: roomManifest({ public: true }), unpublishedAt: Date.now(), joinCodes: {} }),
+        ];
+        for (const r of rooms) {
+          await store.createSession(r);
+          expect(await store.setJoinCode(r.id, "peer_b", "BELL-PERM-03-PEER-B", null, { replaceLive: true, now: Date.now() }), r.id)
+            .toEqual({ ok: false, reason: "not_public" });
+          expect((await store.getSession(r.id))!.joinCodes, r.id).toEqual({});
+          expect(await store.getSessionByJoinCode("BELL-PERM-03-PEER-B"), r.id).toBeUndefined();
+        }
+      });
+
+      it("is retired by removing a member of its seat, as any live code is", async () => {
+        // The member removed may hold the link, so a removal that names the seat's door
+        // shuts it, permanent or not.
+        const s = publicRoom({
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
+        });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        const outcome = await store.removeMember(s.id, "m_peer", {
+          now: Date.now(),
+          frozen: "refuse",
+          cut: true,
+          byUserId: "u_jesse",
+          event: body("member_evicted", "m_peer"),
+          retire: { role: "peer_b", event: body("invite_revoked", "m_peer") },
+          audit: [],
+        });
+
+        expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+      });
+    });
+
     // --------------------------------------------------------------- members
     it("recentEvents returns the tail in cursor order, shorter when the log is, and nothing for a bad limit", async () => {
       const s = session();
@@ -2713,8 +2875,10 @@ export function describeStoreContract(
       const NOW = () => Date.now();
       const hostedRoom = (over: Partial<Session> = {}) => {
         const m = hostedManifest();
+        // As if its host had just asked: a host that has never asked is due the moment its room
+        // starts, and the Durable Object's alarm would fire that question into these cases.
         return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
-          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, lastTickAt: NOW(), lastHostTickAt: NOW(), ...over });
       };
       /** What the host writes on a tick: a thread root, the tick's cursor in its payload (I1). */
       const question = (): Omit<SessionEvent, "cursor" | "at"> => ({

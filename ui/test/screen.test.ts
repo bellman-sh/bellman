@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { pickScreen } from "../src/screen.js";
-import { connectFixture, roomsFixture, surfaceFixture } from "./fixtures.js";
+import { connectFixture, roomsFixture, startFixture, surfaceFixture } from "./fixtures.js";
 
 describe("pickScreen", () => {
   it("renders the join screen for a connect result and the monitor for a rooms result", () => {
@@ -24,5 +24,11 @@ describe("pickScreen", () => {
     expect(pickScreen({ structuredContent: surfaceFixture() })).toMatchObject({ kind: "canvas" });
     const connect = { ...connectFixture(), surface: { cursor: 3, items: [] } };
     expect(pickScreen({ structuredContent: connect })).toMatchObject({ kind: "join" });
+  });
+});
+
+describe("the room card", () => {
+  it("is what bellman_start's result shows", () => {
+    expect(pickScreen({ structuredContent: startFixture() })).toEqual({ kind: "card", data: startFixture() });
   });
 });

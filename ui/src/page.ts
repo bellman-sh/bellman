@@ -16,6 +16,7 @@
  * person just left.
  */
 import { createCanvas, type Canvas } from "./canvas.js";
+import { renderCard } from "./card.js";
 import { renderJoin, verdictMessage, type Delivery } from "./join.js";
 import { renderMonitor } from "./monitor.js";
 import { pickScreen, type ToolOutcome } from "./screen.js";
@@ -141,6 +142,11 @@ export function createPage(deps: PageDeps): Page {
         // identifiers (spec D5, D6). The agent calls bellman_confirm itself.
         // The screen reports "sent" only once the host has accepted it.
         show(renderJoin(screen.data, (verdict) => deps.sendMessage(verdictMessage(verdict))));
+        return;
+      case "card":
+        current = null;
+        stopPolling();
+        show(renderCard(screen.data, deps.openLink, Date.now()));
         return;
       case "monitor":
         current = { kind: "monitor" };

@@ -19,7 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember, isRemovedMember,
+  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
@@ -73,6 +73,11 @@ export const refuse = (code: RoomFailure, reason: string): RoomResult<never> =>
 export const FROZEN =
   "this session is frozen: the plan that created it has lapsed. Everyone stays a member and the " +
   "history is still readable, but nothing new can be sent or joined until the plan is restored.";
+
+/** A permanent code refused to a room that is not public (ADR 0020), by `issueInvite`'s check or the store's. */
+const NOT_PUBLIC =
+  "this room is not public, so it cannot hold a permanent code: a link that never expires belongs only to a room " +
+  "anyone can already read. Omit permanent for a code that expires in 15 minutes.";
 
 export function activeMembers(s: StoredSession): Member[] {
   return s.members.filter(isActiveMember);
@@ -259,13 +264,8 @@ export async function findMember(
 export const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
-/**
- * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
- * started, and not made private since. `=== true` and `== null` because the in-memory store does
- * not hydrate, so a record there may carry neither field.
- */
-export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
-  s.manifest.public === true && s.unpublishedAt == null;
+/** Defined beside the stores, which decide it too (ADR 0020); the routes and projections read it from here. */
+export { isPublic };
 
 /**
  * Every handle this person has held in the room, in join order, those that left included, from
@@ -564,6 +564,12 @@ function unknownRole(session: StoredSession, role: string | undefined): RoomResu
  * other. A room whose manifest gives nobody `invite` cannot be reopened by
  * anyone, its creator included: tests/manifest.test.ts calls that a legal
  * manifest, so it is the declared behaviour, not a hole.
+ *
+ * `permanent` mints a code with no expiry, a null `expiresAt` (ADR 0020), for a
+ * public room's default seat and no other. A link put on a page seats whoever
+ * finds it, so it belongs only to a room whose work anyone can already read, and
+ * only for the seat its creator chose for newcomers. The store asks again whether
+ * the room is public where it writes, for a room made private after this read.
  */
 export async function issueInvite(
   store: BellmanStore,
@@ -571,13 +577,21 @@ export async function issueInvite(
   sessionId: string,
   memberId: string,
   role?: string,
-): Promise<RoomResult<{ code: string; role: string; expiresAt: number; replacedPrevious: boolean }>> {
+  permanent = false,
+): Promise<RoomResult<{ code: string; role: string; expiresAt: number | null; replacedPrevious: boolean }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "invite");
   if (!gate.ok) return gate;
   const session = gate.value;
 
   const bad = unknownRole(session, role);
   if (bad) return bad;
+  if (permanent && !isPublic(session)) return refuse("conflict", NOT_PUBLIC);
+  if (permanent && role !== undefined && role !== session.manifest.defaultRole) {
+    return refuse(
+      "invalid",
+      `a permanent code seats only the room's default role, "${session.manifest.defaultRole}", the seat its creator chose for newcomers. Omit role, or omit permanent for a "${role}" code that expires in 15 minutes.`
+    );
+  }
   // Seated, not active: a room held full by a session that died must still be
   // able to mint the code that replaces it, which is the confusion #103 opens
   // with. This only counts — the seat is actually reclaimed by the
@@ -618,7 +632,7 @@ export async function issueInvite(
 
   const now = Date.now();
   const code = renderJoinCode(issuedRole);
-  const expiresAt = now + JOIN_CODE_TTL;
+  const expiresAt = permanent ? null : now + JOIN_CODE_TTL;
   const set = await store.setJoinCode(sessionId, issuedRole, code, expiresAt, {
     replaceLive: mayReplaceLive,
     now,
@@ -626,12 +640,15 @@ export async function issueInvite(
   if (!set.ok) {
     // Refused rather than silently downgraded to a no-op: a caller that asked
     // for a code and got none must hear why, or it hands out one that never came.
-    return set.reason === "frozen"
-      ? refuse("frozen", FROZEN)
-      : refuse(
-          "forbidden",
-          `role "${issuedRole}" already has a live join code. Replacing it retires the one someone may be holding, so it needs the "revoke" verb as well as "invite" — your seat holds invite alone. Wait for that code to expire, or ask a seat that holds revoke.`
-        );
+    if (set.reason === "frozen") return refuse("frozen", FROZEN);
+    if (set.reason === "not_public") return refuse("conflict", NOT_PUBLIC);
+    const wait = session.joinCodes[issuedRole]?.expiresAt === null
+      ? "That code is permanent and will not expire, so ask a seat that holds revoke."
+      : "Wait for that code to expire, or ask a seat that holds revoke.";
+    return refuse(
+      "forbidden",
+      `role "${issuedRole}" already has a live join code. Replacing it retires the one someone may be holding, so it needs the "revoke" verb as well as "invite" — your seat holds invite alone. ${wait}`
+    );
   }
   const previous = set.replacedLive;
 
@@ -640,11 +657,11 @@ export async function issueInvite(
     fromMemberId: memberId,
     fromUserId: actor.userId,
     fromLabel: actor.label,
-    payload: { role: issuedRole, expires_at: new Date(expiresAt).toISOString() },
+    payload: { role: issuedRole, expires_at: expiresAt === null ? null : new Date(expiresAt).toISOString(), permanent },
     refId: null,
   });
   await audit(store, session, actor, "invite_issued", {
-    role: issuedRole, replaced_previous: previous,
+    role: issuedRole, replaced_previous: previous, permanent,
   });
 
   return succeed({ code, role: issuedRole, expiresAt, replacedPrevious: previous });
@@ -677,7 +694,7 @@ export async function revokeInvite(
   // itself: an event, an audit row, and over-reported roles.
   const retired = (role ? [role] : Object.keys(session.joinCodes)).filter((r) => {
     const rec = session.joinCodes[r];
-    return rec !== undefined && Date.now() <= rec.expiresAt;
+    return rec !== undefined && codeIsLive(rec, Date.now());
   });
   if (role) await store.consumeJoinCode(sessionId, role);
   else await store.clearJoinCodes(sessionId);

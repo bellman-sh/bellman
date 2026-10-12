@@ -767,6 +767,10 @@ async function hostedRoom(
   await store.createSession(session({
     id, manifest: m, joinCodes: {},
     members: [member({ roomRole: "lead" }), ...(host ? [hostMember(m, Date.now())] : [])],
+    // A host that has never asked is due the moment its room starts, and the alarm would fire before
+    // the history below is written. Seeded as having just asked, the room arms a cadence out, and
+    // the history the case wants is written over it.
+    ...(host ? { lastTickAt: Date.now(), lastHostTickAt: Date.now() } : {}),
   }));
   const stub = env.SESSION.get(env.SESSION.idFromName(id));
   await runInDurableObject(stub, async (_i: SessionDO, ctx) => {
@@ -883,4 +887,23 @@ it("writes a hosted room's tick for a due reporter, and queues no wake when nobo
   expect(await queued(stub)).toEqual([]);
   // A reporter's tick leaves the host's own clock where it was (I3).
   expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBeLessThan(after.session!.lastTickAt!);
+});
+
+it("asks a new hosted room's first question when the room starts, not a cadence later", async () => {
+  const id = "qs_hosted_first";
+  const store = new DurableObjectStore(env as never);
+  const m = hostedRoles(true, false);
+  await store.createSession(session({
+    id, manifest: m, joinCodes: {},
+    members: [member({ roomRole: "lead" }), hostMember(m, Date.now())],
+  }));
+  const stub = env.SESSION.get(env.SESSION.idFromName(id));
+  // Armed for the room's first seat, which has already passed, so the alarm fires on its own at once.
+  let after = await rows(stub);
+  for (let i = 0; i < 50 && !after.events.some((e) => e.type === "heartbeat"); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    after = await rows(stub);
+  }
+  expect(after.events.filter((e) => e.type === "heartbeat")).toHaveLength(1);
+  expect((after.session as { lastHostTickAt?: number }).lastHostTickAt).toBeGreaterThan(Date.now() - 5_000);
 });

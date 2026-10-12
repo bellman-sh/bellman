@@ -185,7 +185,7 @@ flowchart TB
 | Surface | Tools | Push | Notes |
 |---|---|---|---|
 | Claude Code, terminal | yes | **channel** | `bellman-claude` adds the flag; the best experience |
-| Claude Code, terminal, `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed |
+| Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
@@ -547,7 +547,8 @@ Removing a member is authority, so the reclaim is confined accordingly:
   `seatedMembers` and write nothing. That matters because `bellman_connect` is
   reachable by anyone holding a join code without joining, and never consumes
   the code — a reclaim there would have let one caller empty a quiet hub room
-  of every member, creator included, repeatedly for the code's 15 minutes.
+  of every member, creator included, repeatedly for as long as the code lives:
+  15 minutes, or, for a public room's permanent code (ADR 0020), until it is retired.
   `evictMember` is creator-only and deliberately outside the verb set; a second
   removal path must not be looser than the first.
 - **One seat, longest-quiet first**, so the blast radius is the size of the
@@ -694,7 +695,8 @@ at-least-once delivery is acknowledged.
 **It asks on its own cadence, and only when a person is there.** A hosted room
 ticks whether or not any role reports. The host's cadence is anchored on
 `lastHostTickAt`, which only a tick that wakes the host moves, in the same write
-as `lastTickAt`; before the host first asks, it anchors on the room's first seat.
+as `lastTickAt`. A host that has never asked is due at the room's first seat, so it
+asks its first question when the room starts, and a cadence after each question then.
 A reporting seat's deadline still writes a tick, for the reporter, and never
 wakes the host: each question resets the three answers and spends units, and
 reporters' ticks once had a room that declared `1h` asking every 20 to 40
@@ -1501,7 +1503,8 @@ It is used four times:
   draining whatever other orgs left behind. That is the hold time #123 asked
   about, measured below.
 - **`SessionDO → RegistryDO` ([#62](../../../issues/62)).** `createSession`,
-  `setJoinCode`, `consumeJoinCode`, `clearJoinCodes` and expiry queue the
+  `setJoinCode`, `consumeJoinCode`, `clearJoinCodes`, `unpublishSession` (a public
+  room's permanent codes, ADR 0020) and expiry queue the
   registry's index write in the session's own transaction — in **that session's**
   queue, delivered as a plain `putJoinCode` or `dropJoinCode` call on the
   registry, so it never becomes a row the registry's own drain has to clear.
@@ -1821,12 +1824,23 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,102** | every request, whether or not you are in a room |
+| Tool definitions | **~8,271** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-12 for permanent codes (ADR 0020), by the method below: 124 tokens
+over the 8,147 that main (`09a9ca7`) measures. `bellman_invite` is up 87, to 815, for
+`permanent` in its schema, the paragraph on what a permanent code is for and how long it
+lives, and the field and the null expiry in its `Returns:` line. `bellman_connect` is up 37,
+to 735, for its `Errors:` line saying a public room's permanent code does not expire and how
+it ends. No tool was added. That is 8,271.
+
+Re-measured on 2026-10-12 for the room card, by the method below: 16 tokens over
+the 8,131 that main (`444954e`) measures, all of them `bellman_start`'s (2,339 to
+2,355), for the `_meta` that names the app's page. That is 8,147.
 
 Re-measured on 2026-10-12 for public rooms on the paid plans, by the method below: 18
 tokens over the 8,084 that main (`9a2d25f`) measures, all `bellman_start`'s (2,320 to

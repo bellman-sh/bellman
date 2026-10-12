@@ -152,7 +152,11 @@ export interface SessionEvent {
 /** One live join code, and when it stops resolving. */
 export interface JoinCodeRecord {
   code: string;
-  expiresAt: number;
+  /**
+   * Null for a permanent code (ADR 0020): a public room's default seat, live until it is
+   * revoked, the room is made private, or the room closes. `codeIsLive` is the one reading.
+   */
+  expiresAt: number | null;
 }
 
 /**

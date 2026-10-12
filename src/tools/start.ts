@@ -14,6 +14,7 @@ import { audit } from "../rooms.js";
 import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
+import { APP_UI_META } from "../ui/resource.js";
 
 export function registerStart(server: McpServer, identity: Identity, s: BellmanStore, features: { hostedSeat: boolean }): void {
   server.registerTool(
@@ -56,6 +57,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false,
       },
+      // Rendered as the room card, the join code and its links, by a host that supports MCP Apps;
+      // the text result is unchanged for every other host (#28, the UI spec's deferred room card).
+      _meta: APP_UI_META,
     },
     async ({ manifest: manifestInput, brief, capabilities, org_only }): Promise<ToolResult> => {
       // Resolve FIRST. A malformed manifest must not reach the store, and the

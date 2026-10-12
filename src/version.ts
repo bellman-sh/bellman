@@ -25,5 +25,14 @@ export function readVersion(file: URL): string {
  * install). In the Claude Desktop bundle it is the package.json extension/build.sh stages beside server/,
  * which carries the version of the code packed inside. It is read as a file and not imported as JSON:
  * tsconfig.json's rootDir is src, and a JSON import from outside it fails the build.
+ *
+ * The Claude Code plugin runs a bundle from plugin/bridge/, and plugin/ holds no package.json (ADR 0018), so
+ * `npm run build:plugin` writes the version in as BELLMAN_BUNDLE_VERSION. No other build defines that name,
+ * and `typeof` reads an undefined name as "undefined" rather than throwing.
  */
-export const VERSION = readVersion(new URL("../package.json", import.meta.url));
+declare const BELLMAN_BUNDLE_VERSION: string | undefined;
+
+export const VERSION =
+  typeof BELLMAN_BUNDLE_VERSION === "string"
+    ? BELLMAN_BUNDLE_VERSION
+    : readVersion(new URL("../package.json", import.meta.url));

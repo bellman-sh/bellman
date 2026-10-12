@@ -333,12 +333,14 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
   });
 
   // Stored state, not the clock: this is recomputed on every re-arm, and an answer
-  // measured from now would slide a cadence later each time anything re-armed.
-  it("arms a hosted room whose host has never asked a cadence after its first seat", () => {
+  // measured from now would slide later each time anything re-armed.
+  it("arms a hosted room whose host has never asked at its first seat, so the host asks when the room starts", () => {
     const s = room({ lastTickAt: undefined, members: [person({ joinedAt: T0 + 5_000 }), host({ joinedAt: T0 + 9_000 })] });
-    expect(nextTickAt(s)).toBe(T0 + 5_000 + HOUR);
-    // A reporter's tick does not move that anchor either.
-    expect(nextTickAt({ ...s, lastTickAt: T0 + 30 * 60_000 })).toBe(T0 + 5_000 + HOUR);
+    expect(nextTickAt(s)).toBe(T0 + 5_000);
+    // The person who started the room is there, so the firing at the start wakes the host.
+    expect(hostedTickDue(s, T0 + 9_000, NO_SOCKETS)).toBe(true);
+    // A firing since the start that woke no host, because nobody was there to ask, tries a cadence after it.
+    expect(nextTickAt({ ...s, lastTickAt: T0 + 30 * 60_000 })).toBe(T0 + 30 * 60_000 + HOUR);
   });
 
   it("keeps a reporting member's own earlier deadline in a hosted room", () => {
@@ -386,7 +388,7 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
    * reset its three answers: seven questions in three hours. Two people are present
    * throughout and report on their own schedules, off the host's.
    */
-  it("asks on its own cadence only: two reporters at a 1h cadence, three hours, at most three host wakes", async () => {
+  it("asks on its own cadence only: two reporters at a 1h cadence, three hours, the host once at the start and then hourly", async () => {
     const MIN = 60_000;
     const reporting = { ...hosted, roles: { ...hosted.roles, lead: { ...hosted.roles.lead, reports: true } } };
     const woken: number[] = [];
@@ -412,7 +414,9 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
     const ticks = (await store.eventsAfter(rest.id, 0)).filter((e) => e.type === "heartbeat");
     // The premise: the reporters' deadlines did make the room tick off the host's cadence.
     expect(ticks.length).toBeGreaterThan(3);
-    expect(woken.map((t) => (t - T0) / MIN)).toEqual([20, 80, 140]);
+    // The host has never asked, so its first question is due at the room's first seat and goes out at
+    // the first firing; then one each hour, however the reporters' deadlines make the room tick.
+    expect(woken.map((t) => (t - T0) / MIN)).toEqual([0, 60, 120, 180]);
   });
 
   // Evicting the host is the creator's off-switch (C1): no tick wakes a host that has left.

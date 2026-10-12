@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { SWEEP_RPC_BUDGET } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session,
@@ -1092,13 +1092,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * lists it.
    */
   async setJoinCode(
-    role: string, code: string, expiresAt: number,
+    role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     const outcome = await this.ctx.storage.transaction<SetJoinCode>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "frozen" };
       if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+      // A permanent code only for a public room, decided in this transaction for the
+      // reason below: unpublishSession retires them in its own, so a room made private
+      // after the caller read it public would otherwise keep this one (ADR 0020).
+      if (expiresAt === null && !isPublic(s)) return { ok: false, reason: "not_public" };
 
       // The `revoke` authority, decided inside the transaction that writes.
       // Deciding it from a record read earlier let two callers holding `invite`
@@ -1106,7 +1110,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // found in review). Live and not merely present: an expired record shuts
       // no door, so minting over it is opening rather than replacing.
       const existing = s.joinCodes[role];
-      const live = existing !== undefined && guard.now <= existing.expiresAt;
+      const live = existing !== undefined && codeIsLive(existing, guard.now);
       if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
 
       const previous = existing?.code;
@@ -1248,7 +1252,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // The member after the seats reclaimed, with its rows (ADR 0018, ADR 0019).
       const { room, rows: seatingRows } = seated(s, members, member, await txn.get<number>(labelKey(member.label)));
 
-      // A full room has no seat for ANY role, so every code goes — in this
+      // A full room has no seat for ANY role, so every temporary code goes — in this
       // transaction, not in a second call after it committed (#116). The
       // registry drops ride the same outbox clearJoinCodes uses.
       //
@@ -1258,7 +1262,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // reclaimable, so a room with one still has a door worth leaving open.
       //
       // Cleared by presence, where removeMember retires only a code that is still live
-      // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+      // (`codeIsLive(rec, req.now)`). The two ask different questions. A removal
       // announces a door shutting, so it must not announce one that had already shut,
       // and an expired record is not a door. A seating announces nothing: it tidies
       // rows, and a full room needs no code at all, so an expired record is dropped
@@ -1266,18 +1270,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // while holding only one therefore reports `codesCleared: true`, which answers
       // this question and does not contradict the other. The contract suite pins this
       // side, and its expired-code cases for removeMember pin the other.
+      //
+      // A permanent code stays (ADR 0020): the room refuses joiners while it is full,
+      // and the link on a public page works again when a seat frees.
       const full = seatVictims(room.members, capacityOf(s.manifest), staleBefore, connected) === null;
-      const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
-      const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
+      const retired = full ? Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt !== null) : [];
+      const rows = await this.driver.enqueue(txn, retired.map(([, rec]) => dropCodeIntent(rec.code)));
+      const joinCodes = { ...s.joinCodes };
+      for (const [role] of retired) delete joinCodes[role];
 
       await putRows(txn, {
-        ...memberRows(s, { ...room, joinCodes: full ? {} : s.joinCodes }),
+        ...memberRows(s, { ...room, joinCodes }),
         ...seatingRows,
         ...rows,
       });
       // What the call did, and not only whether the room filled: a room that fills
       // with no code left in it queued nothing, so there is nothing to deliver.
-      return { refused: null, reclaimed, codesCleared: codes.length > 0 };
+      return { refused: null, reclaimed, codesCleared: retired.length > 0 };
     });
     // After the commit, never inside the closure: everything awaited in there holds
     // every other call to this object until it commits. Delivery first, then the
@@ -1319,7 +1328,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // happened. Decided before the member's state is looked at, because a live
       // door is owed to one who is already out as much as to one who is not.
       const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
-      const retiring = req.retire && rec && req.now <= rec.expiresAt
+      const retiring = req.retire && rec && codeIsLive(rec, req.now)
         ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
         : null;
 
@@ -1614,13 +1623,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /**
    * `BellmanStore.unpublishSession`, for this room. One transaction, so two requests cannot both
    * find the room public: the first time is the one kept. An empty object is left empty.
+   *
+   * The room's permanent codes go in the same transaction (ADR 0020), their registry drops queued
+   * by the `enqueue` `clearJoinCodes` uses and delivered once it has committed.
    */
   async unpublishSession(at: number): Promise<void> {
-    await this.ctx.storage.transaction(async (txn) => {
+    const dropped = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
-      if (!s || s.unpublishedAt != null) return;
-      await putRows(txn, memberRows(s, { ...s, unpublishedAt: at }));
+      if (!s || s.unpublishedAt != null) return false;
+      const permanent = Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt === null);
+      const rows = await this.driver.enqueue(txn, permanent.map(([, rec]) => dropCodeIntent(rec.code)));
+      const joinCodes = { ...s.joinCodes };
+      for (const [role] of permanent) delete joinCodes[role];
+      await putRows(txn, { ...memberRows(s, { ...s, unpublishedAt: at, joinCodes }), ...rows });
+      return permanent.length > 0;
     });
+    if (dropped) await this.driver.deliverNow();
   }
 
   /**
@@ -3533,7 +3551,7 @@ export class DurableObjectStore implements BellmanStore {
     const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
     if (!hit) return undefined; // consumed or rotated
     const [role, rec] = hit;
-    if (Date.now() > rec.expiresAt) return undefined;
+    if (!codeIsLive(rec, Date.now())) return undefined;
     return { session, role };
   }
 
@@ -3546,7 +3564,7 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number,
+    sessionId: string, role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     return this.session(sessionId).setJoinCode(role, code, expiresAt, guard);

@@ -58,3 +58,11 @@ the hook inbox (`seenThrough`).
   read cursor per member, so it cannot say what the agent has seen.
 - A host that renders no MCP Apps, Claude Code's terminal among them, shows the
   text results it showed before.
+
+## Amended 2026-10-12
+
+`bellman_start` carries the meta too. A host renders its result as the room card: the
+join code to share, the code as a link, and a public room's page. The UI spec had
+deferred that card. The same change made the bridge's signed-in connection carry the
+resource calls. Without them, every browser sign-in served no page at all, because
+only the bearer-key connection had them (#28 added them to that one alone).

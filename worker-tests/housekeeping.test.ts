@@ -793,6 +793,9 @@ const hostedRoom = (id: string, at: number, hk: Partial<Thresholds> = {}, sentAt
       hostMember(manifest, at),
     ],
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(at), used: 0, wakes: [] },
+    // A host that has never asked is due the moment its room starts; these cases are about
+    // housekeeping, so the room starts as if its host had just asked.
+    lastTickAt: at, lastHostTickAt: at,
   });
 };
 

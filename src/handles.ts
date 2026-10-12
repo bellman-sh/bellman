@@ -1,4 +1,3 @@
-// src/handles.ts
 /**
  * A public handle (bylines spec D1): the name a room's creator signs a public room with, in place
  * of their sign-in label, which is an email address for most (ADR 0011). Runtime-free, so the

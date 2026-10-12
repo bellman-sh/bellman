@@ -1,4 +1,3 @@
-// tests/handles.test.ts
 import { describe, expect, it } from "vitest";
 import { checkHandle } from "../src/handles.js";
 

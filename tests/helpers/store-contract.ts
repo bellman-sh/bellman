@@ -4224,6 +4224,80 @@ export function describeStoreContract(
       });
     });
 
+    describe("handles and bylines", () => {
+      it("claims a handle once, refuses it to a second user, and answers claimed on a repeat", async () => {
+        expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
+        expect(await store.claimHandle("u_b", "ada")).toBe("taken");
+        expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
+        expect(await store.handleOf("u_a")).toBe("ada");
+        expect(await store.userOfHandle("ada")).toBe("u_a");
+      });
+
+      it("frees the old handle when one changes", async () => {
+        await store.claimHandle("u_a", "ada");
+        expect(await store.claimHandle("u_a", "lovelace")).toBe("claimed");
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.claimHandle("u_b", "ada")).toBe("claimed");
+        expect(await store.handleOf("u_a")).toBe("lovelace");
+      });
+
+      it("signs and unsigns, lists newest first, and answers a byline only while handle and signature both hold", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        await store.signRoom("u_a", "qs_2", 2000);
+        expect(await store.signedRooms("u_a")).toEqual([
+          { sessionId: "qs_2", signedAt: 2000 },
+          { sessionId: "qs_1", signedAt: 1000 },
+        ]);
+        expect(await store.bylineFor("u_a", "qs_1")).toBe("ada");
+        await store.unsignRoom("u_a", "qs_1");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+        expect(await store.bylineFor("u_b", "qs_2")).toBeUndefined();
+      });
+
+      it("releases the handle and every signature at once, so a later handle revives none", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        await store.releaseHandle("u_a");
+        expect(await store.handleOf("u_a")).toBeUndefined();
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        await store.claimHandle("u_a", "ada2");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+      });
+
+      // More keys than one storage delete takes (128), so the release must batch them.
+      it("releases every signature of a handle, however many", async () => {
+        await store.claimHandle("u_a", "ada");
+        for (let i = 0; i < 130; i++) await store.signRoom("u_a", `qs_${i}`, i);
+        await store.releaseHandle("u_a");
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        expect(await store.handleOf("u_a")).toBeUndefined();
+      });
+
+      it("reads nothing for a user who never claimed one", async () => {
+        expect(await store.handleOf("u_none")).toBeUndefined();
+        expect(await store.signedRooms("u_none")).toEqual([]);
+        await store.releaseHandle("u_none");
+      });
+
+      // Operator-issued ids may hold a colon (`isIdentity` takes any non-empty string), so one person's id
+      // can extend another's past the key's separator. Neither a read nor a release may reach the other's
+      // signatures through it.
+      it("lists no signature of an id that extends this one past a colon", async () => {
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        expect(await store.signedRooms("u_x")).toEqual([]);
+        expect(await store.signedRooms("u_x:y")).toEqual([{ sessionId: "qs_1", signedAt: 1000 }]);
+      });
+
+      it("releases no signature of an id that extends this one past a colon", async () => {
+        await store.claimHandle("u_x:y", "yara");
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        await store.releaseHandle("u_x");
+        expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
+      });
+    });
+
     // ----------------------------------------------------------------- audit
     it("scopes audit reads to a single org", async () => {
       (await store.appendAudit({

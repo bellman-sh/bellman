@@ -126,12 +126,12 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 
 Plans gate **creating** a room, not joining one. Anyone signed in can be invited into any room, on any plan — so a teammate, a contractor or someone at another company needs an account and nothing else.
 
-| | modes | rooms / month | blobs / room | kept after close | hosted seat | |
-| --- | --- | --- | --- | --- | --- | --- |
-| `free` | pair | 20 | 50 MB | 7 days | — | |
-| `pro` | pair, swarm | 500 | 500 MB | 1 year | — | |
-| `max` | pair, swarm | 2,000 | 5 GB | until deleted | 3 rooms open at once | *not on sale yet* |
-| `team` | pair, swarm | 5,000 | 5 GB | until deleted | 5 rooms open at once | `org_only` scoping, audit trail |
+| | modes | rooms / month | blobs / room | kept after close | public rooms | hosted seat | |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `free` | pair | 20 | 50 MB | 7 days | — | — | |
+| `pro` | pair, swarm | 500 | 500 MB | 1 year | yes | — | |
+| `max` | pair, swarm | 2,000 | 5 GB | until deleted | yes | 3 rooms open at once | *not on sale yet* |
+| `team` | pair, swarm | 5,000 | 5 GB | until deleted | yes | 5 rooms open at once | `org_only` scoping, audit trail |
 
 A pair room holds two. A swarm room holds as many members as you invite, up to 100, a storage ceiling that is the same on every plan. Rooms persist on every plan: a room ends when its last member leaves, or after 90 days in which nobody in it was seen.
 
@@ -150,7 +150,7 @@ A room's blob ceiling is stamped on the room when it is created, from the plan t
 - `DELETE /rooms/:id` deletes a closed room now, for its creator or an admin of an org that sat in it. It answers `202` with `{ id, purge_at }`, `purge_at` being the time the room is stored to go (a repeated delete is told the first one's), and the purge follows within moments; a room that has not closed answers `409`, because a room is deleted after it closes, never before.
 - `GET /rooms/:id` carries `closed_at` and `purge_at` as ISO times, to a member as to an admin: when the room closed and when it goes. Each is `null` where the record has none, so an open room has neither and a room kept until it is deleted has no `purge_at`.
 - On the team plan an org's admin can read any closed room one of that org's people sat in, though they never held a seat: `GET /rooms/:id` answers with `viewer: "admin"`, `GET /rooms/:id/surface` returns the whole surface, `GET /rooms/:id/events` the whole log, a file on it downloads through `GET /rooms/:id/blobs/:blobId` as it does for a member, and `GET /rooms?as=admin` lists those rooms, newest close first. An admin the room's creator removed reads the closed room the same way, since what a removal cuts is a seat's reading and they no longer hold one; their removed handles are still listed in `my_handles`. It is a read: an admin writes nothing to the room, so a surface write or an upload from one is a `403`, and an open room stays its members' alone. The list reads up to 500 rooms from the org's index, open ones among them, keeps the closed ones and returns the newest 50 by close; `truncated: true` says the index held that many, or more than 50 were closed. That scan costs up to 500 room reads for one request, which the summary index of #49 removes. A room created before this deploy is not in the index, though reading that room by its id still works.
-- A room started with `public: true` in its manifest is readable by anyone with its link, signed in or not: `GET /public/rooms/:id` for its name and purpose, `/surface` for the working surface, `/events` for its log, and `/blobs/:blobId` for a file an item on the surface names. A brief never is: the log leaves out `brief_update`, and a join names only the joiner's id and seat. Members are named there by number, `member 1` and on, never by the label they signed in with, which for most is an email address. `bellman_start` returns a public room's page as `public_url`, apart from `join_url`, which seats whoever opens it. Joining still takes a code, and a joiner sees that the room is public before accepting. Its creator can make it private with `POST /rooms/:id/unpublish` or from the room's page in dash, and nothing makes a room public again. Readers open it at `dash.bellman.sh/r/<id>`.
+- A room started with `public: true` in its manifest, which takes the pro, max or team plan, is readable by anyone with its link, signed in or not: `GET /public/rooms/:id` for its name and purpose, `/surface` for the working surface, `/events` for its log, and `/blobs/:blobId` for a file an item on the surface names. A brief never is: the log leaves out `brief_update`, and a join names only the joiner's id and seat. Members are named there by number, `member 1` and on, never by the label they signed in with, which for most is an email address. `bellman_start` returns a public room's page as `public_url`, apart from `join_url`, which seats whoever opens it. Joining still takes a code, and a joiner sees that the room is public before accepting. Its creator can make it private with `POST /rooms/:id/unpublish` or from the room's page in dash, and nothing makes a room public again. Readers open it at `dash.bellman.sh/r/<id>`.
 
 ## Run it
 

@@ -132,6 +132,10 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.modes).toContain("swarm");
   });
 
+  it("gates public rooms to the paid plans", () => {
+    expect(plans.filter((p) => ENTITLEMENTS[p].publicRooms)).toEqual(["pro", "max", "team"]);
+  });
+
   /** max sells creates between pro and team; nothing else steps. */
   it("raises quotas monotonically by plan", () => {
     expect(ENTITLEMENTS.free.monthlyCreates).toBeLessThan(ENTITLEMENTS.pro.monthlyCreates);
@@ -206,12 +210,13 @@ describe("plan entitlements", () => {
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
    * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
    * room is kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
-   * hosted rooms a person holds open and what each spends. None says who may join it.
+   * hosted rooms a person holds open and what each spends; `publicRooms` whether a
+   * room may be created public, so readable by anyone with its link. None says who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
       "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
-      "hostedRooms", "hostUnitsPerRoom",
+      "hostedRooms", "hostUnitsPerRoom", "publicRooms",
     ].sort();
 
     for (const plan of plans) {

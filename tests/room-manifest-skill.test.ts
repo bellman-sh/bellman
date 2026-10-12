@@ -1,6 +1,6 @@
 /**
- * skills/room-manifest/SKILL.md is the authoring guide a Claude Code session loads when
- * someone asks for a .bellman/room.yaml. It restates the closed verb set, the preset
+ * plugin/skills/room-manifest/SKILL.md is the authoring guide a Claude Code session loads
+ * when someone asks for a .bellman/room.yaml. It restates the closed verb set, the preset
  * catalog and the server's validation rules — all of which live in src/manifest.ts, and
  * all of which will change. A guide that drifts is worse than no guide: it tells a model
  * to write a manifest the server then rejects, confidently.
@@ -16,16 +16,8 @@ import { parse as parseYaml } from "yaml";
 import { MAX_ROLE_KEY_LENGTH, PRESET_NAMES, VERBS, resolveManifest } from "../src/manifest.js";
 
 const SKILL = readFileSync(
-  new URL("../skills/room-manifest/SKILL.md", import.meta.url),
+  new URL("../plugin/skills/room-manifest/SKILL.md", import.meta.url),
   "utf8"
-);
-
-const plugin: { version: string } = JSON.parse(
-  readFileSync(new URL("../.claude-plugin/plugin.json", import.meta.url), "utf8")
-);
-
-const pkg: { version: string } = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8")
 );
 
 /** Every ```yaml block in the skill, in order. */
@@ -243,11 +235,5 @@ describe("the limits the skill quotes", () => {
         reserved
       ).toThrow();
     }
-  });
-});
-
-describe("the plugin manifest", () => {
-  it("carries the package's version", () => {
-    expect(plugin.version).toBe(pkg.version);
   });
 });

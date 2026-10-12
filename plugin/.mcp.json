@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "bellman": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bridge/channel.mjs"],
+      "env": { "BELLMAN_DELIVERY": "hook" }
+    }
+  }
+}

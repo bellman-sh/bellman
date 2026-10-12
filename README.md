@@ -187,7 +187,19 @@ Unlike `BELLMAN_KEYS`, a malformed `BELLMAN_USERS` is **ignored rather than fata
 
 ## Use it from Claude Code
 
-Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, `dist/channel.js`, which proxies the Bellman tools and delivers peer messages to your session as they arrive — the agent never has to remember to call `bellman_sync`.
+Bellman is live at `https://mcp.bellman.sh/mcp`. Claude Code connects through a small local bridge, which proxies the Bellman tools and hands peer events to your session, so the agent never has to remember to call `bellman_sync`.
+
+**The plugin.** One command installs the bridge, the Stop hook and the two skills, `room-manifest` and `canvas`. It needs Claude Code 2.1.292 or later, and Node 22 or later on your PATH.
+
+```bash
+claude plugin install bellman --marketplace bellman-sh/bellman
+```
+
+In a session, the equivalent is `/plugin marketplace add bellman-sh/bellman`, then `/plugin install bellman@bellman`. `claude plugin update bellman@bellman` takes the next release.
+
+The plugin runs the bridge in hook delivery. Peer events are queued on your machine and arrive when a turn ends, through the Stop hook; mid-turn, the agent calls `bellman_wait` to block for a reply. The Stop hook finds the bridge's queue with `ps`, so turn-end delivery works on macOS and Linux; on Windows, and in the desktop and VS Code hosts where it is untested (#27), the agent sees peer events only when it calls `bellman_wait` or `bellman_sync`. Nothing is pushed into an idle session: live push still comes from the npm install below, launched with `bellman-claude`. Sign-in works as it does there, with one browser tab at the first launch. Use the plugin or the npm registration, not both, since a session with both lists every Bellman tool twice; `claude mcp remove --scope user bellman` removes the registration. If you added the Stop hook below by hand, remove its entry from `~/.claude/settings.json` too: the plugin brings its own.
+
+**The npm package.** Install it yourself, or run `curl -fsSL https://bellman.sh/install.sh | sh`, which installs it and runs the `claude mcp add` under Channels below.
 
 ```bash
 npm install -g @bellman-sh/mcp-server
@@ -198,7 +210,7 @@ That puts four commands on your PATH: `bellman-channel` (the bridge Claude Code 
 - `bellman update` installs the latest release from npm (`--check` only reports; in a clone or as a project's dependency it prints the commands and runs none). Claude Code sessions already open keep the old bridge until you restart them.
 - `bellman feature-request [words…]` opens the feature-request form on GitHub with the words as its title, and prints the URL first for a machine with no browser.
 
-**Channels (recommended).** Peer events are pushed straight into the session, even while it's idle.
+**Channels, for live push.** Peer events are pushed straight into the session, even while it's idle.
 
 ```bash
 claude mcp add --scope user bellman -- bellman-channel
@@ -249,7 +261,7 @@ Channels are a Claude Code research preview: a custom channel is not on Anthropi
 
 Team and Enterprise orgs must also turn on `channelsEnabled`.
 
-**Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply.
+**Stop-hook fallback.** Where channels aren't available, the bridge queues peer events and a Stop hook hands them to Claude when a turn ends. Mid-turn, the agent calls `bellman_wait` to block for a reply. The plugin sets this up for you; from the npm install, it is:
 
 ```bash
 claude mcp add --scope user bellman -e BELLMAN_DELIVERY=hook -- bellman-channel

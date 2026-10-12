@@ -1,0 +1,13 @@
+{
+  "name": "bellman",
+  "owner": {
+    "name": "mcfearsome"
+  },
+  "description": "Bellman for Claude Code: the bridge, the Stop hook and the room skills, in one plugin.",
+  "plugins": [
+    {
+      "name": "bellman",
+      "source": "./plugin"
+    }
+  ]
+}

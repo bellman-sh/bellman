@@ -287,6 +287,26 @@ export function hostedSeatOn(raw: string | undefined): boolean {
 }
 
 /**
+ * BELLMAN_HOSTED_SEAT_USERS: the user ids the seat is on for while BELLMAN_HOSTED_SEAT is
+ * off, comma-separated, so chosen accounts can run hosted rooms before everyone can. Plans
+ * still apply: a listed user needs one with a hosted seat. An entry that is not a user id
+ * (`u_…`) is skipped and logged, so a subject key or a typo lists no one.
+ */
+export function hostedSeatUsers(raw: string | undefined): ReadonlySet<string> {
+  const users = new Set<string>();
+  for (const entry of (raw ?? "").split(",").map((e) => e.trim()).filter(Boolean)) {
+    if (/^u_[A-Za-z0-9_-]{1,198}$/.test(entry)) users.add(entry);
+    else console.error(`BELLMAN_HOSTED_SEAT_USERS lists "${entry}", which is not a user id — skipping it`);
+  }
+  return users;
+}
+
+/** Whether this user's hosted room may start: the seat is on, or off with this user listed. */
+export function hostedSeatFor(userId: string, rawSwitch: string | undefined, rawUsers: string | undefined): boolean {
+  return hostedSeatOn(rawSwitch) || hostedSeatUsers(rawUsers).has(userId);
+}
+
+/**
  * What a runtime does for `handleWake` (spec D7). `HostDO` reads and writes the room by
  * RPC and keeps the record in its own storage; `MemoryHost` does the same over a
  * `MemoryStore` and a map. Each queues its wakes and handles them one at a time, on its
@@ -295,6 +315,8 @@ export function hostedSeatOn(raw: string | undefined): boolean {
 export interface HostDriver {
   /** Whether the seat is switched on (`hostedSeatOn`). Off, `handleWake` returns before it reads or calls anything. */
   readonly enabled: boolean;
+  /** Creators whose rooms wake while the seat is off (`hostedSeatUsers`). Absent lists no one. */
+  readonly users?: ReadonlySet<string>;
   /** The delay before each retry, in order: `RETRY_MS`, or shorter in a test. */
   readonly retryMs: readonly number[];
   read(sessionId: string): Promise<{
@@ -370,7 +392,8 @@ const postedText = (e: SessionEvent): string => {
  * the record) propagates to `runWake`, which counts it the same way.
  */
 export async function handleWake(driver: HostDriver, wake: HostWake, now: number): Promise<number | null> {
-  if (!driver.enabled) return null;
+  // Off with no one listed: settled before anything is read.
+  if (!driver.enabled && !driver.users?.size) return null;
   const record = await driver.load(wake.sessionId);
   const settle = async (r: HostRecord): Promise<null> => {
     await driver.save(wake.sessionId, { ...r, lastCause: Math.max(r.lastCause, wake.cursor), attempts: 0 });
@@ -379,6 +402,9 @@ export async function handleWake(driver: HostDriver, wake: HostWake, now: number
 
   const { room, events, sent } = await driver.read(wake.sessionId);
   if (!room) return settle(record);
+  // Off, but on for the creators BELLMAN_HOSTED_SEAT_USERS lists. Anyone else's room stays
+  // quiet as it would with no list: read to learn whose it is, and nothing after.
+  if (!driver.enabled && !driver.users?.has(room.createdBy)) return null;
   const gate = admit(record, wake, room);
   if (gate.kind === "skip") return settle(record);
 

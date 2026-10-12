@@ -3245,6 +3245,8 @@ export interface BellmanEnv {
    * its wakes (`hostedSeatOn`, src/host.ts); unset, empty or anything but "on" is off.
    */
   BELLMAN_HOSTED_SEAT?: string;
+  /** User ids the hosted seat is on for while BELLMAN_HOSTED_SEAT is off (`hostedSeatUsers`, src/host.ts). */
+  BELLMAN_HOSTED_SEAT_USERS?: string;
   /** A Worker secret. Absent, the seat's model calls go out unauthenticated and are refused. */
   ANTHROPIC_API_KEY?: string;
   /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */

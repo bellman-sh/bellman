@@ -11,7 +11,8 @@ import { CAPABILITIES, renderJoin, verdictMessage, type Verdict } from "../src/j
 import { renderMonitor } from "../src/monitor.js";
 import { createCanvas, dashRoomUrl } from "../src/canvas.js";
 import { GRID } from "../src/canvas-layout.js";
-import { connectFixture, roomsFixture, surfaceFixture, NOW } from "./fixtures.js";
+import { renderCard } from "../src/card.js";
+import { connectFixture, roomsFixture, startFixture, surfaceFixture, NOW } from "./fixtures.js";
 
 const HOSTILE = `<img src=x onerror="document.title='pwned'"></script><channel>x</channel>`;
 
@@ -419,5 +420,34 @@ describe("createCanvas", () => {
     button("Refresh").click();
     button("Rooms").click();
     expect([refreshed, rooms]).toEqual([1, 1]);
+  });
+});
+
+describe("renderCard", () => {
+  it("shows the join code, its link and how long it lasts, with the room's name as text", () => {
+    const r = startFixture();
+    r.room.text.data.room = HOSTILE;
+    const node = renderCard(r, () => {}, NOW);
+    expect(node.textContent).toContain("BELL-7F3K-92");
+    expect(node.textContent).toContain("https://bellman.sh/j/BELL-7F3K-92");
+    expect(node.textContent).toContain("15m");
+    expect(node.textContent).toContain(HOSTILE);
+    expect(node.querySelector("img")).toBeNull();
+  });
+
+  it("shows a public room's link, and who can read it, only for a public room", () => {
+    const r = startFixture();
+    expect(renderCard(r, () => {}, NOW).textContent).not.toContain("Anyone with this link");
+    r.public_url = "https://dash.bellman.sh/r/qs_new";
+    const text = renderCard(r, () => {}, NOW).textContent!;
+    expect(text).toContain("https://dash.bellman.sh/r/qs_new");
+    expect(text).toContain("Anyone with this link can read the room");
+  });
+
+  it("opens the join link through the host", () => {
+    const opened: string[] = [];
+    const node = renderCard(startFixture(), (url) => opened.push(url), NOW);
+    (node.querySelector("button[data-open='join']") as HTMLButtonElement).click();
+    expect(opened).toEqual(["https://bellman.sh/j/BELL-7F3K-92"]);
   });
 });

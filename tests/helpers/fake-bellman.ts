@@ -1,4 +1,5 @@
 import http from "node:http";
+import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 import type { Duplex } from "node:stream";
 import { ignoreResets } from "./upgrade-socket.js";
 import { resolveIdentity } from "../../src/auth.js";
@@ -151,12 +152,18 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
       body.method === "initialize"
         ? {
             protocolVersion: "2025-11-25",
-            capabilities: { tools: {} },
+            capabilities: { tools: {}, resources: {} },
             serverInfo: { name: "bellman", version: "0.1.0" },
           }
         : body.method === "tools/list"
           ? { tools: [{ name: "bellman_start", description: "start", inputSchema: { type: "object" } }] }
-          : {};
+          // The app's page, as the real server registers it (src/ui/resource.ts): what a host rendering
+          // MCP Apps reads through the bridge.
+          : body.method === "resources/list"
+            ? { resources: [{ uri: APP_RESOURCE_URI, name: "bellman", mimeType: APP_MIME_TYPE }] }
+            : body.method === "resources/read"
+              ? { contents: [{ uri: APP_RESOURCE_URI, mimeType: APP_MIME_TYPE, text: "<!doctype html><title>bellman</title>" }] }
+              : {};
 
     return Response.json(
       { jsonrpc: "2.0", id: body.id, result },

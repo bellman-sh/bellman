@@ -1810,12 +1810,16 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,102** | every request, whether or not you are in a room |
+| Tool definitions | **~8,147** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-12 for the room card, by the method below: 16 tokens over
+the 8,131 that main (`444954e`) measures, all of them `bellman_start`'s (2,339 to
+2,355), for the `_meta` that names the app's page. That is 8,147.
 
 Re-measured on 2026-10-12 for public rooms on the paid plans, by the method below: 18
 tokens over the 8,084 that main (`9a2d25f`) measures, all `bellman_start`'s (2,320 to

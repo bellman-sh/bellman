@@ -9,8 +9,7 @@ import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.
 import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Remote, WhoAmI } from "./bridge.js";
+import { remoteOf, type Remote, type WhoAmI } from "./bridge.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockHandle, type LockOptions, type ServerCredential,
@@ -516,14 +515,6 @@ class BridgeAuth implements OAuthClientProvider {
   }
 }
 
-function remoteFrom(client: Client): Remote {
-  return {
-    listTools: () => client.listTools(),
-    callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
-    close: () => client.close(),
-  };
-}
-
 interface Attempt {
   /** Set when the connect succeeded. */
   remote?: Remote;
@@ -573,7 +564,7 @@ async function connectCached(
   });
   try {
     await client.connect(transport);
-    return { remote: remoteFrom(client), provider };
+    return { remote: remoteOf(client), provider };
   } catch (err) {
     await transport.close().catch(() => undefined);
     if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
@@ -1114,6 +1105,6 @@ async function signIn(
     log(label ? `signed in as ${label}${plan ? ` (${plan} plan)` : ""}` : "signed in");
     // The provider goes back with the Remote: it outlives this call inside the
     // transport, and connectSignedIn arms its persist once the lock is released.
-    return { remote: remoteFrom(client), provider };
+    return { remote: remoteOf(client), provider };
   }
 }

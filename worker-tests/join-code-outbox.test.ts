@@ -32,7 +32,7 @@ import type { Member } from "../src/types.js";
 // The shared fixture, not a hand-rolled literal: hydrateStoredSession returns
 // undefined for a session whose manifest has no roles object, so a `manifest: null`
 // fixture reads as GONE and every assertion below would fail against correct code.
-import { member, oneCode, session } from "../tests/helpers/fixtures.js";
+import { member, oneCode, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -437,6 +437,21 @@ const SITES: Site[] = [
     ),
     owes: () => [drop(A), drop(B)],
     after: () => [undefined, undefined, undefined],
+  },
+  {
+    // A public room's permanent code goes in the write that makes the room private
+    // (ADR 0020), and the temporary code beside it is left to run out. The contract
+    // suite cannot see this drop either, for the reason the seating's case gives.
+    name: "unpublishSession, for a room holding a permanent code",
+    given: (store, id) => store.createSession(session({
+      id,
+      blobsSwept: true,
+      manifest: roomManifest({ public: true }),
+      joinCodes: { peer_b: { code: A, expiresAt: null }, peer_a: { code: B, expiresAt: live() } },
+    })),
+    act: (store, id) => store.unpublishSession(id, Date.now()),
+    owes: () => [drop(A)],
+    after: (id) => [undefined, id, undefined],
   },
   {
     name: "closeSession",

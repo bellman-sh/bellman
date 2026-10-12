@@ -19,7 +19,7 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember, isRemovedMember,
+  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
@@ -252,13 +252,8 @@ export function findMember(s: StoredSession, memberId: string, identity: Identit
 export const sessionStatus = (session: { closed: boolean; frozenAt: number | null }): string =>
   session.closed ? "closed" : session.frozenAt !== null ? "frozen" : "active";
 
-/**
- * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
- * started, and not made private since. `=== true` and `== null` because the in-memory store does
- * not hydrate, so a record there may carry neither field.
- */
-export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
-  s.manifest.public === true && s.unpublishedAt == null;
+/** Defined beside the stores, which decide it too (ADR 0020); the routes and projections read it from here. */
+export { isPublic };
 
 /** Every handle this person holds in the room, in roster order. Empty means a stranger. It takes any object of the right shape, so a test can hand it a fixture. */
 export const handlesOf = (session: Pick<StoredSession, "members">, identity: Pick<Identity, "userId">): Member[] =>
@@ -666,7 +661,7 @@ export async function revokeInvite(
   // itself: an event, an audit row, and over-reported roles.
   const retired = (role ? [role] : Object.keys(session.joinCodes)).filter((r) => {
     const rec = session.joinCodes[r];
-    return rec !== undefined && Date.now() <= rec.expiresAt;
+    return rec !== undefined && codeIsLive(rec, Date.now());
   });
   if (role) await store.consumeJoinCode(sessionId, role);
   else await store.clearJoinCodes(sessionId);

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { manifestFixture, member, oneCode, session, swarmSession } from "./helpers/fixtures.js";
+import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
 import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
@@ -409,6 +409,24 @@ describe("revokeInvite", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.roles).toEqual([]);
+  });
+
+  // ADR 0020: a permanent code has no expiry to compare against, and is live until
+  // something retires it, so revoking it is a door shutting and is announced.
+  it("retires a permanent code, reports its role and announces it", async () => {
+    await store.createSession(session({
+      manifest: roomManifest({ public: true }),
+      joinCodes: { peer_b: { code: "BELL-PERM-01", expiresAt: null } },
+    }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual(["peer_b"]);
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_revoked")).toHaveLength(1);
+    expect(await store.getSessionByJoinCode("BELL-PERM-01")).toBeUndefined();
   });
 
   // Without the guard a mistyped role retires nothing and answers { roles: [] },

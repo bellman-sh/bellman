@@ -2,7 +2,7 @@ import type { Member, SessionEvent, SurfaceRow, Verb } from "./types.js";
 import { mustReport, verbsOfRole } from "./roles.js";
 import { presenceOf } from "./presence.js";
 import { reportRow } from "./heartbeat.js";
-import { asked, capacityOf, isActiveMember } from "./store.js";
+import { asked, capacityOf, codeIsLive, isActiveMember } from "./store.js";
 import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
 import { purgeDueAt } from "./retention.js";
@@ -266,10 +266,11 @@ export function roomSummary(
       beat: beatOf(s, m, now, latestNote.get(m.memberId)),
     })),
     join_codes: Object.entries(s.joinCodes)
-      .filter(([, rec]) => rec.expiresAt > now)
+      .filter(([, rec]) => codeIsLive(rec, now))
       .map(([role, rec]) => ({
         role,
-        expires_at: iso(rec.expiresAt),
+        // Null for a permanent code (ADR 0020), which has no time to give.
+        expires_at: rec.expiresAt === null ? null : iso(rec.expiresAt),
         ...(canInvite ? { code: rec.code, join_url: joinUrl(rec.code) } : {}),
       })),
     last_event: last ? { cursor: last.cursor, type: last.type, at: iso(last.at) } : null,

@@ -123,10 +123,10 @@ export function fullMessage(manifest: RoomManifest): string {
  * alive.
  *
  * Written at most once every half-window. In the Durable Objects store an
- * `updateMember` is a read-modify-write of the whole session blob — every
- * member with its brief, every join code, the manifest — so a write on each
- * 25-second poll would cost more than the per-beat event row this design
- * rejects as the wrong home for liveness. Half the window keeps `lastSeenAt` at
+ * `updateMember` reads the room, its present members included, and writes the
+ * member's row (ADR 0019), so a write on each 25-second poll would cost more
+ * than the per-beat event row this design rejects as the wrong home for
+ * liveness. Half the window keeps `lastSeenAt` at
  * worst five minutes behind inside a ten-minute window, which is never the
  * difference between present and stale, at a twelfth of the writes.
  *
@@ -242,8 +242,15 @@ export async function announceReclaimed(
   }
 }
 
-export function findMember(s: StoredSession, memberId: string, identity: Identity): Member | undefined {
-  const m = s.members.find((mm) => mm.memberId === memberId);
+/**
+ * The caller's handle in this room, in it or gone from it, or undefined. One who has left
+ * is not on the session (ADR 0019), so that handle is read by id: reads stay open to a
+ * member who left, and every caller that refuses one reads `leftAt` for itself.
+ */
+export async function findMember(
+  store: BellmanStore, s: StoredSession, memberId: string, identity: Identity,
+): Promise<Member | undefined> {
+  const m = s.members.find((mm) => mm.memberId === memberId) ?? await store.getMember(s.id, memberId);
   // A member handle can only be driven by the identity that created it.
   if (!m || m.userId !== identity.userId) return undefined;
   return m;
@@ -260,9 +267,13 @@ export const sessionStatus = (session: { closed: boolean; frozenAt: number | nul
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
 
-/** Every handle this person holds in the room, in roster order. Empty means a stranger. It takes any object of the right shape, so a test can hand it a fixture. */
-export const handlesOf = (session: Pick<StoredSession, "members">, identity: Pick<Identity, "userId">): Member[] =>
-  session.members.filter((m) => m.userId === identity.userId);
+/**
+ * Every handle this person has held in the room, in join order, those that left included, from
+ * the store (ADR 0019): the session holds only the members in the room now. Empty means a stranger.
+ */
+export const handlesOf = (
+  store: BellmanStore, session: Pick<StoredSession, "id">, identity: Pick<Identity, "userId">,
+): Promise<Member[]> => store.membersOfUser(session.id, identity.userId);
 
 /**
  * Where a person's reading stops (#113), if anywhere. Only when every handle
@@ -426,7 +437,7 @@ export async function leaveRoom(
 ): Promise<RoomResult<{ sessionStatus: string }>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
-  const me = findMember(session, memberId, actor);
+  const me = await findMember(store, session, memberId, actor);
   if (!me) return refuse("forbidden", "member_id is not yours.");
 
   // One operation: the guard, the stamp, the departure and the audit row. Read
@@ -503,7 +514,7 @@ export async function gateSeat(
   if (!session) return refuse("not_found", "session not found or closed.");
   if (session.closed) return refuse("closed", "session not found or closed.");
   if (session.frozenAt !== null) return refuse("frozen", FROZEN);
-  const me = findMember(session, memberId, actor);
+  const me = await findMember(store, session, memberId, actor);
   if (!me || me.leftAt !== null) {
     return refuse("forbidden", "member_id is not yours or has left the session.");
   }
@@ -602,7 +613,7 @@ export async function issueInvite(
   // Fails closed. `gateSeat` has already established this member exists, so a
   // miss means the predicate moved under us, and the safe answer to "may this
   // seat retire a code someone is holding" is no.
-  const me = findMember(session, memberId, actor);
+  const me = await findMember(store, session, memberId, actor);
   const mayReplaceLive = me !== undefined && denyVerb(session, me, "revoke") === null;
 
   const now = Date.now();
@@ -911,8 +922,10 @@ export async function evictMember(
   // checks made on this read are of facts that cannot change under it: a member's
   // record is never deleted and its user never changes. The room closing and a
   // freeze can, so those guards are inside removeMember, where a freeze landing in
-  // this gap cannot slip past them (#118).
-  const target = session.members.find((m) => m.memberId === targetMemberId);
+  // this gap cannot slip past them (#118). A target who has left is read by id, since
+  // the session holds only the members in the room now (ADR 0019).
+  const target = session.members.find((m) => m.memberId === targetMemberId)
+    ?? await store.getMember(sessionId, targetMemberId);
   if (!target) return refuse("not_found", "no member with that member_id is in this room.");
   if (target.userId === actor.userId) {
     // Names no tool and no route. This module serves every transport, and a panel

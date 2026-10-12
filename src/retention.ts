@@ -49,11 +49,12 @@ export const creditedBlobBytes = (charged: number, credited: number): number =>
   Math.max(0, charged - credited);
 
 /**
- * Every org the room involved, once each, in roster order: the orgs a purge or a
- * delete owes an audit entry, one per stream. The roster keeps a member who left
- * or was removed, and so does this, because their org sat in the room. A falsy
- * org names a stream nobody reads, so it is no org here (ARCHITECTURE.md, runtime
- * fact 4).
+ * Every org these members sit for, once each, in their order. A store keeps the
+ * answer on the room's record as `orgs` (ADR 0019), from the members it was created
+ * with and every seat after, so a member who left or was removed still counts: their
+ * org sat in the room. Those are the orgs a purge or a delete owes an audit entry,
+ * one per stream. A falsy org names a stream nobody reads, so it is no org here
+ * (ARCHITECTURE.md, runtime fact 4).
  */
 export function orgsOnRoster(s: { members: readonly { orgId: string | null }[] }): string[] {
   return [...new Set(s.members.map((m) => m.orgId).filter((orgId): orgId is string => Boolean(orgId)))];

@@ -59,23 +59,6 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
 
 /**
- * Members as a room's record keeps them, and the briefs that go beside it (ADR 0018). Each
- * brief leaves its member, which keeps the brief's `agent`. An arriving member brings one,
- * and a member stored before ADR 0018 still carries its own inline and comes out the same
- * way, so the first seat into an old room moves every brief the room still holds.
- */
-export function splitBriefs(
-  members: readonly (Omit<Member, "agent"> & { agent?: AgentInfo; brief?: Brief })[],
-): { members: Member[]; briefs: Record<string, Brief> } {
-  const briefs: Record<string, Brief> = {};
-  const kept = members.map(({ brief, ...m }) => {
-    if (brief) briefs[m.memberId] = brief;
-    return { ...m, agent: brief ? brief.agent : m.agent! };
-  });
-  return { members: kept, briefs };
-}
-
-/**
  * The hosted seat's identity (hosted seat spec, D1): the member id it holds in
  * every room, and the user every hosted seat is seated under.
  *

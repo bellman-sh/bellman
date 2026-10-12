@@ -313,9 +313,11 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
   const person = (over = {}) =>
     member({ memberId: "m_person", roomRole: "lead", joinedAt: T0, lastSeenAt: T0, ...over });
   const host = (over = {}) => member({ ...hostMember(hosted, T0), ...over });
+  /** The room as a store reads it back: its creator is its first seat, from the members it is given. */
   const room = (over: Partial<StoredSession> = {}): StoredSession => {
-    const { events, ...rest } = session({ manifest: hosted, members: [person(), host()] });
-    return { ...rest, ...over } as StoredSession;
+    const { members, ...fields } = over;
+    const { events, ...rest } = session({ manifest: hosted, members: members ?? [person(), host()] });
+    return { ...rest, ...fields } as StoredSession;
   };
 
   it("arms a hosted room a cadence after its host last asked, though no member must report", () => {
@@ -390,9 +392,11 @@ describe("a hosted room's own tick (hosted seat spec, D4)", () => {
     const woken: number[] = [];
     let now = T0;
     const store = new MemoryStore({ host: () => { woken.push(now); } });
+    // The creator first, as a room is created: its seat is the room's creation, where the host's
+    // cadence starts until the host first asks.
     const { events, ...rest } = session({ manifest: reporting, members: [
-      person({ memberId: "m_a", userId: "u_a", joinedAt: T0 - 20 * MIN, lastReportAt: T0 - 20 * MIN }),
       person({ memberId: "m_b", userId: "u_b", joinedAt: T0 - 40 * MIN, lastReportAt: T0 - 40 * MIN }),
+      person({ memberId: "m_a", userId: "u_a", joinedAt: T0 - 20 * MIN, lastReportAt: T0 - 20 * MIN }),
       host({ joinedAt: T0 - 40 * MIN }),
     ] });
     void events;

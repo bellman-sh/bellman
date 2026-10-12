@@ -58,7 +58,7 @@ If a room's creator has removed you, you still get the history up to and includi
       const { member_id, since_cursor, wait_seconds, surface } = args;
       const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
-      const me = findMember(session, member_id, identity);
+      const me = await findMember(s, session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
 
       // This is the liveness signal, and the reason #103 needs no heartbeat

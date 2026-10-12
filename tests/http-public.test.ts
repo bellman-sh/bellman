@@ -226,6 +226,9 @@ describe("members' names on a public read", () => {
     await say(member(), "message", { text: "hello" });
     await say(peer(), "member_joined", { member: storedMember(peer()), brief: brief() });
     await say(peer(), "member_left", { label: "peer@codenerd" });
+    // And has left: the session holds the members in the room now, and a member who left keeps the
+    // number its label was given at seating (ADR 0019, D6).
+    await store.updateMember(PUB, "m_peer", { leftAt: Date.now() });
     await store.appendEvent(PUB, {
       type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
       payload: { members: [{ member_id: "m_peer", label: "peer@codenerd" }], about: { origin: { label: "jesse@codenerd" } } }, refId: null,

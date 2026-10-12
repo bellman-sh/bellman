@@ -72,7 +72,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
-      const me = findMember(session, member_id, identity);
+      const me = await findMember(s, session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
 
       // Sending is as good a sign of life as polling. Before the verb check, so

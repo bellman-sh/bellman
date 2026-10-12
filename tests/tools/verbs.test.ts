@@ -792,8 +792,8 @@ describe("sync and leave are never gated", () => {
     // Not refused is not the same as left: a gate that answered "left" without
     // leaving would pass an isError check on its own. So read the seat itself in
     // the store, before and after; the "before" keeps the "after" from being vacuous.
-    const joinerSeat = async () =>
-      (await h.store.getSession(p.sessionId))!.members.find((m) => m.memberId === p.joinerMemberId)!;
+    // By id: once it has left, the seat is not on the session (ADR 0019).
+    const joinerSeat = async () => (await h.store.getMember(p.sessionId, p.joinerMemberId))!;
     expect((await joinerSeat()).leftAt, "the seat is present before it leaves").toBeNull();
 
     const left = await p.joiner.call("bellman_leave", {

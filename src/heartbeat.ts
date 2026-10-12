@@ -135,10 +135,11 @@ export function nextTickAt(s: StoredSession): number | null {
  * role in a hosted room need report, `social`'s included, and `nextTickAt` takes the
  * earlier of this and every reporter's own deadline, so a reporter is still asked on time.
  *
- * A host that has never asked anchors on the room's first seat, which is stored state
- * like every other anchor here, and not on the clock. `#derivedDue` recomputes this on
- * every re-arm, so an answer measured from now would move a cadence later each time
- * anything re-armed the alarm, and a busy room would never tick at all.
+ * A host that has never asked is due at the room's first seat, so it asks when the room
+ * starts rather than a cadence later. That anchor is stored state like every other here,
+ * and not the clock: `#derivedDue` recomputes this on every re-arm, so an answer measured
+ * from now would slide later each time anything re-armed the alarm, and a busy room would
+ * never tick at all.
  *
  * A firing at or after that time that found nobody to ask (`personSince`) moved
  * `lastTickAt` and not `lastHostTickAt`, so the answer is then a cadence after that
@@ -151,7 +152,8 @@ function hostedTickAt(s: StoredSession): number | null {
   // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. A
   // seated host is on the roster, so the roster is never empty below.
   if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
-  const due = (s.lastHostTickAt ?? Math.min(...s.members.map((m) => m.joinedAt))) + every;
+  const asked = s.lastHostTickAt ?? null;
+  const due = asked === null ? Math.min(...s.members.map((m) => m.joinedAt)) : asked + every;
   return s.lastTickAt !== undefined && s.lastTickAt >= due ? s.lastTickAt + every : due;
 }
 

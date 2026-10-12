@@ -71,7 +71,12 @@ export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeR
 }
 
 /** Session fields to seed from, whose members may be read back from a store and so carry no brief. */
-export type SessionSeed = Partial<Omit<SeededSession, "members">> & { members?: (Member & { brief?: Brief })[] };
+export type SessionSeed = Partial<Omit<SeededSession, "members">> & {
+  members?: (Member & { brief?: Brief })[];
+  /** The tick clocks a stored room carries (`StoredSession`), for a case that starts a room with history. */
+  lastTickAt?: number;
+  lastHostTickAt?: number | null;
+};
 
 /** A member read back from a store, given a brief again so a room built from it can be created. */
 const seeded = (m: Member & { brief?: Brief }): SeededMember => ({ ...m, brief: m.brief ?? brief({ agent: m.agent }) });

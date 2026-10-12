@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bridge/stop-hook.mjs\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

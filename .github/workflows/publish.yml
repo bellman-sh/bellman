@@ -47,6 +47,17 @@ jobs:
           fi
           echo "$RELEASE_TAG matches package.json"
 
+      # The Claude Code plugin runs the bundles committed in plugin/bridge/, which
+      # release PRs rebuild. One older than the source it is built from would ship
+      # under this release's version, so it stops the release here.
+      - name: Plugin bundles must match the source
+        run: |
+          npm run build:plugin
+          if ! git diff --exit-code -- plugin/bridge; then
+            echo "::error::plugin/bridge/ is out of date: run npm run build:plugin and commit the result"
+            exit 1
+          fi
+
       # prepublishOnly runs these too; running them here puts a failure in the
       # log next to the step that caused it.
       - run: npm run verify

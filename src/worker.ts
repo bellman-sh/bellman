@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { handleRoutes } from "./http/handles.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
@@ -238,6 +239,19 @@ export default {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await presetRoutes(request, {
+        store,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // A person's public handle (bylines spec D6), ahead of the OAuth routes, which serve /account and
+    // have no store (plan ruling R1). The room routes' rules and the same guard.
+    if (url.pathname === "/account/handle" || url.pathname === "/account/handle/") {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await handleRoutes(request, {
         store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],

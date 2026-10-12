@@ -4,7 +4,8 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
+  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session,
+  SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
   AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
@@ -13,7 +14,7 @@ import type {
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
   decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
-  isReplyToHost, markRemoved, noteAppend, seatVictims, stampSeen,
+  isReplyToHost, markRemoved, noteAppend, seatVictims, splitBriefs, stampSeen,
 } from "./store.js";
 import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
@@ -66,6 +67,20 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/** One row per member's brief (ADR 0018), beside the session record rather than in it. */
+const briefKey = (memberId: string) => `bf:${memberId}`;
+const BRIEF_PREFIX = "bf:";
+/** The most keys one storage call reads or writes. */
+const KEYS_PER_CALL = 128;
+
+/** Brief rows, at most KEYS_PER_CALL a put, through the transaction the record is written in. */
+async function putBriefs(
+  txn: { put<T>(entries: Record<string, T>): Promise<void> },
+  briefs: Record<string, Brief>,
+): Promise<void> {
+  const rows = Object.entries(briefs).map(([memberId, brief]) => [briefKey(memberId), brief] as const);
+  for (let i = 0; i < rows.length; i += KEYS_PER_CALL) await txn.put(Object.fromEntries(rows.slice(i, i + KEYS_PER_CALL)));
+}
 const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
 /**
  * Delivered intent ids, so a redelivered audit entry is applied once.
@@ -507,8 +522,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return kept !== s && bringsForward(s, kept, e.at);
   }
 
-  async createSession(s: Session): Promise<void> {
-    const { events, ...rest } = s;
+  async createSession(s: NewSession): Promise<void> {
+    const { events, members: arriving, ...others } = s;
+    // Each brief in a row of its own beside the record (ADR 0018), in the same transaction.
+    const { members, briefs } = splitBriefs(arriving);
+    const rest = { ...others, members };
     // Session, seed events, cursor and the registrations its join codes owe land
     // together. Separately committed, an interruption could leave a session with no
     // events, or events with a cursor of zero, or a session whose code nothing can
@@ -521,6 +539,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.transaction(async (txn) => {
       const rows = await this.driver.enqueue(txn, intents);
       await txn.put<unknown>({ ...seeded, ...rows });
+      await putBriefs(txn, briefs);
     });
     if (intents.length > 0) {
       // enqueue armed the alarm for the queue, inside the transaction. The
@@ -1065,13 +1084,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * `createSession`'s "only when nothing was queued" guard does NOT transfer here
    * — see seatMember.
    */
-  async addMember(member: Member): Promise<boolean> {
+  async addMember(member: ArrivingMember): Promise<boolean> {
     const added = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.frozenAt !== null) return false;
       if (s.closed) return false;
-      await txn.put("session", { ...s, members: [...s.members, member] });
+      // The arriving brief to its row, with any an older room still holds inline (ADR 0018).
+      const { members, briefs } = splitBriefs([...s.members, member]);
+      await txn.put("session", { ...s, members });
+      await putBriefs(txn, briefs);
       return true;
     });
     if (added) await this.driver.reArm();
@@ -1121,7 +1143,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * due times reArm() sees are the abandonment time, the tick, and a marker some
    * earlier call left behind.
    */
-  async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
+  async seatMember(member: ArrivingMember, staleBefore: number, now: number): Promise<SeatOutcome> {
     const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
       const no = { reclaimed: [], codesCleared: false };
       const s = await this.stored(txn);
@@ -1146,7 +1168,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         reclaimed.push(next);
         return next;
       });
-      const seated = [...members, member];
+      // The arriving brief to its row, with any an older room still holds inline (ADR 0018).
+      const { members: seated, briefs } = splitBriefs([...members, member]);
 
       // A full room has no seat for ANY role, so every code goes — in this
       // transaction, not in a second call after it committed (#116). The
@@ -1174,6 +1197,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         session: { ...s, members: seated, joinCodes: full ? {} : s.joinCodes },
         ...rows,
       });
+      await putBriefs(txn, briefs);
       // What the call did, and not only whether the room filled: a room that fills
       // with no code left in it queued nothing, so there is nothing to deliver.
       return { refused: null, reclaimed, codesCleared: codes.length > 0 };
@@ -1321,6 +1345,26 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /**
+   * The briefs of these members, from their rows (ADR 0018). A member of a room stored
+   * before then that has seated nobody since still carries its brief inline, and it is
+   * read from there.
+   */
+  async getBriefs(memberIds: string[]): Promise<Record<string, Brief>> {
+    const out: Record<string, Brief> = {};
+    for (let i = 0; i < memberIds.length; i += KEYS_PER_CALL) {
+      const rows = await this.ctx.storage.get<Brief>(memberIds.slice(i, i + KEYS_PER_CALL).map(briefKey));
+      for (const [key, brief] of rows) out[key.slice(BRIEF_PREFIX.length)] = brief;
+    }
+    if (memberIds.some((id) => !(id in out))) {
+      for (const m of (await this.stored())?.members ?? []) {
+        const inline = (m as { brief?: Brief }).brief;
+        if (inline && !(m.memberId in out) && memberIds.includes(m.memberId)) out[m.memberId] = inline;
+      }
+    }
+    return out;
+  }
+
   // updateMember, closeSession and freezeSession below still read and then put.
   // Unconverted, not exempt: see stored().
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
@@ -1329,14 +1373,25 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const members = s.members.map((m) => {
       if (m.memberId !== memberId) return m;
       const next = { ...m };
-      if (patch.brief !== undefined) next.brief = patch.brief;
+      if (patch.brief !== undefined) {
+        // The agent to the record and the brief to its row (ADR 0018). A brief an older room
+        // held inline leaves the record, so the row is the only one there is.
+        next.agent = patch.brief.agent;
+        delete (next as { brief?: Brief }).brief;
+      }
       if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
       if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
       if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
       if (patch.lastReportAt !== undefined) next.lastReportAt = patch.lastReportAt;
       return next;
     });
-    await this.ctx.storage.put("session", { ...s, members });
+    // One put of both keys, so the record's agent and the brief's row cannot disagree.
+    const known = s.members.some((m) => m.memberId === memberId);
+    await this.ctx.storage.put<unknown>(
+      patch.brief !== undefined && known
+        ? { session: { ...s, members }, [briefKey(memberId)]: patch.brief }
+        : { session: { ...s, members } },
+    );
     // addMember's rule, and `leftAt` is the only field in MemberPatch that can
     // flip nextTickAt off null: clearing it returns a departed member to the
     // roster. Nothing calls it that way today — every caller sets a time — but
@@ -3315,7 +3370,7 @@ export class DurableObjectStore implements BellmanStore {
     }
   }
 
-  async createSession(s: Session): Promise<void> {
+  async createSession(s: NewSession): Promise<void> {
     // Join codes register themselves from inside SessionDO, in the same
     // transaction as the session write. See #62.
     await this.session(s.id).createSession(s);
@@ -3381,7 +3436,7 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).setJoinCode(role, code, expiresAt, guard);
   }
 
-  async addMember(sessionId: string, member: Member): Promise<boolean> {
+  async addMember(sessionId: string, member: ArrivingMember): Promise<boolean> {
     const added = await this.session(sessionId).addMember(member);
     // Gated on the result: addMember refuses an unknown, frozen or closed
     // session, and indexing regardless would put rooms into a person's joined
@@ -3406,7 +3461,7 @@ export class DurableObjectStore implements BellmanStore {
 
   async seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome> {
@@ -3439,6 +3494,11 @@ export class DurableObjectStore implements BellmanStore {
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {
     await this.session(sessionId).updateMember(memberId, patch);
+  }
+
+  async getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>> {
+    if (memberIds.length === 0) return {};
+    return this.session(sessionId).getBriefs([...memberIds]);
   }
 
   async closeSession(sessionId: string): Promise<void> {

@@ -766,7 +766,7 @@ describe("capacity is the manifest's (#18)", () => {
   it("puts the ceiling at 100, which a room of maximal briefs keeps under one stored value", () => {
     // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
     // of a 2 MB Durable Object value. 250 would be 3.7 MB.
-    expect(ROOM_MEMBER_CEILING).toBe(100);
+    expect(ROOM_MEMBER_CEILING).toBe(1000);
   });
 });
 

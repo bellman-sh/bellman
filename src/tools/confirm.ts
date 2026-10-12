@@ -4,11 +4,18 @@ import { randomUUID } from "node:crypto";
 import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
-import type { Brief, Capability, Identity, Member } from "../types.js";
+import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
+import { isActiveMember, lastSeen } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
+
+/**
+ * How many briefs a joiner is handed: those of the members heard from most recently
+ * (ADR 0018). A room seats a thousand, and a joiner's agent reads all it is handed.
+ */
+export const BRIEFS_ON_JOIN = 25;
 
 export function registerConfirm(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
@@ -24,7 +31,7 @@ Args:
 
 You are seated in the role the code you previewed carried. That seat was fixed when you ran bellman_connect: a code revoked in between does not change it, and the connect token's 10-minute TTL bounds the window.
 
-Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes), surface: { cursor, items (untrusted envelopes) }, cursor }
+Returns: { session_id, member_id, members[] (each with room_role), room (the same block the preview showed), briefs (untrusted envelopes, from the ${BRIEFS_ON_JOIN} members heard from most recently), briefs_omitted (how many other present members' briefs were left out), surface: { cursor, items (untrusted envelopes) }, cursor }
 surface is the room's working surface in full; a later bellman_sync carries each change as a surface event, and surface: true on it returns everything again.
 The room's verbs are enforced by the server: a call outside your_verbs is refused, naming the verb you lack. Reading the room and leaving it are never gated.
 Keep member_id and cursor — bellman_sync and bellman_send need them.
@@ -67,7 +74,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       const roomRole = pending.roomRole ?? session.manifest.defaultRole;
 
       const memberId = `m_${randomUUID().slice(0, 8)}`;
-      const member: Member = {
+      const member: ArrivingMember = {
         memberId,
         userId: identity.userId,
         label: identity.label,
@@ -123,13 +130,22 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         // "present" would still read as present hours after the member was
         // reaped. Presence is derived, never stored (ARCHITECTURE.md rule 7),
         // so it belongs on live roster responses only.
-        payload: { member: storedMember(member), brief },
+        payload: { member: storedMember({ ...member, agent: member.brief.agent }), brief },
         refId: null,
       });
       await audit(s, session, identity, "brief_exchanged", {
         joiner: identity.userId,
         agent: brief.agent,
       });
+
+      // The briefs of the members heard from most recently, not everyone's (ADR 0018): a room
+      // seats a thousand, and a joiner's agent reads all it is handed. A member who has left
+      // is not among them, and `briefs_omitted` counts the present members not shown.
+      const peers = joined.members
+        .filter((m) => m.memberId !== memberId && isActiveMember(m))
+        .sort((a, b) => lastSeen(b) - lastSeen(a));
+      const shownBriefs = await s.getBriefs(joined.id, peers.slice(0, BRIEFS_ON_JOIN).map((m) => m.memberId));
+      const shown = peers.slice(0, BRIEFS_ON_JOIN).filter((m) => shownBriefs[m.memberId] !== undefined);
 
       return ok(
         {
@@ -138,9 +154,8 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           cursor: joinEvent.cursor,
           members: joined.members.map((m) => publicMember(m, connected)),
           room: roomPreview(joined, roomRole),
-          briefs: joined.members
-            .filter((m) => m.memberId !== memberId)
-            .map((m) => untrusted({ memberId: m.memberId, label: m.label }, m.brief)),
+          briefs: shown.map((m) => untrusted({ memberId: m.memberId, label: m.label }, shownBriefs[m.memberId])),
+          briefs_omitted: peers.length - shown.length,
           // Every item, in the writer's envelope (#129): the joiner is a member
           // now, as `briefs` already treats them.
           surface: await readSurface(s, joined),

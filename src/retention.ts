@@ -55,7 +55,7 @@ export const creditedBlobBytes = (charged: number, credited: number): number =>
  * org names a stream nobody reads, so it is no org here (ARCHITECTURE.md, runtime
  * fact 4).
  */
-export function orgsOnRoster(s: Pick<StoredSession, "members">): string[] {
+export function orgsOnRoster(s: { members: readonly { orgId: string | null }[] }): string[] {
   return [...new Set(s.members.map((m) => m.orgId).filter((orgId): orgId is string => Boolean(orgId)))];
 }
 

@@ -37,7 +37,7 @@ export function storedMember(m: Member) {
     member_id: m.memberId,
     label: m.label,
     org_id: m.orgId,
-    agent: m.brief.agent,
+    agent: m.agent,
     capabilities: m.capabilities,
     room_role: m.roomRole,
     active: m.leftAt === null,

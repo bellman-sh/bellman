@@ -83,6 +83,8 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         return fail(fullMessage(session.manifest));
       }
       const creator = session.members[0];
+      // From its row beside the room (ADR 0018).
+      const creatorBrief = (await s.getBriefs(session.id, [creator.memberId]))[creator.memberId] ?? null;
       const token = generateConnectToken();
       await s.putPendingConnect({
         token,
@@ -112,7 +114,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
           room: roomPreview(session, role),
           creator_brief: untrusted(
             { memberId: creator.memberId, label: creator.label },
-            creator.brief
+            creatorBrief
           ),
           surface: { cursor: surfaceCursor(session), items: index },
         },

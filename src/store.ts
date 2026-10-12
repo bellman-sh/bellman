@@ -1,6 +1,6 @@
 import type {
-  AuditEntry, HostUnits, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
-  SavedPreset, SurfaceRow,
+  AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomManifest,
+  Session, SessionEvent, EventType, SavedPreset, SurfaceRow,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -25,8 +25,11 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
 export type MemberPatch = Partial<
-  Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
->;
+  Pick<Member, "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
+> & {
+  /** A new brief: to the member's row, and its `agent` to the record (ADR 0018). */
+  brief?: Brief;
+};
 // `removedAtCursor` is deliberately absent. It is the append's to write, inside
 // the transaction that stores the event it names (#113), and a patch route
 // would be a second way to write it — one that could set a cursor no event has.
@@ -54,6 +57,23 @@ export const isActiveMember = (m: Member): boolean => m.leftAt === null;
  * applies to `joinCode`.
  */
 export const lastSeen = (m: Member): number => m.lastSeenAt ?? m.joinedAt;
+
+/**
+ * Members as a room's record keeps them, and the briefs that go beside it (ADR 0018). Each
+ * brief leaves its member, which keeps the brief's `agent`. An arriving member brings one,
+ * and a member stored before ADR 0018 still carries its own inline and comes out the same
+ * way, so the first seat into an old room moves every brief the room still holds.
+ */
+export function splitBriefs(
+  members: readonly (Omit<Member, "agent"> & { agent?: AgentInfo; brief?: Brief })[],
+): { members: Member[]; briefs: Record<string, Brief> } {
+  const briefs: Record<string, Brief> = {};
+  const kept = members.map(({ brief, ...m }) => {
+    if (brief) briefs[m.memberId] = brief;
+    return { ...m, agent: brief ? brief.agent : m.agent! };
+  });
+  return { members: kept, briefs };
+}
 
 /**
  * The hosted seat's identity (hosted seat spec, D1): the member id it holds in
@@ -776,7 +796,7 @@ export interface AppendExtras {
  * hand out live references, so relying on them would silently break the port.
  */
 export interface BellmanStore {
-  createSession(s: Session): Promise<void>;
+  createSession(s: NewSession): Promise<void>;
   /**
    * The session record and its members. NOT its events.
    *
@@ -845,7 +865,7 @@ export interface BellmanStore {
    * together. Unlike the cross-object races on #59 and #62, both halves live in
    * the same object, so this one can simply be made not to have a gap.
    */
-  addMember(sessionId: string, member: Member): Promise<boolean>;
+  addMember(sessionId: string, member: ArrivingMember): Promise<boolean>;
   /**
    * Seat a member, reclaiming stale seats if that is what it takes, as ONE
    * operation.
@@ -884,7 +904,7 @@ export interface BellmanStore {
    */
   seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
@@ -947,6 +967,12 @@ export interface BellmanStore {
   connectedMembers(sessionId: string): Promise<ReadonlySet<string>>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
+  /**
+   * The briefs of these members, by member id (ADR 0018). Each lives beside the room in a
+   * row of its own, not on the record `getSession` returns. An id with no brief is left out,
+   * and an unknown session answers none.
+   */
+  getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>>;
   /**
    * Mark a session closed, whoever is in it. Idempotent. To close a room because
    * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then
@@ -1350,6 +1376,8 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
+  private briefs = new Map<string, Map<string, Brief>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1362,8 +1390,10 @@ export class MemoryStore implements BellmanStore {
     this.blobs = options.blobs ?? new MemoryBlobStore();
   }
 
-  async createSession(s: Session): Promise<void> {
-    const stored = detach(s);
+  async createSession(s: NewSession): Promise<void> {
+    const { members, briefs } = splitBriefs(s.members);
+    const stored: Session = detach({ ...s, members });
+    this.keepBriefs(stored.id, briefs);
     this.sessions.set(stored.id, stored);
     for (const rec of Object.values(stored.joinCodes)) this.byJoinCode.set(rec.code, stored.id);
     const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
@@ -1381,6 +1411,12 @@ export class MemoryStore implements BellmanStore {
    * member cannot drift apart. Keyed by user, so a second handle for the same
    * person in the same room is the same entry.
    */
+  private keepBriefs(sessionId: string, briefs: Record<string, Brief>): void {
+    const kept = this.briefs.get(sessionId) ?? new Map<string, Brief>();
+    for (const [memberId, brief] of Object.entries(briefs)) kept.set(memberId, detach(brief));
+    this.briefs.set(sessionId, kept);
+  }
+
   private indexMember(userId: string, sessionId: string): void {
     const joined = this.byMember.get(userId) ?? new Set<string>();
     joined.add(sessionId);
@@ -1453,7 +1489,7 @@ export class MemoryStore implements BellmanStore {
     return { ok: true, replacedLive: live };
   }
 
-  async addMember(sessionId: string, member: Member): Promise<boolean> {
+  async addMember(sessionId: string, member: ArrivingMember): Promise<boolean> {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     if (s.frozenAt !== null) return false;
@@ -1461,7 +1497,9 @@ export class MemoryStore implements BellmanStore {
     // this write, and a close in the gap would otherwise seat a member in a room
     // that is over. closeSessionIfEmpty is the other half.
     if (s.closed) return false;
-    s.members.push(detach(member));
+    const { members: [arrived], briefs } = splitBriefs([member]);
+    s.members.push(detach(arrived));
+    this.keepBriefs(sessionId, briefs);
     // After the guards, so a refused add leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
     this.indexOrg(member.orgId, sessionId);
@@ -1470,7 +1508,7 @@ export class MemoryStore implements BellmanStore {
 
   async seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome> {
@@ -1492,7 +1530,9 @@ export class MemoryStore implements BellmanStore {
       row.leftAt = now;
       reclaimed.push(detach(row));
     }
-    s.members.push(detach(member));
+    const { members: [arrived], briefs } = splitBriefs([member]);
+    s.members.push(detach(arrived));
+    this.keepBriefs(sessionId, briefs);
     // After the guards, so a refused seating leaves no trace in the listing.
     this.indexMember(member.userId, sessionId);
     this.indexOrg(member.orgId, sessionId);
@@ -1633,11 +1673,24 @@ export class MemoryStore implements BellmanStore {
     if (!s) return;
     const m = s.members.find((mm) => mm.memberId === memberId);
     if (!m) return;
-    if (patch.brief !== undefined) m.brief = detach(patch.brief);
+    if (patch.brief !== undefined) {
+      this.keepBriefs(sessionId, { [memberId]: patch.brief });
+      m.agent = detach(patch.brief.agent);
+    }
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
     if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
     if (patch.lastReportAt !== undefined) m.lastReportAt = patch.lastReportAt;
+  }
+
+  async getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>> {
+    const kept = this.briefs.get(sessionId);
+    const out: Record<string, Brief> = {};
+    for (const memberId of memberIds) {
+      const brief = kept?.get(memberId);
+      if (brief) out[memberId] = detach(brief);
+    }
+    return out;
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -2436,17 +2489,22 @@ export const SWEEP_RPC_BUDGET = 300;
 /**
  * How many members one room holds, on every plan that can start a swarm (#18).
  *
- * A ceiling, not a plan fact. A room is one value in SQLite-backed Durable Object
- * storage, members and briefs included (events and surface rows are separate,
- * #25), and a value holds 2 MB. A brief at the schema's maximum (src/tools/kit.ts:
- * goal 500, state 2,000, twenty constraints and twenty open questions of 300) is
- * 14,710 characters; 100 of them are 1.47 MB, under the limit with room for the
- * manifest and the codes. 250 would be 3.7 MB. Two-byte text at the maximum in
- * every brief of a full room is the remaining gap, and the transaction turns it
- * into one failed join rather than a broken room. Reaching this is the trigger
- * for moving members to rows of their own, which is what lifts it.
+ * A ceiling, not a plan fact. A room's record is one value in SQLite-backed Durable
+ * Object storage, and a value holds 2 MB. It was 100 while the record carried every
+ * brief, at up to 14,710 characters each (ADR 0001). Briefs now live in rows of their
+ * own (ADR 0018), as events and surface items do, so a member on the record is its ids,
+ * label, role, agent and times: about 1.5 KB with every field at its maximum and in
+ * two-byte text, so 1,000 of them are about 1.5 MB, with room left for the manifest, the
+ * codes and members who have left; about 300 bytes as members are. worker-tests/briefs-in-rows
+ * stores a full room at the maximum, and shows the same members with their briefs
+ * inline could not be stored at all.
+ *
+ * Members who have left stay on the record: a public read numbers members by when
+ * they joined. A room that sees thousands of joins over its life therefore nears the
+ * limit, and the transaction turns reaching it into one failed join rather than a
+ * broken room. Members as rows of their own is what lifts that.
  */
-export const ROOM_MEMBER_CEILING = 100;
+export const ROOM_MEMBER_CEILING = 1000;
 
 /**
  * How many members this room holds. A `pair` room holds two because the preset

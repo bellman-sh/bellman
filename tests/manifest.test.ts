@@ -897,8 +897,11 @@ describe("a hosted seat in the manifest (hosted seat spec, D1)", () => {
   // so the preset carries what kind of question to ask; the personal-data rule is every host's
   // (HOST_RULES), not this preset's alone. Bounded like an author's instructions.
   it("gives the social host a public-safe question to ask, within the instructions limit", () => {
-    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/one question/i);
-    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/public room/);
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/one specific question/i);
+    // Answerable without saying who anyone is, from a new angle each time, and fit to be read by anyone.
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/answer anonymously/);
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/an angle your earlier questions haven't/);
+    expect(SOCIAL_HOST_INSTRUCTIONS).toMatch(/worth reading in public/);
     expect(SOCIAL_HOST_INSTRUCTIONS.length).toBeLessThanOrEqual(300);
     expect(() => ManifestShape.parse({
       room: "r", mode: "swarm",

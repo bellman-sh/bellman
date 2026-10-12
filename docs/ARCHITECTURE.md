@@ -547,7 +547,8 @@ Removing a member is authority, so the reclaim is confined accordingly:
   `seatedMembers` and write nothing. That matters because `bellman_connect` is
   reachable by anyone holding a join code without joining, and never consumes
   the code — a reclaim there would have let one caller empty a quiet hub room
-  of every member, creator included, repeatedly for the code's 15 minutes.
+  of every member, creator included, repeatedly for as long as the code lives:
+  15 minutes, or, for a public room's permanent code (ADR 0020), until it is retired.
   `evictMember` is creator-only and deliberately outside the verb set; a second
   removal path must not be looser than the first.
 - **One seat, longest-quiet first**, so the blast radius is the size of the
@@ -1491,7 +1492,8 @@ It is used four times:
   draining whatever other orgs left behind. That is the hold time #123 asked
   about, measured below.
 - **`SessionDO → RegistryDO` ([#62](../../../issues/62)).** `createSession`,
-  `setJoinCode`, `consumeJoinCode`, `clearJoinCodes` and expiry queue the
+  `setJoinCode`, `consumeJoinCode`, `clearJoinCodes`, `unpublishSession` (a public
+  room's permanent codes, ADR 0020) and expiry queue the
   registry's index write in the session's own transaction — in **that session's**
   queue, delivered as a plain `putJoinCode` or `dropJoinCode` call on the
   registry, so it never becomes a row the registry's own drain has to clear.
@@ -1811,12 +1813,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,147** | every request, whether or not you are in a room |
+| Tool definitions | **~8,271** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-12 for permanent codes (ADR 0020), by the method below: 124 tokens
+over the 8,147 that main (`09a9ca7`) measures. `bellman_invite` is up 87, to 815, for
+`permanent` in its schema, the paragraph on what a permanent code is for and how long it
+lives, and the field and the null expiry in its `Returns:` line. `bellman_connect` is up 37,
+to 735, for its `Errors:` line saying a public room's permanent code does not expire and how
+it ends. No tool was added. That is 8,271.
 
 Re-measured on 2026-10-12 for the room card, by the method below: 16 tokens over
 the 8,131 that main (`444954e`) measures, all of them `bellman_start`'s (2,339 to

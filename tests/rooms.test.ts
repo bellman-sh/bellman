@@ -3,7 +3,7 @@ import { manifestFixture, member, oneCode, session, swarmSession } from "./helpe
 import { resolveManifest } from "../src/manifest.js";
 import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
-import type { Identity, Member } from "../src/types.js";
+import type { ArrivingMember, Identity, Member } from "../src/types.js";
 
 /**
  * The operations in src/rooms.ts, driven directly. The authority rules are the
@@ -35,7 +35,7 @@ beforeEach(() => {
  * operation that went back to reading the roster and calling closeSession would
  * never meet the join, and pass.
  */
-function joinJustBeforeClose(joiner: Member): void {
+function joinJustBeforeClose(joiner: ArrivingMember): void {
   const closeSession = store.closeSession.bind(store);
   vi.spyOn(store, "closeSession").mockImplementation(async (id) => {
     await store.addMember(id, joiner);
@@ -285,7 +285,7 @@ describe("issueInvite", () => {
     if (r.ok) return;
     expect(r.code).toBe("conflict");
     expect(r.reason).toMatch(/full/);
-    expect(r.reason).toContain("100 members");
+    expect(r.reason).toContain(`${ROOM_MEMBER_CEILING} members`);
     expect(r.reason).toContain("ceiling");
   });
 

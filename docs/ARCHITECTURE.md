@@ -446,7 +446,7 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>surface and brief rows, one alarm for<br/>abandonment, sweep and purge,<br/>freeze flag"]
         RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
@@ -882,6 +882,13 @@ row went in with the event in one transaction, so there is nothing to repair,
 and a removal leaves no tombstone, so re-applying could only put back what was
 removed. The record gains one number, `surfaceCursor`, moved in the same put,
 so `bellman_sync` reports "the surface moved" off the record it already read.
+
+Briefs are rows too, `bf:<memberId>` (ADR 0018). A member on the session record
+keeps only its brief's `agent`, for the roster, and `getBriefs` reads the briefs a
+caller names: `bellman_connect` the creator's, `bellman_confirm` the 25 present
+members heard from most recently. Each store writes a brief in the transaction that
+seats its member, so the record stays small enough for a room of 1,000. A room stored
+before then keeps its briefs inline until its next seat moves them.
 A member a creator removed (#113) is told a number derived from the items it is
 shown instead, because the record's could claim a change it never saw.
 

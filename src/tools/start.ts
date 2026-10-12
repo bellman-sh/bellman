@@ -5,13 +5,13 @@ import { BriefShape, CapabilitiesShape, fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { roomPreview } from "../projections.js";
 import { hostMember } from "../host.js";
-import type { Brief, Capability, Identity, Member, RoomManifest, Session } from "../types.js";
+import type { ArrivingMember, Brief, Capability, Identity, NewSession, RoomManifest } from "../types.js";
 import { entitlementsFor } from "../auth.js";
 import { generateSessionId, joinUrl, publicRoomUrl, renderJoinCode } from "../codes.js";
 import { ManifestError, ManifestShape, PRESET_NAMES, checkCiteCadence, resolveManifest, roomBeat } from "../manifest.js";
 import { asManifest } from "../presets.js";
 import { audit } from "../rooms.js";
-import { JOIN_CODE_TTL } from "../store.js";
+import { JOIN_CODE_TTL, ROOM_MEMBER_CEILING, splitBriefs } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { monthKey } from "../stored-session.js";
 
@@ -35,7 +35,7 @@ Args:
     invite reaches outside its own seat: holding it lets you mint a join code for ANY role this manifest declares, not only your own or the default, so you can seat someone — including yourself, by leaving and rejoining — in the most capable role the room has. revoke is likewise not self-scoped: a seat holding it may retire any role's code, not only its own. Give invite only to a seat you would trust with every seat's authority.
     The manifest sets the room's mode; there is no separate mode argument. A "pair"
     room holds exactly 2 members; a "swarm" room holds as many as you invite, up to
-    100 — Bellman's ceiling for one room, the same on every plan.
+    ${ROOM_MEMBER_CEILING} — Bellman's ceiling for one room, the same on every plan.
     The pair and review presets make pair rooms; the swarm and social presets make swarm rooms.
     A manifest may declare a \`host\`, a seat Bellman runs that asks the room a question on each heartbeat and answers replies; it needs the max or team plan, a \`heartbeat\` of at least 1h, and a swarm room. The social preset declares one. The host never keeps a room open.
     public: true (pro, max or team plan) lets anyone with the room's public_url read its surface and its log, never a brief, with members named by number; joining still takes a code, and joiners are told before they accept. False unless given; a saved preset's is the default for its rooms. Share public_url for people to read, never join_url, which seats whoever redeems it until it expires.
@@ -134,7 +134,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
 
       const now = Date.now();
       const memberId = `m_${randomUUID().slice(0, 8)}`;
-      const creator: Member = {
+      const creator: ArrivingMember = {
         memberId,
         userId: identity.userId,
         label: identity.label,
@@ -150,7 +150,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         code: renderJoinCode(manifest.defaultRole),
         expiresAt: now + JOIN_CODE_TTL,
       };
-      const session: Session = {
+      const session: NewSession = {
         id: sessionId,
         manifest,
         createdBy: identity.userId,
@@ -191,7 +191,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         throw err;
       }
       await s.recordCreate(identity.userId);
-      await audit(s, session, identity, "session_created", {
+      // The room as the store keeps it: each member with its brief's agent, the brief beside it (ADR 0018).
+      const room = { ...session, members: splitBriefs(session.members).members };
+      await audit(s, room, identity, "session_created", {
         mode: manifest.mode, org_only, preset: manifest.preset, hosted: manifest.host !== null,
       });
 
@@ -211,9 +213,9 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // What the server recorded, seen from the creator's seat. Without it the
         // author of a manifest, especially one parsed from .bellman/room.yaml,
         // cannot see a preset or role that validated but is not what they meant.
-        room: roomPreview(session, manifest.creatorRole),
+        room: roomPreview(room, manifest.creatorRole),
         share_instructions:
-          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room holds as many members as you invite, up to 100; reissue a code with bellman_invite to add members later.`,
+          `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room holds as many members as you invite, up to ${ROOM_MEMBER_CEILING}; reissue a code with bellman_invite to add members later.`,
       });
     }
   );

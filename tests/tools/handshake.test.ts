@@ -657,7 +657,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     expect(preview.isError, preview.text).toBe(false);
     expect((preview.data.session as { mode: string }).mode).toBe("swarm");
     // The number an agent can act on: the room's capacity, not a plan limit.
-    expect((preview.data.session as { max_members: number }).max_members).toBe(100);
+    expect((preview.data.session as { max_members: number }).max_members).toBe(ROOM_MEMBER_CEILING);
   });
 
   it("reports a pair room's capacity as two in the connect preview", async () => {

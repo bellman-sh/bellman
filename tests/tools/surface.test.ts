@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
 import { SURFACE_KINDS } from "../../src/surface.js";
@@ -112,7 +113,7 @@ describe("tool surface", () => {
 
     // What each mode holds is what a caller chooses a preset by.
     expect(flat).toContain('"pair" room holds exactly 2 members');
-    expect(flat).toContain('a "swarm" room holds as many as you invite, up to 100');
+    expect(flat).toContain(`a "swarm" room holds as many as you invite, up to ${ROOM_MEMBER_CEILING}`);
   });
 
   // A joiner's human decides on the verbs a room declares, and since #2 the

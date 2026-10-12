@@ -37,7 +37,18 @@ export function roomManifest(over: Partial<RoomManifest> = {}): RoomManifest {
   return { ...resolveManifest(manifestFixture()), ...over };
 }
 
-export function member(over: Partial<Member> = {}): Member {
+/**
+ * A member as the tests seat one: the fields the room's record keeps, `agent` among them, and
+ * the brief that the store keeps beside the record (ADR 0018). It is both a `Member` and an
+ * `ArrivingMember`, so one fixture both seeds a store and stands in for what it reads back.
+ */
+export type SeededMember = Member & { brief: Brief };
+
+/** A session whose members are `SeededMember`s: a `Session`, and a `NewSession` to create. */
+export type SeededSession = Omit<Session, "members"> & { members: SeededMember[] };
+
+export function member(over: Partial<SeededMember> = {}): SeededMember {
+  const b = over.brief ?? brief();
   return {
     memberId: "m_creator",
     userId: "u_jesse",
@@ -45,7 +56,8 @@ export function member(over: Partial<Member> = {}): Member {
     orgId: "org_codenerd",
     capabilities: ["read_context", "receive_messages"],
     roomRole: "peer_a",
-    brief: brief(),
+    brief: b,
+    agent: b.agent,
     joinedAt: Date.now(),
     lastSeenAt: Date.now(),
     leftAt: null,
@@ -58,7 +70,14 @@ export function oneCode(code: string, role = "peer_b"): Record<string, JoinCodeR
   return { [role]: { code, expiresAt: Date.now() + JOIN_CODE_TTL } };
 }
 
-export function session(over: Partial<Session> = {}): Session {
+/** Session fields to seed from, whose members may be read back from a store and so carry no brief. */
+export type SessionSeed = Partial<Omit<SeededSession, "members">> & { members?: (Member & { brief?: Brief })[] };
+
+/** A member read back from a store, given a brief again so a room built from it can be created. */
+const seeded = (m: Member & { brief?: Brief }): SeededMember => ({ ...m, brief: m.brief ?? brief({ agent: m.agent }) });
+
+export function session(seed: SessionSeed = {}): SeededSession {
+  const { members: given, ...over } = seed;
   const now = Date.now();
   const manifest = over.manifest ?? roomManifest();
   return {
@@ -81,7 +100,7 @@ export function session(over: Partial<Session> = {}): Session {
     lastMemberEventAt: null,
     thawedAt: null,
     unpublishedAt: null,
-    members: [member()],
+    members: given ? given.map(seeded) : [member()],
     events: [],
     closed: false,
     ...over,
@@ -93,6 +112,6 @@ export function session(over: Partial<Session> = {}): Session {
  * the mode and nothing else, so this is how a test gets a spare seat beyond two
  * without changing the seats it already names.
  */
-export function swarmSession(over: Partial<Session> = {}): Session {
+export function swarmSession(over: SessionSeed = {}): SeededSession {
   return session({ manifest: roomManifest({ mode: "swarm", preset: null }), ...over });
 }

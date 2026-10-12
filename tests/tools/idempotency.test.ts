@@ -127,9 +127,8 @@ describe("bellman_send with an idempotency_key", () => {
     const again = await send();
 
     expect(again.data.replayed).toBe(true);
-    const s = await h.store.getSession(p.sessionId);
-    const me = s!.members.find((m) => m.memberId === p.joinerMemberId)!;
-    expect(me.brief.goal).toBe("the new goal");
+    const mine = (await h.store.getBriefs(p.sessionId, [p.joinerMemberId]))[p.joinerMemberId];
+    expect(mine.goal).toBe("the new goal");
     const events = await h.store.eventsAfter(p.sessionId, 0);
     expect(events.filter((e) => e.type === "brief_update")).toHaveLength(1);
   });
@@ -158,9 +157,8 @@ describe("bellman_send with an idempotency_key", () => {
     });
 
     expect(clash.isError).toBe(true);
-    const me = (await h.store.getSession(p.sessionId))!
-      .members.find((m) => m.memberId === p.joinerMemberId)!;
-    expect(me.brief.goal).toBe("the first goal");
+    const mine = (await h.store.getBriefs(p.sessionId, [p.joinerMemberId]))[p.joinerMemberId];
+    expect(mine.goal).toBe("the first goal");
   });
 
   /** REVIEW FOCUS 4: the zod bounds, which no other test reaches. */

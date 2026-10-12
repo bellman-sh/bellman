@@ -10,7 +10,7 @@ import { bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "../src
 import { noteAppend } from "../src/store.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import type { StoredSession } from "../src/stored-session.js";
-import type { RoomManifest, SessionEvent } from "../src/types.js";
+import type { Member, RoomManifest, SessionEvent } from "../src/types.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");
@@ -35,7 +35,7 @@ const base = (manifest = declared()) => ({
   members: [
     member({ memberId: "m_a", joinedAt: T0 - 10 }),
     member({ memberId: "m_b", userId: "u_b", joinedAt: T0 - 10 }),
-  ],
+  ] as Member[],
   openRequests: {} as Record<string, { at: number; fromMemberId: string }>,
   lastMemberEventAt: null as number | null,
 });

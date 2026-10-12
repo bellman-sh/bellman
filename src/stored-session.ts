@@ -1,4 +1,4 @@
-import type { HostUnits, RoomManifest, Session } from "./types.js";
+import type { AgentInfo, Brief, HostUnits, Member, RoomManifest, Session } from "./types.js";
 import { ENTITLEMENTS } from "./auth.js";
 
 // Deliberately not in store-do.ts. That module imports `cloudflare:workers`, which
@@ -158,6 +158,9 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  *
  * All fifteen live here, in one gate, rather than in separate functions that could drift.
  */
+/** What a member reads as when its record names no agent at all, which no member written by Bellman lacks. */
+const UNKNOWN_AGENT: AgentInfo = { provider: "unknown", model: "unknown", client: "unknown" };
+
 export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const m = (raw as { manifest?: unknown }).manifest;
@@ -173,6 +176,12 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
 
   return {
     ...row,
+    // A member stored before ADR 0018 carries its brief inline and no `agent` beside it. The
+    // agent is lifted from the brief, and the brief stays where it is until the room's next
+    // seat moves it to a row of its own.
+    members: (row.members ?? []).map((m) => (m as Partial<Member>).agent
+      ? m
+      : { ...m, agent: (m as { brief?: Brief }).brief?.agent ?? UNKNOWN_AGENT }),
     manifest: withManifestDefaults(row.manifest),
     frozenAt: row.frozenAt ?? null,
     surfaceCursor: row.surfaceCursor ?? 0,

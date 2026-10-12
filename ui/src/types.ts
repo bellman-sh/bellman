@@ -74,7 +74,8 @@ export interface RoomSummary {
   your_member_id: string;
   room: RoomBlock;
   members: MemberRow[];
-  join_codes: { role: string; expires_at: string; code?: string; join_url?: string }[];
+  /** `expires_at` is null for a public room's permanent code (ADR 0020). */
+  join_codes: { role: string; expires_at: string | null; code?: string; join_url?: string }[];
   last_event: { cursor: number; type: string; at: string } | null;
 }
 

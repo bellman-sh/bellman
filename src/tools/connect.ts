@@ -29,7 +29,7 @@ surface lists what the room's working surface holds — keys, kinds and sizes, n
 public: true means anyone with the room's public page can read its surface and its log, with members named by number and never a brief: tell your human before they accept.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
-Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, or the room closes. "session is org-restricted" — creator limited joining to their org.`,
+Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         // `readOnlyHint` is FALSE, and this tool previews rather than joins (#119).
@@ -63,7 +63,7 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
     async ({ join_code }): Promise<ToolResult> => {
       const hit = await s.getSessionByJoinCode(normalizeJoinCode(join_code));
       if (!hit) {
-        return fail("join code not found or expired. Codes expire 15 minutes after creation if unused, and are consumed when a pair session fills. Ask the creator to start a new session.");
+        return fail("join code not found or expired. Codes expire 15 minutes after creation, except a public room's permanent code, and are consumed when a pair session fills. Ask the creator to start a new session.");
       }
       const { session, role } = hit;
       if (session.orgOnly && session.orgId !== identity.orgId) {

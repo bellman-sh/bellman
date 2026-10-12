@@ -840,6 +840,14 @@ read the var off their own env, and the Node server reads it once in
 `src/index.ts` for both. The Workers test config sets it `on`, so the `HostDO`
 tests run the seat; ADR 0002 records when production does.
 
+**Chosen accounts can have it first.** `BELLMAN_HOSTED_SEAT_USERS`, also a var,
+lists the user ids the seat is on for while the switch is off (`hostedSeatUsers`).
+`bellman_start` asks `hostedSeatFor` with the caller's user id. `handleWake` cannot
+know whose room a wake is for until it reads the room, so with a list set it reads
+it and goes on only for a listed creator; with no list it still returns before the
+read. Plans still apply: a listed user needs a hosted seat in their plan. The Node
+server reads only the switch.
+
 ### The working surface
 
 A room carries a surface as well as a log (#129): keyed, typed, optionally

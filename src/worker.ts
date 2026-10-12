@@ -15,7 +15,7 @@ import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
-import { hostedSeatOn } from "./host.js";
+import { hostedSeatFor } from "./host.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 
 /**
@@ -347,7 +347,7 @@ export default {
     if (!identity) return unauthorized(oauth);
 
     try {
-      const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatOn(env.BELLMAN_HOSTED_SEAT) });
+      const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS) });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

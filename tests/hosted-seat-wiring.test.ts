@@ -52,6 +52,14 @@ describe("the Worker's /mcp", () => {
     expect(await startSocial({ BELLMAN_HOSTED_SEAT: "on" })).not.toContain(REFUSAL);
   });
 
+  it("does not refuse a hosted room for a user BELLMAN_HOSTED_SEAT_USERS lists while the var is off", async () => {
+    expect(await startSocial({ BELLMAN_HOSTED_SEAT_USERS: "u_max" })).not.toContain(REFUSAL);
+  });
+
+  it("refuses a user the list does not name", async () => {
+    expect(await startSocial({ BELLMAN_HOSTED_SEAT_USERS: "u_someone_else" })).toContain(REFUSAL);
+  });
+
   it("refuses it again for a value that is not \"on\", a typo included", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     expect(await startSocial({ BELLMAN_HOSTED_SEAT: "yes" })).toContain(REFUSAL);
@@ -91,6 +99,14 @@ describe("HostDO", () => {
   // The control: the same wake, the same alarm, with the var on, goes as far as the room.
   it("reads the room for the same wake when the var is \"on\"", async () => {
     const { seat, reads } = await seatOver({ BELLMAN_HOSTED_SEAT: "on" });
+    await seat.wake(wake, "row_1");
+    await seat.alarm();
+    expect(reads).toEqual(["getSession"]);
+  });
+
+  // Off with a list, the seat reads the room to learn whose it is (tests/host.test.ts decides the rest).
+  it("reads the room while the var is off but BELLMAN_HOSTED_SEAT_USERS is set", async () => {
+    const { seat, reads } = await seatOver({ BELLMAN_HOSTED_SEAT_USERS: "u_jesse" });
     await seat.wake(wake, "row_1");
     await seat.alarm();
     expect(reads).toEqual(["getSession"]);

@@ -83,11 +83,20 @@ export interface PlatformStats {
 }
 ```
 
-The handler's return type is `PlatformStats`. A `userId`, an email, an `orgId`, a
-label or a join code added to this response is a compile error rather than
-something a reviewer has to notice. #259's constraint — the endpoint is built so
-it cannot return a row — is this interface and the test in D10 that walks the
-body and refuses a value that is not a number or a boolean.
+The handler builds one `PlatformStats` literal and passes it to `json()`. Two
+things hold the line together, and neither does it alone:
+
+- **The literal is typed.** Declaring a field on `PlatformStats` without
+  supplying it fails to compile, and supplying one the interface does not
+  declare fails the literal's excess-property check.
+- **The test walks the body.** `json()` takes `unknown`, so a spread at the call
+  site — `{ ...stats, ...grant }` — would type-check. What catches that is the
+  test in D10 asserting every value in the response is a number or a boolean,
+  seeded with a row from every source the handler reads.
+
+The type alone is not a compile-time guarantee against a row, and this spec said
+it was until the counter-example was compiled (Task 1, Minor 4). #259's
+constraint — the endpoint is built so it cannot return a row — is the pair.
 
 If a panel ever needs a row, that is the signal to build `manage.bellman.sh`,
 not to widen this.
@@ -97,18 +106,39 @@ not to widen this.
 | Field | Source |
 |---|---|
 | `accounts` | `countUsers()` |
-| `paid` | `listGrants(MAX_GRANTS_COUNTED)`, counted by plan |
-| `free` | `accounts - paid` |
-| `paidCapped` | `paid === MAX_GRANTS_COUNTED` |
+| `paid` | identity keys on a non-free plan, from `listGrants(MAX_GRANTS_COUNTED)` and from `BELLMAN_USERS`, deduplicated |
+| `free` | `max(0, accounts - paid)` |
+| `paidCapped` | `grants.length === MAX_GRANTS_COUNTED` |
+
+Three corrections to this table, each made during implementation and each
+recorded in the ledger rather than here:
+
+- **Overrides overlay grants.** A key's `BELLMAN_USERS` entry resolves ahead of
+  its grant, so a free override beats a paid grant. Counting grants alone left
+  every comped account — the operator's own included — reading as free, which
+  answers a different question from the one asked. A plain union would have been
+  wrong too: it would call that key paid.
+- **Purchase grants are excluded when billing is off**, as `decidePlan` excludes
+  them, or the panel reports people as paid who get nothing.
+- **`paidCapped` reads `grants.length`, not `paid`.** Free grants and excluded
+  purchase grants both come out of `paid`, so `paid` can sit below a bound the
+  scan reached. What the flag reports is the scan hitting its limit.
 
 No per-plan counters maintained on write. A counter incremented beside a grant
 is the drift the AuthDO client count had in #122, and the registry already
 answers this with one bounded read.
 
 `free` is derived rather than counted because a free account is the absence of a
-grant, and `countUsers` counts everyone. A grant held by someone who has never
-signed in would make `free` negative; the handler clamps at 0 rather than
+paid plan, and `countUsers` counts everyone. A paid key with nobody signed in
+behind it would make `free` negative; the handler clamps at 0 rather than
 returning a negative count, and the clamp is tested.
+
+The clamp is a floor, not a reconciliation. `accounts` counts people by `userId`
+and `paid` counts identity keys, and nothing joins the two key spaces —
+`UserRecord` holds no keys and a grant carries no `userId`. So `paid` can exceed
+`accounts`, and `free` can read low even below that point, because a key with no
+account behind it still subtracts. The panel says so in words rather than
+pretending the three numbers share a unit.
 
 **D8. `paidCapped` is how the ceiling tells the truth.** `listGrants(limit,
 orgId?)` returns at most `limit` rows. Past it `paid` undercounts and `free`
@@ -128,10 +158,16 @@ behind a bearer token.
 
 **D10. The dash shows it, and hides it on 403.** One page, one nav entry, one
 call through the existing `src/lib/api.ts` client, which already sends
-`credentials: "include"` to `API_ORIGIN`. The page calls on mount; a 403 renders
-nothing and hides the nav entry, so a customer who guesses the URL sees what a
-wrong URL shows. No new client machinery and no second probe request — the stats
-call is the probe.
+`credentials: "include"` to `API_ORIGIN`.
+
+Two corrections, decided during implementation (plan rulings R3 and R4):
+
+- **There is no nav entry at all**, rather than one hidden on a 403. Hiding one
+  would mean every signed-in page load probing this endpoint so that one person
+  sees a link, a request every customer pays for. The page is reached by URL.
+- **A 403 renders a visible refusal**, not nothing: the loader answers `null` and
+  the page says the account has no platform stats. Throwing would put the
+  router's error screen in front of a customer who guessed the URL.
 
 ## Testing
 

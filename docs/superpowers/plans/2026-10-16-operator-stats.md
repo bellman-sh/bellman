@@ -38,7 +38,7 @@ Five conditions the spec implies that no task's own tests would otherwise reach.
 ## Rulings on the spec
 
 - **R1. `paidCapped` is `grants.length === MAX_GRANTS_COUNTED`, not `paid === MAX_GRANTS_COUNTED`.** Spec D8 says the latter. `paid` excludes free grants, so with 1000 grants of which ten are free, `paid` is 990 and the bound was still reached. What the flag reports is that the scan hit its limit, which is `grants.length`. *Cost if wrong:* the flag stays false while the numbers are short.
-- **R2. The operator check runs before the method check.** So a non-operator sending POST gets 403, not 405. A 405 would confirm the route exists to someone who may not know. Spec D5 gives the order as method-then-nothing; this fixes the order. *Cost if wrong:* a customer learns a route name.
+- **R2. The operator check runs before the method check.** So a non-operator sending POST gets 403, not 405. Spec D5 gives the order as method-then-nothing; this fixes the order. *Reason corrected during implementation:* this ruling first said a 405 would confirm the route to someone who may not know, which is false — the 401 and the 403 already confirm it, since any other path answers 404. What the ordering actually keeps back is the method: an unauthenticated caller gets 401 whatever it sends, so it learns nothing about which methods exist. *Cost if wrong:* a caller learns which methods a route it cannot use accepts.
 - **R3. No nav entry in the dash. The page is reached by URL.** Spec D10 says a 403 hides the nav entry, which would need the shell to probe `/operator/stats` on every signed-in page load — a request every customer pays for so one person sees a link. There is one operator and a bookmark costs nothing. `NAV` in `src/components/layout/app-shell.tsx` is untouched. *Cost if wrong:* the operator types a URL.
 - **R4. The loader answers `null` for a 403 rather than throwing to the error component.** `orSignIn` already turns a 401 into a sign-in redirect and rethrows the rest, which would put the route's error screen in front of a customer who guessed the URL. `null` lets the page render its own refusal. *Cost if wrong:* a customer sees an error page instead of a sentence.
 
@@ -329,15 +329,20 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
       deps.store.countUsers(),
       deps.store.listGrants(MAX_GRANTS_COUNTED),
     ]);
+    // Superseded during implementation: `paid` became the deduplicated count of
+    // identity keys on a non-free plan from BOTH grants and BELLMAN_USERS, with
+    // overrides overlaying grants, and purchase grants excluded while billing is
+    // off. See src/http/stats.ts for what shipped.
     const paid = grants.filter((g) => g.plan !== "free").length;
     const stats: PlatformStats = {
       accounts,
-      // Floored: a grant for a key that has never signed in makes this
-      // negative, and a negative count of people is worse than a floor.
+      // Floored: a paid key with nobody signed in behind it makes this negative,
+      // and a negative count of people is worse than a floor.
       free: Math.max(0, accounts - paid),
       paid,
       // The scan's bound, not the paid count (ruling R1): free grants come out
-      // of `paid`, so `paid` can sit below the limit on a scan that reached it.
+      // of `paid`, and so does a purchase grant excluded while billing is off,
+      // so `paid` can sit below the limit on a scan that reached it.
       paidCapped: grants.length === MAX_GRANTS_COUNTED,
     };
     return json(200, stats, origin);

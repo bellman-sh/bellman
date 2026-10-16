@@ -57,6 +57,28 @@ describe("the handle routes through the Worker", () => {
     expect((await call("/account/handle", { method: "POST", headers: auth })).status).toBe(405);
   });
 
+  // The dash's PUT and DELETE on these routes carry its cookie across origins, so a browser sends them only after a
+  // preflight that grants them (final review, recommendation 1). The OPTIONS above sends no Origin and so checks no
+  // grant. The panel's origin reaches the routes only with OAuth on, through BELLMAN_PANEL_ORIGINS.
+  it("grants the dash's origin PUT and DELETE in the preflight of /account/handle and of /rooms/:id/byline", async () => {
+    const panel = "https://dash.bellman.sh";
+    const panelEnv = { ...env, BELLMAN_TOKEN_SECRET: "test-signing-secret", BELLMAN_PANEL_ORIGINS: panel } as unknown as Parameters<typeof worker.fetch>[1];
+    for (const path of ["/account/handle", "/rooms/qs_any/byline"]) {
+      for (const method of ["PUT", "DELETE"]) {
+        const res = await worker.fetch(new Request(`${ORIGIN}${path}`, {
+          method: "OPTIONS",
+          headers: { origin: panel, "access-control-request-method": method, "access-control-request-headers": "content-type" },
+        }), panelEnv, ctx);
+        const at = `${method} ${path}`;
+        expect(res.status, at).toBe(204);
+        expect(res.headers.get("access-control-allow-origin"), at).toBe(panel);
+        expect(res.headers.get("access-control-allow-credentials"), at).toBe("true");
+        expect(res.headers.get("access-control-allow-methods")?.split(/,\s*/), at).toContain(method);
+        expect(res.headers.get("access-control-allow-headers")?.split(/,\s*/), at).toContain("content-type");
+      }
+    }
+  });
+
   // /admin is the authorization server's, so this needs OAuth on and a token it signed for an admin the operator
   // made (ADR 0021). The gate's cases are pinned in tests/http-bylines.test.ts; this is the wiring.
   it("lets the operator release someone's handle at /admin/handles/:handle, over the real registry", async () => {

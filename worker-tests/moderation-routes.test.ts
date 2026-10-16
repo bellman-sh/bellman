@@ -161,6 +161,18 @@ describe("the moderation routes through the Worker", () => {
     expect(rooms.status).toBe(403);
   });
 
+  it("lifts a suspension at DELETE /admin/suspensions/:userId from the real registry, and answers 404 when none is left", async () => {
+    const operator = await tokenFor(OPERATOR);
+    await store().suspend("u_wire_lifted", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const lift = () => worker.fetch(new Request(`${ORIGIN}/admin/suspensions/u_wire_lifted`, {
+      method: "DELETE", headers: { authorization: `Bearer ${operator}` },
+    }), oauthEnv(), ctx);
+    const lifted = await lift();
+    expect(lifted.status, await lifted.clone().text()).toBe(204);
+    expect(await store().isSuspended("u_wire_lifted")).toBe(false);
+    expect((await lift()).status, "nothing left to lift").toBe(404);
+  });
+
   // The rest of R8's paths, a case each, each for an account of its own: this isolate's cache keeps its answer for an
   // account a minute. The control at each is an account nobody suspended, sent the same request.
   for (const [path, headers, served] of [

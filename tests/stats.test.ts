@@ -105,16 +105,24 @@ describe("GET /operator/stats", () => {
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 
-  // A browser hands the panel the answer, or a refusal, only if the response names its origin.
-  it("carries the panel's origin on the answer", async () => {
-    const res = await call(DEV_KEY.jesse, "/operator/stats", { origin: PANEL });
-    expect(res!.status).toBe(200);
-    expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
-  });
-
-  it("carries the panel's origin on a refusal", async () => {
-    const res = await call(null, "/operator/stats", { origin: PANEL });
-    expect(res!.status).toBe(401);
+  // A browser hands the panel an answer, or a refusal, only if the response names its
+  // origin. A row for each response the route gives besides the preflight, which has
+  // its own test above; a new response gets a row.
+  it.each([
+    { status: 200, key: DEV_KEY.jesse }, // an operator
+    { status: 401, key: null }, // no credential
+    { status: 403, key: DEV_KEY.peer }, // signed in, not an operator
+    { status: 405, key: DEV_KEY.jesse, method: "POST" }, // an operator, anything but GET
+    { status: 500, key: DEV_KEY.jesse, storeFails: true }, // an operator, the store down
+  ])("carries the panel's origin on a $status", async ({ status, key, method, storeFails }) => {
+    if (storeFails) {
+      // Assigned on the instance, for the reason the 500 test below gives.
+      const failing = new MemoryStore();
+      failing.countUsers = () => Promise.reject(new Error("registry unreachable"));
+      deps = { ...deps, store: failing };
+    }
+    const res = await call(key, "/operator/stats", { method, origin: PANEL });
+    expect(res!.status).toBe(status);
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 

@@ -113,7 +113,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // against a room it cannot read. There is nothing coming: its feed has a
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
-      const read = cut === undefined
+      const page = cut === undefined
         ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE)
         : (await s.eventsAfter(session_id, since_cursor, SYNC_PAGE)).filter((e) => e.cursor <= cut);
 
@@ -140,6 +140,16 @@ If a room's creator has removed you, you still get the history up to and includi
         ? (await s.getSession(session_id)) ?? session
         : session;
       const status = sessionStatus(answering);
+
+      // An answer that says `closed` is never a page (#208). Every released client stops at
+      // `closed` without reading `more` (src/bridge.ts, src/bus-link.ts), and a closed room's
+      // log is final, so the answer carries the rest of it, capped at the cut, as every answer
+      // did before pages: a member far behind when its room closed would otherwise be handed
+      // one page of what it missed and never the rest.
+      const read = status === "closed" && page.length === SYNC_PAGE
+        ? [...page, ...(await s.eventsAfter(session_id, page[page.length - 1].cursor))
+          .filter((e) => cut === undefined || e.cursor <= cut)]
+        : page;
 
       // A removal that committed after `me` was read is not on `me`. The record,
       // `touchMember` and the event read above are separate calls, and on Workers
@@ -276,8 +286,9 @@ If a room's creator has removed you, you still get the history up to and includi
       const sfCursor = stopAt === undefined ? surfaceCursor(answering) : (surfaceBlock?.cursor ?? 0);
 
       // A full page may have more behind it (#208), unless it already reached the cut: a
-      // removed member's feed ends there however long the room goes on.
-      const more = read.length === SYNC_PAGE && (stopAt === undefined || cursor < stopAt);
+      // removed member's feed ends there however long the room goes on. A closed room's
+      // answer is never a page (above).
+      const more = status !== "closed" && read.length === SYNC_PAGE && (stopAt === undefined || cursor < stopAt);
 
       return ok(
         {
@@ -331,7 +342,13 @@ If a room's creator has removed you, you still get the history up to and includi
           // record can say the second. A genuine eviction loses nothing by the
           // wait: this poll is still capped by the event, and the next poll
           // reads the committed cursor and sets the flag.
-          ...(cut !== undefined ? { removed: true as const } : {}),
+          //
+          // And never beside `more` (#208). A released client stops at this flag
+          // without reading `more`, so on a page short of the cut it would end the
+          // feed with the rest of the history unread, the `member_evicted` that says
+          // why among it. It rides the page that reaches the cut, and every poll
+          // after, which is still every poll from past it.
+          ...(cut !== undefined && !more ? { removed: true as const } : {}),
           // Last, after the fields that say whether the feed has ended: `removed` is
           // the one field a client must never miss, and `surface` is the one block
           // that can be large (64 items of up to 8,000 characters), so a read that

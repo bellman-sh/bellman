@@ -298,10 +298,13 @@ describe("bellman_evict", () => {
       expect(first.isError, first.text).toBe(false);
       expect(first.data.more).toBe(true);
       expect(first.data.cursor).toBe(SYNC_PAGE);
+      // Not yet: a client stops at `removed` without reading `more`, and the notice is still ahead.
+      expect(first.data.removed).toBeUndefined();
 
       const rest = await sync(SYNC_PAGE);
       expect(rest.data.more).toBeUndefined();
       expect(rest.data.cursor).toBe(cut);
+      expect(rest.data.removed).toBe(true);
     });
 
     // The page is full and the room has more past it, but none of it is theirs.

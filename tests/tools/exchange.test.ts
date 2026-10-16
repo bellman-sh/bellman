@@ -765,11 +765,43 @@ describe("send / sync / leave mechanics", () => {
 
     expect(pages.map((d) => d.more)).toEqual([true, undefined]);
     expect(pages[0].cursor).toBe(SYNC_PAGE);
+    expect(pages.map((d) => d.session_status)).toEqual(["active", "active"]);
     const texts = pages.flatMap((d) => envelopes(d.events))
       .map((e) => e.data as { type: string; payload: { text?: string } })
       .filter((d) => d.type === "message")
       .map((d) => d.payload.text);
     expect(texts).toEqual(said);
+  });
+
+  // A client stops at `closed` without reading `more`, and a closed room's log is final: so the
+  // answer that says closed carries the rest of it, as every answer did before pages (#208).
+  it("answers a closed room with everything past the cursor, and never says more", async () => {
+    const p = await pairUp(h);
+    for (let i = 0; i < SYNC_PAGE + 5; i++) {
+      await h.store.appendEvent(p.sessionId, {
+        type: "message", fromMemberId: p.joinerMemberId, fromUserId: "u_peer", fromLabel: "peer", payload: { text: `m${i}` }, refId: null,
+      });
+    }
+    await h.store.closeSession(p.sessionId);
+
+    for (const wait_seconds of [0, 1]) {
+      const out = await p.creator.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: 0, wait_seconds,
+      });
+      expect(out.isError, out.text).toBe(false);
+      expect(out.data.session_status).toBe("closed");
+      expect(out.data.more).toBeUndefined();
+      const messages = envelopes(out.data.events).filter((e) => (e.data as { type: string }).type === "message");
+      expect(messages).toHaveLength(SYNC_PAGE + 5);
+    }
+
+    // Nor when a page happens to end exactly where the log does.
+    const head = (await h.store.recentEvents(p.sessionId, 1))[0].cursor;
+    const last = await p.creator.call("bellman_sync", {
+      session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: head - SYNC_PAGE,
+    });
+    expect(last.data.cursor).toBe(head);
+    expect(last.data.more).toBeUndefined();
   });
 
   it("broadcasts a departure and closes the session when the last member leaves", async () => {

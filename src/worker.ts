@@ -7,6 +7,7 @@ import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { statsRoutes } from "./http/stats.js";
 import { buildServer } from "./server.js";
 import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
@@ -308,6 +309,26 @@ export default {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The operator's platform stats (operator stats spec D1), on the room routes' rules and behind the
+    // same guard. Gated on the operators set, which is why it takes `operators` where the others take only
+    // `panelOrigins`. `paid` follows sign-in on two points that come from config, so it also takes
+    // `overrides` (BELLMAN_USERS outranks a grant) and `honourPurchases` (a purchase grant counts only
+    // with applyPlans), off the same OAuth config. The route requires all three keys; it cannot check the
+    // values, so worker-tests/stats-routes.test.ts reads the count through each.
+    if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await statsRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+        operators: oauth?.operators,
+        overrides: oauth?.overrides,
+        honourPurchases: oauth?.honourPurchases,
       });
       if (handled) return handled;
     }

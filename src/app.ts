@@ -9,6 +9,7 @@ import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes } from "./http/rooms.js";
+import { statsRoutes } from "./http/stats.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
 import { SUSPENDED } from "./suspension.js";
@@ -77,6 +78,13 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
   app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [] }))));
+  // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of
+  // them would make the local server the loose one. No overrides and no billing either, which is the truth
+  // here: nothing on this server reads BELLMAN_USERS or BELLMAN_BILLING, and a plan here comes from the key
+  // table, never from a grant. With no operators the route answers 403 before it reads either.
+  app.use("/operator/stats", serve(gated((request) => statsRoutes(request, {
+    store, caller, panelOrigins: [], operators: undefined, overrides: {}, honourPurchases: false,
+  }))));
   // No credential, so no gate.
   app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
 

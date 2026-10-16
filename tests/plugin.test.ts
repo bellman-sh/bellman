@@ -55,13 +55,14 @@ describe("the plugin's shape", () => {
    * PID, and the Stop hook finds it by walking up to Claude Code. A wrapper in between
    * puts the inbox under the wrapper's PID, where the hook never looks.
    */
-  it("starts the bridge with node itself, in hook delivery", () => {
+  // BELLMAN_INSTALL tells the bridge it runs from the plugin, so an update notice names `claude plugin update`.
+  it("starts the bridge with node itself, in hook delivery, as the plugin's install", () => {
     expect(json("plugin/.mcp.json")).toEqual({
       mcpServers: {
         bellman: {
           command: "node",
           args: ["${CLAUDE_PLUGIN_ROOT}/bridge/channel.mjs"],
-          env: { BELLMAN_DELIVERY: "hook" },
+          env: { BELLMAN_DELIVERY: "hook", BELLMAN_INSTALL: "plugin" },
         },
       },
     });

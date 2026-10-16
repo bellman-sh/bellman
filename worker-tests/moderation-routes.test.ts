@@ -194,6 +194,19 @@ describe("the moderation routes through the Worker", () => {
     });
   }
 
+  // /operator/stats reads the registry as its caller, so R8 gates it too. Both accounts are operators here, so with no
+  // gate the suspended one would read the platform's counts; the control is the other operator, served them.
+  it("refuses a suspended operator at /operator/stats with the one message, and serves another operator", async () => {
+    const operators = oauthEnv({ BELLMAN_OPERATORS: "u_wire_stats,u_wire_stats_control" });
+    const as = async (userId: string) => worker.fetch(new Request(`${ORIGIN}/operator/stats`, {
+      headers: { authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` })}` },
+    }), operators, ctx);
+    await store().suspend("u_wire_stats", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const refused = await as("u_wire_stats");
+    expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: "This account is suspended." }]);
+    expect((await as("u_wire_stats_control")).status, "the control").toBe(200);
+  });
+
   // The dash comes with its cookie, which `roomCaller` resolves through the authorization server's `caller`. The
   // refusal carries CORS, so the panel can read why. The route reuses the gate's answer, so a request touches its
   // session once rather than once for the gate and again for the route.

@@ -9,10 +9,12 @@ import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
 } from "./retention.js";
 import { monthKey, type StoredSession } from "./stored-session.js";
-// Type-only: host.ts and heartbeat.ts import this module at runtime, so a value import
-// back would be a cycle. `MemoryStore.tick` is handed its rule for that reason.
+// Type-only: host.ts, heartbeat.ts and housekeeping.ts import this module at runtime, so a value
+// import back would be a cycle. `MemoryStore.tick` and `MemoryStore.housekeep` are handed their
+// rules for that reason.
 import type { HostWake } from "./host.js";
 import type { TickStep } from "./heartbeat.js";
+import type { Finding } from "./housekeeping.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
@@ -2887,6 +2889,36 @@ export class MemoryStore implements BellmanStore {
       // The host's own clock moves only on a tick that wakes it (I3), in the same step as the tick.
       (s as { lastHostTickAt?: number | null }).lastHostTickAt = now;
       this.hostWoken({ sessionId: s.id, cause: "tick", cursor: tick.cursor });
+    }
+  }
+
+  /**
+   * The Node server's housekeeping (#231): for every room, what SessionDO's `#housekeepIfDue`
+   * does for one, run by the loop that runs `tick`. `rules` are `dueFindings` and `clearedKeys`
+   * from housekeeping.ts, handed in because that module imports this one; they decide, and this
+   * writes as the handler writes. A raised key that no longer holds is forgotten, and each due
+   * finding is one `housekeeping` event from the room itself, its key recorded at `now`. The
+   * rules' own gate keeps out a room with no housekeeping, a closed, a frozen or an empty one,
+   * and an abandoned room is refused here as `tick` refuses it. `appendNow` runs the books and
+   * wakes no hosted seat (ruling H1). Not on `BellmanStore`: the Workers store runs this by
+   * alarm. No awaits, for appendEvent's reason.
+   */
+  housekeep(now: number, rules: { dueFindings: (s: StoredSession, now: number) => Finding[]; clearedKeys: (s: StoredSession, now: number) => string[] }): void {
+    for (const s of this.sessions.values()) {
+      if (isAbandoned(s, now, connectedAmong(s.members, this.attachedTo(s.id)))) continue;
+      const cleared = rules.clearedKeys(s, now);
+      const due = rules.dueFindings(s, now);
+      if (cleared.length === 0 && due.length === 0) continue;
+      const raised = { ...s.raised };
+      for (const key of cleared) delete raised[key];
+      for (const f of due) raised[f.key] = { at: now, repeat: f.payload.repeat, since: f.payload.since };
+      Object.assign(s, { raised });
+      for (const f of due) {
+        this.appendNow(s, {
+          type: "housekeeping", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+          payload: f.payload, refId: null,
+        }, now);
+      }
     }
   }
 

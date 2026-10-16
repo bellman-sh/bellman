@@ -181,6 +181,8 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         thawedAt: null,
         // Public or not is the manifest's; this is set only when the creator makes a public room private (public rooms spec D2).
         unpublishedAt: null,
+        // Set below from public_name (public names spec, D4); null until then.
+        publicName: null,
         // The host is seated here, beside the creator, and never joins by code.
         members: manifest.host === null ? [creator] : [creator, hostMember(manifest, now)],
         events: [],

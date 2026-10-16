@@ -163,6 +163,7 @@ export const monthKey = (now: number): string => new Date(now).toISOString().sli
  * - **unpublishedAt** (public rooms) defaults to `null`: a room written before it was never
  *   made private. Whether it is public at all is the manifest's `public`, read false for such
  *   a row.
+ * - **publicName** (public names) defaults to `null`: a room written before it was never named.
  * - **members** (ADR 0019) are not on a record written since: they are rows, and `present`
  *   names those in the room. That one is not lifted here, because it is a move of rows and
  *   not a default: SessionDO's constructor moves an older record's members out before
@@ -220,6 +221,7 @@ export function hydrateStoredSession(raw: unknown): StoredSession | undefined {
     lastMemberEventAt: (row as { lastMemberEventAt?: number | null }).lastMemberEventAt ?? null,
     thawedAt: (row as { thawedAt?: number | null }).thawedAt ?? null,
     unpublishedAt: (row as { unpublishedAt?: number | null }).unpublishedAt ?? null,
+    publicName: (row as { publicName?: string | null }).publicName ?? null,
     joinCodes:
       row.joinCodes ??
       (joinCode ? { [row.manifest.defaultRole]: { code: joinCode, expiresAt: joinCodeExpiresAt ?? 0 } } : {}),

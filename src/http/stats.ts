@@ -69,8 +69,10 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
      * the user ids BELLMAN_OPERATORS lists" and are read only by someone already
      * holding a bearer token. Any signed-in customer can try this URL (D4).
      *
-     * Ahead of the method check on purpose (ruling R2): a 405 would confirm the
-     * route to someone who may not know it is there.
+     * Ahead of the method check on purpose (ruling R2). That does not hide the route:
+     * the 401 above and this 403 already confirm it. It keeps the method back. Past
+     * the preflight, a caller who is not an operator gets the same 401 or 403 whatever
+     * method it sends, so only an operator is told, by the 405, which one the route takes.
      */
     if (!deps.operators?.has(who.identity.userId)) {
       return problem(403, "not_available", "this account has no platform stats", origin);

@@ -98,8 +98,9 @@ describe("GET /operator/stats", () => {
     expect((await call(DEV_KEY.jesse))!.status).toBe(403);
   });
 
-  // Ruling R2.
-  it("refuses a non-operator before it reports the method", async () => {
+  // Ruling R2: past the preflight, a caller who is not an operator is told nothing about the methods.
+  it("refuses a caller who is not an operator before it reports the method", async () => {
+    expect((await call(null, "/operator/stats", { method: "POST" }))!.status).toBe(401);
     expect((await call(DEV_KEY.peer, "/operator/stats", { method: "POST" }))!.status).toBe(403);
   });
 

@@ -1844,12 +1844,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,697** | every request, whether or not you are in a room |
+| Tool definitions | **~8,694** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
-| `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
+| `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
+(`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no
+longer lists a room-level `expires_at` the listing had stopped sending. No other tool changed.
+That is 8,694.
 
 Re-measured on 2026-10-15 for public names, by the method below: 426 tokens over the 8,271
 that main (`7d4c137`) measures. `bellman_public_name` is new, at 309: its schema, and a

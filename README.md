@@ -458,9 +458,8 @@ joiner sees the thresholds before accepting a seat: the connect preview carries
 
 Housekeeping counts people. A hosted seat is never named quiet, what it says is not
 activity (a room only the host speaks in reads idle), and a proposal never wakes it. The Node
-server (`npm start`) keeps the books these findings are read from and raises nothing: its tick
-loop does not run housekeeping, so a housekeeping room shows no proposal there. Run the room
-under `npm run dev:worker` to see one.
+server (`npm start`) raises the same proposals from the loop that ticks its rooms, within a
+minute of a threshold passing.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

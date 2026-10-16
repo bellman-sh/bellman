@@ -519,11 +519,11 @@ describe("plan resolution", () => {
      * at zero no matter how many had signed in.
      */
     it("records the sign-in, on the path that grants nothing", async () => {
-      expect(await config.plans!.countUsers()).toBe(0);
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(0);
 
       await resolvePlan(PROFILE, config);
 
-      expect(await config.plans!.countUsers()).toBe(1);
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
     });
 
     it("records a sign-in that an operator override decided", async () => {
@@ -531,7 +531,7 @@ describe("plan resolution", () => {
 
       await resolvePlan(PROFILE, config);
 
-      expect(await config.plans!.countUsers()).toBe(1);
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
     });
 
     /** A wrong count is worth less than a person locked out of their account. */

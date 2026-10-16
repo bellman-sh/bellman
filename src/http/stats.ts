@@ -17,12 +17,15 @@ export type StatsRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrig
 };
 
 /**
- * Scalars only, by type (#259, spec D6).
+ * Scalars only (#259, spec D6).
  *
- * A userId, an email, an orgId, a label or a join code added here is a compile
- * error rather than something a reviewer has to catch. The endpoint was asked
- * for on the condition that it cannot return a row, and this interface is that
- * condition written down.
+ * The endpoint was asked for on the condition that it cannot return a row, and
+ * two things hold that together. `stats` below is typed as this interface, so a
+ * field outside it is an excess-property error and a required field added to it
+ * must be given a value there. And the "answers scalars only" test fails on any
+ * value in the response that is not a number or a boolean. The type alone would
+ * miss a row spread into the body, because `json` takes `unknown`; the test is
+ * what catches that.
  */
 export interface PlatformStats {
   accounts: number;

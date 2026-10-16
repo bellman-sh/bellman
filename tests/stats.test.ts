@@ -105,6 +105,19 @@ describe("GET /operator/stats", () => {
     expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
   });
 
+  // A browser hands the panel the answer, or a refusal, only if the response names its origin.
+  it("carries the panel's origin on the answer", async () => {
+    const res = await call(DEV_KEY.jesse, "/operator/stats", { origin: PANEL });
+    expect(res!.status).toBe(200);
+    expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
+  it("carries the panel's origin on a refusal", async () => {
+    const res = await call(null, "/operator/stats", { origin: PANEL });
+    expect(res!.status).toBe(401);
+    expect(res!.headers.get("access-control-allow-origin")).toBe(PANEL);
+  });
+
   it("counts nobody on an empty store", async () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toEqual({
       accounts: 0, free: 0, paid: 0, paidCapped: false,
@@ -146,13 +159,23 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 0, free: 0, paid: 1 });
   });
 
-  // Ruling R1.
-  it("says so when the grant scan reached its bound", async () => {
-    for (let i = 0; i < MAX_GRANTS_COUNTED; i += 1) {
+  // listGrants(limit, null) keeps only the grants with no org, and a team seat has one.
+  it("counts a grant that belongs to an org", async () => {
+    await store.putGrant(grant({ key: "github:1", plan: "team", orgId: "org_x" }));
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ paid: 1 });
+  });
+
+  // Ruling R1: the flag is the scan's bound, not the paid count. A free grant in the
+  // window keeps `paid` one under the limit on a scan that still reached it.
+  it("says so when the grant scan reached its bound, though a free grant keeps paid under it", async () => {
+    for (let i = 0; i < MAX_GRANTS_COUNTED - 1; i += 1) {
       await store.putGrant(grant({ key: `github:${i}` }));
     }
+    await store.putGrant(grant({ key: "github:free", plan: "free" }));
+
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({
-      paid: MAX_GRANTS_COUNTED, paidCapped: true,
+      paid: MAX_GRANTS_COUNTED - 1, paidCapped: true,
     });
   });
 
@@ -161,6 +184,8 @@ describe("GET /operator/stats", () => {
     await store.recordSignIn("u_a", Date.now());
     const byBearer = await bodyOf(await call(DEV_KEY.jesse));
     const byCookie = await bodyOf(await call(null, "/operator/stats", { cookie: DEV_KEY.jesse }));
+    // Two identical refusals would be equal too, so pin that the answer is the real one.
+    expect(byBearer).toMatchObject({ accounts: 1 });
     expect(byCookie).toEqual(byBearer);
   });
 

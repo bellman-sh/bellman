@@ -18,6 +18,7 @@
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
+import { PUBLIC_NAME, roomNamed } from "../public-names.js";
 import { isPublic, readSurface, sessionStatus } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 import { surfaceCursor } from "../surface.js";
@@ -104,9 +105,12 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
   try {
     const m = PATH.exec(path);
     if (!m) return notFound("no such route");
-    const [, id, part, blobId] = m;
-    const session = await deps.store.getSession(id);
+    const [, key, part, blobId] = m;
+    // A public name or a session id (public names spec, D6): a name has no `_`, and an id always has one.
+    // A name goes through the index and its room's record, so one nobody holds reads no room at all.
+    const session = PUBLIC_NAME.test(key) ? await roomNamed(deps.store, key) : await deps.store.getSession(key);
     if (!session || !isPublic(session)) return notFound("no such public room");
+    const id = session.id;
 
     if (blobId !== undefined) {
       // Only a blob an item on the surface names: one uploaded and never placed, or one whose

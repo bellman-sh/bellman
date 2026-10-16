@@ -35,4 +35,13 @@ describe("public rooms through the Worker", () => {
 
     expect((await call(`/public/rooms/${ROOM}`)).status).toBe(404);
   });
+
+  it("reads a public room by its name through the registry's index", async () => {
+    const store = new DurableObjectStore(env as never);
+    await store.createSession(session({ id: ROOM, manifest: roomManifest({ public: true }), members: [member()], publicName: "worker-room" }));
+    expect(await store.claimPublicName("worker-room", ROOM, null)).toBe(true);
+    const byName = await call("/public/rooms/worker-room");
+    expect(byName.status, await byName.clone().text()).toBe(200);
+    expect((await call("/public/rooms/no-such-name")).status).toBe(404);
+  });
 });

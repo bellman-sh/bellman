@@ -85,8 +85,8 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
     // counts twice; UserRecord keeps no keys to join them by.
     const plans = new Map<string, unknown>();
     for (const g of grants) plans.set(g.key, g.plan);
-    for (const [key, who] of Object.entries<Identity>(deps.overrides ?? {})) {
-      if (who) plans.set(key, who.plan);
+    for (const [key, entry] of Object.entries<Identity>(deps.overrides ?? {})) {
+      if (entry) plans.set(key, entry.plan);
     }
     const paid = [...plans.values()].filter((plan) => typeof plan === "string" && plan !== "free").length;
     const stats: PlatformStats = {

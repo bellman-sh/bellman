@@ -262,11 +262,13 @@ describe("GET /operator/stats", () => {
 
   // Spec D6: the guard that fails if the response type is widened to carry a row.
   it("answers scalars only", async () => {
+    // Everything the handler reads: a user for the count, and a row from each source of
+    // rows, a grant and an override. A leak that spreads a row into the body puts strings
+    // there, where an empty source would spread nothing. Each row has an org because a
+    // leak that adds the org id only when there is one fires on nothing else.
     await store.recordSignIn("u_a", Date.now());
-    // A row for a leak to carry: spread into the body it puts strings there, where
-    // an empty store would spread nothing. It carries an org because a leak that adds
-    // the org id only when there is one fires on nothing else.
     await store.putGrant(grant({ orgId: "org_x" }));
+    deps = { ...deps, overrides: { "github:1": identity({ orgId: "org_x" }) } };
     const body = await bodyOf(await call(DEV_KEY.jesse));
     for (const [field, value] of Object.entries(body)) {
       expect(typeof value, field).toMatch(/^(number|boolean)$/);

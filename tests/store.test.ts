@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
-import { MemoryStore } from "../src/store.js";
+import { MemoryStore, hostSentEntries } from "../src/store.js";
 import type { Session } from "../src/types.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
@@ -460,5 +460,49 @@ describe("hydrating a session written before a field existed", () => {
     expect(hydrateStoredSession(legacy)).toBeUndefined();
     expect(hydrateStoredSession(stored({ manifest: { roles: undefined } }))).toBeUndefined();
     expect(hydrateStoredSession(undefined)).toBeUndefined();
+  });
+});
+
+describe("hostSentEntries", () => {
+  it("records a host's send for the room's org and every org with a person present, as the room's org acting", () => {
+    const s = session({
+      id: "qs_hosted", orgId: "org_a",
+      members: [
+        member({ orgId: "org_a" }),
+        member({ memberId: "m_bo", userId: "u_bo", label: "Bo", orgId: "org_b", roomRole: "peer_b" }),
+        member({ memberId: "m_host", userId: HOST_USER_ID, label: "host@bellman", orgId: null, roomRole: "host" }),
+      ],
+    });
+    const rows = hostSentEntries(s, {
+      type: "message", fromMemberId: "m_host", fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+      payload: { text: "hi" }, refId: null,
+    }, 9);
+
+    expect(rows.map((r) => [r.orgId, r.actorOrgId, r.direction, r.parties])).toEqual([
+      ["org_a", "org_a", "outbound", ["org_a", "org_b"]],
+      ["org_b", "org_a", "inbound", ["org_a", "org_b"]],
+    ]);
+    expect(rows[0]).toMatchObject({ action: "sent_message", actorLabel: "host@bellman", roomName: s.manifest.room, detail: { chars: 13 } });
+  });
+
+  // The room's org got this row before the roster counted, so it still does when nobody of its own is left in the room.
+  it("records a host's send for the room's org when none of its people are still in the room", () => {
+    const s = session({
+      id: "qs_hosted", orgId: "org_a",
+      members: [
+        member({ orgId: "org_a", leftAt: Date.now() }),
+        member({ memberId: "m_bo", userId: "u_bo", label: "Bo", orgId: "org_b", roomRole: "peer_b" }),
+        member({ memberId: "m_host", userId: HOST_USER_ID, label: "host@bellman", orgId: null, roomRole: "host" }),
+      ],
+    });
+    const rows = hostSentEntries(s, {
+      type: "message", fromMemberId: "m_host", fromUserId: HOST_USER_ID, fromLabel: "host@bellman",
+      payload: { text: "hi" }, refId: null,
+    }, 9);
+
+    expect(rows.map((r) => [r.orgId, r.direction, r.parties])).toEqual([
+      ["org_a", "outbound", ["org_a", "org_b"]],
+      ["org_b", "inbound", ["org_a", "org_b"]],
+    ]);
   });
 });

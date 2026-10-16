@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { manifestFixture, member, oneCode, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
-import { MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
+import { HOST_USER_ID, MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
 import type { Identity, Member } from "../src/types.js";
 
@@ -1368,7 +1368,9 @@ describe("evictMember", () => {
     // any pair that agreed, and auditEntries() builds both from one object.
     const detail = { member_id: "m_peer", user_id: "u_peer", room_role: "peer_b" };
     const theirs = await store.auditForOrg("org_other", 50);
-    expect(theirs).toHaveLength(1);
+    // D1 (audit trail spec): every org with a person in the room gets the row.
+    // The evicted member was in the room when the rows were built, so their org gets the door's too.
+    expect(theirs.map((a) => a.action)).toEqual(["member_evicted", "invite_revoked"]);
     expect(theirs[0]).toMatchObject({ action: "member_evicted", sessionId: "qs_test", actorUserId: "u_jesse" });
     expect(theirs[0].detail).toEqual(detail);
     const ours = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
@@ -1608,5 +1610,46 @@ describe("audit", () => {
     await audit(store, room, jesse, "probe", {});
 
     expect(written.mock.calls.map(([entry]) => entry.orgId).sort()).toEqual(["org_codenerd", "org_room"]);
+  });
+
+  const ana: Identity = { userId: "u_ana", orgId: "org_a", plan: "team", role: "member", label: "Ana" };
+  const anaSeat = member({ memberId: "m_ana", userId: "u_ana", label: "Ana", orgId: "org_a" });
+  const boSeat = member({ memberId: "m_bo", userId: "u_bo", label: "Bo", orgId: "org_b", roomRole: "peer_b" });
+  const inA = (members: Member[]) => session({ id: "qs_cross", orgId: "org_a", members });
+
+  it("writes a send in A's room with B's member present to both orgs: outbound for A, inbound for B", async () => {
+    const room = inA([anaSeat, boSeat]);
+    await audit(store, room, ana, "sent_message", { chars: 5 });
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => [r.crossing, r.direction])).toEqual([["cross_org", "outbound"]]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([{
+      at: expect.any(Number), orgId: "org_b", sessionId: "qs_cross", actorUserId: "u_ana", action: "sent_message",
+      detail: { chars: 5 }, actorLabel: "Ana", actorOrgId: "org_a", roomName: room.manifest.room,
+      parties: ["org_a", "org_b"], crossing: "cross_org", direction: "inbound",
+    }]);
+  });
+
+  it("makes a room with a person who has no org cross-org, and writes that person no row", async () => {
+    const solo = member({ memberId: "m_solo", userId: "u_solo", label: "solo", orgId: null, roomRole: "peer_b" });
+    const written = vi.spyOn(store, "appendAudit");
+    await audit(store, inA([anaSeat, solo]), ana, "sent_message", {});
+
+    expect(written.mock.calls.map(([e]) => [e.orgId, e.crossing, e.parties])).toEqual([["org_a", "cross_org", ["org_a", null]]]);
+  });
+
+  it("counts people still in the room: a member who left and the hosted seat are not parties", async () => {
+    const left = { ...boSeat, leftAt: Date.now() };
+    const host = member({ memberId: "m_host", userId: HOST_USER_ID, label: "host@bellman", orgId: null, roomRole: "host" });
+    await audit(store, inA([anaSeat, left, host]), ana, "sent_message", {});
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => [r.crossing, r.parties])).toEqual([["internal", ["org_a"]]]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([]);
+  });
+
+  it("reaches an evicted member's org, which is no longer in the room, as inbound", async () => {
+    await audit(store, inA([anaSeat]), ana, "member_evicted", { user_id: "u_bo" }, ["org_b"]);
+
+    expect((await store.auditForOrg("org_a", 10)).map((r) => r.direction)).toEqual(["outbound"]);
+    expect((await store.auditForOrg("org_b", 10)).map((r) => [r.crossing, r.direction])).toEqual([["cross_org", "inbound"]]);
   });
 });

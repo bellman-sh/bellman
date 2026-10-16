@@ -16,6 +16,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import { auditRows, partiesOf } from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -696,16 +697,25 @@ export function decideHostCharge(
 }
 
 /**
- * The audit row a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for
- * a member, so a team org's stream sees the host as it sees members. The host belongs to
- * no org, so only the room's own gets it. Both stores queue it in the send's own write.
+ * The audit rows a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for a
+ * member, so a team org's stream sees the host as it sees members. The host belongs to no org
+ * and acts for the room, so the parties are the room's org and the orgs of the people in it
+ * (audit trail spec, D1), and the row says the room's org acted. Both stores queue them in the
+ * send's own write.
  */
-export function hostSentEntries(s: Pick<StoredSession, "id" | "orgId">, e: Omit<SessionEvent, "cursor" | "at">, now: number): AuditEntry[] {
-  if (!s.orgId) return [];
-  return [{
-    at: now, orgId: s.orgId, sessionId: s.id, actorUserId: e.fromUserId, action: `sent_${e.type}`,
-    detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
-  }];
+export function hostSentEntries(
+  s: Pick<StoredSession, "id" | "orgId" | "members" | "manifest">,
+  e: Omit<SessionEvent, "cursor" | "at">,
+  now: number,
+): AuditEntry[] {
+  return auditRows(
+    partiesOf([s.orgId, ...s.members.filter(isActivePerson).map((m) => m.orgId)]),
+    {
+      at: now, sessionId: s.id, action: `sent_${e.type}`, roomName: s.manifest.room,
+      detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+    },
+    { userId: e.fromUserId, label: e.fromLabel, orgId: s.orgId },
+  );
 }
 
 /**

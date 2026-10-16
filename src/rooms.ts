@@ -19,13 +19,14 @@ import type { StoredSession } from "./stored-session.js";
 import { renderJoinCode } from "./codes.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember, isRemovedMember,
+  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, isActiveMember, isActivePerson, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
 import { MAX_SURFACE_ITEMS, normalizeSurfaceWrite, surfaceCursor } from "./surface.js";
 import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./blobs.js";
+import { auditRows, partiesOf } from "./audit.js";
 
 // ---------------------------------------------------------------------------
 // Result
@@ -319,26 +320,21 @@ export async function readSurface(
 }
 
 /**
- * Which orgs get a row for this action, and what it says. One rule, in one
- * place, for the callers that write it themselves and the ones that hand it to
+ * Which orgs get a row for this action, and what it says (audit trail spec, D1 and D2). One
+ * rule, in one place, for the callers that write it themselves and the ones that hand it to
  * a store operation to commit with the mutation it records.
  *
- * Enterprise audit trail. Cross-org sessions write one entry per involved org
- * so each org's admins see the crossings that touched THEIR boundary —
- * without being able to read the other org's unrelated activity.
+ * The parties are the room's org, the actor's, any named in `alsoOrgs`, and the org of every
+ * person still in the room. The last is what makes a crossing visible from both sides: when a
+ * member of org A sends in A's room while a member of org B is in it, A's context reaches B, so
+ * B's stream records it too. `alsoOrgs` is for an actor acting on someone else: an eviction
+ * touches the evicted member's org, which need be neither the room's nor the creator's, and
+ * that member is no longer in the room to be counted. The hosted seat is not a party; it acts
+ * for the room. A person with no org is a party with no stream: the room is cross-org for
+ * everyone else, and no row is written for them.
  *
- * The involved orgs are the room's and the actor's, and that is enough while
- * the actor is the person the entry is about: a member joining or leaving
- * writes a row for their own org. It is not enough when the actor acts on
- * someone else. An eviction touches the evicted member's org, which need be
- * neither the room's nor the creator's, so that caller names it in `alsoOrgs`
- * and the entry reaches the org whose member lost access. The parameter only
- * adds: the room's and the actor's rows are always written, an org named twice
- * gets one row, and an org-less member gets none.
- *
- * It lives here rather than in a transport because a transport that writes its
- * own row is a transport that will one day write it for one org and not the
- * other.
+ * It lives here rather than in a transport because a transport that writes its own row is a
+ * transport that will one day write it for one org and not the other.
  */
 export function auditEntries(
   session: StoredSession,
@@ -347,13 +343,14 @@ export function auditEntries(
   detail: Record<string, unknown>,
   alsoOrgs: readonly (string | null)[] = []
 ): AuditEntry[] {
-  const orgs = new Set<string | null>([session.orgId, actor.orgId, ...alsoOrgs]);
-  const at = Date.now();
-  return [...orgs]
-    .filter((orgId): orgId is string => orgId !== null)
-    .map((orgId) => ({
-      at, orgId, sessionId: session.id, actorUserId: actor.userId, action, detail,
-    }));
+  const parties = partiesOf([
+    session.orgId, actor.orgId, ...alsoOrgs, ...session.members.filter(isActivePerson).map((m) => m.orgId),
+  ]);
+  return auditRows(
+    parties,
+    { at: Date.now(), sessionId: session.id, action, roomName: session.manifest.room, detail },
+    { userId: actor.userId, label: actor.label, orgId: actor.orgId },
+  );
 }
 
 /**
@@ -971,10 +968,10 @@ export async function evictMember(
     // above and the removal. And it could only describe a removal this call made,
     // so the doors an eviction shut would sit in two places, a field for members who
     // were present and a row for those who had already left, and a query for
-    // `invite_revoked` would find half of them. The row goes to the room's org and
-    // the creator's, as revokeInvite writes it, and no more: it names a role and no
-    // person, so the departed member's org could not tell whom it concerned, and a
-    // row an org cannot resolve to anyone is worse than none.
+    // `invite_revoked` would find half of them. The row goes where revokeInvite's
+    // goes, to the orgs `auditEntries` names, and the departed member's org is not
+    // added to them: it names a role and no person, so that org could not tell whom
+    // it concerned, and a row an org cannot resolve to anyone is worse than none.
     retire: {
       role: target.roomRole,
       event: doorShutEvent(actor, target.roomRole),

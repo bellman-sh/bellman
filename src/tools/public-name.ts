@@ -12,14 +12,11 @@ export function registerPublicName(server: McpServer, identity: Identity, s: Bel
     "bellman_public_name",
     {
       title: "Check or set a public room's name",
-      description: `A public room's page is dash.bellman.sh/r/<name> once it has a name, and dash.bellman.sh/r/<session_id> until then. Names are first come, first served, and free again when their room closes or is made private.
+      description: `Check or set the name in a public room's link, dash.bellman.sh/r/<name>, which until then is dash.bellman.sh/r/<session_id>. First come, first served; free again when its room closes or is made private.
 
-Args:
-  - name: 3 to 40 lowercase letters, digits and single hyphens, starting and ending with a letter or digit.
-  - session_id (or room_id): your public room. Without it the name is only checked. With it the name is set: you must be the room's creator, the room must be public and open, and the name it held before is free at once.
-
+Args: name (3 to 40 lowercase letters, digits and single hyphens); session_id or room_id to set it on your public, open room, as its creator, freeing its previous name. Without one, the name is only checked.
 Returns: { name, free } when checking; { name, public_url } when setting.
-Errors: "public name "...": use 3 to 40 lowercase letters..." (the rule), "public name "..." is taken" (choose another), "no such room, or no member of yours in it", "only the room's creator may name it", "only a public room has a public name", "the room is closed".`,
+Errors: the name rule, "is taken", "no such room, or no member of yours in it", "only the room's creator may name it", "only a public room has a public name", "the room is closed".`,
       inputSchema: { name: z.string().max(200), ...RoomRefShape },
       annotations: {
         readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false,

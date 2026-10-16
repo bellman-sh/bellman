@@ -228,7 +228,7 @@ describe("the moderation routes through the Worker", () => {
   });
 
   // Fail closed: a registry that cannot answer serves nobody. A route answers in its own JSON, as a throw inside it
-  // is answered, and /mcp and /ws are not served at all.
+  // is answered; /mcp answers JSON-RPC's internal error, which an MCP client can parse, and /ws a 500.
   it("serves nothing when the registry cannot say whether an account is suspended", async () => {
     const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended").mockRejectedValue(new Error("registry down"));
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -236,14 +236,17 @@ describe("the moderation routes through the Worker", () => {
       const token = await tokenFor({ userId: "u_wire_unread", orgId: null, plan: "free", role: "member", label: "u@example.dev" });
       const rooms = await worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { authorization: `Bearer ${token}` } }), oauthEnv(), ctx);
       expect([rooms.status, await rooms.json()]).toEqual([500, { error: "internal", error_description: expect.any(String) }]);
-      await expect(worker.fetch(new Request(`${ORIGIN}/mcp`, {
+      const mcp = await worker.fetch(new Request(`${ORIGIN}/mcp`, {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-      }), oauthEnv(), ctx)).rejects.toThrow("registry down");
-      await expect(worker.fetch(new Request(`${ORIGIN}/ws?session=qs_wire_none&cursor=0`, {
+      }), oauthEnv(), ctx);
+      expect([mcp.status, await mcp.json()])
+        .toEqual([500, { jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null }]);
+      const ws = await worker.fetch(new Request(`${ORIGIN}/ws?session=qs_wire_none&cursor=0`, {
         headers: { authorization: `Bearer ${token}`, upgrade: "websocket" },
-      }), oauthEnv(), ctx)).rejects.toThrow("registry down");
+      }), oauthEnv(), ctx);
+      expect(ws.status).toBe(500);
       expect(read).toHaveBeenCalledTimes(3);
     } finally {
       read.mockRestore();

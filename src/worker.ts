@@ -376,8 +376,16 @@ export default {
 
       const identity = await resolveCaller(request, env, oauth);
       if (!identity) return unauthorized(oauth);
-      // A socket already open stays open (plan ruling R8); this refuses the next one.
-      if (await suspended(identity.userId)) return new Response(SUSPENDED, { status: 403 });
+      // A socket already open stays open (plan ruling R8); this refuses the next one. A registry that
+      // cannot say is a 500 rather than workerd's error page, and opens no socket either.
+      let refused: boolean;
+      try {
+        refused = await suspended(identity.userId);
+      } catch (err) {
+        console.error("/ws suspension read failed:", err);
+        return new Response("Internal server error", { status: 500 });
+      }
+      if (refused) return new Response(SUSPENDED, { status: 403 });
 
       const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
       const { memberIds, closed } = await stub.membersOf(identity.userId);
@@ -414,11 +422,13 @@ export default {
 
     const identity = await resolveCaller(request, env, oauth);
     if (!identity) return unauthorized(oauth);
-    if (await suspended(identity.userId)) {
-      return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
-    }
 
     try {
+      // Inside the try: a registry that cannot say is JSON-RPC's internal error below, which an MCP
+      // client can parse, and serves nobody.
+      if (await suspended(identity.userId)) {
+        return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
+      }
       const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS) });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

@@ -738,13 +738,15 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   const cut = asAdmin ? undefined : cutFor(mine);
   const within = (e: SessionEvent) => cut === undefined || e.cursor <= cut;
   let read: SessionEvent[];
+  // Every read is bounded in the store (#208). `within` keeps a prefix of what it is handed, so a
+  // page filtered to the cut is the page the whole tail filtered and sliced used to give.
   if (after !== undefined) {
-    read = (await deps.store.eventsAfter(sessionId, after)).filter(within).slice(0, MAX_EVENTS_READ);
+    read = (await deps.store.eventsAfter(sessionId, after, MAX_EVENTS_READ)).filter(within);
   } else if (cut === undefined) {
     read = await deps.store.recentEvents(sessionId, MAX_EVENTS_READ);
   } else {
     // A removed member's newest are the ones before its cut, which the room's tail may not reach.
-    read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ))).filter(within).slice(-MAX_EVENTS_READ);
+    read = (await deps.store.eventsAfter(sessionId, Math.max(0, cut - MAX_EVENTS_READ), MAX_EVENTS_READ)).filter(within);
   }
   return json(200, {
     events: read.map((e) => untrusted({ memberId: e.fromMemberId, label: e.fromLabel }, publicEvent(e))),

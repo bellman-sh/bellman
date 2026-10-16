@@ -343,7 +343,9 @@ sends it. The decisions are in the
 
 **Read-and-register still applies.** `SessionDO.fetch` awaits the events the
 client missed, then attaches the cursor, accepts the socket and sends the
-replay, with nothing yielding between those. An event appended in that gap
+replay, with nothing yielding between those. It replays 1,000 at most: a
+client further behind is refused with 410 and catches up by polling
+`bellman_sync`, which pages (#208). An event appended in that gap
 would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
 closes by registering its waiter with no `await` after its read (invariant 2
 below). The rule governs both paths and only the registration mechanism
@@ -520,7 +522,9 @@ cadence a room declares in its manifest, and it earns its row by carrying what
 only the server can see: for every member the room expects to report, when it
 last did and how long it had been silent at the tick's own `at`. It is written
 only when some member is due, never into a frozen or closed room, and a room
-that declares no cadence gets none. Members answer with `progress` events —
+that declares no cadence gets none. A member asked for three cadences without
+answering is not due again until it reports (#208), so an unattended room stops
+ticking instead of writing a tick every cadence until it is abandoned. Members answer with `progress` events —
 "still working, currently on the migration script" — which exist to reach a peer
 and have no timer of their own. A role on the heartbeat may carry its creator's
 instruction for what that note says (its `heartbeat_on` set to the text, at most
@@ -1863,12 +1867,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,694** | every request, whether or not you are in a room |
+| Tool definitions | **~8,724** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for #208, by the method below: 30 tokens over the 8,694 that main
+(`c34d089`) measures, all of them `bellman_sync`'s (740 to 770), whose `Returns:` line names
+`more` and says to call again at once when a page comes back full. No other tool changed.
+That is 8,724.
 
 Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
 (`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no

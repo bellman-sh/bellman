@@ -1363,7 +1363,12 @@ export interface BellmanStore {
    * the whole array, so the memory store has to say so itself.
    */
   recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]>;
-  waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
+  /**
+   * The events after `cursor`, or the first to arrive within `waitMs`: at most `limit`, the
+   * earliest, when a limit is given. `bellman_sync` passes its page (#208), so a member far
+   * behind reads a page per poll and never the whole log at once.
+   */
+  waitForEvents(sessionId: string, cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]>;
   /**
    * Every surface row of this room, sorted by key, as detached copies. An
    * unknown session answers none. One hop: the Durable Objects store reads the
@@ -2411,10 +2416,11 @@ export class MemoryStore implements BellmanStore {
   waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
-    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor)) : [];
+    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit)) : [];
     if (immediate.length > 0 || waitMs <= 0) return Promise.resolve(immediate);
     return new Promise((resolve) => {
       const w: Waiter = { after: cursor, resolve };

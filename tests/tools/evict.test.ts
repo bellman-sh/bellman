@@ -3,6 +3,7 @@ import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief } from "../helpers/fixtures.js";
 import { DEV_KEY, Harness, envelopes, type Peer } from "../helpers/harness.js";
 import { STALE_AFTER_MS } from "../../src/presence.js";
+import { SYNC_PAGE } from "../../src/tools/sync.js";
 
 /**
  * A creator removing a member. The history stays open to the person removed — it
@@ -265,6 +266,55 @@ describe("bellman_evict", () => {
       const kinds = envelopes(history.data.events).map((e) => (e.data as { type: string }).type);
       expect(kinds).toContain("member_evicted");
       expect(kinds).not.toContain("message");
+    });
+
+    /**
+     * #208: the history a removed member reads is paged like anyone's. A room evicts the third
+     * member once `fill` messages have landed after it joined, then goes on talking; the cursor
+     * of the eviction is returned with the room.
+     */
+    async function evictAfter(fill: (joinedAt: number) => number) {
+      const s = await pairUp(h, { manifest: { room: "test-room", preset: "swarm" } });
+      const third = await joinThird(s);
+      const joined = (await h.store.recentEvents(s.sessionId, 1))[0].cursor;
+      for (let i = 0; i < fill(joined); i++) {
+        await h.store.appendEvent(s.sessionId, {
+          type: "message", fromMemberId: s.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse", payload: { text: `m${i}` }, refId: null,
+        });
+      }
+      const out = await s.creator.call("bellman_evict", { session_id: s.sessionId, member_id: third.memberId });
+      expect(out.isError, out.text).toBe(false);
+      await s.creator.call("bellman_send", {
+        session_id: s.sessionId, member_id: s.creatorMemberId, type: "message", payload: { text: "after the cut" },
+      });
+      const cut = (await h.store.eventsAfter(s.sessionId, 0)).find((e) => e.type === "member_evicted")!.cursor;
+      const sync = (since: number) => third.peer.call("bellman_sync", { session_id: s.sessionId, member_id: third.memberId, since_cursor: since });
+      return { cut, sync };
+    }
+
+    it("pages their history, and says there is more while a full page stops short of the cut", async () => {
+      const { cut, sync } = await evictAfter(() => SYNC_PAGE);
+      const first = await sync(0);
+      expect(first.isError, first.text).toBe(false);
+      expect(first.data.more).toBe(true);
+      expect(first.data.cursor).toBe(SYNC_PAGE);
+      // Not yet: a client stops at `removed` without reading `more`, and the notice is still ahead.
+      expect(first.data.removed).toBeUndefined();
+
+      const rest = await sync(SYNC_PAGE);
+      expect(rest.data.more).toBeUndefined();
+      expect(rest.data.cursor).toBe(cut);
+      expect(rest.data.removed).toBe(true);
+    });
+
+    // The page is full and the room has more past it, but none of it is theirs.
+    it("says nothing more is coming when a full page ends at the cut", async () => {
+      const { cut, sync } = await evictAfter((joined) => SYNC_PAGE - joined - 1);
+      expect(cut).toBe(SYNC_PAGE);
+      const page = await sync(0);
+      expect(page.isError, page.text).toBe(false);
+      expect(page.data.cursor).toBe(cut);
+      expect(page.data.more).toBeUndefined();
     });
 
     it("does not hold their long poll open, because there is nothing coming", async () => {

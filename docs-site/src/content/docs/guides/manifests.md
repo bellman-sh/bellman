@@ -75,7 +75,7 @@ Verbs do not combine. Each call needs exactly one, and no verb stands in for ano
 
 ## A heartbeat
 
-A room can ask its members to report. A top-level `heartbeat` sets how often the server appends a `heartbeat` tick saying who has reported and who has gone quiet. It is a duration in seconds, minutes or hours, from 30 seconds to 24 hours, so a day is `24h`. A role's `heartbeat_on` says whether members in that seat must answer the tick by sending `progress`. `true` uses the server's own ask. A string of at most 300 characters is your instruction for what to report.
+A room can ask its members to report. A top-level `heartbeat` sets how often the server appends a `heartbeat` tick saying who has reported and who has gone quiet. It is a duration in seconds, minutes or hours, from 30 seconds to 24 hours, so a day is `24h`. A role's `heartbeat_on` says whether members in that seat must answer the tick by sending `progress`. `true` uses the server's own ask. A string of at most 300 characters is your instruction for what to report. A member that goes three cadences without reporting is not asked again until it reports. Ticks written for other members still list it as silent, and a room where nobody reports stops ticking.
 
 ```yaml
 room: payments-migration

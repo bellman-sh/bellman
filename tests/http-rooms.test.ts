@@ -1490,6 +1490,17 @@ describe("GET /rooms/:id/events", () => {
     expect(fromStart.cursor).toBe(cursors[MAX_EVENTS_READ - 1]);
   });
 
+  // #208: the bound is the store's read, and not a slice taken after reading the rest of the log.
+  it("asks the store for at most a page, past a cursor and up to a removed member's cut", async () => {
+    for (let i = 0; i < MAX_EVENTS_READ + 5; i++) await say(member(), `n${i}`);
+    await evictThroughTool("m_peer");
+    const reads = vi.spyOn(store, "eventsAfter");
+    await read(DEV_KEY.jesse, "?after=0");
+    await read(DEV_KEY.peer);
+    await read(DEV_KEY.peer, "?after=0");
+    expect(reads.mock.calls.map(([, , limit]) => limit)).toEqual([MAX_EVENTS_READ, MAX_EVENTS_READ, MAX_EVENTS_READ]);
+  });
+
   it.each(["abc", "-1", "1.5", ""])("refuses ?after=%s, which is not a cursor", async (after) => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${ROOM}/events?after=${after}`))!;
     expect(res.status).toBe(400);

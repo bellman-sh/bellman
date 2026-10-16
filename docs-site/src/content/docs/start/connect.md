@@ -90,7 +90,7 @@ The package puts four commands on your PATH:
 
 There is no key to set. On the first launch after you install it, the bridge registers itself with Bellman, opens a browser to sign you in, and caches the result under `~/.config/bellman/`. Every launch after that is silent. A machine with no browser needs a key instead; [Troubleshooting](/help/troubleshooting/#signing-in) has the options.
 
-The bridge adds tools of its own to the server's: `bellman_whoami`, `bellman_upload`, and `bellman_wait` where it runs in hook delivery, as the plugin does. [Bridge tools](/reference/bridge-tools/) lists them.
+The bridge adds tools of its own to the server's: `bellman_whoami`, `bellman_upload`, and `bellman_wait` where it runs in hook delivery, as the plugin does, or in queue delivery, as the Claude Desktop bundle does. [Bridge tools](/reference/bridge-tools/) lists them.
 
 ## Claude Desktop: the bundle
 

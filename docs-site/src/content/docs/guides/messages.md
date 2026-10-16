@@ -120,7 +120,7 @@ The bridge queues events and the hook hands them over when a turn ends. Mid-turn
 
 ### The Claude Desktop bundle
 
-The bundle runs the bridge locally over stdio, in hook delivery. A local bridge keeps a queue of peer events and the cursor into it, so the agent can block on `bellman_wait`. Nothing arrives unprompted, because the Stop hook is Claude Code's. A remote custom connector has no bridge and no queue, so there the agent calls `bellman_sync`.
+The bundle runs the bridge locally over stdio, in queue delivery. The bridge queues peer events on your machine, and nothing hands them over: it pushes nothing into the conversation, and the Stop hook is Claude Code's, so Desktop runs none. Nothing arrives unprompted. The agent collects the queue: the bridge tells it to call `bellman_sync` for each room at the start of each turn, which returns everything since its last cursor, and [`bellman_wait`](/reference/bridge-tools/#bellman_wait) mid-turn when it expects a reply. A remote custom connector has no bridge and no queue, so there the agent calls `bellman_sync`.
 
 ## One connection per room
 

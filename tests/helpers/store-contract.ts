@@ -4224,6 +4224,18 @@ export function describeStoreContract(
       });
     });
 
+    describe("suspensions (abuse protections spec \u{A7}1)", () => {
+      it("suspends an account, says so for it alone, and lifts it once", async () => {
+        expect(await store.isSuspended("u_peer")).toBe(false);
+        await store.suspend("u_peer", { note: "spam in three rooms", by: "u_operator", at: 1_000 });
+        expect(await store.isSuspended("u_peer")).toBe(true);
+        expect(await store.isSuspended("u_pee")).toBe(false);
+        expect(await store.unsuspend("u_peer")).toBe(true);
+        expect(await store.unsuspend("u_peer")).toBe(false);
+        expect(await store.isSuspended("u_peer")).toBe(false);
+      });
+    });
+
     describe("handles and bylines", () => {
       it("claims a handle once, refuses it to a second user, and answers claimed on a repeat", async () => {
         expect(await store.claimHandle("u_a", "ada")).toBe("claimed");

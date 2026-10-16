@@ -5,7 +5,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
 import worker from "../src/worker.js";
+import { sessionCookieName } from "../src/oauth/cookies.js";
+import { SESSION_TTL_MS } from "../src/oauth/storage.js";
+import { AuthStore } from "../src/oauth/store.js";
+import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
 import { DurableObjectStore } from "../src/store-do.js";
+import type { Identity } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";
@@ -25,6 +30,16 @@ afterEach(async () => {
   await reset();
   await abortAllDurableObjects();
 });
+
+const SECRET = "test-signing-secret";
+/** OAuth on, for a token the authorization server signed: /admin is its. */
+const oauthEnv = (over: Record<string, unknown> = {}) =>
+  ({ ...env, BELLMAN_TOKEN_SECRET: SECRET, BELLMAN_OPERATORS: "u_operator", ...over }) as unknown as Parameters<typeof worker.fetch>[1];
+const tokenFor = (identity: Identity) => signJwt(
+  { iss: ORIGIN, sub: identity.userId, aud: canonicalResource(`${ORIGIN}/mcp`), bellman: identity, plan_source: "default" },
+  SECRET, ACCESS_TOKEN_TTL_SECONDS,
+);
+const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
 
 describe("the moderation routes through the Worker", () => {
   it("bans at /rooms/:id/bans, lists the ban, and lifts it at /rooms/:id/bans/:banId, over the real room", async () => {
@@ -58,6 +73,114 @@ describe("the moderation routes through the Worker", () => {
       // The control: the same request with the key map bound reaches the route.
       expect((await call("/account/bans")).status).toBe(200);
     } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  // A user id no earlier case read, so this isolate's cache (spec D4) holds no answer for it yet.
+  it("suspends at /admin/suspensions/:userId, and the Worker refuses that account at /mcp and /rooms", async () => {
+    const operator = await tokenFor(OPERATOR);
+    const target = await tokenFor({ userId: "u_wire_suspended", orgId: null, plan: "free", role: "member", label: "s@example.dev" });
+    const post = await worker.fetch(new Request(`${ORIGIN}/admin/suspensions/u_wire_suspended`, {
+      method: "POST", headers: { authorization: `Bearer ${operator}`, "content-type": "application/json" }, body: JSON.stringify({ note: "wire" }),
+    }), oauthEnv(), ctx);
+    expect(post.status, await post.clone().text()).toBe(200);
+    const mcp = await worker.fetch(new Request(`${ORIGIN}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${target}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    }), oauthEnv(), ctx);
+    expect([mcp.status, await mcp.json()]).toEqual([403, expect.objectContaining({ error: expect.objectContaining({ message: "This account is suspended." }) })]);
+    const rooms = await worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { authorization: `Bearer ${target}` } }), oauthEnv(), ctx);
+    expect(rooms.status).toBe(403);
+  });
+
+  // The rest of R8's paths, a case each, each for an account of its own: this isolate's cache keeps its answer for an
+  // account a minute. The control at each is an account nobody suspended, sent the same request.
+  for (const [path, headers, served] of [
+    ["/ws?session=qs_wire_none&cursor=0", { upgrade: "websocket" }, 404],
+    ["/presets", {}, 200],
+    ["/account/handle", {}, 200],
+    ["/account/bans", {}, 200],
+  ] as const) {
+    const name = path.split("?")[0];
+    it(`refuses a suspended account at ${name} with the one message, and serves another`, async () => {
+      const as = async (userId: string) => worker.fetch(new Request(`${ORIGIN}${path}`, {
+        headers: { ...headers, authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` })}` },
+      }), oauthEnv(), ctx);
+      const suspended = `u_wire${name.replaceAll("/", "_")}`;
+      await store().suspend(suspended, { note: "wire", by: OPERATOR.userId, at: Date.now() });
+      const refused = await as(suspended);
+      expect([refused.status, await refused.text()]).toEqual([403, expect.stringContaining("This account is suspended.")]);
+      expect((await as(`${suspended}_control`)).status, "the control").toBe(served);
+    });
+  }
+
+  // The dash comes with its cookie, which `roomCaller` resolves through the authorization server's `caller`. The
+  // refusal carries CORS, so the panel can read why. The route reuses the gate's answer, so a request touches its
+  // session once rather than once for the gate and again for the route.
+  it("refuses a suspended account's panel cookie where the panel can read it, and touches a served session once", async () => {
+    const PANEL = "https://dash.example.test";
+    const cookieFor = async (userId: string) => {
+      const now = Date.now();
+      const id = crypto.randomUUID();
+      await new AuthStore(env.AUTH as never).putSession(id, {
+        identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
+        identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+      });
+      return `${sessionCookieName(true)}=${id}`;
+    };
+    const rooms = async (cookie: string) =>
+      worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { cookie, origin: PANEL } }), oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL }), ctx);
+    await store().suspend("u_wire_cookie", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const refused = await rooms(await cookieFor("u_wire_cookie"));
+    expect([refused.status, await refused.json(), refused.headers.get("access-control-allow-origin")])
+      .toEqual([403, { error: "suspended", error_description: "This account is suspended." }, PANEL]);
+
+    const control = await cookieFor("u_wire_cookie_control");
+    const touched = vi.spyOn(AuthStore.prototype, "touchSession");
+    try {
+      expect((await rooms(control)).status, "the control").toBe(200);
+      expect(touched).toHaveBeenCalledTimes(1);
+    } finally {
+      touched.mockRestore();
+    }
+  });
+
+  it("asks the registry about an account once a minute, not once a request", async () => {
+    const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended");
+    try {
+      const token = await tokenFor({ userId: "u_wire_cached", orgId: null, plan: "free", role: "member", label: "c@example.dev" });
+      for (const path of ["/account/handle", "/presets"]) {
+        const res = await worker.fetch(new Request(`${ORIGIN}${path}`, { headers: { authorization: `Bearer ${token}` } }), oauthEnv(), ctx);
+        expect(res.status, path).toBe(200);
+      }
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  // Fail closed: a registry that cannot answer serves nobody. A route answers in its own JSON, as a throw inside it
+  // is answered, and /mcp and /ws are not served at all.
+  it("serves nothing when the registry cannot say whether an account is suspended", async () => {
+    const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended").mockRejectedValue(new Error("registry down"));
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const token = await tokenFor({ userId: "u_wire_unread", orgId: null, plan: "free", role: "member", label: "u@example.dev" });
+      const rooms = await worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { authorization: `Bearer ${token}` } }), oauthEnv(), ctx);
+      expect([rooms.status, await rooms.json()]).toEqual([500, { error: "internal", error_description: expect.any(String) }]);
+      await expect(worker.fetch(new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      }), oauthEnv(), ctx)).rejects.toThrow("registry down");
+      await expect(worker.fetch(new Request(`${ORIGIN}/ws?session=qs_wire_none&cursor=0`, {
+        headers: { authorization: `Bearer ${token}`, upgrade: "websocket" },
+      }), oauthEnv(), ctx)).rejects.toThrow("registry down");
+      expect(read).toHaveBeenCalledTimes(3);
+    } finally {
+      read.mockRestore();
       quiet.mockRestore();
     }
   });

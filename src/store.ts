@@ -17,6 +17,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import type { Suspension } from "./suspension.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -1105,6 +1106,16 @@ export interface BellmanStore {
    */
   isBannedByCreator(creatorId: string, userId: string): Promise<boolean>;
   /**
+   * Suspend an account (abuse protections spec, section 1): every authenticated call that reads or writes
+   * the store as it is then refused (plan ruling R8). The registry keeps it, one row an account, and a
+   * repeat replaces the note.
+   */
+  suspend(userId: string, s: Suspension): Promise<void>;
+  /** Lift a suspension, and say whether there was one. */
+  unsuspend(userId: string): Promise<boolean>;
+  /** One read. The Worker keeps the answer a minute per isolate (`SuspensionCache`); the Node server asks each time. */
+  isSuspended(userId: string): Promise<boolean>;
+  /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
    * the room's WebSocket never calls `bellman_sync`, so it never says anything
@@ -1625,6 +1636,8 @@ export class MemoryStore implements BellmanStore {
   private roomBanned = new Map<string, Ban[]>();
   /** Creator-wide bans, by creator (spec section 1): about a creator and not a room, so the purge leaves them. */
   private creatorBanned = new Map<string, CreatorBan[]>();
+  /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
+  private suspensions = new Map<string, Suspension>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1972,6 +1985,18 @@ export class MemoryStore implements BellmanStore {
 
   async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
     return this.bansCreatorWide(creatorId, userId);
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    this.suspensions.set(userId, detach(s));
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.suspensions.delete(userId);
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return this.suspensions.has(userId);
   }
 
   /**

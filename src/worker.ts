@@ -6,14 +6,15 @@ import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
-import { roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { buildServer } from "./server.js";
+import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
 import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
-import { parsePanelOrigins } from "./oauth/browser.js";
+import { allowedOrigin, parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
 import { handleStripeWebhook } from "./billing/stripe.js";
 import { billingSettings } from "./billing/config.js";
@@ -185,12 +186,41 @@ async function roomCaller(request: Request, env: WorkerEnv, oauth?: OAuthConfig)
   return who ? { identity: who.identity, via: who.via } : null;
 }
 
+/**
+ * Which accounts are suspended (abuse protections spec, section 1), as this isolate last read the
+ * registry: an answer is kept a minute (spec D4), so a suspension or a lift reaches every path within one.
+ */
+const suspensions = new SuspensionCache();
+
+/** The first call's promise, kept: whatever asks again shares the one answer. */
+function once<T>(f: () => Promise<T>): () => Promise<T> {
+  let kept: Promise<T> | undefined;
+  return () => (kept ??= f());
+}
+
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
     const store = new DurableObjectStore(env);
     const oauth = oauthConfig(request, env, store);
     const blobs = new R2BlobStore(env.BLOBS);
+    const suspended = (userId: string) => suspensions.check(userId, () => store.isSuspended(userId));
+
+    // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
+    // session is touched once. `routeGate` asks first, and refuses a suspended account before a module reads
+    // or writes anything as it (plan ruling R8). /public takes no credential, so it has no gate. A throw in
+    // the gate is answered as one inside a module is: the modules' JSON, with CORS, so the panel can read it.
+    const who = once(() => roomCaller(request, env, oauth));
+    const routeGate = async (): Promise<Response | undefined> => {
+      const origin = allowedOrigin(request, oauth?.panelOrigins ?? []);
+      try {
+        const them = await who();
+        return them && (await suspended(them.identity.userId)) ? problem(403, "suspended", SUSPENDED, origin) : undefined;
+      } catch (err) {
+        console.error(`${request.method} ${url.pathname} failed:`, err);
+        return problem(500, "internal", "the request failed on the server; repeating it is safe", origin);
+      }
+    };
 
     // Ahead of the OAuth routes: Stripe signs its own requests and carries no
     // bearer token, so it must not fall through anything expecting one.
@@ -222,12 +252,12 @@ export default {
     // serves no room. The bans routes are asked first: they answer the paths
     // under /rooms/:id/bans, and leave every other path to the room routes.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const deps = {
         store,
         blobs,
-        caller: (req: Request) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       };
       const handled = (await moderationRoutes(request, deps)) ?? (await roomRoutes(request, deps));
@@ -246,11 +276,11 @@ export default {
 
     // The saved presets (designer spec D5), on the room routes' rules and behind the same guard.
     if (url.pathname === "/presets" || url.pathname.startsWith("/presets/")) {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await presetRoutes(request, {
         store,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       });
       if (handled) return handled;
@@ -259,11 +289,11 @@ export default {
     // A person's public handle (bylines spec D6), ahead of the OAuth routes, which serve /account and
     // have no store (plan ruling R1). The room routes' rules and the same guard.
     if (url.pathname === "/account/handle" || url.pathname === "/account/handle/") {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await handleRoutes(request, {
         store,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       });
       if (handled) return handled;
@@ -272,11 +302,11 @@ export default {
     // A creator's bans across their rooms (abuse protections spec, section 1): beside the handle, for the
     // same reason, and behind the same guard.
     if (url.pathname === "/account/bans" || url.pathname.startsWith("/account/bans/")) {
-      const blocked = unconfigured(env, oauth);
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await moderationRoutes(request, {
         store,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       });
       if (handled) return handled;
@@ -346,6 +376,8 @@ export default {
 
       const identity = await resolveCaller(request, env, oauth);
       if (!identity) return unauthorized(oauth);
+      // A socket already open stays open (plan ruling R8); this refuses the next one.
+      if (await suspended(identity.userId)) return new Response(SUSPENDED, { status: 403 });
 
       const stub = env.SESSION.get(env.SESSION.idFromName(sessionId));
       const { memberIds, closed } = await stub.membersOf(identity.userId);
@@ -382,6 +414,9 @@ export default {
 
     const identity = await resolveCaller(request, env, oauth);
     if (!identity) return unauthorized(oauth);
+    if (await suspended(identity.userId)) {
+      return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
+    }
 
     try {
       const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS) });

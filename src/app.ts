@@ -8,9 +8,10 @@ import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
-import { roomRoutes } from "./http/rooms.js";
+import { problem, roomRoutes } from "./http/rooms.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
+import { SUSPENDED } from "./suspension.js";
 
 /**
  * Builds the HTTP surface around an injected store.
@@ -58,15 +59,25 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
     return identity ? { identity, via: "bearer" as const } : null;
   };
+  /**
+   * A route module behind the suspension check the Worker makes (plan ruling R8): a suspended account is refused
+   * before the module reads or writes anything as it. The store is read each time, with no cache: MemoryStore
+   * answers at once.
+   */
+  const gated = (routes: (request: Request) => Promise<Response | undefined>) => async (request: Request) => {
+    const who = await caller(request);
+    return who && (await store.isSuspended(who.identity.userId)) ? problem(403, "suspended", SUSPENDED, undefined) : routes(request);
+  };
   // The bans routes are asked first: they answer the paths under /rooms/:id/bans, and leave every other
   // path to the room routes.
-  app.use("/rooms", serve(async (request) => {
+  app.use("/rooms", serve(gated(async (request) => {
     const deps = { store, blobs, caller, panelOrigins: [] };
     return (await moderationRoutes(request, deps)) ?? roomRoutes(request, deps);
-  }));
-  app.use("/presets", serve((request) => presetRoutes(request, { store, caller, panelOrigins: [] })));
-  app.use("/account/handle", serve((request) => handleRoutes(request, { store, caller, panelOrigins: [] })));
-  app.use("/account/bans", serve((request) => moderationRoutes(request, { store, caller, panelOrigins: [] })));
+  })));
+  app.use("/presets", serve(gated((request) => presetRoutes(request, { store, caller, panelOrigins: [] }))));
+  app.use("/account/handle", serve(gated((request) => handleRoutes(request, { store, caller, panelOrigins: [] }))));
+  app.use("/account/bans", serve(gated((request) => moderationRoutes(request, { store, caller, panelOrigins: [] }))));
+  // No credential, so no gate.
   app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
 
   app.use(express.json({ limit: "1mb" }));
@@ -98,6 +109,10 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
         error: { code: -32001, message: "Unauthorized: missing or unknown bearer key" },
         id: null,
       });
+      return;
+    }
+    if (await store.isSuspended(identity.userId)) {
+      res.status(403).json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null });
       return;
     }
     try {

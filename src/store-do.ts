@@ -2,6 +2,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
 import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
+import type { Suspension } from "./suspension.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
@@ -2882,6 +2883,9 @@ const creatorBanPrefix = (creatorId: string): string => `cb:${encodeURIComponent
 const creatorBanKey = (creatorId: string, userId: string): string =>
   `${creatorBanPrefix(creatorId)}${encodeURIComponent(userId)}`;
 
+/** `su:<user>` is a suspended account (abuse protections spec, section 1), its id percent-encoded as `cb:`'s are. */
+const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userId)}`;
+
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
 
@@ -3634,6 +3638,18 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
     return (await this.ctx.storage.get(creatorBanKey(creatorId, userId))) !== undefined;
   }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    await this.ctx.storage.put(suspensionKey(userId), s);
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.ctx.storage.delete(suspensionKey(userId));
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get(suspensionKey(userId))) !== undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3907,6 +3923,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
     return this.registry.isBannedByCreator(creatorId, userId);
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    await this.registry.suspend(userId, s);
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.registry.unsuspend(userId);
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return this.registry.isSuspended(userId);
   }
 
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {

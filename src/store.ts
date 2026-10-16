@@ -52,6 +52,16 @@ export const codeIsLive = (rec: { expiresAt: number | null }, now: number): bool
  * Here, and re-exported by rooms.ts, because the stores decide it too: `setJoinCode` refuses a
  * permanent code to a room that is not public, in the operation that writes the code (ADR 0020).
  */
+/** An entry in the public name index (public names spec, D5 as amended): the room that claimed the name, and when. */
+export interface PublicNameEntry {
+  id: string;
+  at: number;
+}
+
+/** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
+export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
+  a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
+
 export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
   s.manifest.public === true && s.unpublishedAt == null;
 
@@ -1144,15 +1154,17 @@ export interface BellmanStore {
    */
   unpublishSession(sessionId: string, at: number): Promise<void>;
   /**
-   * The session id the public name index holds for `name`, or null (public names spec, D5). A hint:
-   * whoever reads it checks the room's record (`holdsName`), which is the truth.
+   * The public name index's entry for `name`, or null (public names spec, D5): which room claimed it,
+   * and when. A hint: whoever reads it checks the room's record (`holdsName`), which is the truth.
    */
-  publicNameEntry(name: string): Promise<string | null>;
+  publicNameEntry(name: string): Promise<PublicNameEntry | null>;
   /**
-   * Point `name` at `sessionId` if the index still holds `expected` for it (null for no entry), in
+   * Set `name`'s entry to `entry` if it is still `expected` (null for no entry), compared whole and in
    * one step, so of two claims that read the same entry exactly one wins. True when this one did.
    */
-  claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean>;
+  claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean>;
+  /** Remove `name`'s entry if it is still `expected`, in one step: a claim given back. True when it was. */
+  releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean>;
   /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
   setPublicName(sessionId: string, name: string): Promise<void>;
   /**
@@ -1471,7 +1483,7 @@ export class MemoryStore implements BellmanStore {
    */
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
-  private byPublicName = new Map<string, string>(); // public name -> session id, a hint (public names spec, D5)
+  private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
   private byMember = new Map<string, Set<string>>();
   /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
@@ -2007,13 +2019,20 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async publicNameEntry(name: string): Promise<string | null> {
-    return this.byPublicName.get(name) ?? null;
+  async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
+    const entry = this.byPublicName.get(name);
+    return entry ? { ...entry } : null;
   }
 
-  async claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean> {
-    if ((this.byPublicName.get(name) ?? null) !== expected) return false;
-    this.byPublicName.set(name, sessionId);
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    if (!sameEntry(this.byPublicName.get(name) ?? null, expected)) return false;
+    this.byPublicName.set(name, { ...entry });
+    return true;
+  }
+
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    if (!sameEntry(this.byPublicName.get(name) ?? null, expected)) return false;
+    this.byPublicName.delete(name);
     return true;
   }
 

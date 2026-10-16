@@ -4,8 +4,9 @@
  * The route is tests/http-public.test.ts; the store methods are the store contract's.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { PUBLIC_NAME, claimName, heldName, holdsName, publicNameRefusal, roomNamed } from "../src/public-names.js";
+import { PUBLIC_NAME, PUBLIC_NAME_LEASE_MS, claimName, heldName, holdsName, nameFree, publicNameRefusal, roomNamed } from "../src/public-names.js";
 import { MemoryStore } from "../src/store.js";
+import type { BellmanStore } from "../src/store.js";
 import { roomPreview } from "../src/projections.js";
 import { DEV_KEY, Harness, type Peer } from "./helpers/harness.js";
 import { pairUp } from "./helpers/flows.js";
@@ -60,10 +61,12 @@ describe("holding a name (D5)", () => {
 describe("claiming a name through the index (D5)", () => {
   const named = (id: string, name: string) => session({ id, manifest: roomManifest({ public: true }), publicName: name });
 
+  const entry = (id: string, at = Date.now()) => ({ id, at });
+
   it("finds the room that holds a name, and nothing once it holds another", async () => {
     const store = new MemoryStore();
     await store.createSession(named("qs_a", "bellman-dev"));
-    await store.claimPublicName("bellman-dev", "qs_a", null);
+    await store.claimPublicName("bellman-dev", entry("qs_a"), null);
     expect((await roomNamed(store, "bellman-dev"))?.id).toBe("qs_a");
     await store.setPublicName("qs_a", "renamed");
     expect(await roomNamed(store, "bellman-dev")).toBeUndefined();
@@ -72,21 +75,56 @@ describe("claiming a name through the index (D5)", () => {
   it("takes a free name, refuses a held one, and takes over one its room no longer holds", async () => {
     const store = new MemoryStore();
     await store.createSession(named("qs_a", "bellman-dev"));
-    expect(await claimName(store, "bellman-dev", "qs_a")).toBe(true);
-    expect(await claimName(store, "bellman-dev", "qs_b")).toBe(false);
+    expect(await claimName(store, "bellman-dev", "qs_a")).not.toBeNull();
+    expect(await claimName(store, "bellman-dev", "qs_b")).toBeNull();
     await store.unpublishSession("qs_a", Date.now());
-    expect(await claimName(store, "bellman-dev", "qs_b")).toBe(true);
-    expect(await store.publicNameEntry("bellman-dev")).toBe("qs_b");
+    expect(await claimName(store, "bellman-dev", "qs_b")).not.toBeNull();
+    expect((await store.publicNameEntry("bellman-dev"))?.id).toBe("qs_b");
   });
 
-  it("answers yes to the room the entry already points at, and frees a name whose room was never created", async () => {
+  it("claims again, refreshing it, the name a room's entry already holds", async () => {
     const store = new MemoryStore();
     await store.createSession(named("qs_a", "bellman-dev"));
-    await store.claimPublicName("bellman-dev", "qs_a", null);
-    expect(await claimName(store, "bellman-dev", "qs_a")).toBe(true);
-    await store.claimPublicName("orphan", "qs_never", null);
-    expect(await roomNamed(store, "orphan")).toBeUndefined();
-    expect(await claimName(store, "orphan", "qs_b")).toBe(true);
+    await store.claimPublicName("bellman-dev", entry("qs_a", 1), null);
+    const again = await claimName(store, "bellman-dev", "qs_a", 5_000);
+    expect(again).toEqual({ id: "qs_a", at: 5_000 });
+    expect(await store.publicNameEntry("bellman-dev")).toEqual(again);
+  });
+
+  // Final review, I1: a claim whose room has not written the name yet may be in flight.
+  it("holds a name whose claim is in flight, and frees one whose room never wrote it once the lease runs out", async () => {
+    const store = new MemoryStore();
+    const t = 1_000_000;
+    await store.claimPublicName("in-flight", entry("qs_new", t), null);
+    expect(await roomNamed(store, "in-flight")).toBeUndefined();
+    expect(await claimName(store, "in-flight", "qs_b", t + 1_000)).toBeNull();
+    expect(await nameFree(store, "in-flight", t + 1_000)).toBe(false);
+    expect(await nameFree(store, "in-flight", t + PUBLIC_NAME_LEASE_MS)).toBe(true);
+    expect(await claimName(store, "in-flight", "qs_b", t + PUBLIC_NAME_LEASE_MS)).not.toBeNull();
+  });
+
+  // Final review, I1(b): A held foo and renamed to bar; C read foo's entry; A claimed foo back. C must lose.
+  it("fences a claimer that read a room's entry before the room claimed its name again", async () => {
+    const store = new MemoryStore();
+    await store.createSession(named("qs_a", "bar"));
+    await store.claimPublicName("foo", entry("qs_a", 0), null);
+    let open!: () => void;
+    const gate = new Promise<void>((resolve) => { open = resolve; });
+    const gated = new Proxy(store, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (typeof value !== "function") return value;
+        const method = value as (...args: unknown[]) => unknown;
+        if (prop !== "claimPublicName") return method.bind(target);
+        return async (...args: unknown[]) => { await gate; return method.apply(target, args); };
+      },
+    });
+    const c = claimName(gated, "foo", "qs_c");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await claimName(store, "foo", "qs_a")).not.toBeNull();
+    open();
+    expect(await c).toBeNull();
+    expect((await store.publicNameEntry("foo"))?.id).toBe("qs_a");
   });
 });
 
@@ -217,5 +255,112 @@ describe("bellman_public_name (D3)", () => {
     const unpublished = await start(jesse, { public_name: "private-soon" });
     await h.store.unpublishSession(unpublished.room, Date.now());
     expect((await jesse.call("bellman_public_name", { name: "private-soon" })).data.free).toBe(true);
+  });
+});
+
+// Final review, I1: a claim in flight must not read as free, so of two claims on one name exactly
+// one room ends up with it, however their steps interleave.
+describe("names under concurrency (D5 as amended)", () => {
+  /** A MemoryStore whose room records land a little after they are asked for, as a Durable Object's do across an RPC hop. */
+  const slowRecords = (): BellmanStore => {
+    const store = new MemoryStore();
+    return new Proxy(store, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target) as unknown;
+        if (typeof value !== "function") return value;
+        const method = value as (...args: unknown[]) => unknown;
+        if (prop !== "createSession" && prop !== "setPublicName") return method.bind(target);
+        return async (...args: unknown[]) => {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          return method.apply(target, args);
+        };
+      },
+    });
+  };
+  let h: Harness;
+  beforeEach(() => { h = new Harness(slowRecords()); });
+  afterEach(async () => { await h.close(); });
+  const OPEN = { room: "Dev", preset: "pair", public: true };
+
+  /** Until the index holds an entry for `name`: the first claim has landed, its room's record not yet. */
+  const claimed = async (name: string): Promise<void> => {
+    for (let i = 0; i < 500; i++) {
+      if ((await h.store.publicNameEntry(name)) !== null) return;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    throw new Error(`no claim on ${name}`);
+  };
+
+  it("refuses a second start for a name the first has claimed but not yet written down", async () => {
+    const [one, two] = [await h.connect(DEV_KEY.jesse), await h.connect(DEV_KEY.jesse)];
+    const first = one.call("bellman_start", { manifest: OPEN, public_name: "race-name", brief: brief() });
+    await claimed("race-name");
+    const second = await two.call("bellman_start", { manifest: { ...OPEN, room: "Dev 2" }, public_name: "race-name", brief: brief() });
+    const won = await first;
+    expect(won.isError, won.text).toBe(false);
+    expect(second.isError).toBe(true);
+    expect(second.text).toContain('public name "race-name" is taken');
+    expect((await roomNamed(h.store, "race-name"))?.id).toBe(won.data.session_id);
+  });
+
+  it("refuses a second room the name the first has claimed but not yet written down", async () => {
+    const [one, two] = [await h.connect(DEV_KEY.jesse), await h.connect(DEV_KEY.jesse)];
+    const rooms: string[] = [];
+    for (const room of ["One", "Two"]) {
+      rooms.push(String((await one.call("bellman_start", { manifest: { ...OPEN, room }, brief: brief() })).data.session_id));
+    }
+    const first = one.call("bellman_public_name", { name: "race-name", session_id: rooms[0] });
+    await claimed("race-name");
+    const second = await two.call("bellman_public_name", { name: "race-name", session_id: rooms[1] });
+    expect((await first).isError).toBe(false);
+    expect(second.text).toContain('public name "race-name" is taken');
+    expect((await roomNamed(h.store, "race-name"))?.id).toBe(rooms[0]);
+    expect((await h.store.getSession(rooms[1]))?.publicName).toBeNull();
+  });
+});
+
+// Final review, I1: a claim a later step refuses is given back, so a retry with the same name finds it free.
+describe("giving a claim back (D5 as amended)", () => {
+  let h: Harness;
+  afterEach(async () => { await h.close(); });
+  /** `store` with `method` replaced, as a store that misbehaves at that one step. */
+  const replacing = (store: MemoryStore, method: string, by: (...args: unknown[]) => Promise<unknown>): BellmanStore =>
+    new Proxy(store, {
+      get(target, prop) {
+        if (prop === method) return by;
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+
+  it("gives back a name a start claimed when its hosted room is refused", async () => {
+    h = new Harness();
+    const max = await h.connectAs({ userId: "u_max", orgId: null, plan: "max", role: "member", label: "max" });
+    for (const id of ["qs_h1", "qs_h2", "qs_h3"]) expect((await h.store.reserveHostedRoom("u_max", id, 3)).ok).toBe(true);
+    const out = await max.call("bellman_start", { manifest: { room: "Social", preset: "social", public: true }, public_name: "social-hour", brief: brief() });
+    expect(out.text).toContain("hosted room limit reached");
+    expect(await nameFree(h.store, "social-hour")).toBe(true);
+  });
+
+  it("gives back a name a start claimed when the room cannot be created", async () => {
+    const store = new MemoryStore();
+    h = new Harness(replacing(store, "createSession", async () => { throw new Error("storage down"); }));
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const out = await jesse.call("bellman_start", { manifest: { room: "Dev", preset: "pair", public: true }, public_name: "bellman-dev", brief: brief() });
+    expect(out.isError).toBe(true);
+    expect(await nameFree(store, "bellman-dev")).toBe(true);
+  });
+
+  // M3, within I1's fix: the link returned is the one the room holds as the call left it.
+  it("returns the link the room holds once the call is done, not the one it set out to", async () => {
+    const store = new MemoryStore();
+    h = new Harness(replacing(store, "setPublicName", async (...args: unknown[]) => {
+      await store.setPublicName(args[0] as string, args[1] as string);
+      await store.unpublishSession(args[0] as string, Date.now());
+    }));
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const room = String((await jesse.call("bellman_start", { manifest: { room: "Dev", preset: "pair", public: true }, brief: brief() })).data.session_id);
+    const out = await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: room });
+    expect(out.data.public_url).toBe(`https://dash.bellman.sh/r/${room}`);
   });
 });

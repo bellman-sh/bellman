@@ -3,7 +3,7 @@ import { z } from "zod";
 import { RoomRefShape, fail, ok, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
-import { publicNameRefusal, roomNamed } from "../public-names.js";
+import { nameFree, publicNameRefusal } from "../public-names.js";
 import { namePublicRoom } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 
@@ -26,7 +26,7 @@ Errors: the name rule, "is taken", "no such room, or no member of yours in it", 
       const bad = publicNameRefusal(args.name);
       if (bad) return fail(`${bad}.`);
       const room = roomIdOf(args);
-      if (room === undefined) return ok({ name: args.name, free: (await roomNamed(s, args.name)) === undefined });
+      if (room === undefined) return ok({ name: args.name, free: await nameFree(s, args.name) });
       const r = await namePublicRoom(s, identity, room, args.name);
       return r.ok ? ok({ name: r.value.name, public_url: r.value.publicUrl }) : fail(r.reason);
     },

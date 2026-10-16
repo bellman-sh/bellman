@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session,
   SessionEvent, SurfaceRow,
@@ -2816,15 +2816,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.delete(`jc:${code}`);
   }
 
-  async lookupPublicName(name: string): Promise<string | undefined> {
-    return this.ctx.storage.get<string>(`pn:${name}`);
+  async lookupPublicName(name: string): Promise<PublicNameEntry | undefined> {
+    return this.ctx.storage.get<PublicNameEntry>(`pn:${name}`);
   }
 
   /** `BellmanStore.claimPublicName`, in one transaction (public names spec, D5). */
-  async claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean> {
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
     return this.ctx.storage.transaction(async (txn) => {
-      if (((await txn.get<string>(`pn:${name}`)) ?? null) !== expected) return false;
-      await txn.put(`pn:${name}`, sessionId);
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.put(`pn:${name}`, entry);
+      return true;
+    });
+  }
+
+  /** `BellmanStore.releasePublicName`, in one transaction. */
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.delete(`pn:${name}`);
       return true;
     });
   }
@@ -3715,12 +3724,16 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).unpublishSession(at);
   }
 
-  async publicNameEntry(name: string): Promise<string | null> {
+  async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
     return (await this.registry.lookupPublicName(name)) ?? null;
   }
 
-  async claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean> {
-    return this.registry.claimPublicName(name, sessionId, expected);
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    return this.registry.claimPublicName(name, entry, expected);
+  }
+
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.registry.releasePublicName(name, expected);
   }
 
   async setPublicName(sessionId: string, name: string): Promise<void> {

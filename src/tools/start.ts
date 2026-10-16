@@ -139,12 +139,18 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
       // names spec, D5). Then a hosted room's slot, counted and recorded in one call (I7), and given
       // back if the room is not created after all.
       const sessionId = generateSessionId();
-      if (public_name !== undefined && !(await claimName(s, public_name, sessionId))) {
+      const claim = public_name === undefined ? null : await claimName(s, public_name, sessionId);
+      if (public_name !== undefined && claim === null) {
         return fail(`public name "${public_name}" is taken: choose another, or start without one and set it later with bellman_public_name.`);
       }
+      // Given back when a later step refuses, so a retry with the same name finds it free (D5 as amended).
+      const giveBack = async (): Promise<void> => {
+        if (public_name !== undefined && claim !== null) await s.releasePublicName(public_name, claim);
+      };
       if (manifest.host !== null) {
         const slot = await s.reserveHostedRoom(identity.userId, sessionId, ent.hostedRooms);
         if (!slot.ok) {
+          await giveBack();
           return fail(`hosted room limit reached: ${slot.open} hosted rooms open, the most the "${identity.plan}" plan allows. A hosted room that closes frees its slot.`);
         }
       }
@@ -207,6 +213,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         await s.createSession(session);
       } catch (err) {
         if (manifest.host !== null) await s.releaseHostedRoom(identity.userId, sessionId);
+        await giveBack();
         throw err;
       }
       await s.recordCreate(identity.userId);

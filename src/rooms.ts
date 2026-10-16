@@ -278,9 +278,9 @@ export const handlesOf = (
 
 /**
  * `bellman_public_name`'s write (public names spec, D3): the room's creator names their public,
- * open room. The index first, then the record: a claim whose record write fails names a room that
- * does not hold it, which is free (D5). The name the room held before is free once the record
- * names another.
+ * open room. The index first, then the record; a record write that fails gives the claim back (D5 as
+ * amended). The name the room held before is given back at once, and the link returned is read back
+ * from the record, so it says what the call established.
  */
 export async function namePublicRoom(
   store: BellmanStore, identity: Pick<Identity, "userId">, sessionId: string, name: string,
@@ -292,11 +292,22 @@ export async function namePublicRoom(
   if (session.createdBy !== identity.userId) return refuse("forbidden", "only the room's creator may name it");
   if (session.closed) return refuse("closed", "the room is closed, and a closed room holds no name");
   if (!isPublic(session)) return refuse("invalid", "only a public room has a public name");
-  if (!(await claimName(store, name, session.id))) {
-    return refuse("conflict", `public name "${name}" is taken: choose another`);
+  const claim = await claimName(store, name, session.id);
+  if (!claim) return refuse("conflict", `public name "${name}" is taken: choose another`);
+  if (session.publicName !== name) {
+    try {
+      await store.setPublicName(session.id, name);
+    } catch (err) {
+      await store.releasePublicName(name, claim);
+      throw err;
+    }
+    if (session.publicName !== null) {
+      const before = await store.publicNameEntry(session.publicName);
+      if (before?.id === session.id) await store.releasePublicName(session.publicName, before);
+    }
   }
-  if (session.publicName !== name) await store.setPublicName(session.id, name);
-  return succeed({ name, publicUrl: publicRoomUrl({ ...session, publicName: name }) });
+  const after = await store.getSession(session.id);
+  return succeed({ name, publicUrl: publicRoomUrl(after ?? session) });
 }
 
 /**

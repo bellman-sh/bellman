@@ -35,7 +35,7 @@ returns `{ name, free }`. With `name` and the room (`session_id`, or its alias
   theirs in the room, and `createdBy` theirs;
 - only on a room that is public (`isPublic`) and open;
 - a taken name is refused; the name the room already holds is returned as it is;
-- a new name replaces the room's current one, which is free at once.
+- a new name replaces the room's current one, which is free at once: its entry is given back (D5).
 
 Checking needs no plan. Setting needs a public room, which needs a paid plan
 (public rooms spec, D10). A room made public before this has no name, and its
@@ -49,16 +49,25 @@ monthly limit, and the refusal names the cure: another name, or none now and
 `bellman_public_name` later.
 
 **D5. Who holds a name.** The room whose own record names it (`publicName`),
-while that room is public and open. The registry keeps an index from name to
-room, read as a hint. An entry whose room no longer names it, has closed, has
-been made private, or was never created is free, and the next claim takes it
-over. A claim writes the index only if the entry is still what the claimer
-read, so of two claims on one name exactly one wins.
+while that room is public and open: that is what a reader of the name gets
+(D6). The registry keeps an index from each name to the claim that took it, its
+room and its time, read as a hint, as the store is truth and the channel
+transport. Against another claim, an entry keeps its name while its room's
+record names it and the room is public and open, or, while its room's record
+does not name it yet, for a lease of five minutes, since that claim may still
+be in flight. Every claim is a compare-and-set on the whole entry, so of two
+claims that read the same entry exactly one wins, and a room claiming its own
+name again refreshes its entry, which fences any claimer that read it before.
 
-Nothing runs when a room closes, goes private or is renamed. The room's record
-is the truth and the index a hint, as the store is truth and the channel
-transport. A claim that wins the index and then fails to write the room's
-record leaves an entry no room names, which is free.
+A claim is given back when the step after it refuses: a start whose hosted
+room is refused or whose room cannot be created, and a set whose record write
+fails. A rename gives the old name back at once (D3). Nothing runs when a room
+closes or goes private. A claim that fails without being given back keeps its
+name until the lease runs out.
+
+*Amended on 2026-10-15 after the final review (I1). As first written, an entry
+whose room did not name it was free at once, so a claim still in flight read as
+free, and two rooms could both win one name, each told it held the link.*
 
 **D6. Reading.** `GET /public/rooms/:key` takes a name or a session id. A name
 resolves through the index and D5's check, and a free name is not found. A
@@ -79,8 +88,12 @@ room ends, and an old link may then open another room.
   a role key it is chosen by the creator but held to a grammar the server checks,
   so it sits beside `public` rather than in the untrusted envelope.
 - Dash, in its own PR after bellman deploys: the canvas header's copy link uses
-  `public_name` when set. The public page passes the URL's segment to
-  `GET /public/rooms/:key` as it does now, so it needs no change.
+  `public_name` when set. The public page reads the room once by the URL's
+  segment, a name or an id, and its canvas and its log by the id that read
+  returned, so a name that moves on to another room never splices that room
+  into an open page, and a poll goes to the room, not through the name's index.
+  *Amended after the final review (I2): as first written, the page polled by
+  the URL's segment.*
 - `extension/manifest.json` lists `bellman_public_name`.
 
 **D8. Cost.** Every tool's definition is sent on every request, which is why one
@@ -101,6 +114,9 @@ to be measured and recorded in ARCHITECTURE §11 when built.
   refused.
 - Two claims on one name at once: exactly one wins, in the store contract, so
   on `MemoryStore` and the registry Durable Object alike.
+- A second claim after the first has landed but before its room's record names
+  the name, at start and at set: refused. A claim a later step refuses is given
+  back.
 - `GET /public/rooms/:key` serves a room by its name and by its session id, and
   a freed name is not found.
 - `extension/manifest.json` against the bridge's surface

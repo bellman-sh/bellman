@@ -250,7 +250,7 @@ describe("members' names on a public read", () => {
 
 describe("a public room read by its name (public names spec, D6)", () => {
   const name = async (id: string, n: string) => {
-    await store.claimPublicName(n, id, null);
+    await store.claimPublicName(n, { id, at: Date.now() }, null);
     await store.setPublicName(id, n);
   };
 

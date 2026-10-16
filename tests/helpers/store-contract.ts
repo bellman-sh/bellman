@@ -148,21 +148,35 @@ export function describeStoreContract(
         expect(await store.publicNameEntry("bellman-dev")).toBeNull();
       });
 
-      it("claims a name only while its entry is still what the claimer read", async () => {
-        expect(await store.claimPublicName("bellman-dev", "qs_a", null)).toBe(true);
-        expect(await store.publicNameEntry("bellman-dev")).toBe("qs_a");
-        expect(await store.claimPublicName("bellman-dev", "qs_b", null)).toBe(false);
-        expect(await store.claimPublicName("bellman-dev", "qs_b", "qs_a")).toBe(true);
-        expect(await store.publicNameEntry("bellman-dev")).toBe("qs_b");
+      it("claims a name only while its entry is still what the claimer read, compared whole", async () => {
+        const a = { id: "qs_a", at: 1 };
+        const b = { id: "qs_b", at: 2 };
+        expect(await store.claimPublicName("bellman-dev", a, null)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(a);
+        expect(await store.claimPublicName("bellman-dev", b, null)).toBe(false);
+        // The same room's id from another claim is another entry: the claim it read has been replaced.
+        expect(await store.claimPublicName("bellman-dev", b, { id: "qs_a", at: 9 })).toBe(false);
+        expect(await store.claimPublicName("bellman-dev", b, a)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(b);
       });
 
       it("lets exactly one of two claims on one name win", async () => {
         const won = await Promise.all([
-          store.claimPublicName("race", "qs_a", null),
-          store.claimPublicName("race", "qs_b", null),
+          store.claimPublicName("race", { id: "qs_a", at: 1 }, null),
+          store.claimPublicName("race", { id: "qs_b", at: 1 }, null),
         ]);
         expect(won.filter(Boolean)).toHaveLength(1);
-        expect(await store.publicNameEntry("race")).toBe(won[0] ? "qs_a" : "qs_b");
+        expect((await store.publicNameEntry("race"))?.id).toBe(won[0] ? "qs_a" : "qs_b");
+      });
+
+      it("gives a claim back only while its entry is still the one given", async () => {
+        const a = { id: "qs_a", at: 1 };
+        await store.claimPublicName("given-back", a, null);
+        expect(await store.releasePublicName("given-back", { id: "qs_a", at: 2 })).toBe(false);
+        expect(await store.publicNameEntry("given-back")).toEqual(a);
+        expect(await store.releasePublicName("given-back", a)).toBe(true);
+        expect(await store.publicNameEntry("given-back")).toBeNull();
+        expect(await store.releasePublicName("given-back", a)).toBe(false);
       });
 
       it("writes the name on the room's record, keeps one a room is created with, and leaves a room that is not there not there", async () => {

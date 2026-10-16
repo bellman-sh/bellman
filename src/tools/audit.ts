@@ -3,7 +3,7 @@ import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import type { Identity } from "../types.js";
-import { entitlementsFor } from "../auth.js";
+import { auditRefusal } from "../audit.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerAudit(server: McpServer, identity: Identity, s: BellmanStore): void {
@@ -22,19 +22,18 @@ Returns: { entries: [{ at, session_id, actor, action, detail }] }`,
       },
     },
     async ({ limit }): Promise<ToolResult> => {
-      const ent = entitlementsFor(identity);
-      if (!ent.audit) return fail(`the audit log requires the team plan (you are on "${identity.plan}").`);
-      if (identity.role !== "admin") return fail("the audit log requires the admin role.");
-      if (!identity.orgId) return fail("your identity has no org.");
+      const refused = auditRefusal(identity);
+      if (refused) return fail(refused);
+      const orgId = identity.orgId as string; // auditRefusal refuses an identity with no org
 
-      const entries = (await s.auditForOrg(identity.orgId, limit)).map((a) => ({
+      const entries = (await s.auditForOrg(orgId, limit)).map((a) => ({
         at: new Date(a.at).toISOString(),
         session_id: a.sessionId,
         actor: a.actorUserId,
         action: a.action,
         detail: a.detail,
       }));
-      return ok({ org_id: identity.orgId, count: entries.length, entries });
+      return ok({ org_id: orgId, count: entries.length, entries });
     }
   );
 }

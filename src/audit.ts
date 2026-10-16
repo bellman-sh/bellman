@@ -7,7 +7,8 @@
  * Runtime-free, as grant-audit.ts is: store-do.ts imports `cloudflare:workers`, which no
  * vitest test can import, so a rule written there could not be tested in Node.
  */
-import type { AuditEntry } from "./types.js";
+import { entitlementsFor } from "./auth.js";
+import type { AuditEntry, Identity } from "./types.js";
 
 /** Who acted, as a row records them. */
 export interface AuditActor {
@@ -234,4 +235,17 @@ export function auditWhere(
   if (q.org !== undefined) add("EXISTS (SELECT 1 FROM json_each(entries.parties) WHERE value = ?)", q.org);
   if (use.scope && q.scope !== undefined) add("crossing = ?", q.scope);
   return { clause: parts.length > 0 ? `WHERE ${parts.join(" AND ")}` : "", params };
+}
+
+/**
+ * Why `identity` may not read an org's audit stream, or null when it may: the team plan,
+ * which is what pays for the log, the admin role, and an org, in that order and in
+ * `bellman_audit`'s words. The tool, the room routes' admin read and the audit routes all
+ * ask this, so the three conditions cannot drift apart.
+ */
+export function auditRefusal(identity: Identity): string | null {
+  if (!entitlementsFor(identity).audit) return `the audit log requires the team plan (you are on "${identity.plan}").`;
+  if (identity.role !== "admin") return "the audit log requires the admin role.";
+  if (!identity.orgId) return "your identity has no org.";
+  return null;
 }

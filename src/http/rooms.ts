@@ -16,7 +16,7 @@
  * to a status, the way rooms.ts says a route should; `RoomFailure` is a closed
  * union, so a code the table below forgets is a compile error.
  */
-import { entitlementsFor } from "../auth.js";
+import { auditRefusal } from "../audit.js";
 import {
   BlobLengthError, MAX_BLOB_BYTES, MAX_BLOB_NAME_CHARS, OCTET_STREAM, SNIFF_BYTES,
   attachmentDisposition, blobBytesUsed, blobKey, isBlobId, isImageType, newBlobId, readHead,
@@ -419,8 +419,7 @@ const closedAtDescending = (a: StoredSession, b: StoredSession): number => {
  * team plan, which is what pays for the audit log, the admin role, and an org. A falsy org is no
  * org, as a falsy id names no stream anywhere else (ARCHITECTURE.md, runtime fact 4).
  */
-const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string } =>
-  identity.role === "admin" && entitlementsFor(identity).audit && Boolean(identity.orgId);
+const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string } => auditRefusal(identity) === null;
 
 /**
  * Whether the room admits this caller as the admin of an org that sat in it (#65, D4): the audit

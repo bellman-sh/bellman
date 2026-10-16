@@ -81,9 +81,11 @@ interface Options {
   uploadRoot?: string;
   /** The directory to start the process in, which is its upload root while `uploadRoot` is unset. */
   cwd?: string;
+  /** BELLMAN_DELIVERY for the process, with its inbox under a temporary BELLMAN_INBOX_ROOT. Unset, it is channel. */
+  delivery?: string;
 }
 
-function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd }: Options = {}): Bridge {
+function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd, delivery }: Options = {}): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bellman-channel-"));
   dirs.push(configHome);
   servers.push(bellman.server);
@@ -117,6 +119,11 @@ function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoo
   env.BELLMAN_NO_BROWSER = "1";
   delete env.BELLMAN_UPLOAD_ROOT;
   if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;
+  if (delivery) {
+    env.BELLMAN_DELIVERY = delivery;
+    env.BELLMAN_INBOX_ROOT = mkdtempSync(join(tmpdir(), "bellman-inbox-"));
+    dirs.push(env.BELLMAN_INBOX_ROOT);
+  }
 
   const proc = spawn(TSX, [ENTRY], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
   spawned.push(proc);
@@ -179,6 +186,21 @@ describe("the bridge as a process", () => {
       ready: true,
       log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
       // Not exit 1 with "BELLMAN_KEY is not set; refusing to start".
+      exitCode: null,
+    });
+  });
+
+  // The Claude Desktop bundle launches this entry in queue delivery (#241), which needs the inbox this
+  // file hands the bridge. The in-process tests build their own bridges, so only a process reaches it.
+  it("starts in queue delivery, as the Claude Desktop bundle launches it", async () => {
+    const bellman = await fakeBellman(hangs);
+    const bridge = startBridge(bellman, { delivery: "queue" });
+
+    const ready = await until(() => bridge.log().length > 0);
+
+    expect({ ready, log: bridge.log(), exitCode: bridge.proc.exitCode }).toEqual({
+      ready: true,
+      log: [`ready: queue delivery via ${bellman.url} (not signed in yet)`],
       exitCode: null,
     });
   });

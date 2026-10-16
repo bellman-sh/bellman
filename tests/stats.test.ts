@@ -226,6 +226,34 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ paid: 1 });
   });
 
+  // firstGrant leaves a purchase grant out unless the OAuth config's honourPurchases is on,
+  // and reads an absent switch as on. The count follows, so a grant sign-in would not honour
+  // does not make an account paid. A grant anyone but billing wrote is no purchase, and the
+  // switch has no say over it.
+  it.each([
+    { source: "purchase", honourPurchases: true, paid: 1 },
+    { source: "purchase", honourPurchases: false, paid: 0 },
+    { source: "purchase", honourPurchases: undefined, paid: 1 },
+    { source: "operator", honourPurchases: true, paid: 1 },
+    { source: "operator", honourPurchases: false, paid: 1 },
+    { source: "operator", honourPurchases: undefined, paid: 1 },
+  ])("reports $paid paid for a $source grant when honourPurchases is $honourPurchases", async ({ source, honourPurchases, paid }) => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.putGrant(grant({ key: "github:1", plan: "pro", source }));
+    deps = { ...deps, honourPurchases };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 1, free: 1 - paid, paid });
+  });
+
+  // The switch is billing's. BELLMAN_USERS is the operator's, so an override on the key still counts.
+  it("counts an override on a key whose purchase grant the switch leaves out", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.putGrant(grant({ key: "github:1", plan: "pro", source: "purchase" }));
+    deps = { ...deps, honourPurchases: false, overrides: { "github:1": identity({ plan: "team" }) } };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 1, free: 0, paid: 1 });
+  });
+
   // Ruling R1: the flag is the scan's bound, not the paid count. A free grant in the
   // window keeps `paid` one under the limit on a scan that still reached it.
   it("says so when the grant scan reached its bound, though a free grant keeps paid under it", async () => {

@@ -8,6 +8,7 @@
  * one gated on `operators` (D2). A route that writes belongs on `/admin/*`
  * behind a bearer token, whose refusal of browser sessions this does not touch.
  */
+import { PURCHASE } from "../billing/grants.js";
 import { allowedOrigin, preflightResponse } from "../oauth/browser.js";
 import type { Identity } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
@@ -20,6 +21,12 @@ export type StatsRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrig
    * plan is read. Absent or empty adds no one.
    */
   overrides?: Readonly<Record<string, Identity>>;
+  /**
+   * `honourPurchases` as the OAuth config carries it: whether a grant billing wrote counts,
+   * which is BELLMAN_BILLING being `on`. False leaves purchase grants out, as sign-in does.
+   * Absent counts them, as sign-in reads an absent switch (`!== false`).
+   */
+  honourPurchases?: boolean;
 };
 
 /**
@@ -79,12 +86,17 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
     ]);
     // Paid is an identity key whose plan is not free, from a grant or from BELLMAN_USERS.
     // An override outranks a grant on the same key, as at sign-in (decidePlan), so a key
-    // in both counts once, at the override's plan. parseOverrides casts its JSON without
-    // checking it: an entry can be null or lack a plan, and neither is paid.
+    // in both counts once, at the override's plan. A purchase grant counts only while
+    // billing is on, as at sign-in (firstGrant); a grant anyone else wrote and an override
+    // count whatever the switch says. parseOverrides casts its JSON without checking it:
+    // an entry can be null or lack a plan, and neither is paid.
     // ponytail: keys, not people. Someone filed under two keys (a subject and an address)
     // counts twice; UserRecord keeps no keys to join them by.
+    const honourPurchases = deps.honourPurchases !== false;
     const plans = new Map<string, unknown>();
-    for (const g of grants) plans.set(g.key, g.plan);
+    for (const g of grants) {
+      if (honourPurchases || g.source !== PURCHASE) plans.set(g.key, g.plan);
+    }
     for (const [key, entry] of Object.entries<Identity>(deps.overrides ?? {})) {
       if (entry) plans.set(key, entry.plan);
     }

@@ -257,9 +257,9 @@ describe("a public room read by its name (public names spec, D6)", () => {
   it("reads the room, its surface and its log by its name as by its session id", async () => {
     await name(PUB, "open-review");
     for (const part of ["", "/surface", "/events"]) {
-      const byName = await read(`/public/rooms/open-review${part}`);
+      const byName = (await read(`/public/rooms/open-review${part}`))!;
       expect(byName.status, part).toBe(200);
-      expect(await byName.json(), part).toEqual(await (await read(`/public/rooms/${PUB}${part}`)).json());
+      expect(await byName.json(), part).toEqual(await (await read(`/public/rooms/${PUB}${part}`))!.json());
     }
   });
 
@@ -269,13 +269,13 @@ describe("a public room read by its name (public names spec, D6)", () => {
       id: "qs_closed_pub", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: Date.now(), joinCodes: {},
     }));
     await name("qs_closed_pub", "closed-room");
-    expect((await read("/public/rooms/closed-room")).status).toBe(404);
-    expect((await read("/public/rooms/qs_closed_pub")).status).toBe(200);
+    expect((await read("/public/rooms/closed-room"))!.status).toBe(404);
+    expect((await read("/public/rooms/qs_closed_pub"))!.status).toBe(200);
     await name(PUB, "open-review");
     // The positive control: the name reads while its room holds it, so the 404 below is the release.
-    expect((await read("/public/rooms/open-review")).status).toBe(200);
+    expect((await read("/public/rooms/open-review"))!.status).toBe(200);
     await store.unpublishSession(PUB, Date.now());
-    const gone = await read("/public/rooms/open-review");
+    const gone = (await read("/public/rooms/open-review"))!;
     expect(gone.status).toBe(404);
     expect(await gone.json()).toEqual(NOT_PUBLIC);
   });
@@ -283,7 +283,7 @@ describe("a public room read by its name (public names spec, D6)", () => {
   // Review Focus 5: a name nobody holds is answered from the index alone.
   it("answers a name nobody claimed without reading any room", async () => {
     const reads = vi.spyOn(store, "getSession");
-    expect((await read("/public/rooms/never-claimed")).status).toBe(404);
+    expect((await read("/public/rooms/never-claimed"))!.status).toBe(404);
     expect(reads).not.toHaveBeenCalled();
   });
 });

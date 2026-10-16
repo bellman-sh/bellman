@@ -1488,6 +1488,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
+  /** Whether this room bans the account: one `get` of its `bu:` row. An unknown room holds none. */
+  async isBanned(userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get<string>(banUserKey(userId))) !== undefined;
+  }
+
   /** The bans on this room, oldest first (spec section 1). An object with no ban rows lists none, an unknown room's included. */
   async roomBans(): Promise<Ban[]> {
     const rows = await this.ctx.storage.list<Ban>({ prefix: BAN_PREFIX });
@@ -3923,6 +3928,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
     return this.registry.isBannedByCreator(creatorId, userId);
+  }
+
+  async isBannedFromRoom(sessionId: string, userId: string): Promise<boolean> {
+    return this.session(sessionId).isBanned(userId);
   }
 
   async suspend(userId: string, s: Suspension): Promise<void> {

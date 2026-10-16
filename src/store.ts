@@ -1106,6 +1106,11 @@ export interface BellmanStore {
    */
   isBannedByCreator(creatorId: string, userId: string): Promise<boolean>;
   /**
+   * Whether this room bans this account, in one read. The preview's check, so a banned account is refused before the
+   * room is described to it. The seating decides for itself (`seatMember`), where a ban landing after this read is seen.
+   */
+  isBannedFromRoom(sessionId: string, userId: string): Promise<boolean>;
+  /**
    * Suspend an account (abuse protections spec, section 1): every authenticated call that reads or writes
    * the store as it is then refused (plan ruling R8). The registry keeps it, one row an account, and a
    * repeat replaces the note.
@@ -1985,6 +1990,10 @@ export class MemoryStore implements BellmanStore {
 
   async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
     return this.bansCreatorWide(creatorId, userId);
+  }
+
+  async isBannedFromRoom(sessionId: string, userId: string): Promise<boolean> {
+    return this.isBanned(sessionId, userId);
   }
 
   async suspend(userId: string, s: Suspension): Promise<void> {

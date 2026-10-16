@@ -1202,8 +1202,9 @@ loud:
   removes the account from each of the creator's other rooms it sits in now, found
   through the joined-rooms index: each handle by the removal an eviction makes in that
   room, under its own code rules, with no room ban of its own, and `also_removed_from`
-  counts those rooms. The room's own ban is read
-  inside `seatMember`, in the transaction that seats. The creator-wide ban is read from
+  counts those rooms. The room's own ban is read by
+  `bellman_connect`, and again inside `seatMember`, in the transaction that seats, where a
+  ban made after the preview is seen. The creator-wide ban is read from
   the registry beside the code's resolution, by `bellman_connect` and again by
   `bellman_confirm`, because a preview holds a 10-minute token. Either way the account
   is told `You can't join this room.`, whichever code it redeems, which names neither
@@ -1220,8 +1221,7 @@ loud:
   so the person can still sign out. It asks the registry once per identity per isolate a
   minute (`SuspensionCache`).
 
-  Known gaps. A room-banned account still sees `bellman_connect`'s preview and is refused
-  at `bellman_confirm`. A suspension takes up to 60 seconds to reach each isolate. A room
+  Known gaps. A suspension takes up to 60 seconds to reach each isolate. A room
   socket open at the time stays open, receive-only, and only the next connect is
   refused. A ban `"all"` that only widens an earlier room ban files no audit row. A ban
   `"all"` leaves a seat the joined-rooms index never recorded (`sessionsJoinedBy`).

@@ -50,6 +50,29 @@ describe("bellman_evict with ban (abuse protections spec \u{A7}1)", () => {
     expect([preview.isError, preview.text]).toEqual([true, `Error: ${BANNED}`]);
   });
 
+  // A room's own ban refuses the preview as well, before the room is described: the account never reads the brief, and
+  // is never told the room is full. The seating's check stays, for a ban landing between the preview and the confirm.
+  it("refuses a room-banned account's preview, with a seat free and with none", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "pair", public: true }), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const door = await creator.call("bellman_invite", { session_id: sessionId, member_id: String(started.data.member_id), permanent: true });
+    expect(door.isError, door.text).toBe(false);
+    const code = String(door.data.join_code);
+    const peer = await h.connect(DEV_KEY.peer);
+    const joined = await joinWith(peer, code);
+    expect(joined.isError, joined.text).toBe(false);
+    const evicted = await creator.call("bellman_evict", { session_id: sessionId, member_id: joined.data.member_id, ban: "room" });
+    expect(evicted.isError, evicted.text).toBe(false);
+
+    const free = await peer.call("bellman_connect", { join_code: code });
+    expect([free.isError, free.text]).toEqual([true, `Error: ${BANNED}`]);
+    expect((await joinWith(await h.connect(DEV_KEY.outsider), code)).isError, "the control: another account takes the free seat").toBe(false);
+    const full = await peer.call("bellman_connect", { join_code: code });
+    expect([full.isError, full.text]).toEqual([true, `Error: ${BANNED}`]);
+  });
+
   // R2: a preview holds a 10-minute token, minted before the ban.
   it("refuses a confirm whose preview came before a ban from every room", async () => {
     const first = await publicRoom(h);

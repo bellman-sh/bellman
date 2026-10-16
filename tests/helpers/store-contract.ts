@@ -5559,6 +5559,20 @@ export function describeStoreContract(
         expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBeNull();
       });
 
+      // The preview's check: `bellman_connect` asks it before it describes the room.
+      it("says whether the room bans an account, for that account and room alone, until the ban is lifted", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "the control: not yet banned").toBe(false);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        expect(await store.isBannedFromRoom(s.id, "u_peer")).toBe(true);
+        expect(await store.isBannedFromRoom(s.id, "u_pee"), "another account").toBe(false);
+        expect(await store.isBannedFromRoom("qs_nowhere", "u_peer"), "an unknown room").toBe(false);
+        const [ban] = await store.roomBans(s.id);
+        await store.liftRoomBan(s.id, ban.banId);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "lifted").toBe(false);
+      });
+
       it("lists bans oldest first by when each was made, not in the order they were written", async () => {
         const s = swarmSession({
           members: [

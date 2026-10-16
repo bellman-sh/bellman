@@ -49,13 +49,15 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
    `member_id`, and `member_id` is per connection, so `evictMember` removes the target's
    handle and then each other handle the account still holds, each in its own
    `removeMember` call. A refusal partway is finished by repeating the eviction.
-7. **The room's ban is checked in the seating, the creator-wide one beside the code
-   (R2).** `seatMember` refuses a banned account inside the transaction that seats, after
-   the frozen refusal and before the capacity check, so a banned account is never told
-   the room is full. The registry's code rows map a code to a room and do not know who
-   created it, so `bellman_connect` asks `isBannedByCreator(session.createdBy, userId)`
-   once a code resolves, and `bellman_confirm` asks again, because a preview holds a
-   10-minute token.
+7. **The room's ban is checked in the preview and the seating, the creator-wide one
+   beside the code (R2).** `bellman_connect` asks `isBannedFromRoom(sessionId, userId)`
+   once a code resolves, so a room-banned account never reads the brief, and `seatMember`
+   refuses one inside the transaction that seats, after the frozen refusal and before the
+   capacity check, where a ban made after the preview is seen. Either way a banned account
+   is never told the room is full. The registry's code rows map a code to a room and do
+   not know who created it, so `bellman_connect` asks
+   `isBannedByCreator(session.createdBy, userId)` there too, and `bellman_confirm` asks
+   again, because a preview holds a 10-minute token.
 8. **State is split by scope, so each check reads one object (D2, ADR 0006).** A room's
    bans, two rows each (`bn:<banId>` and `bu:<user>`), and its send counts live in its
    `SessionDO`. Creator-wide bans (`cb:<creator>:<user>`), suspensions (`su:<user>`) and
@@ -140,9 +142,6 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
   `bellman_confirm`, and removes it from the creator's other rooms where it sits now. It
   finds them through the joined-rooms index, so a seat the index never recorded, one taken
   before the index's deploy or whose index write failed (`sessionsJoinedBy`), stays.
-- A room-banned account still sees `bellman_connect`'s preview, and is refused at
-  `bellman_confirm`. The room's ban is read inside the seating, where it cannot race, and
-  the preview does not read it.
 - A suspension, and its lift, reach an isolate within 60 seconds. An open room socket is
   not closed, so a suspended member keeps receiving what the room says until it closes. The
   socket is receive-only, so every call that writes is refused.

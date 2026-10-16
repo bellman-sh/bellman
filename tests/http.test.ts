@@ -69,7 +69,7 @@ describe("HTTP surface", () => {
     expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
   });
 
-  // The dev identities sign in here, and an operator gate that admitted one would make this server the loose one.
+  // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.
   // It mounts the stats with no operators, so even the team admin is refused. The route's own cases are in tests/stats.test.ts.
   it("serves /operator/stats to no one, the dev team admin included", async () => {
     expect((await fetch(`${base}/operator/stats`)).status).toBe(401);

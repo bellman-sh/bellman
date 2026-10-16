@@ -30,7 +30,8 @@ beforeEach(() => {
   // u_jesse is DEV_KEY.jesse's userId; u_peer is DEV_KEY.peer's.
   deps = {
     store, caller, panelOrigins: [PANEL], operators: new Set(["u_jesse"]),
-    // What the Worker hands over with OAuth on, billing on and nothing in BELLMAN_USERS.
+    // What the Worker hands over when OAuth is on, applyPlans is true (BELLMAN_BILLING on with
+    // both Stripe secrets set) and BELLMAN_USERS is empty.
     overrides: {}, honourPurchases: true,
   };
 });
@@ -242,10 +243,10 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ paid: 1 });
   });
 
-  // firstGrant leaves a purchase grant out unless the OAuth config's honourPurchases is on,
-  // and reads an undefined switch as on. The count follows, so a grant sign-in would not honour
-  // does not make an account paid. A grant anyone but billing wrote is no purchase, and the
-  // switch has no say over it.
+  // firstGrant leaves a purchase grant out when the OAuth config's honourPurchases is false,
+  // and reads an undefined one as on (`!== false`). The route follows that one rule, so a
+  // purchase grant that rule leaves out does not make an account paid. A grant anyone but
+  // billing wrote is no purchase, and honourPurchases has no say over it.
   it.each([
     { source: "purchase", honourPurchases: true, paid: 1 },
     { source: "purchase", honourPurchases: false, paid: 0 },
@@ -261,7 +262,7 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 1, free: 1 - paid, paid });
   });
 
-  // The switch is billing's. BELLMAN_USERS is the operator's, so an override on the key still counts.
+  // honourPurchases gates what billing wrote. BELLMAN_USERS is the operator's, so an override on the key still counts.
   it("counts an override on a key whose purchase grant the switch leaves out", async () => {
     await store.recordSignIn("u_a", Date.now());
     await store.putGrant(grant({ key: "github:1", plan: "pro", source: "purchase" }));

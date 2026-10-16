@@ -1,8 +1,9 @@
 /**
  * The Worker mounts the operator's stats over the real registry (operator stats spec D1). The route's rules are
  * pinned in tests/stats.test.ts; this is the wiring. The route requires its three config keys, so a mount cannot
- * forget one. The value is what the type cannot check. A wrong `operators` fails the 200 assertions below; the 401
- * and 403 assertions pass on it, since everyone is refused. A wrong `overrides` or `honourPurchases` gives a wrong
+ * forget one. The value is what the type cannot check. A wrong `operators` fails here in either direction: a mount
+ * that refuses the listed user fails the 200 assertions, and one that admits the caller when it should not (another
+ * id listed, no list, no OAuth) fails the 403 assertions. A wrong `overrides` or `honourPurchases` gives a wrong
  * `paid` and no error, so the count is read through each of them here, set the only way the Worker takes them: its env.
  */
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +16,8 @@ const ORIGIN = "https://mcp.example.test";
 const KEY = "qk_ws_test";
 const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 type WorkerEnv = Parameters<typeof worker.fetch>[1];
-// OAuth on, which is where the Worker reads the operators, the overrides and the billing switch from.
+// The token secret, with the AUTH binding this env has, makes the Worker build its OAuth config.
+// It reads the operators, the overrides and honourPurchases from there.
 const envWith = (over: Record<string, string | undefined>) =>
   ({ ...env, BELLMAN_TOKEN_SECRET: "test-signing-secret", ...over }) as unknown as WorkerEnv;
 const getStats = (on: WorkerEnv, path = "/operator/stats", init: RequestInit = { headers: { authorization: `Bearer ${KEY}` } }) =>
@@ -32,7 +34,7 @@ afterEach(async () => {
   await abortAllDurableObjects();
 });
 
-/** Three accounts. github:1 holds a purchased plan, github:2 is comped by BELLMAN_USERS, github:3 is on the default. */
+/** Three accounts. github:1 holds a purchase grant for pro, github:2 is comped by BELLMAN_USERS, github:3 has neither. */
 async function seed() {
   const registry = new DurableObjectStore(env as never);
   for (const id of ["u_github_1", "u_github_2", "u_github_3"]) await registry.recordSignIn(id, Date.now());
@@ -43,15 +45,17 @@ async function seed() {
 }
 
 describe("the operator stats through the Worker", () => {
-  // Sign-in resolves github:2 to pro by BELLMAN_USERS whatever billing says, and github:1 to pro only while billing is on.
+  // Sign-in resolves github:2 to pro by BELLMAN_USERS whatever applyPlans says, and github:1 to pro only
+  // while applyPlans is true: BELLMAN_BILLING on with both Stripe secrets set.
   it.each([
     { billing: "on, with its Stripe secrets", vars: { BELLMAN_BILLING: "on", ...STRIPE }, paid: 2 },
     { billing: "shadow", vars: { BELLMAN_BILLING: "shadow", ...STRIPE }, paid: 1 },
     { billing: "off", vars: { BELLMAN_BILLING: "off" }, paid: 1 },
     { billing: "unset", vars: {}, paid: 1 },
-    // billingSettings keeps billing off without them, so sign-in honours no purchase, and the count follows it.
+    // billingSettings turns `on` back to off unless both Stripe secrets are set, and this row sets
+    // neither. Sign-in honours no purchase then, and the count follows it.
     { billing: "on, without its Stripe secrets", vars: { BELLMAN_BILLING: "on" }, paid: 1 },
-  ])("counts the plans as sign-in resolves them with billing $billing", async ({ vars, paid }) => {
+  ])("counts a purchase grant and a comped account as sign-in would, with billing $billing", async ({ vars, paid }) => {
     await seed();
     const res = await getStats(envWith({ BELLMAN_OPERATORS: "u_jesse", BELLMAN_USERS: COMPED, ...vars }));
     expect(res.status, await res.clone().text()).toBe(200);

@@ -269,8 +269,9 @@ export default {
 
     // The operator's platform stats (operator stats spec D1), on the room routes' rules and behind the
     // same guard. Gated on the operators set, which is why it takes `operators` where the others take only
-    // `panelOrigins`. It counts plans as sign-in resolves them, so it also takes `overrides` and
-    // `honourPurchases`, off the same OAuth config. The route requires all three keys; it cannot check the
+    // `panelOrigins`. `paid` follows sign-in on two points that come from config, so it also takes
+    // `overrides` (BELLMAN_USERS outranks a grant) and `honourPurchases` (a purchase grant counts only
+    // with applyPlans), off the same OAuth config. The route requires all three keys; it cannot check the
     // values, so worker-tests/stats-routes.test.ts reads the count through each.
     if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
       const blocked = unconfigured(env, oauth);

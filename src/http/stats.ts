@@ -66,9 +66,10 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
     const who = await deps.caller(request);
     if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
     /**
-     * Names no mechanism, unlike the refusals on /admin/*, which say "limited to
-     * the user ids BELLMAN_OPERATORS lists" and are read only by someone already
-     * holding a bearer token. Any signed-in customer can try this URL (D4).
+     * Names no mechanism, unlike the refusals on /admin/*, which name theirs (the one on
+     * /admin/handles says "limited to the user ids BELLMAN_OPERATORS lists") and are read
+     * only by someone already holding a bearer token. Any signed-in customer can try this
+     * URL (D4).
      *
      * Ahead of the method check on purpose (ruling R2). That does not hide the route:
      * the 401 above and this 403 already confirm it. It keeps the method back. Past
@@ -89,10 +90,11 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
     ]);
     // Paid is an identity key whose plan is not free, from a grant or from BELLMAN_USERS.
     // An override outranks a grant on the same key, as at sign-in (decidePlan), so a key
-    // in both counts once, at the override's plan. A purchase grant counts only while
-    // billing is on, as at sign-in (firstGrant); a grant anyone else wrote and an override
-    // count whatever the switch says. parseOverrides casts its JSON without checking it:
-    // an entry can be null or lack a plan, and neither is paid.
+    // in both counts once, at the override's plan. A purchase grant counts unless
+    // honourPurchases is false, as at sign-in (firstGrant); in the Worker that is applyPlans,
+    // BELLMAN_BILLING on with both Stripe secrets set. A grant anyone else wrote and an
+    // override count whatever honourPurchases says. parseOverrides casts its JSON without
+    // checking it: an entry can be null or lack a plan, and neither is paid.
     // ponytail: keys, not people. Someone filed under two keys (a subject and an address)
     // counts twice; UserRecord keeps no keys to join them by.
     const honourPurchases = deps.honourPurchases !== false;
@@ -107,14 +109,15 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
     const stats: PlatformStats = {
       accounts,
       // Floored: a grant or an override for a key that has never signed in, or a
-      // person filed under two keys, makes this negative, and a negative count of
-      // people is worse than a floor.
+      // person filed under two keys, can push `paid` past `accounts`, which would make
+      // this negative, and a negative count of people is worse than a floor.
       free: Math.max(0, accounts - paid),
       paid,
-      // The scan's bound, not the paid count (ruling R1): free grants, and purchase grants
-      // the switch leaves out, come out of `paid`, so it can sit below the limit on a scan
-      // that reached it, and overrides add to it, so it can sit above the limit on one that
-      // did not.
+      // The scan's bound, not the paid count (ruling R1). A grant can sit in the window without
+      // counting as paid: its plan is free, it is a purchase while honourPurchases is false, or
+      // an override gives its key no paid plan. So `paid` can sit below the limit on a scan that
+      // reached it. Overrides can add keys the scan never saw, so `paid` can sit above the limit
+      // on one that did not.
       paidCapped: grants.length === MAX_GRANTS_COUNTED,
     };
     return json(200, stats, origin);

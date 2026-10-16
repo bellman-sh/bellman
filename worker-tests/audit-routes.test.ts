@@ -30,4 +30,15 @@ describe("the audit routes through the Worker", () => {
       org_id: "org_codenerd", total: 1, through: 1, entries: [{ seq: 1, action: "session_created" }],
     });
   });
+
+  it("stream the export from the same store", async () => {
+    const store = new DurableObjectStore(env as never);
+    for (const action of ["session_created", "invite_issued"]) {
+      await store.appendAudit({ at: 1_000, orgId: "org_codenerd", sessionId: "qs_1", actorUserId: "u_jesse", action, detail: {} });
+    }
+    const res = await call("/audit/export?format=json");
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = (await res.json()) as { entries: { action: string }[] };
+    expect(body.entries.map((e) => e.action)).toEqual(["invite_issued", "session_created"]);
+  });
 });

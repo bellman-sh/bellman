@@ -2,8 +2,11 @@
  * The audit routes (audit trail spec, D7 and D8), driven as the Worker drives them: a Request
  * in, a Response out, over a MemoryStore, with rows written by the rooms' own audit rule.
  */
-import { beforeEach, describe, expect, it } from "vitest";
-import { AUDIT_PAGE, auditRoutes, type AuditEntryView, type AuditRouteDeps } from "../src/http/audit.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  AUDIT_EXPORT_PAGE, AUDIT_PAGE, CSV_COLUMNS, auditRoutes, csvCell, csvRow, entryView, exportFilename, parseAuditQuery,
+  type AuditEntryView, type AuditRouteDeps,
+} from "../src/http/audit.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { audit } from "../src/rooms.js";
 import { MemoryStore } from "../src/store.js";
@@ -31,6 +34,7 @@ const caller = async (request: Request): Promise<RoomCaller | null> => {
 let store: MemoryStore;
 let deps: AuditRouteDeps;
 beforeEach(() => {
+  vi.restoreAllMocks(); // the config does not, and a spy on console.error must not outlive its test
   store = new MemoryStore();
   deps = { store, caller, panelOrigins: [PANEL] };
 });
@@ -88,6 +92,8 @@ describe("GET /audit", () => {
   it.each([
     ["from=yesterday", "from must be an ISO 8601 instant"],
     ["to=2026-10-09", "to must be an ISO 8601 instant"],
+    ["from=2026-02-30T00:00:00Z", "from must be an ISO 8601 instant"],
+    ["to=2026-02-29T00:00:00Z", "to must be an ISO 8601 instant"],
     ["scope=both", "scope must be internal or cross_org"],
     ["before=-1", "before is a seq"],
     ["through=1.5", "through is a seq"],
@@ -100,6 +106,11 @@ describe("GET /audit", () => {
     const res = (await call("admin-a", `/audit?${query}`))!;
     expect(res.status).toBe(400);
     expect(await said(res)).toContain(words);
+  });
+
+  // The day is the string's own: an offset moves the UTC date, and a leap day exists.
+  it.each(["2024-02-29T00:00:00Z", "2026-03-01T01:00:00+05:00", "2026-02-28T23:30:00-05:00"])("takes %s", (from) => {
+    expect(parseAuditQuery(new URLSearchParams({ from }), false)).toEqual({ query: { from: Date.parse(from) } });
   });
 
   // dash#11's first acceptance check.
@@ -150,5 +161,123 @@ describe("GET /audit", () => {
       seq: 1, at: "1970-01-01T00:00:01.000Z", action: "member_left", room: { id: "qs_old", name: null },
       actor: { id: "u_old" }, parties: null, crossing: null, direction: null, detail: {},
     });
+  });
+});
+
+describe("the CSV", () => {
+  it("quotes a cell that holds a comma, a quote or a line break, doubling its quotes", () => {
+    expect(csvCell('Bo, "the" builder')).toBe('"Bo, ""the"" builder"');
+    expect(csvCell("two\r\nlines")).toBe('"two\r\nlines"');
+  });
+
+  it("puts a ' before a string a spreadsheet would run as a formula", () => {
+    expect(["=1+1", "+1", "-1", "@SUM(A1)", "\tx"].map(csvCell)).toEqual(["'=1+1", "'+1", "'-1", "'@SUM(A1)", "'\tx"]);
+    expect(csvCell("\rx")).toBe("\"'\rx\"");
+    expect(csvCell('=HYPERLINK("x")')).toBe(`"'=HYPERLINK(""x"")"`);
+  });
+
+  it("writes nothing for null, and a number as itself", () => {
+    expect([csvCell(null), csvCell(undefined), csvCell(12)]).toEqual(["", "", "12"]);
+  });
+
+  it("writes a row in the columns' order, the parties joined with ; and a person with no org named so", () => {
+    const view = entryView({ seq: 3, ...row({ at: 7, parties: ["org_a", null], crossing: "cross_org", direction: "outbound", detail: { chars: 5 } }) });
+    expect(csvRow(view)).toBe(`3,1970-01-01T00:00:00.007Z,sent_message,qs_q3,q3-plan,u_ana,Ana,org_a,org_a;(no org),cross_org,outbound,"{""chars"":5}"\r\n`);
+  });
+
+  it("writes an org id that would break a header as a safe file name", () => {
+    expect(exportFilename('org/a b"c', 7, "json")).toBe("bellman-audit-org_a_b_c-7.json");
+    expect(exportFilename("org_a", null, "csv")).toBe("bellman-audit-org_a-0.csv");
+  });
+});
+
+/** `n` rows an hour apart in org A's stream: every 2nd by Ana, every 4th internal, every 3rd in another room. */
+async function rows(n: number) {
+  for (let i = 1; i <= n; i++) {
+    const internal = i % 4 === 0;
+    await store.appendAudit(row({
+      at: Date.parse("2026-10-01T00:00:00Z") + i * 3_600_000,
+      sessionId: i % 3 === 0 ? "qs_other" : "qs_q3",
+      actorUserId: i % 2 === 0 ? "u_ana" : "u_bo", actorLabel: i % 2 === 0 ? "Ana" : "Bo", actorOrgId: i % 2 === 0 ? "org_a" : "org_b",
+      parties: internal ? ["org_a"] : ["org_a", "org_b"], crossing: internal ? "internal" : "cross_org",
+      direction: internal ? null : i % 2 === 0 ? "outbound" : "inbound", detail: { i },
+    }));
+  }
+}
+
+describe("GET /audit/export", () => {
+  // dash#11's second acceptance check: filters compose, and the export is what the screen pages through.
+  it("exports exactly the rows the list pages through, as JSON and as CSV, under a filter of scope, member and dates", async () => {
+    await rows(2_400);
+    const filter = "scope=cross_org&actor=u_ana&from=2026-10-05T00:00:00Z&to=2027-01-10T00:00:00Z";
+    const listed: AuditEntryView[] = [];
+    let page = await list(`/audit?${filter}`);
+    listed.push(...page.entries);
+    while (page.next !== null) {
+      page = await list(`/audit?${filter}&before=${page.next}&through=${page.through}`);
+      listed.push(...page.entries);
+    }
+    expect(listed).toHaveLength(page.total);
+    expect(listed.length).toBeGreaterThan(AUDIT_EXPORT_PAGE); // the export reads more than one page
+
+    const json = (await (await call("admin-a", `/audit/export?${filter}&format=json&through=${page.through}`))!.json()) as {
+      org_id: string; filter: Record<string, string>; through: number; entries: AuditEntryView[];
+    };
+    expect(json.entries).toEqual(listed);
+    expect(json).toMatchObject({ org_id: "org_a", through: page.through, filter: { scope: "cross_org", actor: "u_ana" } });
+
+    const csv = await (await call("admin-a", `/audit/export?${filter}&format=csv&through=${page.through}`))!.text();
+    const lines = csv.trimEnd().split("\r\n");
+    expect(lines[0]).toBe(CSV_COLUMNS.join(","));
+    expect(lines.slice(1).map((l) => Number(l.split(",")[0]))).toEqual(listed.map((e) => e.seq));
+  });
+
+  it("pins an export to the seq it is given, so rows written since are not in it", async () => {
+    await rows(3);
+    await store.appendAudit(row());
+    const json = (await (await call("admin-a", "/audit/export?format=json&through=3"))!.json()) as { through: number; entries: AuditEntryView[] };
+    expect([json.through, json.entries.map((e) => e.seq)]).toEqual([3, [3, 2, 1]]);
+  });
+
+  it("writes a stream with no rows as the header alone, and as a list with none in it", async () => {
+    expect(await (await call("admin-a", "/audit/export?format=csv"))!.text()).toBe(`${CSV_COLUMNS.join(",")}\r\n`);
+    expect(await (await call("admin-a", "/audit/export?format=json&actor=u_nobody"))!.json()).toEqual({
+      org_id: "org_a", filter: { actor: "u_nobody" }, through: null, entries: [],
+    });
+  });
+
+  it("names the file for the org and its seq, sends it as a download, and lets the panel read the name", async () => {
+    await rows(2);
+    const res = (await call("admin-a", "/audit/export?format=csv"))!;
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(res.headers.get("content-disposition")).toBe("attachment; filename*=UTF-8''bellman-audit-org_a-2.csv");
+    expect(res.headers.get("access-control-expose-headers")).toBe("content-disposition");
+    expect(res.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it.each([
+    ["before=3&format=csv", "before is not a parameter of /audit/export"],
+    ["", "format is required: csv or json"],
+    ["format=xml", "format is required: csv or json"],
+  ])("refuses %s", async (query, words) => {
+    const res = (await call("admin-a", `/audit/export?${query}`))!;
+    expect(res.status).toBe(400);
+    expect(await said(res)).toBe(words);
+  });
+
+  it("refuses a caller the log does not admit, as the list does", async () => {
+    expect((await call("member-a", "/audit/export?format=csv"))!.status).toBe(403);
+  });
+
+  it("errors the stream when a read fails partway, rather than ending a short file", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await rows(AUDIT_EXPORT_PAGE + 1);
+    const real = store.queryAudit.bind(store);
+    vi.spyOn(store, "queryAudit").mockImplementationOnce(real).mockRejectedValueOnce(new Error("the stream went away"));
+    const res = (await call("admin-a", "/audit/export?format=csv"))!;
+    expect(res.status).toBe(200);
+    await expect(res.text()).rejects.toThrow();
   });
 });

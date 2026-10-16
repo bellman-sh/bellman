@@ -1005,8 +1005,9 @@ export async function evictMember(
   // One removal's request, built from the member it removes. A ban takes every handle the account
   // holds in the room (below), and each is a member of its own, with its own seat, door and org, so
   // each gets its own event, door and audit rows. With no ban, and no permanent code behind the seat,
-  // for one handle it is the request this function has always made.
-  const request = (m: Member): RemovalRequest => ({
+  // for one handle it is the request this function has always made. `stored` is the ban the store is
+  // asked to write, and the audit row carries the call's `ban` whatever it is.
+  const request = (m: Member, stored: BanScope | undefined = ban): RemovalRequest => ({
     now: Date.now(),
     frozen: "refuse",
     // An eviction cuts the feed (#113): the target is recorded out at the
@@ -1070,7 +1071,7 @@ export async function evictMember(
         audit: auditEntries(session, actor, "invite_revoked", { roles: [m.roomRole] }),
       },
     }),
-    ...(ban ? { ban } : {}),
+    ...(stored ? { ban: stored } : {}),
     audit: auditEntries(
       session, actor, "member_evicted",
       {
@@ -1105,11 +1106,12 @@ export async function evictMember(
   // the room go too, or one of them keeps sending. Each is removed by a removal of its own, and
   // the outcomes are not read: a refusal partway, such as a freeze landing between two of them,
   // is finished by repeating the eviction. That finds the target out and the ban kept, and removes
-  // whoever is left.
+  // whoever is left. Each asks the store for the room's ban alone: the target's removal queued the
+  // creator-wide one, and a second row the outbox delivered after a lift would bring it back.
   if (ban) {
     for (const other of await handlesOf(store, session, target)) {
       if (other.memberId !== targetMemberId && isActiveMember(other)) {
-        await store.removeMember(sessionId, other.memberId, request(other));
+        await store.removeMember(sessionId, other.memberId, request(other, "room"));
       }
     }
   }

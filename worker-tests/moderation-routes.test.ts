@@ -3,13 +3,14 @@
  * pinned in tests/http-moderation.test.ts and tests/http-admin.test.ts; this is the wiring.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { env, reset, abortAllDurableObjects } from "cloudflare:test";
+import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import worker from "../src/worker.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { AuthStore } from "../src/oauth/store.js";
 import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oauth/tokens.js";
-import { DurableObjectStore } from "../src/store-do.js";
+import type { OutboxDriver } from "../src/outbox.js";
+import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { Identity } from "../src/types.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
@@ -50,6 +51,32 @@ describe("the moderation routes through the Worker", () => {
     expect(listed.bans.map((b) => b.label)).toEqual(["peer@codenerd"]);
     expect((await call(`/rooms/qs_wire_mod/bans/${listed.bans[0].ban_id}`, { method: "DELETE" })).status).toBe(204);
     expect(await store().roomBans("qs_wire_mod")).toEqual([]);
+  });
+
+  // A lifted ban must not come back. Every creator_ban row the outbox delivers after a lift writes the ban again, so
+  // one eviction queues one, however many handles the account holds in the room.
+  it("queues one creator_ban row for a ban from every room on an account holding two handles in the room", async () => {
+    await store().createSession(session({
+      id: "qs_wire_mod", manifest: roomManifest({ public: true }),
+      members: [
+        member(),
+        member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }),
+        member({ memberId: "m_peer_2", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" }),
+      ],
+    }));
+    const queued: string[] = [];
+    await runInDurableObject(env.SESSION.get(env.SESSION.idFromName("qs_wire_mod")), (room: SessionDO) => {
+      const driver = (room as unknown as { driver: OutboxDriver }).driver;
+      const enqueue = driver.enqueue.bind(driver);
+      driver.enqueue = (txn, intents) => {
+        queued.push(...intents.map((i) => i.kind));
+        return enqueue(txn, intents);
+      };
+    });
+    const banned = await call("/rooms/qs_wire_mod/bans", { method: "POST", body: JSON.stringify({ member_id: "m_peer", scope: "all" }) });
+    expect(banned.status, await banned.clone().text()).toBe(200);
+    expect((await store().getSession("qs_wire_mod"))!.members.map((m) => m.memberId), "the control: both handles went").toEqual(["m_creator"]);
+    expect(queued.filter((kind) => kind === "creator_ban")).toHaveLength(1);
   });
 
   it("lists a creator's bans at /account/bans from the real registry, and lifts one at /account/bans/:banId", async () => {

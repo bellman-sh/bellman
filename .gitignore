@@ -37,3 +37,6 @@ src/ui/assets.ts
 
 # The SDD executor's per-plan scratch (ledger, briefs). Never committed.
 .superpowers/
+
+# The types Claude Code lays beside a mod it hot-reloads (mod/tsconfig.json extends them).
+mod/.claude-plugin/types/

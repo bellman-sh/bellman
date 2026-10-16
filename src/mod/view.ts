@@ -23,6 +23,10 @@ export const REQUEST_TTL_MS = ACTION_REQUEST_TTL_MS;
 export const BELL_COLUMNS = 10;
 export const BELL_ROWS = 4;
 export const PANE_ID = "bellman";
+/** How often the mod reads each bridge's door. Local, over a Unix socket. */
+export const DOOR_POLL_MS = 2_000;
+/** How often the mod reads `bellman_rooms`: the MCP Apps monitor's cadence, `POLL_MS` in `ui/src/page.ts`. */
+export const ROOMS_POLL_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // Layout

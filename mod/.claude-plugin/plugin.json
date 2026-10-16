@@ -1,0 +1,12 @@
+{
+  "name": "bellman-mod",
+  "version": "0.3.3",
+  "description": "Bellman rooms in Claude Code's terminal: the room and its members at a glance, toasts, a room pane, a wake on a peer's message, and action requests only you can answer.",
+  "author": {
+    "name": "mcfearsome"
+  },
+  "homepage": "https://bellman.sh",
+  "repository": "https://github.com/bellman-sh/bellman.git",
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

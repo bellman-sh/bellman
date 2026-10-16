@@ -1,9 +1,10 @@
 /**
- * The Claude Code plugin. The repository root is a marketplace named `bellman` that lists
- * one plugin, `plugin/`. Claude Code copies that directory into its cache and runs what
- * plugin/.mcp.json and plugin/hooks/hooks.json name from the copy, so what a user runs is
- * the committed bundle under plugin/bridge/, never src/. These tests read the committed
- * tree and spawn the committed bundle.
+ * The Claude Code plugins. The repository root is a marketplace named `bellman` that lists
+ * two: `plugin/`, and the mod, `mod/`. Claude Code copies each directory into its cache and
+ * runs what plugin/.mcp.json and plugin/hooks/hooks.json name from the copy, so what a user
+ * runs is the committed bundle under plugin/bridge/, never src/; the mod runs its committed
+ * mod/hooks/register.mjs the same way. These tests read the committed tree and spawn the
+ * committed bundle. The mod's own behaviour is tested by its kit tests (`npm run test:mod`).
  *
  * The bundle is rebuilt in release PRs, not on every bridge change, so nothing here
  * compares it to src/ beyond the version: the version is what a release changes, and a
@@ -19,6 +20,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const PLUGIN = join(ROOT, "plugin");
+const MOD = join(ROOT, "mod");
 
 const json = (path: string) => JSON.parse(readFileSync(join(ROOT, path), "utf8"));
 const pkg: { version: string } = json("package.json");
@@ -38,12 +40,20 @@ const INSTALL_TRIGGERS = [
   "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock", "bun.lockb", "yarn.lock", "pnpm-lock.yaml",
 ];
 
+/** Every plugin-relative file under `dir` that would make Claude Code install dependencies. */
+function installTriggers(dir: string): string[] {
+  return readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((path) => INSTALL_TRIGGERS.includes(basename(path)));
+}
+
 describe("the plugin's shape", () => {
-  it("is listed by the repository's marketplace, bellman, from ./plugin", () => {
+  it("is listed by the repository's marketplace, bellman, from ./plugin, and the mod from ./mod", () => {
     const marketplace = json(".claude-plugin/marketplace.json");
 
     expect(marketplace.name).toBe("bellman");
-    expect(marketplace.plugins).toEqual([expect.objectContaining({ name: "bellman", source: "./plugin" })]);
+    expect(marketplace.plugins).toEqual([
+      expect.objectContaining({ name: "bellman", source: "./plugin" }),
+      expect.objectContaining({ name: "bellman-mod", source: "./mod" }),
+    ]);
   });
 
   it("carries the package's version", () => {
@@ -75,11 +85,7 @@ describe("the plugin's shape", () => {
   });
 
   it("holds no package.json and no lockfile", () => {
-    const found = readdirSync(PLUGIN, { recursive: true, encoding: "utf8" }).filter((path) =>
-      INSTALL_TRIGGERS.includes(basename(path))
-    );
-
-    expect(found).toEqual([]);
+    expect(installTriggers(PLUGIN)).toEqual([]);
   });
 
   it("carries both skills", () => {
@@ -94,6 +100,41 @@ describe("the plugin's shape", () => {
     for (const pkg of ["@modelcontextprotocol/sdk@", "fast-uri@", "yaml@", "zod@"]) {
       expect(notices, pkg).toContain(pkg);
     }
+  });
+});
+
+/**
+ * The mod: a plugin that is a hooks module alone. Its bundle is built from mod/src (and the
+ * runtime-free modules under src/ it imports) by `npm run build:mod`, and committed.
+ */
+describe("the mod's shape", () => {
+  it("carries the package's version and its types", () => {
+    expect(json("mod/.claude-plugin/plugin.json")).toMatchObject({ name: "bellman-mod", version: pkg.version, types: "./types/index.d.ts" });
+  });
+
+  it("runs only its committed module", () => {
+    expect(json("mod/hooks/hooks.json")).toEqual({ modules: ["./register.mjs"] });
+    expect(existsSync(join(MOD, "hooks", "register.mjs"))).toBe(true);
+  });
+
+  /**
+   * The engine hands a hooks module `claude-code` and nothing else: the module runs with no
+   * Node and no node_modules, so every other import must have been bundled in. The scan has to
+   * find the one import there is, or it proves nothing.
+   */
+  it("imports nothing but claude-code", () => {
+    const bundle = readFileSync(join(MOD, "hooks", "register.mjs"), "utf8");
+    const specifiers = [...bundle.matchAll(/\bfrom\s*["']([^"']+)["']|\bimport\s*["']([^"']+)["']/g)].map((m) => m[1] ?? m[2]);
+
+    expect([...new Set(specifiers)]).toEqual(["claude-code"]);
+  });
+
+  it("holds no package.json and no lockfile", () => {
+    expect(installTriggers(MOD)).toEqual([]);
+  });
+
+  it("carries Bellman's license", () => {
+    expect(readFileSync(join(MOD, "LICENSE"), "utf8")).toBe(readFileSync(join(PLUGIN, "LICENSE"), "utf8"));
   });
 });
 

@@ -54,7 +54,7 @@ describe("the moderation routes", () => {
 describe("a room's bans", () => {
   it("bans a member for the creator, lists the ban by label and time with no user id, and lifts it", async () => {
     const banned = await call(DEV_KEY.jesse, `/rooms/${ROOM}/bans`, { method: "POST", body: { member_id: "m_peer", scope: "room" } });
-    expect(await answer(banned)).toEqual([200, { evicted: true, code_retired: "peer_b", session_status: "active", banned: "room" }]);
+    expect(await answer(banned)).toEqual([200, { evicted: true, code_retired: "peer_b", session_status: "active", banned: "room", also_removed_from: 0 }]);
     const [status, body] = await answer(await call(DEV_KEY.jesse, `/rooms/${ROOM}/bans`));
     expect(status).toBe(200);
     expect(body).toEqual({ bans: [{ ban_id: expect.stringMatching(/^ban_/), label: "peer@codenerd", at: expect.any(String) }] });

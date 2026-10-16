@@ -28,6 +28,13 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
    `"all"` also records it as banned from every room the creator owns. The two are
    separate records, so lifting one leaves the other, and a later eviction asking for
    `"all"` widens a room ban made earlier. `evictMember` in `src/rooms.ts` runs it.
+   `"all"` covers the rooms the account sits in now as well as its later joins: every
+   other room the creator owns where it holds a handle, found through the joined-rooms
+   index, loses each handle by the removal an eviction makes there. That removal follows
+   the room's own code rules, files the eviction's audit row with `ban`, writes its
+   `member_evicted` event and adds no room ban, since the creator-wide ban keeps the
+   account out. A room it leaves with nobody in it closes. `also_removed_from` counts the
+   rooms, and a refusal partway is finished by repeating the ban, as decision 6 has it.
 4. **The dash bans through a route (R1).** `POST /rooms/:id/bans` takes `{ member_id,
    scope }` and runs the `evictMember` the tool runs. `GET /rooms/:id/bans` and
    `DELETE /rooms/:id/bans/:banId` list and lift a room's bans, for its creator alone,
@@ -130,7 +137,9 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 - A fresh GitHub or Google account evades a ban, because a ban is on the account. The send
   limit and reports are the backstop.
 - A ban from every room refuses the account's next join, at `bellman_connect` and again at
-  `bellman_confirm`, and leaves it in the creator's other rooms where it sits now.
+  `bellman_confirm`, and removes it from the creator's other rooms where it sits now. It
+  finds them through the joined-rooms index, so a seat the index never recorded, one taken
+  before the index's deploy or whose index write failed (`sessionsJoinedBy`), stays.
 - A room-banned account still sees `bellman_connect`'s preview, and is refused at
   `bellman_confirm`. The room's ban is read inside the seating, where it cannot race, and
   the preview does not read it.

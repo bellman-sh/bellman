@@ -142,3 +142,96 @@ describe("bellman_evict with ban (abuse protections spec \u{A7}1)", () => {
     expect([confirmed.isError, confirmed.text]).toEqual([true, `Error: ${BANNED}`]);
   });
 });
+
+/** A ban from every room covers the rooms the account sits in now, as well as its later joins (spec section 1). */
+describe("bellman_evict with ban all, in the creator's other rooms", () => {
+  /** A room started by `key`, and a 15-minute code for its default seat. */
+  async function roomBy(key: string, preset = "swarm") {
+    const creator = await h.connect(key);
+    const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset }), brief: brief() });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const memberId = String(started.data.member_id);
+    const door = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId });
+    expect(door.isError, door.text).toBe(false);
+    return { creator, sessionId, memberId, code: String(door.data.join_code) };
+  }
+
+  /** Rooms A and B are jesse's, and C is outsider's, a pair room on the free plan. The account sits in all three, in B with two handles. */
+  async function seatedInThree() {
+    const a = await publicRoom(h);
+    const b = await roomBy(DEV_KEY.jesse);
+    const c = await roomBy(DEV_KEY.outsider, "pair");
+    const peer = await h.connect(DEV_KEY.peer);
+    const inA = await joinWith(peer, a.code);
+    expect(inA.isError, inA.text).toBe(false);
+    for (const [who, code] of [[peer, b.code], [await h.connect(DEV_KEY.peer), b.code], [peer, c.code]] as const) {
+      const joined = await joinWith(who, code);
+      expect(joined.isError, joined.text).toBe(false);
+    }
+    return { a, b, c, peer, target: String(inA.data.member_id) };
+  }
+
+  /** How many handles the account holds in the room now. */
+  const seats = async (sessionId: string) =>
+    (await h.store.getSession(sessionId))!.members.filter((m) => m.userId === "u_peer").length;
+
+  it("removes the account from every other room its creator owns, and leaves another creator's", async () => {
+    const { a, b, c, peer, target } = await seatedInThree();
+    const out = await a.creator.call("bellman_evict", { session_id: a.sessionId, member_id: target, ban: "all" });
+    expect(out.isError, out.text).toBe(false);
+    expect(out.data).toMatchObject({ evicted: true, banned: "all", also_removed_from: 1 });
+    expect([await seats(a.sessionId), await seats(b.sessionId), await seats(c.sessionId)]).toEqual([0, 0, 1]);
+
+    // In B, what an eviction writes, once a handle: the member_evicted event, and the audit row with the ban on it. No
+    // room ban of B's own: the creator-wide ban keeps the account out.
+    expect((await h.store.eventsAfter(b.sessionId, 0)).filter((e) => e.type === "member_evicted")).toHaveLength(2);
+    const rows = (await h.store.auditForOrg("org_codenerd", 500)).filter((r) => r.sessionId === b.sessionId && r.action === "member_evicted");
+    expect(rows.map((r) => r.detail)).toEqual([
+      expect.objectContaining({ user_id: "u_peer", ban: "all" }), expect.objectContaining({ user_id: "u_peer", ban: "all" }),
+    ]);
+    expect(await h.store.roomBans(b.sessionId)).toEqual([]);
+
+    // B's 15-minute code went with the seat, as an eviction's does, and the next code B's creator mints refuses the account.
+    const late = await joinWith(await h.connect(DEV_KEY.outsider), b.code);
+    expect([late.isError, late.text], "B's code is retired").toEqual([true, expect.stringContaining("join code not found")]);
+    const fresh = await b.creator.call("bellman_invite", { session_id: b.sessionId, member_id: b.memberId });
+    expect(fresh.isError, fresh.text).toBe(false);
+    const back = await joinWith(peer, String(fresh.data.join_code));
+    expect([back.isError, back.text]).toEqual([true, `Error: ${BANNED}`]);
+  });
+
+  it("with ban room, leaves the account in the creator's other rooms", async () => {
+    const { a, b, target } = await seatedInThree();
+    const out = await a.creator.call("bellman_evict", { session_id: a.sessionId, member_id: target, ban: "room" });
+    expect(out.data).toMatchObject({ evicted: true, banned: "room", also_removed_from: 0 });
+    expect(await seats(b.sessionId)).toBe(2);
+  });
+
+  // R3's rule: a removal refused partway, here by a frozen room, is finished by repeating the ban.
+  it("finishes on a repeat what a room that refused the removal left undone", async () => {
+    const { a, b, c, target } = await seatedInThree();
+    const evict = () => a.creator.call("bellman_evict", { session_id: a.sessionId, member_id: target, ban: "all" });
+    await h.store.freezeSession(b.sessionId, Date.now());
+    const first = await evict();
+    expect(first.data).toMatchObject({ evicted: true, also_removed_from: 0 });
+    expect(await seats(b.sessionId), "the premise: frozen, B refused both removals").toBe(2);
+    await h.store.freezeSession(b.sessionId, null);
+    const again = await evict();
+    expect(again.data).toMatchObject({ evicted: true, also_removed_from: 1 });
+    expect([await seats(a.sessionId), await seats(b.sessionId), await seats(c.sessionId)]).toEqual([0, 0, 1]);
+  });
+
+  // The rule every removal keeps: a room with nobody left in it is over.
+  it("closes a room of the creator's that the removal leaves with nobody in it", async () => {
+    const a = await publicRoom(h);
+    const b = await roomBy(DEV_KEY.jesse);
+    const peer = await h.connect(DEV_KEY.peer);
+    const inA = await joinWith(peer, a.code);
+    expect((await joinWith(peer, b.code)).isError).toBe(false);
+    expect((await b.creator.call("bellman_leave", { session_id: b.sessionId, member_id: b.memberId })).isError).toBe(false);
+    expect((await h.store.getSession(b.sessionId))!.closed, "the premise: the account keeps B open").toBe(false);
+    await a.creator.call("bellman_evict", { session_id: a.sessionId, member_id: inA.data.member_id, ban: "all" });
+    expect((await h.store.getSession(b.sessionId))!.closed).toBe(true);
+  });
+});

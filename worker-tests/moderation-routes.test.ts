@@ -12,7 +12,7 @@ import { ACCESS_TOKEN_TTL_SECONDS, canonicalResource, signJwt } from "../src/oau
 import type { OutboxDriver } from "../src/outbox.js";
 import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
 import type { Identity } from "../src/types.js";
-import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
+import { member, oneCode, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const ORIGIN = "https://mcp.example.test";
 const KEY = "qk_ws_test"; // u_jesse, in vitest.config.ts
@@ -77,6 +77,45 @@ describe("the moderation routes through the Worker", () => {
     expect(banned.status, await banned.clone().text()).toBe(200);
     expect((await store().getSession("qs_wire_mod"))!.members.map((m) => m.memberId), "the control: both handles went").toEqual(["m_creator"]);
     expect(queued.filter((kind) => kind === "creator_ban")).toHaveLength(1);
+  });
+
+  // A ban from every room removes the account from the creator's other rooms now, found through the registry's
+  // joined-rooms index, and leaves another creator's alone. A frozen room refuses its removals, and a repeat finishes them.
+  it("removes the account from every other room the creator owns, finishing on a repeat what a frozen room refused", async () => {
+    const peerAs = (memberId: string) => member({ memberId, userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" });
+    await store().createSession(session({ id: "qs_wire_a", joinCodes: {}, members: [member(), peerAs("m_peer")] }));
+    await store().createSession(session({
+      id: "qs_wire_b", joinCodes: oneCode("BELL-WIRE-B"), members: [member(), peerAs("m_peer_b1"), peerAs("m_peer_b2")],
+    }));
+    await store().createSession(session({
+      id: "qs_wire_c", createdBy: "u_other", joinCodes: {},
+      members: [member({ userId: "u_other", label: "other@elsewhere" }), peerAs("m_peer_c")],
+    }));
+    const seated = async (id: string) =>
+      (await store().getSession(id))!.members.filter((m) => m.userId === "u_peer").map((m) => m.memberId);
+    const ban = async () => {
+      const res = await call("/rooms/qs_wire_a/bans", { method: "POST", body: JSON.stringify({ member_id: "m_peer", scope: "all" }) });
+      expect(res.status, await res.clone().text()).toBe(200);
+      return res.json();
+    };
+
+    await store().freezeSession("qs_wire_b", Date.now());
+    expect(await ban()).toMatchObject({ banned: "all", also_removed_from: 0 });
+    expect(await seated("qs_wire_b"), "the premise: frozen, B refused both removals").toEqual(["m_peer_b1", "m_peer_b2"]);
+    await store().freezeSession("qs_wire_b", null);
+    expect(await ban()).toMatchObject({ banned: "all", also_removed_from: 1 });
+    expect([await seated("qs_wire_a"), await seated("qs_wire_b"), await seated("qs_wire_c")]).toEqual([[], [], ["m_peer_c"]]);
+
+    // In B, what an eviction writes, once a handle, the ban on its audit rows, and B's expiring code retired. No room ban of
+    // B's own: the creator-wide ban, which the next join reads, keeps the account out.
+    expect((await store().eventsAfter("qs_wire_b", 0)).filter((e) => e.type === "member_evicted")).toHaveLength(2);
+    const rows = (await store().auditForOrg("org_codenerd", 100)).filter((r) => r.sessionId === "qs_wire_b" && r.action === "member_evicted");
+    expect(rows.map((r) => r.detail)).toEqual([
+      expect.objectContaining({ user_id: "u_peer", ban: "all" }), expect.objectContaining({ user_id: "u_peer", ban: "all" }),
+    ]);
+    expect((await store().getSession("qs_wire_b"))!.joinCodes).toEqual({});
+    expect(await store().roomBans("qs_wire_b")).toEqual([]);
+    expect(await store().isBannedByCreator("u_jesse", "u_peer")).toBe(true);
   });
 
   it("lists a creator's bans at /account/bans from the real registry, and lifts one at /account/bans/:banId", async () => {

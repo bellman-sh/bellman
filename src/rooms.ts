@@ -21,7 +21,7 @@ import type { BanScope } from "./bans.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
+  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
@@ -959,6 +959,12 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
  * connection, so every other handle the account still holds in the room is removed as well, each by
  * a removal of its own with its own event, door and rows. Their outcomes are not reported: a refusal
  * partway is finished by repeating the eviction, which finds the target out and removes the rest.
+ *
+ * `"all"` covers the creator's rooms now as well as later: every other room they own where the account
+ * holds a handle loses it too, each handle by the removal an eviction makes there, under that room's own
+ * code rules, and with no room ban, since the creator-wide one keeps the account out. `alsoRemovedFrom`
+ * counts the rooms this call removed it from. They are found through the joined-rooms index, so a seat
+ * the index lost (`BellmanStore.sessionsJoinedBy`) stays, and only the account's next join there is refused.
  */
 export async function evictMember(
   store: BellmanStore,
@@ -966,7 +972,9 @@ export async function evictMember(
   sessionId: string,
   targetMemberId: string,
   ban?: BanScope,
-): Promise<RoomResult<{ evicted: boolean; codeRetired: string | null; sessionStatus: string; banned: BanScope | null }>> {
+): Promise<RoomResult<{
+  evicted: boolean; codeRetired: string | null; sessionStatus: string; banned: BanScope | null; alsoRemovedFrom: number;
+}>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
 
@@ -1005,9 +1013,10 @@ export async function evictMember(
   // One removal's request, built from the member it removes. A ban takes every handle the account
   // holds in the room (below), and each is a member of its own, with its own seat, door and org, so
   // each gets its own event, door and audit rows. With no ban, and no permanent code behind the seat,
-  // for one handle it is the request this function has always made. `stored` is the ban the store is
-  // asked to write, and the audit row carries the call's `ban` whatever it is.
-  const request = (m: Member, stored: BanScope | undefined = ban): RemovalRequest => ({
+  // for one handle it is the request this function has always made. `room` is the room the member is
+  // removed from, whose codes and orgs the request reads; `stored` is the ban the store is asked to
+  // write, and the audit row carries the call's `ban` whatever it is.
+  const request = (room: StoredSession, m: Member, stored: BanScope | undefined): RemovalRequest => ({
     now: Date.now(),
     frozen: "refuse",
     // An eviction cuts the feed (#113): the target is recorded out at the
@@ -1064,16 +1073,16 @@ export async function evictMember(
     //
     // Except a public room's permanent code, which an eviction leaves open (see above). Read from
     // the room as this call found it, so a code replaced since is the next eviction's to shut.
-    ...(session.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
+    ...(room.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
       retire: {
         role: m.roomRole,
         event: doorShutEvent(actor, m.roomRole),
-        audit: auditEntries(session, actor, "invite_revoked", { roles: [m.roomRole] }),
+        audit: auditEntries(room, actor, "invite_revoked", { roles: [m.roomRole] }),
       },
     }),
     ...(stored ? { ban: stored } : {}),
     audit: auditEntries(
-      session, actor, "member_evicted",
+      room, actor, "member_evicted",
       {
         // The seat and the person. member_id is per connection and only resolves
         // inside the room, so user_id is what lets an org reading its own log see
@@ -1093,7 +1102,7 @@ export async function evictMember(
     ),
   });
 
-  const outcome = await store.removeMember(sessionId, targetMemberId, request(target));
+  const outcome = await store.removeMember(sessionId, targetMemberId, request(session, target, ban));
 
   if (outcome.refused === "closed") return refuse("closed", "session is closed.");
   if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
@@ -1111,7 +1120,27 @@ export async function evictMember(
   if (ban) {
     for (const other of await handlesOf(store, session, target)) {
       if (other.memberId !== targetMemberId && isActiveMember(other)) {
-        await store.removeMember(sessionId, other.memberId, request(other, "room"));
+        await store.removeMember(sessionId, other.memberId, request(session, other, "room"));
+      }
+    }
+  }
+
+  // "all" now: the account's handles in the creator's other rooms go as well, each by the removal an
+  // eviction makes in that room, read from that room, with no ban of the room's own. A room that refuses,
+  // frozen say, is finished by repeating the ban, as above. Each room that loses its last person closes,
+  // the rule every removal ends on. The scan is bounded by JOINED_SCAN, whose note gives the cost.
+  let alsoRemovedFrom = 0;
+  if (ban === "all") {
+    for (const id of await store.sessionsJoinedBy(target.userId, JOINED_SCAN)) {
+      const room = id === sessionId ? undefined : await store.getSession(id);
+      if (!room || room.closed || room.createdBy !== session.createdBy) continue;
+      let removed = false;
+      for (const m of room.members.filter((mm) => mm.userId === target.userId && isActiveMember(mm))) {
+        removed = (await store.removeMember(id, m.memberId, request(room, m, undefined))).removed || removed;
+      }
+      if (removed) {
+        alsoRemovedFrom++;
+        await store.closeSessionIfEmpty(id);
       }
     }
   }
@@ -1131,5 +1160,6 @@ export async function evictMember(
     // own transaction, and for "all" the registry's, queued in that transaction for the outbox
     // to deliver. A refusal returned above, so none of this is claimed for one.
     banned: ban ?? null,
+    alsoRemovedFrom,
   });
 }

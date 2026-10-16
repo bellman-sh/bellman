@@ -113,6 +113,7 @@ async function banMember(request: Request, sessionId: string, origin: string | u
     code_retired: r.value.codeRetired,
     session_status: r.value.sessionStatus,
     banned: r.value.banned,
+    also_removed_from: r.value.alsoRemovedFrom,
   }, origin);
 }
 

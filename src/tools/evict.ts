@@ -14,12 +14,12 @@ export function registerEvict(server: McpServer, identity: Identity, s: BellmanS
       title: "Remove a member from a room you created",
       description: `Remove someone from a room you created. Only the room's creator can do this — it is not a manifest verb, so no seat grants it and no role can be given it.
 
-Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. A public room's permanent code is the exception: it is the link everyone else uses, so removing one person does not end it, and a ban is how you keep that person out. Other roles' codes are unaffected, and so is anyone else already in the room. Without ban, removal is not a ban: any live code seats them again. With ban, their account cannot rejoin through any code: "room" refuses it at this room, and "all" at every room you own, now and later. A ban also removes every other handle that account holds here, and removes nothing from the log. They are told only that they can't join.
+Evicting also retires the join code for that member's seat, if one is live. A code is the door; leaving it open behind someone you removed means they can walk back in. A public room's permanent code is the exception: it is the link everyone else uses, so removing one person does not end it, and a ban is how you keep that person out. Other roles' codes are unaffected, and so is anyone else already in the room. Without ban, removal is not a ban: any live code seats them again. With ban, their account cannot rejoin through any code: "room" refuses it at this room, and "all" at every room you own, now and later, and removes them from your other rooms they sit in now. A ban also removes every other handle that account holds here, and removes nothing from the log. They are told only that they can't join.
 
 The history stays readable to the person removed: it was theirs too, and their bellman_sync keeps returning it, including the member_evicted event that removed them. What stops is everything after: new events do not reach them, their next bellman_send is refused, and a room socket is refused too. Rejoining on a live code gives them a fresh handle that reads the room again.
 
 Args: session_id, member_id (THEIRS, not yours), ban ("room" or "all", optional)
-Returns: { evicted, code_retired (the role whose code was retired, or null), session_status, banned ("room", "all" or null) }
+Returns: { evicted, code_retired (the role whose code was retired, or null), session_status, banned ("room", "all" or null), also_removed_from (how many other rooms of yours "all" removed them from) }
 Members see a member_evicted event, the person removed too. If the room freezes while the call is in progress, the call is refused and nothing changes — the person is still in the room and their seat's code is untouched — so repeat it once the room thaws. Removing the last active member closes the room.
 Errors: only the creator may call it; you cannot evict yourself (use bellman_leave); an unknown or closed session, a member_id not in the room, and a frozen room are refused. Removing someone who already left is not announced twice, but still retires their seat's code if one is live and not permanent — leaving does not.`,
       inputSchema: {
@@ -61,6 +61,7 @@ Errors: only the creator may call it; you cannot evict yourself (use bellman_lea
             code_retired: r.value.codeRetired,
             session_status: r.value.sessionStatus,
             banned: r.value.banned,
+            also_removed_from: r.value.alsoRemovedFrom,
           })
         : fail(r.reason);
     }

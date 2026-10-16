@@ -1198,7 +1198,11 @@ loud:
   as well.
 - **A ban and a suspension each refuse with one message, and a ban adds no event**
   (ADR 0022). A creator bans an account from one room, or from every room they own,
-  with `bellman_evict`'s `ban` or `POST /rooms/:id/bans`. The room's own ban is read
+  with `bellman_evict`'s `ban` or `POST /rooms/:id/bans`. A ban from every room also
+  removes the account from each of the creator's other rooms it sits in now, found
+  through the joined-rooms index: each handle by the removal an eviction makes in that
+  room, under its own code rules, with no room ban of its own, and `also_removed_from`
+  counts those rooms. The room's own ban is read
   inside `seatMember`, in the transaction that seats. The creator-wide ban is read from
   the registry beside the code's resolution, by `bellman_connect` and again by
   `bellman_confirm`, because a preview holds a 10-minute token. Either way the account
@@ -1219,7 +1223,8 @@ loud:
   Known gaps. A room-banned account still sees `bellman_connect`'s preview and is refused
   at `bellman_confirm`. A suspension takes up to 60 seconds to reach each isolate. A room
   socket open at the time stays open, receive-only, and only the next connect is
-  refused. A ban `"all"` that only widens an earlier room ban files no audit row.
+  refused. A ban `"all"` that only widens an earlier room ban files no audit row. A ban
+  `"all"` leaves a seat the joined-rooms index never recorded (`sessionsJoinedBy`).
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -1870,19 +1875,21 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,868** | every request, whether or not you are in a room |
+| Tool definitions | **~8,897** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-16 for bans, by the method below: 171 tokens over the 8,697 that
-main (`7d1dbad`) measures. `bellman_evict` is up 171, to 684: `ban` in its schema and its
-`Args:` line, the sentences saying what a ban refuses and that a public room's permanent
-code is the one door an eviction leaves open, `banned` in its `Returns:` line, and "and
-not permanent" in its `Errors:` line. No other tool changed and none was added. That is
-8,868.
+Re-measured on 2026-10-16 for bans, by the method below: 200 tokens over the 8,697 that
+main (`7d1dbad`) measures. `bellman_evict` is up 200, to 713: `ban` in its schema and its
+`Args:` line, the sentences saying what a ban refuses, that `"all"` also removes the
+account from the creator's other rooms it sits in now, and that a public room's permanent
+code is the one door an eviction leaves open, `banned` and `also_removed_from` in its
+`Returns:` line, and "and not permanent" in its `Errors:` line. No other tool changed and
+none was added. That is 8,897. The clause on `"all"` and `also_removed_from` came with the
+branch's fix pass, 29 of the 200, over the 8,868 measured before it.
 
 Re-measured on 2026-10-15 for public names, by the method below: 426 tokens over the 8,271
 that main (`7d4c137`) measures. `bellman_public_name` is new, at 309: its schema, and a

@@ -786,7 +786,7 @@ describe("evictMember", () => {
 
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -810,7 +810,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door is shut").toBeUndefined();
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type), "the removal is not announced again").toEqual(["invite_revoked"]);
@@ -913,8 +913,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
     expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
   });
@@ -931,7 +931,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -952,7 +952,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const events = await store.eventsAfter("qs_test", 0);
@@ -973,7 +973,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const [evicted, revoked] = await store.eventsAfter("qs_test", 0);
@@ -1000,7 +1000,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
@@ -1241,7 +1241,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.map((a) => a.detail)).toEqual([
@@ -1523,8 +1523,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type)).toEqual(["member_evicted", "invite_revoked"]);
     const rows = await store.auditForOrg("org_codenerd", 50);

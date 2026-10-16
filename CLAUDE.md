@@ -12,6 +12,7 @@ npm run typecheck:worker   # the Worker program; separate from the Node one
 npm start             # local Node server on :3900 (MemoryStore)
 npm run smoke         # end-to-end; BELLMAN_URL points it at any deployment
 npm run dev:worker    # wrangler dev, real Durable Objects
+npm run docs:gen      # the docs site's tool reference, from the tools themselves
 ```
 
 ## Architecture
@@ -92,6 +93,11 @@ or *peers*, where a peer is any other member rather than a counterpart.
   `tests/extension.test.ts` asserts it against a hook-mode bridge's real
   surface — the server's tools plus the bridge's own — so the manifest cannot
   silently fall behind. It already had: the list was missing `bellman_whoami`.
+- **The docs site's tool reference is generated and committed.** `npm run docs:gen` writes
+  `docs-site/src/content/docs/reference/tools/` and `reference/bridge-tools.md` from the tools as a
+  client lists them, and `tests/docs-reference.test.ts` fails with "run npm run docs:gen" when a tool's
+  title, description, schema or annotations changed without it, or a page names a tool that is gone.
+  A new tool means running it too. Never edit those pages by hand.
 - **`src/ui/assets.ts` is generated and gitignored.** Edit `ui/`, never the generated
   file; every script that compiles or runs the server runs `build:ui` first, and wrangler
   runs it itself through `[build]` in `wrangler.toml`, so a fresh clone's `npm test` builds

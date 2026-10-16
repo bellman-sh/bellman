@@ -91,6 +91,14 @@ export interface Member {
    * person (ADR 0019, D6).
    */
   publicNumber: number | null;
+  /**
+   * How this seat was taken: through a public room's permanent code (abuse protections spec, section 2);
+   * absent for every other seat, the creator's included. A member who has it is a stranger, and the send limit
+   * counts fewer sends a minute for one (`sendLimitFor`). Given at confirm from the pending connect, which took
+   * it at the preview, and never changed after. Absent on rows stored before the field existed, which read as
+   * not a stranger.
+   */
+  via?: "permanent";
 }
 
 /**
@@ -298,6 +306,12 @@ export interface PendingConnect {
    * a joiner who previewed legitimately would be bumped by an unrelated reissue.
    */
   roomRole: string;
+  /**
+   * How this seat was taken: through a public room's permanent code (abuse protections spec, section 2);
+   * absent for every other seat. Captured here for `roomRole`'s reason, because bellman_confirm receives only
+   * the token, and copied onto the member it seats as `Member.via`.
+   */
+  via?: "permanent";
   createdAt: number;
   expiresAt: number;
 }

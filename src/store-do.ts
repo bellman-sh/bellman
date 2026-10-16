@@ -41,6 +41,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
 import { presetInNewWords } from "./presets.js";
+import { admitAt, type SendAdmission } from "./send-limit.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -50,8 +51,9 @@ import { presetInNewWords } from "./presets.js";
  * real scope in the data:
  *
  *   SessionDO   one per room. Holds the session record, its events, its surface
- *               rows, bans and outbox, the live long-poll waiters and the room's
- *               sockets. Every request for a room routes to the same instance,
+ *               rows, bans and outbox, the live long-poll waiters, each member's
+ *               send count and the room's sockets. Every request for a room
+ *               routes to the same instance,
  *               which is what makes an in-memory waiter list correct here and
  *               what gives read-then-register its atomicity.
  *   RegistryDO  singleton. What resolves without a room in hand: join codes,
@@ -310,6 +312,15 @@ const readsClosed = (s: StoredSession | undefined, now: number, connected: Reado
 export class SessionDO extends DurableObject<BellmanEnv> {
   /** Live long-polls. In-memory is correct: one instance serves this session. */
   private waiters: Waiter[] = [];
+
+  /**
+   * Each member's recent sends for the send limit (abuse protections spec D5): member id to the times of its
+   * sends still inside the minute. In the instance and never in storage, so an object that sleeps forgets them,
+   * which a one-minute window can afford and which keeps a write off every send. One instance serves the room,
+   * as it does for `waiters`, so this is the room's one count. A member's entry stays until the instance goes
+   * and holds no more times than the limit allows.
+   */
+  #sends = new Map<string, number[]>();
 
   /**
    * This object's one alarm, shared by name: the driver works out which handlers
@@ -2037,6 +2048,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return result;
+  }
+
+  /**
+   * `BellmanStore.admitSend`'s count, in `#sends`. No await and no storage, so the read of a member's times
+   * and the write of them back are one turn and two sends landing together are counted one after the other.
+   */
+  async admitSend(memberId: string, limit: number, now: number): Promise<SendAdmission> {
+    const counted = admitAt(this.#sends.get(memberId) ?? [], limit, now);
+    this.#sends.set(memberId, counted.times);
+    return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
   }
 
   /**
@@ -4127,6 +4148,10 @@ export class DurableObjectStore implements BellmanStore {
     extras: AppendExtras = {}
   ): Promise<EventWrite> {
     return this.session(sessionId).appendEventOnce(e, key, extras);
+  }
+
+  async admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission> {
+    return this.session(sessionId).admitSend(memberId, limit, now);
   }
 
   async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {

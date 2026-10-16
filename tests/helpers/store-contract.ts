@@ -3073,6 +3073,42 @@ export function describeStoreContract(
             detail: { chars: JSON.stringify(answer.payload).length, ref_id: "1" } }),
         ]);
       });
+
+      // Spec section 2: the hosted seat is exempt. Its writes go through this method alone, which never reads the count.
+      it("writes past a full send count: the hosted seat is exempt from the limit", async () => {
+        const s = hostedRoom();
+        await store.createSession(s);
+        for (let i = 0; i < 2; i++) await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW());
+        expect(await store.admitSend(s.id, HOST_MEMBER_ID, 2, NOW()), "the premise: the count is full").toMatchObject({ ok: false });
+        expect(await store.appendHostEvent(s.id, question(), 1, NOW(), "host:tick:1")).toMatchObject({ ok: true });
+      });
+    });
+
+    describe("the send count (abuse protections spec D5)", () => {
+      it("admits a member's sends up to the limit in a minute, per member and per room", async () => {
+        await store.createSession(session());
+        await store.createSession(session({ id: "qs_other" }));
+        for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", "m_creator", 3, 1_000 + i)).toEqual({ ok: true });
+        expect(await store.admitSend("qs_test", "m_creator", 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
+        expect(await store.admitSend("qs_test", "m_peer", 3, 2_000), "another member").toEqual({ ok: true });
+        expect(await store.admitSend("qs_other", "m_creator", 3, 2_000), "another room").toEqual({ ok: true });
+        expect(await store.admitSend("qs_test", "m_creator", 3, 61_000), "a minute on").toEqual({ ok: true });
+      });
+
+      // The count's limit is read from this field, so a store that dropped it would limit nobody as a stranger.
+      it("keeps how a seat was taken, on the pending connect and on the member it seats", async () => {
+        const s = session();
+        await store.createSession(s);
+        await store.putPendingConnect({
+          token: "qct_via", sessionId: s.id, userId: "u_peer", roomRole: "peer_b", via: "permanent",
+          createdAt: Date.now(), expiresAt: Date.now() + CONNECT_TOKEN_TTL,
+        });
+        expect((await store.takePendingConnect("qct_via"))?.via).toBe("permanent");
+        const arriving = member({ memberId: "m_stranger", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b", via: "permanent" });
+        expect((await store.seatMember(s.id, arriving, 0, Date.now())).refused).toBeNull();
+        expect((await store.getMember(s.id, "m_stranger"))?.via).toBe("permanent");
+        expect((await store.getMember(s.id, "m_creator"))?.via, "the creator").toBeUndefined();
+      });
     });
 
     /**

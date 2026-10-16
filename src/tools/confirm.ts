@@ -86,6 +86,8 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
         orgId: identity.orgId,
         capabilities: capabilities as Capability[],
         roomRole,
+        // How the seat was taken, as the preview recorded it: a seat through a permanent code is a stranger's.
+        ...(pending.via ? { via: pending.via } : {}),
         brief: brief as Brief,
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),

@@ -19,6 +19,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 export type { AuditIntent } from "./grant-audit.js";
 
@@ -1400,6 +1401,22 @@ export interface BellmanStore {
     extras?: AppendExtras
   ): Promise<EventWrite>;
   /**
+   * Count one send by this member in this room against `limit` over the rolling minute (abuse protections
+   * spec D5), and say whether it is admitted. The caller passes `sendLimitFor(member)` and appends only
+   * when admitted; a refusal carries how long until the member's oldest send in the window leaves it, and
+   * writes nothing to the log.
+   *
+   * A call of its own, made after a send's checks and before its append (ADR 0022), so both append methods
+   * keep their return types. A send that fails after it was admitted, such as one to a frozen room or one
+   * with a key conflict, still used its place.
+   *
+   * Memory only: `SessionDO` keeps the counts in the instance and writes no storage, so a room object that
+   * sleeps forgets them, which a one-minute window can afford. `MemoryStore` keeps them beside the room and
+   * drops them with it at the purge. The hosted seat is exempt by never being asked: its writes go through
+   * `appendHostEvent` alone.
+   */
+  admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission>;
+  /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
    * when a limit is given. The hosted seat's read (I4) and a public room's events route
    * are the bounded ones; every other caller reads the tail whole.
@@ -1645,6 +1662,8 @@ export class MemoryStore implements BellmanStore {
   private creatorBanned = new Map<string, CreatorBan[]>();
   /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
   private suspensions = new Map<string, Suspension>();
+  /** Each member's recent sends, by session then by member (spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
+  private sends = new Map<string, Map<string, number[]>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -2483,6 +2502,14 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "appended", event: detach(event) };
   }
 
+  async admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission> {
+    const room = this.sends.get(sessionId) ?? new Map<string, number[]>();
+    const counted = admitAt(room.get(memberId) ?? [], limit, now);
+    room.set(memberId, counted.times);
+    this.sends.set(sessionId, room);
+    return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
+  }
+
   /**
    * The append itself, with no awaits in it, so both public appenders can call
    * it without yielding between their guard and their write. Same rule, and
@@ -2946,6 +2973,7 @@ export class MemoryStore implements BellmanStore {
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
     this.roomBanned.delete(s.id);
+    this.sends.delete(s.id);
     this.surfaces.delete(s.id);
     this.sessions.delete(s.id);
   }

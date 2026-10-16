@@ -17,7 +17,7 @@ export default defineConfig({
       // A group lists its directory's pages by their `sidebar.order`. A slug named here must
       // exist or the build fails, so an explicit entry lands in the same change as its page.
       sidebar: [
-        { label: 'Start', items: [{ autogenerate: { directory: 'start' } }] },
+        { label: 'Start', items: ['index', { autogenerate: { directory: 'start' } }] },
         { label: 'Guides', items: [{ autogenerate: { directory: 'guides' } }] },
         { label: 'Concepts', items: [{ autogenerate: { directory: 'concepts' } }] },
         {

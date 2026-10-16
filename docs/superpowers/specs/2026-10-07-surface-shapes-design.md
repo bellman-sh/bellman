@@ -1,7 +1,7 @@
 # Surface Shapes: Simple Vector Shapes on the Canvas — Design
 
 Issue: [#129](https://github.com/bellman-sh/bellman/issues/129), piece 5 — added after piece 4 was specified. The kind is [#197](https://github.com/bellman-sh/bellman/issues/197); the canvas side is [bellman-sh/dash#15](https://github.com/bellman-sh/dash/issues/15)
-Status: implemented on the server; the panel follows (dash #15)
+Status: implemented: the server in #240, the panel for bellman-sh/dash#15. D5 to D7 amended on 2026-10-15 to what the panel's review settled.
 Depends on: piece 1 — [the working surface](2026-10-06-working-surface-design.md), whose item model this extends; piece 3 — [the canvas UI](2026-10-06-surface-canvas-ui-design.md), whose page draws it. Piece 4 — [HTML artifacts](2026-10-06-surface-html-artifacts-design.md) — lands first by order, and nothing here needs its frame
 Repos: `bellman-sh/bellman` (the kind) and `bellman-sh/dash` (the node, the resizer, the dialog)
 
@@ -78,8 +78,12 @@ shape read back can be sent back.
 ### D5 — Inline SVG, with no peer string but the label.
 
 The node draws `<rect>`, `<ellipse>`, a `<polygon>` for the diamond, and a
-`<line>` with a marker for the arrow, sized to the node. Every attribute is a
-number the server validated or a class the color map chose. The label is an
+`<line>` for a line or an arrow, an arrow's head a `<polygon>` the line ends at,
+sized to the node. A line or an arrow also carries a transparent stroke 12 px
+wide along it that takes a press, so a level one, a pixel tall, can still be
+grabbed, and it has no connection handles, which would sit off its ends. Every
+attribute is a number the server validated or a class the color map chose, and
+a hex colour is the one custom property `--shape`, checked again (D3). The label is an
 HTML element laid over the SVG, centered, clamped to three lines by CSS,
 rendered as text (React escapes it). No `href`, no `<use>`, no `<script>`,
 no `foreignObject`, no `dangerouslySetInnerHTML`: the `react/no-danger` rule
@@ -91,8 +95,19 @@ A writer sees React Flow's `NodeResizer` on a shape; a reader does not. On
 resize end the page writes the whole item with the new `w` and `h` (a PUT
 takes the item), keeping a local override until the poll agrees; a refused or
 failed write drops the override, so the next poll snaps the node back to the
-server's size, the rule a drag already follows. The resizer's minimum is
-40 × 40 on the page; the server's rule stays positive-finite.
+server's size, the rule a drag already follows. A release that left the box as
+it was writes nothing, so a press on a handle never makes the presser the author
+of a peer's item, nor writes a stored size back at its drawn clamp. The
+resizer's minimum is 40 × 40 for a rect, an ellipse or a diamond, and 1 px a
+side for a line or an arrow, which is a diagonal across its box: a 40 px floor
+drew an agent's level arrow at 45° (D4). The server's rule stays
+positive-finite.
+
+Shapes are drawn beneath every other kind, the larger further back, so a box
+drawn around cards never takes their presses and a shape drawn inside another
+can be pressed; a selected shape comes up while it is selected. That is a fixed
+rule of the page, not the user-chosen z-order the Out of scope section leaves
+out.
 
 Piece 3's local override holds `x` and `y`; this piece widens it to carry `w`
 and `h` for a shape.
@@ -100,7 +115,8 @@ and `h` for a shape.
 ### D7 — The dialog.
 
 A "Shape" button on the toolbar opens a dialog: the form as five choices, the
-color as six swatches, an optional label. The key is `shape_<suffix>` from
+color as six swatches and a Custom choice (the browser's colour picker, which
+yields a hex), an optional label. The key is `shape_<suffix>` from
 the suffix helper the other keys use. The item is placed at the viewport's
 center at 200 × 120 (200 × 100 for an arrow or a line) and written through
 `putItem`; the dialog closes on the 2xx, and a refusal shows beside the

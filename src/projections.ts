@@ -241,6 +241,25 @@ export function beatOf(s: StoredSession, m: Member, now: number, latest: Session
 }
 
 /**
+ * Every seat one account holds in a room, oldest first, as the tools an account calls name them
+ * (`bellman_rooms`, `bellman_surface`). A call comes from the account and nothing in it says which
+ * seat is asking, so these tools list all of them and name none as the asker's. Oldest is join order
+ * (`seq`) and not the clock: two seats can join in one millisecond and cannot share a place in line.
+ */
+export function yourSeats(s: Pick<StoredSession, "manifest">, mine: readonly Member[]) {
+  return [...mine]
+    .sort((a, b) => a.seq - b.seq)
+    .map((m) => ({ member_id: m.memberId, role: m.roomRole, verbs: verbsOfRole(s.manifest, m.roomRole) }));
+}
+
+/**
+ * The seat a room block may speak from: the account's one, when it holds one. With several there is
+ * no seat to prefer, and a guess names one of them as the asker, so the block takes `roomPreview`'s
+ * form for a viewer with no seat.
+ */
+export const soleSeat = (mine: readonly Member[]): Member | undefined => (mine.length === 1 ? mine[0] : undefined);
+
+/**
  * One room as `bellman_rooms` returns it, for the account that asked (#28).
  *
  * `mine` is every live seat the account holds in the room. The tool is called
@@ -268,11 +287,8 @@ export function roomSummary(
   tail: SessionEvent[],
   now: number,
 ) {
-  // Join order (seq) and not the clock: two seats can join in one millisecond and cannot share a place in line.
-  const seats = [...mine]
-    .sort((a, b) => a.seq - b.seq)
-    .map((m) => ({ member_id: m.memberId, role: m.roomRole, verbs: verbsOfRole(s.manifest, m.roomRole) }));
-  const only = mine.length === 1 ? mine[0] : undefined;
+  const seats = yourSeats(s, mine);
+  const only = soleSeat(mine);
   const canInvite = seats.some((seat) => seat.verbs.includes("invite"));
   const latestNote = new Map<string, SessionEvent>();
   for (let i = tail.length - 1; i >= 0; i--) {

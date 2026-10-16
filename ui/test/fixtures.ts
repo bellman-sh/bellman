@@ -94,7 +94,8 @@ function item(over: Partial<SurfaceItemWire> & { key: string; kind: string }, au
 export function surfaceFixture(): SurfaceResult {
   return {
     session_id: "qs_1",
-    room: { ...roomsFixture().rooms[0].room, your_role: "lead" },
+    your_seats: roomsFixture().rooms[0].your_seats,
+    room: roomsFixture().rooms[0].room,
     surface: {
       cursor: 9,
       items: [

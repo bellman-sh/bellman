@@ -1844,18 +1844,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,752** | every request, whether or not you are in a room |
+| Tool definitions | **~8,777** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
 
-Re-measured on 2026-10-16 for the seats an account holds in a room, by the method below: 58
-tokens over the 8,694 that main (`c34d089`) measures, all of them `bellman_rooms`'s (252 to 310).
-Its `Returns:` line now names `your_seats`, says `your_member_id` is null and the room block
-names no role when an account holds several, and says a code's string and link show when any of
-those seats holds `invite`. No other tool changed. That is 8,752.
+Re-measured on 2026-10-16 for the seats an account holds in a room, by the method below: 83
+tokens over the 8,694 that main (`c34d089`) measures. `bellman_rooms` is up 58, to 310: its
+`Returns:` line now names `your_seats`, says `your_member_id` is null and the room block names
+no role when an account holds several, and says a code's string and link show when any of those
+seats holds `invite`. `bellman_surface` is up 25, to 308, for `your_seats` and the same null
+`your_role`. No other tool changed. That is 8,777.
 
 Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
 (`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no

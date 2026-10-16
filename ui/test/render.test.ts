@@ -316,21 +316,30 @@ describe("createCanvas", () => {
     expect(c.root.querySelector("[role=status]")?.textContent).toContain("artifacts render here");
   });
 
-  // bellman_surface names one seat, and for an account on two machines it is not a seat the account can call its
-  // own. The seats the monitor listed come in beside it, and when there are several they replace the one.
-  it("names every seat it is given when the account holds several, and the block's one seat otherwise", () => {
-    const lead = { member_id: "m_lead", role: "lead", verbs: ["send", "invite"] };
-    const helper = { member_id: "m_second", role: "helper", verbs: ["send"] };
-    const several = createCanvas(surfaceFixture(), deps({ seats: [lead, helper] }).deps, NOW);
-    const title = several.root.querySelector("h1")!.textContent!;
-    expect(title).toContain("migration-swarm");
-    expect(title).toContain("Your seats: lead (send, invite), helper (send)");
-    expect(several.root.querySelector("h1 .chip")).toBeNull();
+  // bellman_surface lists every seat the account holds, and for an account on two machines it names none in the room
+  // block. The header follows each result it is given, a poll's included, so it never keeps a seat the next answer
+  // no longer lists. A result with no list (bellman_confirm's, which speaks for the seat it just made) reads as before.
+  it("names every seat the result lists when the account holds several, and the block's one seat otherwise", () => {
+    const several = surfaceFixture();
+    several.your_seats = [
+      { member_id: "m_lead", role: "lead", verbs: ["send", "invite"] },
+      { member_id: "m_second", role: "helper", verbs: ["send"] },
+    ];
+    Object.assign(several.room, { your_role: null, your_verbs: [], your_heartbeat_on: false });
+    const c = createCanvas(several, deps().deps, NOW);
+    const title = () => c.root.querySelector("h1")!.textContent!;
+    expect(title()).toContain("migration-swarm");
+    expect(title()).toContain("Your seats: lead (send, invite), helper (send)");
+    expect(c.root.querySelector("h1 .chip")).toBeNull();
 
-    for (const seats of [undefined, [], [lead]]) {
-      const one = createCanvas(surfaceFixture(), deps({ seats }).deps, NOW);
-      expect(one.root.querySelector("h1 .chip")?.textContent).toBe("lead");
-      expect(one.root.querySelector("h1")!.textContent).not.toContain("Your seats");
+    const noList = surfaceFixture();
+    delete noList.your_seats;
+    for (const next of [surfaceFixture(), noList]) {
+      c.update(several, NOW);
+      expect(title()).toContain("Your seats");
+      c.update(next, NOW);
+      expect(c.root.querySelector("h1 .chip")?.textContent).toBe("lead");
+      expect(title()).not.toContain("Your seats");
     }
   });
 

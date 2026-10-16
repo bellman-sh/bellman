@@ -6,8 +6,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
-import { brief, manifestFixture, member, roomManifest } from "../helpers/fixtures.js";
-import { pairUp } from "../helpers/flows.js";
+import { brief, manifestFixture, member, pairVerbs } from "../helpers/fixtures.js";
+import { pairUp, seatAgain, startRoom } from "../helpers/flows.js";
 import { UNTRUSTED_PREAMBLE } from "../../src/projections.js";
 import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
@@ -33,26 +33,6 @@ interface Room {
 }
 
 const roomsOf = async (peer: Peer) => (await peer.call("bellman_rooms")).data.rooms as Room[];
-
-/** What the pair preset lets a role do, read off the manifest the room was made from and not off the code under test. */
-const pairVerbs = (role: string) => roomManifest().roles[role]!.can;
-
-/** A room its creator just started, with nobody else in it. */
-async function startRoom(peer: Peer, manifest: Record<string, unknown> = manifestFixture()) {
-  const started = await peer.call("bellman_start", { manifest, brief: brief() });
-  expect(started.isError, started.text).toBe(false);
-  return { started, sessionId: String(started.data.session_id), memberId: String(started.data.member_id) };
-}
-
-/**
- * Another seat for the same account in a room, newer than every seat the room holds: a Claude Code
- * session beside the claude.ai one. The tool is called by the account, so nothing in the call says which.
- */
-async function seatAgain(peer: Peer, sessionId: string, roomRole: string, memberId = "m_second") {
-  const at = Date.now() + 1;
-  const seat = member({ memberId, userId: peer.identity.userId, label: peer.identity.label, roomRole, joinedAt: at, lastSeenAt: at });
-  expect(await h.store.addMember(sessionId, seat)).toBe(true);
-}
 
 /** A swarm whose lead reports on a 5-minute cadence; the helper and observer do not. */
 const SWARM = {
@@ -190,7 +170,7 @@ describe("bellman_rooms", () => {
   it("lists every seat one account holds in a room, oldest first", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
     const { sessionId, memberId } = await startRoom(creator);
-    await seatAgain(creator, sessionId, "peer_b");
+    await seatAgain(h, creator, sessionId, "peer_b");
 
     const rooms = await roomsOf(creator);
     expect(rooms).toHaveLength(1);
@@ -208,7 +188,7 @@ describe("bellman_rooms", () => {
     expect(alone.your_member_id).toBe(memberId);
     expect(alone.room).toMatchObject({ your_role: "lead", your_heartbeat_on: true });
 
-    await seatAgain(creator, sessionId, "lead");
+    await seatAgain(h, creator, sessionId, "lead");
     const [room] = await roomsOf(creator);
     expect(room.your_member_id).toBeNull();
     expect(room.room).toMatchObject({ your_role: null, your_verbs: [], your_heartbeat_on: false });
@@ -218,7 +198,7 @@ describe("bellman_rooms", () => {
     const creator = await h.connect(DEV_KEY.jesse);
     const { started, sessionId } = await startRoom(creator);
     // peer_a can invite and peer_b cannot, and the newer seat is the one that cannot.
-    await seatAgain(creator, sessionId, "peer_b");
+    await seatAgain(h, creator, sessionId, "peer_b");
 
     const [room] = await roomsOf(creator);
     expect(room.join_codes).toEqual([{
@@ -235,7 +215,7 @@ describe("bellman_rooms", () => {
       session_id: p.sessionId, member_id: p.creatorMemberId, role: "observer",
     });
     expect(issued.isError, issued.text).toBe(false);
-    await seatAgain(p.joiner, p.sessionId, "helper");
+    await seatAgain(h, p.joiner, p.sessionId, "helper");
 
     const [room] = await roomsOf(p.joiner);
     // Two helper seats of one account, so this is the several-seats path, and a helper cannot invite.
@@ -249,7 +229,7 @@ describe("bellman_rooms", () => {
   it("does not count a seat that left", async () => {
     const creator = await h.connect(DEV_KEY.jesse);
     const { sessionId, memberId } = await startRoom(creator);
-    await seatAgain(creator, sessionId, "peer_b");
+    await seatAgain(h, creator, sessionId, "peer_b");
     const gone = await creator.call("bellman_leave", { session_id: sessionId, member_id: "m_second" });
     expect(gone.isError, gone.text).toBe(false);
 

@@ -15,9 +15,13 @@ import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
 /**
  * The most events one poll returns (#208), the earliest after the caller's cursor. A member
  * far behind reads the log a page per poll, told by `more` to ask again, where it used to
- * read all of it in one response; the panel's log route pages by the same number.
+ * read all of it in one response.
+ *
+ * Fifty, not the panel route's 200 (`MAX_EVENTS_READ`): a page an agent asks for lands whole
+ * in its context, and at about 220 tokens an event, 200 is some 44k tokens in one call. A
+ * bridge pages the rest at poll speed, so the smaller page costs a catch-up a few more calls.
  */
-export const SYNC_PAGE = 200;
+export const SYNC_PAGE = 50;
 
 /**
  * The log since `since` (#208): with `since` half an hour back, every request that can still

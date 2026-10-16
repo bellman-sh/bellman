@@ -1867,12 +1867,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,724** | every request, whether or not you are in a room |
+| Tool definitions | **~8,759** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 when `bellman_sync`'s page went from 200 events to 50, by the
+method below: the page itself costs nothing, since "200" and "50" are one token each. But
+main (`498daac`) measures 35 over the 8,724 below, which was taken before #276 merged main.
+`bellman_connect` is 738 to 758 and `bellman_invite` 815 to 824, for the docs site's note
+(#272) that evicting a code's seat ends the code, with #266's changes. `bellman_audit` is
+213 to 219, for #266's roster rule. That is 8,759.
 
 Re-measured on 2026-10-16 for #208, by the method below: 30 tokens over the 8,694 that main
 (`c34d089`) measures, all of them `bellman_sync`'s (740 to 770), whose `Returns:` line names

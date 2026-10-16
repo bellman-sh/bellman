@@ -117,12 +117,12 @@ The set is closed. A role can hold any subset of these and nothing else:
 
 | Verb | Permits |
 |---|---|
-| `send` | `bellman_send` — messages and action responses |
+| `send` | `bellman_send` — messages, artifacts, brief updates and progress reports |
 | `invite` | `bellman_invite` — issuing join codes |
 | `revoke` | revoking a join code |
 | `request_actions` | sending `action_request` events |
 | `respond_actions` | sending `action_response` events |
-| `write_surface` | `bellman_send` type `surface` — writing or removing an item on the room's working surface, and uploading the bytes a `file` or `image` item names (`POST /rooms/:id/blobs`; the bridge's `bellman_upload` does both) |
+| `write_surface` | `bellman_send` type `surface` — writing or removing an item on the room's working surface, and uploading the bytes a `file`, `image` or blob-backed `html` item names (`POST /rooms/:id/blobs`; the bridge's `bellman_upload` does both) |
 
 Every member can always `bellman_sync` and `bellman_leave`, whatever their
 role. There is no verb for either, and none for reading — a seat with `can: []`

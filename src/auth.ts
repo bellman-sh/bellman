@@ -23,6 +23,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     retainAfterCloseMs: 7 * 24 * 60 * 60 * 1000,
     // Audit rows are kept with no expiry on every plan (audit trail spec, D9). #58 decides a window and the sweep.
     auditRetentionMs: null,
+    publicRooms: false,
   },
   pro: {
     modes: ["pair", "swarm"],
@@ -34,6 +35,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostUnitsPerRoom: 0,
     retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
     auditRetentionMs: null,
+    publicRooms: true,
   },
   // Max sells the hosted seat: three hosted rooms open at once, 3,000 units each a
   // month (the hosted seat spec, D2 and D3, and ADR 0002), over pro's creates, blob ceiling and how
@@ -51,6 +53,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
     auditRetentionMs: null,
+    publicRooms: true,
   },
   team: {
     modes: ["pair", "swarm"],
@@ -62,16 +65,18 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
     auditRetentionMs: null,
+    publicRooms: true,
   },
 };
 
 /**
- * Identity resolution boundary.
+ * Identity resolution for static bearer keys: the operator's BELLMAN_KEYS map,
+ * or the dev table below when no map is set. The Worker never calls
+ * resolveIdentity without a map.
  *
- * v1: static bearer keys (works with Claude custom connectors today).
- * Cross-provider path: replace this function with OAuth 2.1 + Dynamic Client
- * Registration token introspection — ChatGPT-style remote connectors require
- * it. Nothing outside this file changes when that lands.
+ * OAuth 2.1 with dynamic client registration did not replace this; it landed
+ * beside it (#7, PR #21). resolveCaller in src/worker.ts tries an access token
+ * first and falls back to resolveIdentity.
  */
 const DEV_KEYS: Record<string, Identity> = {
   "qk_dev_jesse": {

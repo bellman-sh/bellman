@@ -1,6 +1,6 @@
 import type {
-  AuditEntry, HostUnits, Member, PendingConnect, PlanGrant, RoomManifest, Session, SessionEvent, EventType,
-  SavedPreset, SurfaceRow,
+  AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
+  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -28,11 +28,45 @@ type Waiter = { after: number; resolve: (events: SessionEvent[]) => void };
 
 /** Fields of a Member that may change after it is created. */
 export type MemberPatch = Partial<
-  Pick<Member, "brief" | "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
->;
+  Pick<Member, "capabilities" | "leftAt" | "lastSeenAt" | "lastReportAt">
+> & {
+  /** A new brief: to the member's row, and its `agent` to the record (ADR 0018). */
+  brief?: Brief;
+};
 // `removedAtCursor` is deliberately absent. It is the append's to write, inside
 // the transaction that stores the event it names (#113), and a patch route
 // would be a second way to write it — one that could set a cursor no event has.
+
+/**
+ * Whether a join code is live at `now`: a permanent one always is, and a temporary one until
+ * its expiry, inclusive (ADR 0020). The one place liveness is decided, read
+ * by both stores, by `revokeInvite` and by the `join_codes` projection, so a code cannot be live
+ * to one of them and expired to another. Nothing prunes an expired record, which is why every
+ * one of them has to ask.
+ */
+export const codeIsLive = (rec: { expiresAt: number | null }, now: number): boolean =>
+  rec.expiresAt === null || now <= rec.expiresAt;
+
+/**
+ * Whether anyone with the room's link may read it (public rooms spec D2): marked public when it
+ * started, and not made private since. `=== true` and `== null` because the in-memory store does
+ * not hydrate, so a record there may carry neither field.
+ *
+ * Here, and re-exported by rooms.ts, because the stores decide it too: `setJoinCode` refuses a
+ * permanent code to a room that is not public, in the operation that writes the code (ADR 0020).
+ */
+/** An entry in the public name index (public names spec, D5 as amended): the room that claimed the name, and when. */
+export interface PublicNameEntry {
+  id: string;
+  at: number;
+}
+
+/** Two index entries are one when room and moment both match: a later claim by the same room is another entry. */
+export const sameEntry = (a: PublicNameEntry | null, b: PublicNameEntry | null): boolean =>
+  a === null || b === null ? a === b : a.id === b.id && a.at === b.at;
+
+export const isPublic = (s: Pick<StoredSession, "manifest" | "unpublishedAt">): boolean =>
+  s.manifest.public === true && s.unpublishedAt == null;
 
 /**
  * Whether a member is still in the room: they have not left.
@@ -78,10 +112,72 @@ export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId ===
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
 
+/** A member as it comes to be seated: a brief to keep beside the room, or the agent of one kept there already. */
+export type Seating = Omit<Member, "agent" | "seq" | "publicNumber"> & { agent?: AgentInfo; brief?: Brief };
+
+/**
+ * Members as a room seats them, in the order given (ADR 0018, ADR 0019). Each brief leaves
+ * its member for a row of its own, and the member keeps the brief's `agent`. Each member
+ * takes the next `seq`. Each label takes a public number: the one the room gave it before
+ * (`known`), or the next one, and none for the hosted seat, whose label names no person.
+ *
+ * `counts` are the last `seq` and the last public number the room has given. What comes
+ * back is the members, their briefs, the labels this numbered for the first time, and the
+ * counts after. Both stores seat through here, and so does the Durable Object's move of an
+ * older room's members into rows, so the three cannot number a member differently.
+ */
+export function seatInOrder(
+  arriving: readonly Seating[],
+  counts: { memberSeq: number; labelSeq: number },
+  known: (label: string) => number | undefined = () => undefined,
+): { members: Member[]; briefs: Record<string, Brief>; numbered: Map<string, number>; memberSeq: number; labelSeq: number } {
+  let { memberSeq, labelSeq } = counts;
+  const briefs: Record<string, Brief> = {};
+  const numbered = new Map<string, number>();
+  const members = arriving.map(({ brief, ...m }): Member => {
+    if (brief) briefs[m.memberId] = brief;
+    let publicNumber: number | null = null;
+    if (!isHostMember(m)) {
+      publicNumber = numbered.get(m.label) ?? known(m.label) ?? null;
+      if (publicNumber === null) numbered.set(m.label, (publicNumber = ++labelSeq));
+    }
+    return { ...m, agent: brief ? brief.agent : m.agent!, seq: ++memberSeq, publicNumber };
+  });
+  return { members, briefs, numbered, memberSeq, labelSeq };
+}
+
+/**
+ * The room's first seat as its record keeps it (ADR 0019). A room is created with its creator
+ * seated, so a creation with nobody to seat is refused here, before either store writes.
+ */
+export function creatorOf(m: Member | undefined): RoomCreator {
+  if (!m) throw new Error("a room is created with its creator seated, and this one names no member");
+  return { memberId: m.memberId, userId: m.userId, label: m.label, joinedAt: m.joinedAt };
+}
+
+/**
+ * What `departedMembers` answers, from every member a room has seated (ADR 0019, D7): those
+ * who have left, after `leftAfter` when it is given, and of those the `limit` who left most
+ * recently, a later joiner first where two left at once. Handed back in join order. Both
+ * stores answer through here, so they cannot choose different members to show.
+ */
+export function departures(
+  members: readonly Member[],
+  { limit, leftAfter }: { limit?: number; leftAfter?: number } = {},
+): DepartedMembers {
+  const gone = members.filter((m) => m.leftAt !== null && (leftAfter === undefined || m.leftAt > leftAfter));
+  const shown = limit === undefined
+    ? gone
+    : [...gone].sort((a, b) => b.leftAt! - a.leftAt! || b.seq - a.seq).slice(0, Math.max(0, limit));
+  return { members: [...shown].sort((a, b) => a.seq - b.seq), omitted: gone.length - shown.length };
+}
+
 /**
  * Everyone a room ever seated, the hosted seat left out, as an audit row's parties (audit trail
  * spec, D2): what a purge's and a delete's rows say the room held. The roster keeps a member who
- * left, as `orgsOnRoster` does, because their org sat in the room.
+ * left, as the record's `orgs` does, because their org sat in the room. So `members` is every
+ * member seated, not a read room's: MemoryStore's record holds them all, and the Durable Objects
+ * store reads them from their rows, since its record holds only those in the room (ADR 0019).
  */
 export const rosterParties = (s: Pick<StoredSession, "members">): (string | null)[] =>
   partiesOf(s.members.filter((m) => !isHostMember(m)).map((m) => m.orgId));
@@ -165,6 +261,12 @@ export function connectedAmong(
  * presence.ts imports this module.
  */
 export const ABANDONED_AFTER_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** What `departedMembers` found: the members it hands back, and how many more matched past its `limit`. */
+export interface DepartedMembers {
+  members: Member[];
+  omitted: number;
+}
 
 /** What the abandonment rule reads: a session, or a stored one. */
 export type RoomRoster = Pick<Session, "closed" | "frozenAt" | "members">;
@@ -494,9 +596,11 @@ export interface RemovalRequest {
  * for a joiner that never got in.
  *
  * `codesCleared` says what the seating did: it filled the room and retired the codes
- * the room held, in the same operation that seated the member. A room that fills with
- * no code left in it reports false, because nothing was cleared, and so does every
- * refusal, which writes nothing. "Filled" means a further joiner would be refused,
+ * the room held, in the same operation that seated the member. A permanent code is
+ * kept (ADR 0020): joins are refused while the room is full, and the link on a public
+ * page works again when a seat frees. A room that fills with no temporary code left
+ * in it reports false, because nothing was cleared, and so does every refusal, which
+ * writes nothing. "Filled" means a further joiner would be refused,
  * with no free seat and none reclaimable, which is not the same as every seat being
  * occupied: a stale seat is occupied and still reclaimable, so a room holding one
  * keeps its codes.
@@ -510,7 +614,7 @@ export interface RemovalRequest {
 export interface SeatOutcome {
   refused: "not_found" | "closed" | "frozen" | "full" | null;
   reclaimed: Member[];
-  /** The seating filled the room and retired the codes it held. False when it held none. */
+  /** The seating filled the room and retired the temporary codes it held. False when it held none. */
   codesCleared: boolean;
 }
 
@@ -557,22 +661,6 @@ export function seatVictims(
 }
 
 /**
- * Storage boundary. Everything stateful goes through this interface so the
- * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
- * without touching tool logic.
- *
- * EVERY METHOD IS ASYNC, including ones an in-memory store answers instantly.
- * That is not incidental. A Durable Objects port resolves a join code in one
- * DO and the session it names in another, and every cross-DO hop is RPC. A
- * synchronous signature here would be implementable only by MemoryStore, which
- * would make this interface a comment rather than a seam.
- *
- * Read methods return DETACHED copies. Callers must never mutate what they read
- * back and expect it to stick — every write has an explicit method here. That
- * rule is what makes the interface portable: a database-backed store cannot
- * hand out live references, so relying on them would silently break the port.
- */
-/**
  * What a source-guarded write replaced: `previous` here, `removed` on
  * GrantDelete.
  *
@@ -613,34 +701,13 @@ export type EventWrite =
   | { outcome: "conflict" };
 
 /**
- * What an append writes BESIDES the event, in the event's own transaction.
- *
- * An explicit argument rather than the store reading `e.type`: nothing in either
- * store branches on an event's kind, and these are the writes that would have
- * made it. The caller already knows it is handling a `progress` send — it checked
- * the verb and validated the payload to get there — so saying so costs it a flag
- * and leaves the store a log that does not interpret what it logs. An eviction is
- * the same: `evictMember` is the one writing the `member_evicted` event.
- *
- * One exception, and it is not a flag: housekeeping's books (#66). `noteAppend` reads
- * an event's type and sender, because the departures that close a member's requests
- * are written by paths no caller flags (`removeMember`, `announceReclaimed`), and a
- * flag every caller had to remember is how the books would go stale. Both stores
- * apply it at the write, for a room that declared housekeeping.
- *
- * It is not an optimisation. The stamp and the event have to commit together or
- * a due tick can read one without the other, and the cut and its event have to
- * commit together or a reader can be refused at a cursor no stored event
- * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
- */
-/**
  * What `setJoinCode` did, which a boolean could not say once the write became
  * conditional: `frozen` and `live_code_exists` are different refusals and the
  * caller answers them with different sentences.
  */
 export type SetJoinCode =
   | { ok: true; replacedLive: boolean }
-  | { ok: false; reason: "frozen" | "live_code_exists" };
+  | { ok: false; reason: "frozen" | "live_code_exists" | "not_public" };
 
 /** What a blob charge did (#183, D3). `used` is the room's total after the call, or as it stood when refused. */
 export type BlobCharge =
@@ -754,6 +821,27 @@ export type PurgeSchedule =
  */
 export const JOINED_SCAN = 500;
 
+/**
+ * What an append writes BESIDES the event, in the event's own transaction.
+ *
+ * An explicit argument rather than the store reading `e.type`: nothing in either
+ * store branches on an event's kind, and these are the writes that would have
+ * made it. The caller already knows it is handling a `progress` send — it checked
+ * the verb and validated the payload to get there — so saying so costs it a flag
+ * and leaves the store a log that does not interpret what it logs. An eviction is
+ * the same: `evictMember` is the one writing the `member_evicted` event.
+ *
+ * One exception, and it is not a flag: housekeeping's books (#66). `noteAppend` reads
+ * an event's type and sender, because the departures that close a member's requests
+ * are written by paths no caller flags (`removeMember`, `announceReclaimed`), and a
+ * flag every caller had to remember is how the books would go stale. Both stores
+ * apply it at the write, for a room that declared housekeeping.
+ *
+ * It is not an optimisation. The stamp and the event have to commit together or
+ * a due tick can read one without the other, and the cut and its event have to
+ * commit together or a reader can be refused at a cursor no stored event
+ * carries; see `creditReport`, `markRemoved` and `SessionDO.appendEvent`.
+ */
 export interface AppendExtras {
   /**
    * Credit `e.fromMemberId` with a report at the event's own `at`, monotonically.
@@ -795,8 +883,24 @@ export interface AppendExtras {
   surface?: SurfaceWrite;
 }
 
+/**
+ * Storage boundary. Everything stateful goes through this interface so the
+ * in-memory implementation can be replaced by Durable Objects / SQLite / Redis
+ * without touching tool logic.
+ *
+ * EVERY METHOD IS ASYNC, including ones an in-memory store answers instantly.
+ * That is not incidental. A Durable Objects port resolves a join code in one
+ * DO and the session it names in another, and every cross-DO hop is RPC. A
+ * synchronous signature here would be implementable only by MemoryStore, which
+ * would make this interface a comment rather than a seam.
+ *
+ * Read methods return DETACHED copies. Callers must never mutate what they read
+ * back and expect it to stick — every write has an explicit method here. That
+ * rule is what makes the interface portable: a database-backed store cannot
+ * hand out live references, so relying on them would silently break the port.
+ */
 export interface BellmanStore {
-  createSession(s: Session): Promise<void>;
+  createSession(s: NewSession): Promise<void>;
   /**
    * The session record and its members. NOT its events.
    *
@@ -836,12 +940,17 @@ export interface BellmanStore {
    * `now` is a parameter so that liveness is the caller's clock, as it is for
    * `seatMember`: an expired code is not a live one, and minting over it is
    * opening a shut door rather than replacing an open one.
+   *
+   * A null `expiresAt` is a permanent code (ADR 0020), refused `not_public` unless
+   * the room is public, decided here for the reason `replaceLive` is: a room made
+   * private between the caller's read and this write has already retired the
+   * permanent codes it held, and would otherwise keep this one.
    */
   setJoinCode(
     sessionId: string,
     role: string,
     code: string,
-    expiresAt: number,
+    expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode>;
   /**
@@ -865,7 +974,7 @@ export interface BellmanStore {
    * together. Unlike the cross-object races on #59 and #62, both halves live in
    * the same object, so this one can simply be made not to have a gap.
    */
-  addMember(sessionId: string, member: Member): Promise<boolean>;
+  addMember(sessionId: string, member: ArrivingMember): Promise<boolean>;
   /**
    * Seat a member, reclaiming stale seats if that is what it takes, as ONE
    * operation.
@@ -893,8 +1002,9 @@ export interface BellmanStore {
    * Refuses rather than partially reaping. Reclaiming one of two seats a joiner
    * needs would remove a member for somebody who never got in.
    *
-   * When the seat it took fills the room, it also retires every role's join code,
-   * and `codesCleared` says whether there was one to retire. That was
+   * When the seat it took fills the room, it also retires every role's temporary join
+   * code, keeping a permanent one (ADR 0020), and `codesCleared` says whether there was
+   * one to retire. That was
    * `bellman_confirm`'s second call, made once the seat had committed with nothing
    * spanning the two, and a failure there left the member in the room with no event,
    * no audit row and no member_id returned, and a connect token that is single use
@@ -904,7 +1014,7 @@ export interface BellmanStore {
    */
   seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome>;
@@ -967,6 +1077,34 @@ export interface BellmanStore {
   connectedMembers(sessionId: string): Promise<ReadonlySet<string>>;
   /** Patch a member's mutable fields. Unknown session/member is a no-op. */
   updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void>;
+  /**
+   * The briefs of these members, by member id (ADR 0018). Each lives beside the room in a
+   * row of its own, not on the record `getSession` returns. An id with no brief is left out,
+   * and an unknown session answers none.
+   */
+  getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>>;
+  /**
+   * A member of this room by id, in the room or gone from it (ADR 0019). `getSession` holds
+   * only the members in the room now, so this is how a caller who has left is read. Undefined
+   * for an id the room never seated, and for an unknown room.
+   */
+  getMember(sessionId: string, memberId: string): Promise<Member | undefined>;
+  /** The members with these ids, in join order, gone or not. An id the room never seated is left out. */
+  getMembers(sessionId: string, memberIds: readonly string[]): Promise<Member[]>;
+  /** Every handle this person has held in the room, in join order, those that have left included. */
+  membersOfUser(sessionId: string, userId: string): Promise<Member[]>;
+  /**
+   * The members who have left, in join order (ADR 0019, D7). With `leftAfter`, only those
+   * who left after that time. With `limit`, only the `limit` who left most recently, and
+   * `omitted` counts the others that matched.
+   */
+  departedMembers(sessionId: string, opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers>;
+  /**
+   * The public number of each of these labels (ADR 0019, D6), which a public room shows as
+   * "member N". A label the room has not numbered is left out: the hosted seat's, and any
+   * label no member of the room holds.
+   */
+  publicNumbers(sessionId: string, labels: readonly string[]): Promise<Record<string, number>>;
   /**
    * Mark a session closed, whoever is in it. Idempotent. To close a room because
    * it has emptied, use `closeSessionIfEmpty`: deciding that from a read and then
@@ -1033,8 +1171,25 @@ export interface BellmanStore {
    * The first time stands, so a retry changes nothing, and a room that is not there is left not
    * there: nothing is written for it. Who may ask is the route's to decide, as for `schedulePurge`.
    * An open room and a closed one alike: a closed public room is readable until its purge (D7).
+   *
+   * The same write retires the room's permanent codes (ADR 0020): a private room's door is a
+   * code that runs out. Its temporary codes are left to run out as they would have.
    */
   unpublishSession(sessionId: string, at: number): Promise<void>;
+  /**
+   * The public name index's entry for `name`, or null (public names spec, D5): which room claimed it,
+   * and when. A hint: whoever reads it checks the room's record (`holdsName`), which is the truth.
+   */
+  publicNameEntry(name: string): Promise<PublicNameEntry | null>;
+  /**
+   * Set `name`'s entry to `entry` if it is still `expected` (null for no entry), compared whole and in
+   * one step, so of two claims that read the same entry exactly one wins. True when this one did.
+   */
+  claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean>;
+  /** Remove `name`'s entry if it is still `expected`, in one step: a claim given back. True when it was. */
+  releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean>;
+  /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
+  setPublicName(sessionId: string, name: string): Promise<void>;
   /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
@@ -1183,8 +1338,8 @@ export interface BellmanStore {
   ): Promise<EventWrite>;
   /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
-   * when a limit is given. The hosted seat's read is the bounded one (I4); every other
-   * caller reads the tail whole.
+   * when a limit is given. The hosted seat's read (I4) and a public room's events route
+   * are the bounded ones; every other caller reads the tail whole.
    */
   eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]>;
   /**
@@ -1253,6 +1408,17 @@ export interface BellmanStore {
 
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
+
+  /**
+   * Note that someone signed in. First sign-in sets firstSeenAt; every one
+   * moves lastSeenAt.
+   *
+   * The provider is not stored: userId is u_<provider>_<subject>, so it is
+   * already in there.
+   */
+  recordSignIn(userId: string, now: number): Promise<void>;
+  /** How many people have ever signed in. */
+  countUsers(): Promise<number>;
   /**
    * Take one of this person's hosted-room slots for `sessionId`, unless `limit` are held
    * already (I7): the count and the record are one operation, so two starts at the limit
@@ -1275,6 +1441,33 @@ export interface BellmanStore {
   putPreset(userId: string, preset: SavedPreset, cap: number): Promise<"saved" | "full">;
   /** True when there was one to delete. */
   deletePreset(userId: string, name: string): Promise<boolean>;
+
+  /**
+   * A person's public handle (bylines spec D1, D2), and the public rooms they signed with it. The
+   * registry holds both, so claiming, releasing, signing and unsigning are each one transaction
+   * and nothing spans two objects (ADR 0006).
+   */
+  handleOf(userId: string): Promise<string | undefined>;
+  userOfHandle(handle: string): Promise<string | undefined>;
+  /** "taken" when another user holds it. Claiming a new one frees the old; claiming your own is "claimed". */
+  claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
+  /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
+  releaseHandle(userId: string): Promise<void>;
+  /**
+   * The operator's release (ADR 0021): resolves the handle to its holder and releases as `releaseHandle`
+   * does, in the same transaction. The holder's user id, or `undefined` when nobody holds the handle.
+   */
+  releaseHandleNamed(handle: string): Promise<string | undefined>;
+  /**
+   * Signs with the handle the user holds, read in the same operation as the write, so a release cannot
+   * land between them. The handle it signed with, or `undefined`, writing nothing, when they hold none.
+   */
+  signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined>;
+  unsignRoom(userId: string, sessionId: string): Promise<void>;
+  /** Newest signature first. */
+  signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]>;
+  /** The handle, when the user holds one and has signed the room: the public read's one registry call (D4). */
+  bylineFor(userId: string, sessionId: string): Promise<string | undefined>;
 
   /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
   getGrant(key: string): Promise<PlanGrant | undefined>;
@@ -1349,8 +1542,14 @@ function detach<T>(value: T): T {
 }
 
 export class MemoryStore implements BellmanStore {
+  /**
+   * The rooms, each with every member it has seated, those who have left included: one array
+   * where the Durable Objects store keeps a row per member (ADR 0019). `getSession` hands back
+   * the members in the room now, and the member reads reach the rest.
+   */
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
+  private byPublicName = new Map<string, PublicNameEntry>(); // public name -> its claim, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
   private byMember = new Map<string, Set<string>>();
   /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
@@ -1359,7 +1558,11 @@ export class MemoryStore implements BellmanStore {
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
   private presets = new Map<string, Map<string, SavedPreset>>(); // userId -> name -> preset
+  private handles = new Map<string, string>(); // handle -> userId
+  private handleByUser = new Map<string, string>(); // userId -> handle
+  private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
+  private users = new Map<string, UserRecord>();
   /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
   private audit: { seq: number; entry: AuditEntry }[] = [];
   private auditSeq = new Map<string, number>();
@@ -1368,7 +1571,8 @@ export class MemoryStore implements BellmanStore {
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
    * record: that type is the one SessionDO persists and hydrateStoredSession
    * validates, and a field there would need a hydration rule it does not need.
-   * Same lifetime either way — a session is never deleted from this store.
+   * Same lifetime either way — a session leaves this store only by the purge,
+   * and its keys go with it.
    */
   private keys = new Map<string, Map<string, IdempotencyRecord>>();
   /**
@@ -1377,6 +1581,8 @@ export class MemoryStore implements BellmanStore {
    * their own storage keys there too.
    */
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
+  /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
+  private briefs = new Map<string, Map<string, Brief>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1389,8 +1595,10 @@ export class MemoryStore implements BellmanStore {
     this.blobs = options.blobs ?? new MemoryBlobStore();
   }
 
-  async createSession(s: Session): Promise<void> {
-    const stored = detach(s);
+  async createSession(s: NewSession): Promise<void> {
+    const { members, briefs } = seatInOrder(s.members, { memberSeq: 0, labelSeq: 0 });
+    const stored: Session = detach({ ...s, members, creator: creatorOf(members[0]), orgs: orgsOnRoster({ members }) });
+    this.keepBriefs(stored.id, briefs);
     this.sessions.set(stored.id, stored);
     for (const rec of Object.values(stored.joinCodes)) this.byJoinCode.set(rec.code, stored.id);
     const mine = this.byCreator.get(stored.createdBy) ?? new Set<string>();
@@ -1400,7 +1608,7 @@ export class MemoryStore implements BellmanStore {
     // hands over the creator in `members` and never calls addMember — so they
     // are indexed here. addMember indexes everyone who joins afterwards.
     for (const m of stored.members) this.indexMember(m.userId, stored.id);
-    for (const orgId of orgsOnRoster(stored)) this.indexOrg(orgId, stored.id);
+    for (const orgId of stored.orgs) this.indexOrg(orgId, stored.id);
   }
 
   /**
@@ -1408,6 +1616,12 @@ export class MemoryStore implements BellmanStore {
    * member cannot drift apart. Keyed by user, so a second handle for the same
    * person in the same room is the same entry.
    */
+  private keepBriefs(sessionId: string, briefs: Record<string, Brief>): void {
+    const kept = this.briefs.get(sessionId) ?? new Map<string, Brief>();
+    for (const [memberId, brief] of Object.entries(briefs)) kept.set(memberId, detach(brief));
+    this.briefs.set(sessionId, kept);
+  }
+
   private indexMember(userId: string, sessionId: string): void {
     const joined = this.byMember.get(userId) ?? new Set<string>();
     joined.add(sessionId);
@@ -1429,8 +1643,10 @@ export class MemoryStore implements BellmanStore {
     // The events come off before the copy, not after it (#134): detach is a deep clone,
     // so cloning first paid for the room's whole history on every call and then threw it
     // away. closeIfAbandoned has already run on `s`, so nothing it did is skipped by cloning later.
-    const { events: _events, ...rest } = s;
-    return detach(rest);
+    // The members who have left come off the same way (ADR 0019): the record holds who is in
+    // the room now, and the member reads reach the others.
+    const { events: _events, members, ...rest } = s;
+    return detach({ ...rest, members: members.filter(isActiveMember) });
   }
 
   async getSessionByJoinCode(code: string): Promise<{ session: StoredSession; role: string } | undefined> {
@@ -1441,7 +1657,7 @@ export class MemoryStore implements BellmanStore {
     const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
     if (!hit) return undefined; // consumed or rotated
     const [role, rec] = hit;
-    if (Date.now() > rec.expiresAt) return undefined;
+    if (!codeIsLive(rec, Date.now())) return undefined;
     return { session, role };
   }
 
@@ -1461,15 +1677,16 @@ export class MemoryStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number,
+    sessionId: string, role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "frozen" };
     if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+    if (expiresAt === null && !isPublic(s)) return { ok: false, reason: "not_public" };
     const previous = s.joinCodes[role];
     // Live, not merely present: an expired record shuts no door.
-    const live = previous !== undefined && guard.now <= previous.expiresAt;
+    const live = previous !== undefined && codeIsLive(previous, guard.now);
     if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
     // No awaits between the test above and the writes below, which is what makes
     // this atomic here — the same arrangement appendEvent and addMember use. The
@@ -1480,7 +1697,7 @@ export class MemoryStore implements BellmanStore {
     return { ok: true, replacedLive: live };
   }
 
-  async addMember(sessionId: string, member: Member): Promise<boolean> {
+  async addMember(sessionId: string, member: ArrivingMember): Promise<boolean> {
     const s = this.sessions.get(sessionId);
     if (!s) return false;
     if (s.frozenAt !== null) return false;
@@ -1488,16 +1705,30 @@ export class MemoryStore implements BellmanStore {
     // this write, and a close in the gap would otherwise seat a member in a room
     // that is over. closeSessionIfEmpty is the other half.
     if (s.closed) return false;
-    s.members.push(detach(member));
     // After the guards, so a refused add leaves no trace in the listing.
-    this.indexMember(member.userId, sessionId);
-    this.indexOrg(member.orgId, sessionId);
+    this.seat(s, member);
     return true;
+  }
+
+  /**
+   * Seat one member, the rule both joins share (ADR 0019): the next `seq`, its label's public
+   * number or the next one (`seatInOrder`), its brief beside the room, its org on the record,
+   * and the listings. No awaits, for the reason the callers give.
+   */
+  private seat(s: Session, member: ArrivingMember): void {
+    const labelSeq = s.members.reduce((n, m) => Math.max(n, m.publicNumber ?? 0), 0);
+    const known = (label: string) => s.members.find((m) => m.label === label && m.publicNumber !== null)?.publicNumber ?? undefined;
+    const { members: [arrived], briefs } = seatInOrder([member], { memberSeq: s.members.length, labelSeq }, known);
+    s.members.push(detach(arrived));
+    this.keepBriefs(s.id, briefs);
+    if (arrived.orgId && !s.orgs.includes(arrived.orgId)) s.orgs.push(arrived.orgId);
+    this.indexMember(member.userId, s.id);
+    this.indexOrg(member.orgId, s.id);
   }
 
   async seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome> {
@@ -1519,12 +1750,10 @@ export class MemoryStore implements BellmanStore {
       row.leftAt = now;
       reclaimed.push(detach(row));
     }
-    s.members.push(detach(member));
     // After the guards, so a refused seating leaves no trace in the listing.
-    this.indexMember(member.userId, sessionId);
-    this.indexOrg(member.orgId, sessionId);
+    this.seat(s, member);
 
-    // A full room has no seat for ANY role, so every code goes — decided and
+    // A full room has no seat for ANY role, so every temporary code goes — decided and
     // written here rather than by the caller afterwards. As a second call made
     // once the seat had committed it had nothing spanning it: a failure left the
     // joiner seated with the codes still redeemable (#116).
@@ -1536,7 +1765,7 @@ export class MemoryStore implements BellmanStore {
     // counting would have retired its code.
     //
     // Cleared by presence, where removeMember retires only a code that is still live
-    // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+    // (`codeIsLive(rec, req.now)`). The two ask different questions. A removal
     // announces a door shutting, so it must not announce one that had already shut,
     // and an expired record is not a door. A seating announces nothing: it tidies
     // rows, and a full room needs no code at all, so an expired record goes with the
@@ -1544,11 +1773,15 @@ export class MemoryStore implements BellmanStore {
     // `codesCleared: true`, which answers this question and does not contradict the
     // other. The contract suite pins this side, and its expired-code cases for
     // removeMember pin the other.
+    //
+    // A permanent code stays (ADR 0020). It is a public room's link, put where people
+    // find it, and the room refuses joiners while it is full: when a seat frees, the
+    // link works again, where a cleared one would have to be found and replaced.
     const full = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected) === null;
-    const codes = full ? Object.values(s.joinCodes) : [];
-    if (full) {
-      for (const rec of codes) this.byJoinCode.delete(rec.code);
-      s.joinCodes = {};
+    const codes = full ? Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt !== null) : [];
+    for (const [role, rec] of codes) {
+      this.byJoinCode.delete(rec.code);
+      delete s.joinCodes[role];
     }
     // What the call did, and not only whether the room filled: a room that fills
     // with no code left in it had nothing to retire.
@@ -1580,7 +1813,7 @@ export class MemoryStore implements BellmanStore {
     // state is looked at, because a live door is owed to one who is already out as
     // much as to one who is not.
     const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
-    const retiring = req.retire && rec && req.now <= rec.expiresAt
+    const retiring = req.retire && rec && codeIsLive(rec, req.now)
       ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
       : null;
 
@@ -1660,11 +1893,55 @@ export class MemoryStore implements BellmanStore {
     if (!s) return;
     const m = s.members.find((mm) => mm.memberId === memberId);
     if (!m) return;
-    if (patch.brief !== undefined) m.brief = detach(patch.brief);
+    if (patch.brief !== undefined) {
+      this.keepBriefs(sessionId, { [memberId]: patch.brief });
+      m.agent = detach(patch.brief.agent);
+    }
     if (patch.capabilities !== undefined) m.capabilities = detach(patch.capabilities);
     if (patch.leftAt !== undefined) m.leftAt = patch.leftAt;
     if (patch.lastSeenAt !== undefined) m.lastSeenAt = patch.lastSeenAt;
     if (patch.lastReportAt !== undefined) m.lastReportAt = patch.lastReportAt;
+  }
+
+  async getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>> {
+    const kept = this.briefs.get(sessionId);
+    const out: Record<string, Brief> = {};
+    for (const memberId of memberIds) {
+      const brief = kept?.get(memberId);
+      if (brief) out[memberId] = detach(brief);
+    }
+    return out;
+  }
+
+  /** Every member this room has seated, in join order, or none for an unknown room. */
+  private everyMember(sessionId: string): Member[] {
+    return this.sessions.get(sessionId)?.members ?? [];
+  }
+
+  async getMember(sessionId: string, memberId: string): Promise<Member | undefined> {
+    const m = this.everyMember(sessionId).find((mm) => mm.memberId === memberId);
+    return m && detach(m);
+  }
+
+  async getMembers(sessionId: string, memberIds: readonly string[]): Promise<Member[]> {
+    const wanted = new Set(memberIds);
+    return detach(this.everyMember(sessionId).filter((m) => wanted.has(m.memberId)));
+  }
+
+  async membersOfUser(sessionId: string, userId: string): Promise<Member[]> {
+    return detach(this.everyMember(sessionId).filter((m) => m.userId === userId));
+  }
+
+  async departedMembers(sessionId: string, opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers> {
+    return detach(departures(this.everyMember(sessionId), opts));
+  }
+
+  async publicNumbers(sessionId: string, labels: readonly string[]): Promise<Record<string, number>> {
+    const members = this.everyMember(sessionId);
+    return Object.fromEntries(labels.flatMap((label) => {
+      const n = members.find((m) => m.label === label && m.publicNumber !== null)?.publicNumber;
+      return n == null ? [] : [[label, n]];
+    }));
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -1799,7 +2076,7 @@ export class MemoryStore implements BellmanStore {
     // Asked already: the first request stands, is on the record once, and is the time the answer gives.
     if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, rosterParties(s), by, Date.now())));
+    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, rosterParties(s), by, Date.now())));
     return { ok: true, purgeAt: at };
   }
 
@@ -1807,6 +2084,33 @@ export class MemoryStore implements BellmanStore {
     const s = this.sessions.get(sessionId);
     if (!s || s.unpublishedAt != null) return;
     s.unpublishedAt = at;
+    for (const [role, rec] of Object.entries(s.joinCodes)) {
+      if (rec.expiresAt !== null) continue;
+      this.byJoinCode.delete(rec.code);
+      delete s.joinCodes[role];
+    }
+  }
+
+  async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
+    const entry = this.byPublicName.get(name);
+    return entry ? { ...entry } : null;
+  }
+
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    if (!sameEntry(this.byPublicName.get(name) ?? null, expected)) return false;
+    this.byPublicName.set(name, { ...entry });
+    return true;
+  }
+
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    if (!sameEntry(this.byPublicName.get(name) ?? null, expected)) return false;
+    this.byPublicName.delete(name);
+    return true;
+  }
+
+  async setPublicName(sessionId: string, name: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) s.publicName = name;
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {
@@ -2146,6 +2450,15 @@ export class MemoryStore implements BellmanStore {
     this.recordMonth(this.creates, userId);
   }
 
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    const seen = this.users.get(userId);
+    this.users.set(userId, { userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now });
+  }
+
+  async countUsers(): Promise<number> {
+    return this.users.size;
+  }
+
   async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {
     // No await: the count and the record are one step, for seatMember's reason.
     const held = this.hostedOpen.get(userId) ?? new Set<string>();
@@ -2195,6 +2508,62 @@ export class MemoryStore implements BellmanStore {
 
   async deletePreset(userId: string, name: string): Promise<boolean> {
     return this.presets.get(userId)?.delete(name) ?? false;
+  }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.handleByUser.get(userId);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.handles.get(handle);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    const holder = this.handles.get(handle);
+    if (holder !== undefined) return holder === userId ? "claimed" : "taken";
+    const old = this.handleByUser.get(userId);
+    if (old !== undefined) this.handles.delete(old);
+    this.handles.set(handle, userId);
+    this.handleByUser.set(userId, handle);
+    return "claimed";
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    const handle = this.handleByUser.get(userId);
+    if (handle !== undefined) this.handles.delete(handle);
+    this.handleByUser.delete(userId);
+    this.signatures.delete(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    const userId = this.handles.get(handle);
+    // releaseHandle awaits nothing, so it runs to its end before this yields: nothing lands between the read and it.
+    if (userId !== undefined) await this.releaseHandle(userId);
+    return userId;
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    const handle = this.handleByUser.get(userId);
+    if (handle === undefined) return undefined;
+    const mine = this.signatures.get(userId) ?? new Map<string, number>();
+    mine.set(sessionId, at);
+    this.signatures.set(userId, mine);
+    return handle;
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    this.signatures.get(userId)?.delete(sessionId);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return [...(this.signatures.get(userId) ?? [])]
+      .map(([sessionId, signedAt]) => ({ sessionId, signedAt }))
+      .sort((a, b) => b.signedAt - a.signedAt || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    const handle = this.handleByUser.get(userId);
+    return handle !== undefined && this.signatures.get(userId)?.has(sessionId) ? handle : undefined;
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {
@@ -2415,9 +2784,9 @@ export class MemoryStore implements BellmanStore {
     this.byCreator.get(s.createdBy)?.delete(s.id);
     this.hostedOpen.get(s.createdBy)?.delete(s.id);
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
-    for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
+    for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
+    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
@@ -2481,17 +2850,21 @@ export const SWEEP_RPC_BUDGET = 300;
 /**
  * How many members one room holds, on every plan that can start a swarm (#18).
  *
- * A ceiling, not a plan fact. A room is one value in SQLite-backed Durable Object
- * storage, members and briefs included (events and surface rows are separate,
- * #25), and a value holds 2 MB. A brief at the schema's maximum (src/tools/kit.ts:
- * goal 500, state 2,000, twenty constraints and twenty open questions of 300) is
- * 14,710 characters; 100 of them are 1.47 MB, under the limit with room for the
- * manifest and the codes. 250 would be 3.7 MB. Two-byte text at the maximum in
- * every brief of a full room is the remaining gap, and the transaction turns it
- * into one failed join rather than a broken room. Reaching this is the trigger
- * for moving members to rows of their own, which is what lifts it.
+ * A ceiling, not a plan fact. A room's record is one value in SQLite-backed Durable
+ * Object storage, and a value holds 2 MB. It was 100 while the record carried every
+ * brief (ADR 0001), and 1,000 once briefs had rows of their own (ADR 0018) and the
+ * record still carried every member who had ever sat in the room. Members are rows of
+ * their own now (ADR 0019): the record names those in the room and keeps the counts, so
+ * storage no longer bounds the ceiling, and however many come and go the record keeps
+ * its size.
+ *
+ * What bounds it is the read. Every call still loads the members in the room, about
+ * 300 bytes each as members are, so 5,000 is about 1.5 MB a call, and about 7.5 MB with
+ * every field at its maximum in two-byte text. worker-tests/members-as-rows seats a full
+ * room at that maximum and refuses one more. Narrowing what each call reads is the next
+ * step, and the one that lifts this.
  */
-export const ROOM_MEMBER_CEILING = 100;
+export const ROOM_MEMBER_CEILING = 5000;
 
 /**
  * How many members this room holds. A `pair` room holds two because the preset

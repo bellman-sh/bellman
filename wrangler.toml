@@ -104,6 +104,12 @@ BELLMAN_BILLING = "on"
 #   npx wrangler secret put ANTHROPIC_API_KEY
 BELLMAN_HOSTED_SEAT = "off"
 
+# Who the seat is on for while BELLMAN_HOSTED_SEAT is off: user ids, comma-separated
+# (hostedSeatUsers in src/host.ts). Their hosted rooms start and wake; everyone else's
+# stay refused and quiet. Plans still apply, so a listed user needs one with a hosted
+# seat (max or team). A var like the switch, so who gets the seat is a reviewed commit.
+BELLMAN_HOSTED_SEAT_USERS = "u_github_8698"
+
 # Where the control panel is served from. Comma-separated; bare origins, no
 # trailing slash — the Origin header carries neither, and parsePanelOrigins
 # normalises an entry that does rather than letting it match nothing.
@@ -119,3 +125,5 @@ BELLMAN_PANEL_ORIGINS = "https://dash.bellman.sh"
 
 # BELLMAN_KEYS is a secret, never a var:
 #   npx wrangler secret put BELLMAN_KEYS
+# So is BELLMAN_OPERATORS, the user ids (u_…) that may release anyone's handle; unset, nobody may:
+#   npx wrangler secret put BELLMAN_OPERATORS

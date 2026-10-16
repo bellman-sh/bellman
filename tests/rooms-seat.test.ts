@@ -5,19 +5,24 @@
  */
 import { describe, it, expect } from "vitest";
 import { cutAtFor, cutFor, handlesOf } from "../src/rooms.js";
+import { MemoryStore } from "../src/store.js";
 import { member, session } from "./helpers/fixtures.js";
 
 const me = { userId: "u_me" };
 
 describe("handlesOf", () => {
-  it("returns every handle the identity holds, in roster order, and none for a stranger", () => {
+  it("returns every handle the identity has held, in join order, one that left included, and none for a stranger", async () => {
+    const store = new MemoryStore();
     const s = session({ members: [
       member({ memberId: "m_a", userId: "u_me" }),
       member({ memberId: "m_b", userId: "u_other" }),
       member({ memberId: "m_c", userId: "u_me" }),
     ] });
-    expect(handlesOf(s, me).map((m) => m.memberId)).toEqual(["m_a", "m_c"]);
-    expect(handlesOf(s, { userId: "u_nobody" })).toEqual([]);
+    await store.createSession(s);
+    // Gone from the session's roster (ADR 0019), and still this person's handle.
+    await store.updateMember(s.id, "m_a", { leftAt: 50 });
+    expect((await handlesOf(store, s, me)).map((m) => m.memberId)).toEqual(["m_a", "m_c"]);
+    expect(await handlesOf(store, s, { userId: "u_nobody" })).toEqual([]);
   });
 });
 

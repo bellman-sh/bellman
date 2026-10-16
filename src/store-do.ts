@@ -1,20 +1,26 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { SWEEP_RPC_BUDGET } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  AuditEntry, EventType, Member, PendingConnect, PlanGrant, SavedPreset, Session, SessionEvent, SurfaceRow,
+  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
+  SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
+  AppendExtras, BellmanStore, DepartedMembers, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
   SeatOutcome,
 } from "./store.js";
 import {
-  ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
-  decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
-  isReplyToHost, markRemoved, noteAppend, rosterParties, seatVictims, stampSeen,
+  ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
+  decideBlobCharge, decideHostCharge, departures, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
+  stampSeen,
 } from "./store.js";
+import {
+  BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
+  putRows, seatRows, seated, userOfKey, userPrefix, USER_PREFIX, type RowReader,
+} from "./member-rows.js";
 import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -42,17 +48,21 @@ import { presetInNewWords } from "./presets.js";
 /**
  * Durable Objects implementation of BellmanStore.
  *
- * Topology — three classes, each matching a real scope in the data:
+ * Topology — the three classes in this file, of the five Durable Object classes
+ * (AuthDO is in src/oauth/store.ts, HostDO in src/host-do.ts), each matching a
+ * real scope in the data:
  *
- *   SessionDO   one per session. Holds the session record, its events, and the
- *               live long-poll waiters. Every request for a session routes to
- *               the same instance, which is what makes an in-memory waiter list
- *               correct here and what gives read-then-register its atomicity.
- *   RegistryDO  singleton. The join-code index, pending connect tokens, and
- *               per-user monthly create counts — the three lookups that cannot
- *               live inside a session because they are how you FIND one.
+ *   SessionDO   one per room. Holds the session record, its events, its surface
+ *               rows and outbox, the live long-poll waiters and the room's
+ *               sockets. Every request for a room routes to the same instance,
+ *               which is what makes an in-memory waiter list correct here and
+ *               what gives read-then-register its atomicity.
+ *   RegistryDO  singleton. What resolves without a room in hand: join codes,
+ *               pending connect tokens, plan grants, create counts, the creator,
+ *               joined-rooms and org-rooms indexes, saved presets and hosted-room
+ *               slots.
  *   AuditDO     one per org, so an org's audit stream is physically its own
- *               object. A cross-org session writes to both, and neither org's
+ *               object. A cross-org room writes to each, and neither org's
  *               DO is reachable from the other.
  *
  * On sweep(): MemoryStore scans every session on a timer. There is no cheap
@@ -66,6 +76,15 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/**
+ * `rows` with the `session` draft it may carry written as the record and the member rows that
+ * draft owes (ADR 0019, D4): every write of the session goes through `memberRows`, and an append
+ * builds its draft in pieces (`extraRows`, the books in `#writeEvent`) before it is written.
+ */
+function asRows(read: StoredSession, rows: Record<string, unknown>): Record<string, unknown> {
+  const { session, ...rest } = rows;
+  return session === undefined ? rest : { ...rest, ...memberRows(read, session as StoredSession) };
+}
 /**
  * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
  * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
@@ -199,6 +218,10 @@ const auditIntent = (entry: AuditEntry): OutboxIntent => ({
  * carry, so the result names both the rows to put and the keys to delete.
  *
  * A replay is handed these extras without `surface`; `appendEventOnce` says why.
+ *
+ * The `session` it returns is a draft, the session as the append leaves it, and not a row: the
+ * caller writes it through `asRows`, which puts the record and the rows of the members it
+ * changed (ADR 0019), so a credit or a cut writes one member's row and not the room's.
  */
 async function extraRows(
   txn: DurableObjectTransaction,
@@ -242,11 +265,12 @@ async function extraRows(
  * abandoned with the alarm still to come. A row that is gone reads closed, which
  * is the answer an unknown room has always had.
  *
- * `attached` is what the object's sockets carry (`#attachedIds()`), because a
+ * `connected` is the members the object's sockets vouch for (`#connected`), because a
  * socket vouching for an active member is the one thing that keeps a room past
- * its window open. The rule is `isAbandoned`'s, shared with `#closeIfAbandoned`
- * and both stores' sweeps, so a room reads closed here exactly when the alarm
- * would close it.
+ * its window open. The caller reads it, since a socket can name a member who has
+ * left, and that member's row is a storage read. The rule is `isAbandoned`'s, shared
+ * with `#closeIfAbandoned` and both stores' sweeps, so a room reads closed here
+ * exactly when the alarm would close it.
  *
  * Every read that refuses a closed room goes through here, so the rule and the
  * refusals cannot drift apart. `membersOf` authorizes a watch with it and `fetch`
@@ -254,8 +278,8 @@ async function extraRows(
  * was missing. With no recheck, a close landing between the two calls left a socket
  * on a closed room and nothing to close it.
  */
-const readsClosed = (s: StoredSession | undefined, now: number, attached: Iterable<string>): boolean =>
-  !s || s.closed || isAbandoned(s, now, connectedAmong(s.members, attached));
+const readsClosed = (s: StoredSession | undefined, now: number, connected: ReadonlySet<string>): boolean =>
+  !s || s.closed || isAbandoned(s, now, connected);
 
 // ---------------------------------------------------------------------------
 // SessionDO — one per Bellman session
@@ -360,6 +384,29 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   constructor(ctx: DurableObjectState, env: BellmanEnv) {
     super(ctx, env);
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+    // Before any request or alarm reaches the room: `blockConcurrencyWhile` holds every
+    // other event until the move has committed, so nothing reads an older record's members
+    // from the record (ADR 0019, D5). A move that throws resets the object, and the next
+    // event constructs it again and tries again.
+    void this.ctx.blockConcurrencyWhile(() => this.#moveMembersToRows());
+  }
+
+  /**
+   * The move of an older room's members out of its record and into rows (ADR 0019, D5), in
+   * one transaction: every member to a row, numbered in join order, each label's public
+   * number, each person's index row, and any brief still inline to its own (`legacyRows`).
+   * A record written since holds no members and costs this one read; a room that is not
+   * there, or a record the gate reads as gone, is left as it is.
+   *
+   * `#private`: it rewrites the room, and a Durable Object answers RPC for every method on
+   * its class.
+   */
+  async #moveMembersToRows(): Promise<void> {
+    const rows = legacyRows(await this.ctx.storage.get("session"));
+    if (rows === null) return;
+    await this.ctx.storage.transaction(async (txn) => {
+      await putRows(txn, rows);
+    });
   }
 
   /**
@@ -383,8 +430,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * storage and nothing slower.
    * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
    *
-   * Not every mutator has been converted. updateMember, closeSession and freezeSession
-   * still read and then put. They are unconverted, not exempt: the input gate covers
+   * Not every mutator has been converted. updateMember and the two stamps (a socket's
+   * close and the abandonment check's) still read and then put. They are unconverted, not exempt: the input gate covers
    * them in production, since every await between their read and their write is
    * storage, and the transaction is the stronger form. The appends were converted
    * after the local test pool lost writes in them (see appendEventOnce).
@@ -406,11 +453,52 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The exposure is redundant either way — `getSession` returns this record over
    * RPC already — which is why #126 called the family tidying and not a
    * vulnerability.
+   *
+   * **The members it hands back are the ones in the room now** (ADR 0019, D3): the
+   * record keeps their ids in `present` and each is a row of its own (`mb:`), read
+   * through the same `from`, so a transaction's read of the room is one unit with its
+   * members. A member who has left is not read here; the member reads reach one.
+   * Every write of the session goes back through `memberRows`, which writes the record
+   * and the rows of the members the write changed. A record that still holds its
+   * members inline is refused rather than read: the constructor moves them to rows
+   * before any event reaches the object, so one here means that move did not run, and
+   * reading on would write the room back without the members who had left.
    */
-  private async stored(
-    from: { get<T>(key: string): Promise<T | undefined> } = this.ctx.storage
-  ): Promise<StoredSession | undefined> {
-    return hydrateStoredSession(await from.get("session"));
+  private async stored(from: RowReader = this.ctx.storage): Promise<StoredSession | undefined> {
+    const raw = await from.get<{ present?: unknown }>("session");
+    const s = hydrateStoredSession(raw);
+    if (!s) return undefined;
+    const present = raw!.present;
+    if (!Array.isArray(present)) {
+      throw new Error(`room ${s.id}: its record still holds its members, which the constructor moves to rows`);
+    }
+    return { ...s, members: await loadPresent(from, present as string[]) };
+  }
+
+  /**
+   * These members, in the room or gone from it: the ones `s` holds, and the rest read by
+   * id from their rows. An id the room never seated is left out. Read through `from`, so
+   * a caller inside a transaction reads them in it.
+   */
+  async #membersById(s: StoredSession, ids: Iterable<string>, from: RowReader = this.ctx.storage): Promise<Member[]> {
+    const present = new Map(s.members.map((m) => [m.memberId, m]));
+    const wanted = [...new Set(ids)];
+    const gone = wanted.filter((id) => !present.has(id));
+    const rows = gone.length > 0 ? await getRows<Member>(from, gone.map(memberKey)) : new Map<string, Member>();
+    return wanted.flatMap((id) => present.get(id) ?? rows.get(memberKey(id)) ?? []);
+  }
+
+  /**
+   * The members of this room that a live socket vouches for (`connectedAmong`), from
+   * the sockets as they are when this is called. A socket names the members its
+   * identity held when it was accepted, which can include one who has since left, and
+   * that member's row is what says whose socket it is, so those rows are read; every
+   * other input is synchronous.
+   */
+  async #connected(s: StoredSession, from: RowReader = this.ctx.storage): Promise<ReadonlySet<string>> {
+    const attached = this.#attachedIds();
+    // The room's members and the ones the sockets name: a member named twice counts once.
+    return connectedAmong([...s.members, ...await this.#membersById(s, attached, from)], attached);
   }
 
   /**
@@ -490,9 +578,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const base = (extra.session as StoredSession | undefined) ?? s;
     const books = noteAppend(base, e);
     const kept = books === base ? base : { ...base, ...books };
-    const rows = books === base ? extra : { ...extra, session: kept };
-    await txn.put<unknown>({
-      [eventKey(e.cursor)]: e, cursor: e.cursor, ...rows,
+    // The session as this write leaves it, as the record and the member rows it owes (ADR 0019).
+    await putRows(txn, {
+      [eventKey(e.cursor)]: e, cursor: e.cursor, ...asRows(s, { ...extra, session: kept === s ? undefined : kept }),
     });
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
@@ -500,20 +588,28 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return kept !== s && bringsForward(s, kept, e.at);
   }
 
-  async createSession(s: Session): Promise<void> {
-    const { events, ...rest } = s;
+  async createSession(s: NewSession): Promise<void> {
+    const { events, members: arriving, ...others } = s;
+    // Each member a row of its own, numbered in the order given with the creator first, and
+    // each brief a row beside it (ADR 0018, ADR 0019). `creatorOf` refuses a room with nobody
+    // to seat before anything is written.
+    const seat = seatInOrder(arriving, { memberSeq: 0, labelSeq: 0 });
+    const room: StoredSession = {
+      ...others, members: seat.members, creator: creatorOf(seat.members[0]), orgs: orgsOnRoster(seat),
+      memberSeq: seat.memberSeq, labelSeq: seat.labelSeq,
+    };
     // Session, seed events, cursor and the registrations its join codes owe land
     // together. Separately committed, an interruption could leave a session with no
     // events, or events with a cursor of zero, or a session whose code nothing can
     // resolve — and the alarm is what sweeps it, so a session that half-exists
     // would also never be cleaned up.
-    const seeded: Record<string, unknown> = { session: rest, cursor: 0 };
+    const seeded: Record<string, unknown> = { ...memberRows(undefined, room), ...seatRows(seat), cursor: 0 };
     for (const e of events) seeded[eventKey(e.cursor)] = e;
     if (events.length > 0) seeded.cursor = events[events.length - 1].cursor;
-    const intents = Object.values(rest.joinCodes).map((rec) => putCodeIntent(rec.code, s.id));
+    const intents = Object.values(room.joinCodes).map((rec) => putCodeIntent(rec.code, s.id));
     await this.ctx.storage.transaction(async (txn) => {
       const rows = await this.driver.enqueue(txn, intents);
-      await txn.put<unknown>({ ...seeded, ...rows });
+      await putRows(txn, { ...seeded, ...rows });
     });
     if (intents.length > 0) {
       // enqueue armed the alarm for the queue, inside the transaction. The
@@ -572,7 +668,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * Which members this user owns here, and whether the room is closed.
    *
    * The authorization check for a /ws upgrade. Deliberately mirrors
-   * findMember (src/server.ts), leftAt and all: bellman_sync serves a
+   * findMember (src/rooms.ts), leftAt and all: bellman_sync serves a
    * member who has left, and two delivery paths that disagree about who may
    * watch is exactly the drift the spec names as its standing risk.
    *
@@ -606,14 +702,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    */
   async membersOf(userId: string): Promise<{ memberIds: string[]; closed: boolean }> {
     const s = await this.stored();
+    if (!s) return { memberIds: [], closed: true };
     return {
       // `isRemovedMember` and not `isActiveMember`: see above. An identity that
       // holds one removed handle and one live one keeps its socket, on the live
       // one's entitlement (D5), which falls out of this filter without a rule.
-      memberIds: s
-        ? s.members.filter((m) => m.userId === userId && !isRemovedMember(m)).map((m) => m.memberId)
-        : [],
-      closed: readsClosed(s, Date.now(), this.#attachedIds()),
+      // Every handle the person has held, read from their index rows, since one
+      // who left is not on the record (ADR 0019).
+      memberIds: (await this.membersOfUser(userId)).filter((m) => !isRemovedMember(m)).map((m) => m.memberId),
+      closed: readsClosed(s, Date.now(), await this.#connected(s)),
     };
   }
 
@@ -663,7 +760,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async connectedMembers(): Promise<string[]> {
     const s = await this.stored();
     if (!s) return [];
-    return [...connectedAmong(s.members, this.#attachedIds())];
+    return [...await this.#connected(s)];
   }
 
   /**
@@ -730,8 +827,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * The 16 KB is reachable only by churn. What goes in is the ids one identity
    * owns in this room, departed members included, except one a creator removed
    * (#113): membersOf returns the others on purpose, so /ws and bellman_sync
-   * agree about who may watch the open feed, and nothing removes a member from
-   * the roster. The list grows with seatings, not with the room's capacity
+   * agree about who may watch the open feed, and nothing deletes a member's
+   * row (ADR 0019). The list grows with seatings, not with the room's capacity
    * (`capacityOf`), so it takes over a thousand seatings by one identity in one
    * room's life. That is churn, not a breach of the capacity.
    */
@@ -770,15 +867,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     //
     // `!s` is spelled out although `readsClosed` already answers true for a
     // missing record: it is not a type predicate, so the compiler cannot narrow
-    // `s` through it, and the cut below reads `s.members`. Naming the case here
+    // `s` through it, and the cut below reads `s`. Naming the case here
     // is honest about why, where a non-null assertion would hide that the two
     // guards agree. Change `readsClosed` to a predicate and this collapses.
-    if (!s || readsClosed(s, Date.now(), this.#attachedIds())) {
+    if (!s || readsClosed(s, Date.now(), await this.#connected(s))) {
       return new Response("This room is closed", { status: 409 });
     }
 
-    // Then the cut: the roster this request was built against, re-read.
-    const cut = new Set<string>(s.members.filter(isRemovedMember).map((m) => m.memberId));
+    // Then the cut: the roster this request was built against, re-read. A removed
+    // member is not on the record (ADR 0019), so the ids asked for are read by row,
+    // which is storage like every other await here.
+    const cut = new Set<string>(
+      (await this.#membersById(s, asked)).filter(isRemovedMember).map((m) => m.memberId),
+    );
     const memberIds = asked.filter((id) => !cut.has(id));
     if (asked.length > 0 && memberIds.length === 0) {
       return new Response("Forbidden", { status: 403 });
@@ -878,10 +979,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * window. The instant it closes the socket stops vouching — correctly, since
    * reading the live list is the whole design — and the member falls back to
    * `lastSeenAt`. For a member fed by this socket or by the local bus that field
-   * has not moved since it joined, because nothing it does calls `bellman_sync`
-   * or `bellman_send`, the only two things that touch it (src/server.ts). So it
-   * read stale the moment its socket dropped, with its window already spent, and
-   * the next contested `bellman_confirm` took its seat.
+   * has not moved since it joined, because nothing it does runs `touchMember`
+   * (src/rooms.ts): `bellman_sync` and `bellman_send` run it, and so does
+   * `gateSeat`, for an invite, a revoke or a surface write. So it read stale the
+   * moment its socket dropped, with its window already spent, and the next
+   * contested `bellman_confirm` took its seat.
    *
    * Here rather than on the upgrade, which was the other candidate. This covers a
    * socket that has been open for hours, where a stamp at connect buys one window
@@ -900,9 +1002,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * closed room's record is over, and a freeze is meant to cost nobody their
    * place so nobody needs defending during one.
    *
-   * One put for every member, not one each: this is a read-modify-write of the
-   * whole session blob, and a socket serving several members would otherwise pay
-   * it several times. No reArm, for `updateMember`'s reason — `lastSeenAt`
+   * One put for every member, not one each, and of their rows alone (ADR 0019): a
+   * socket serving several members would otherwise pay a read of the room for each.
+   * No reArm, for `updateMember`'s reason — `lastSeenAt`
    * reaches `nextTickAt` not at all, and it moves `abandonedAt` only later, so the
    * armed alarm is early at worst and the reArm() that ends `alarm()` corrects it.
    *
@@ -918,13 +1020,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!Array.isArray(ids) || ids.length === 0) return;
       const s = await this.stored();
       if (!s || s.closed || s.frozenAt !== null) return;
-      const stamped = connectedAmong(s.members, ids);
+      // The ids can name a member who has left, whose row says whose socket it was.
+      const stamped = connectedAmong([...s.members, ...await this.#membersById(s, ids)], ids);
       if (stamped.size === 0) return;
       const now = Date.now();
-      await this.ctx.storage.put("session", {
-        ...s,
-        members: stampSeen(s.members, now, stamped),
-      });
+      // The stamped members' rows and nothing else (ADR 0019).
+      await putRows(this.ctx.storage, memberRows(s, { ...s, members: stampSeen(s.members, now, stamped) }));
     } catch (err) {
       console.error("socket close stamp failed:", err);
     }
@@ -958,7 +1059,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s || !rec) return false;
       const { [role]: _retired, ...rest } = s.joinCodes;
       const rows = await this.driver.enqueue(txn, [dropCodeIntent(rec.code)]);
-      await txn.put<unknown>({ session: { ...s, joinCodes: rest }, ...rows });
+      await putRows(txn, { ...memberRows(s, { ...s, joinCodes: rest }), ...rows });
       return true;
     });
     if (consumed) await this.driver.deliverNow();
@@ -972,7 +1073,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const codes = Object.values(s.joinCodes).map((rec) => rec.code);
       if (codes.length === 0) return false;
       const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
-      await txn.put<unknown>({ session: { ...s, joinCodes: {} }, ...rows });
+      await putRows(txn, { ...memberRows(s, { ...s, joinCodes: {} }), ...rows });
       return true;
     });
     if (cleared) await this.driver.deliverNow();
@@ -989,13 +1090,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * lists it.
    */
   async setJoinCode(
-    role: string, code: string, expiresAt: number,
+    role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     const outcome = await this.ctx.storage.transaction<SetJoinCode>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "frozen" };
       if (s.frozenAt !== null) return { ok: false, reason: "frozen" };
+      // A permanent code only for a public room, decided in this transaction for the
+      // reason below: unpublishSession retires them in its own, so a room made private
+      // after the caller read it public would otherwise keep this one (ADR 0020).
+      if (expiresAt === null && !isPublic(s)) return { ok: false, reason: "not_public" };
 
       // The `revoke` authority, decided inside the transaction that writes.
       // Deciding it from a record read earlier let two callers holding `invite`
@@ -1003,7 +1108,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // found in review). Live and not merely present: an expired record shuts
       // no door, so minting over it is opening rather than replacing.
       const existing = s.joinCodes[role];
-      const live = existing !== undefined && guard.now <= existing.expiresAt;
+      const live = existing !== undefined && codeIsLive(existing, guard.now);
       if (live && !guard.replaceLive) return { ok: false, reason: "live_code_exists" };
 
       const previous = existing?.code;
@@ -1011,8 +1116,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...(previous ? [dropCodeIntent(previous)] : []),
         putCodeIntent(code, s.id),
       ]);
-      await txn.put<unknown>({
-        session: { ...s, joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } } },
+      await putRows(txn, {
+        ...memberRows(s, { ...s, joinCodes: { ...s.joinCodes, [role]: { code, expiresAt } } }),
         ...rows,
       });
       return { ok: true, replacedLive: live };
@@ -1057,13 +1162,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * `createSession`'s "only when nothing was queued" guard does NOT transfer here
    * — see seatMember.
    */
-  async addMember(member: Member): Promise<boolean> {
+  async addMember(member: ArrivingMember): Promise<boolean> {
     const added = await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return false;
       if (s.frozenAt !== null) return false;
       if (s.closed) return false;
-      await txn.put("session", { ...s, members: [...s.members, member] });
+      // The member's row, its index row, its brief's row, and its label's number when the
+      // room has not numbered that label before (ADR 0018, ADR 0019).
+      const { room, rows } = seated(s, s.members, member, await txn.get<number>(labelKey(member.label)));
+      await putRows(txn, { ...memberRows(s, room), ...rows });
       return true;
     });
     if (added) await this.driver.reArm();
@@ -1113,7 +1221,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * due times reArm() sees are the abandonment time, the tick, and a marker some
    * earlier call left behind.
    */
-  async seatMember(member: Member, staleBefore: number, now: number): Promise<SeatOutcome> {
+  async seatMember(member: ArrivingMember, staleBefore: number, now: number): Promise<SeatOutcome> {
     const outcome = await this.ctx.storage.transaction<SeatOutcome>(async (txn) => {
       const no = { reclaimed: [], codesCleared: false };
       const s = await this.stored(txn);
@@ -1121,12 +1229,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.closed) return { refused: "closed" as const, ...no };
       if (s.frozenAt !== null) return { refused: "frozen" as const, ...no };
 
-      // The sockets as they are now, read here and not passed in. It is
-      // synchronous and inside the transaction, so the decision is made against
+      // The sockets as they are now, read here and not passed in. They are read
+      // inside the transaction, and the one await in it is a storage read of the
+      // rows of members they name who have left, so the decision is made against
       // the sockets that exist while this holds the object. A set fetched by the
       // caller first could not promise that: a member can connect in the gap, and
       // reclaiming it is final.
-      const connected = connectedAmong(s.members, this.#attachedIds());
+      const connected = await this.#connected(s, txn);
       const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
       if (victims === null) return { refused: "full" as const, ...no };
 
@@ -1138,9 +1247,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         reclaimed.push(next);
         return next;
       });
-      const seated = [...members, member];
+      // The member after the seats reclaimed, with its rows (ADR 0018, ADR 0019).
+      const { room, rows: seatingRows } = seated(s, members, member, await txn.get<number>(labelKey(member.label)));
 
-      // A full room has no seat for ANY role, so every code goes — in this
+      // A full room has no seat for ANY role, so every temporary code goes — in this
       // transaction, not in a second call after it committed (#116). The
       // registry drops ride the same outbox clearJoinCodes uses.
       //
@@ -1150,7 +1260,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // reclaimable, so a room with one still has a door worth leaving open.
       //
       // Cleared by presence, where removeMember retires only a code that is still live
-      // (`req.now <= rec.expiresAt`). The two ask different questions. A removal
+      // (`codeIsLive(rec, req.now)`). The two ask different questions. A removal
       // announces a door shutting, so it must not announce one that had already shut,
       // and an expired record is not a door. A seating announces nothing: it tidies
       // rows, and a full room needs no code at all, so an expired record is dropped
@@ -1158,17 +1268,23 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // while holding only one therefore reports `codesCleared: true`, which answers
       // this question and does not contradict the other. The contract suite pins this
       // side, and its expired-code cases for removeMember pin the other.
-      const full = seatVictims(seated, capacityOf(s.manifest), staleBefore, connected) === null;
-      const codes = full ? Object.values(s.joinCodes).map((rec) => rec.code) : [];
-      const rows = await this.driver.enqueue(txn, codes.map((code) => dropCodeIntent(code)));
+      //
+      // A permanent code stays (ADR 0020): the room refuses joiners while it is full,
+      // and the link on a public page works again when a seat frees.
+      const full = seatVictims(room.members, capacityOf(s.manifest), staleBefore, connected) === null;
+      const retired = full ? Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt !== null) : [];
+      const rows = await this.driver.enqueue(txn, retired.map(([, rec]) => dropCodeIntent(rec.code)));
+      const joinCodes = { ...s.joinCodes };
+      for (const [role] of retired) delete joinCodes[role];
 
-      await txn.put<unknown>({
-        session: { ...s, members: seated, joinCodes: full ? {} : s.joinCodes },
+      await putRows(txn, {
+        ...memberRows(s, { ...room, joinCodes }),
+        ...seatingRows,
         ...rows,
       });
       // What the call did, and not only whether the room filled: a room that fills
       // with no code left in it queued nothing, so there is nothing to deliver.
-      return { refused: null, reclaimed, codesCleared: codes.length > 0 };
+      return { refused: null, reclaimed, codesCleared: retired.length > 0 };
     });
     // After the commit, never inside the closure: everything awaited in there holds
     // every other call to this object until it commits. Delivery first, then the
@@ -1200,7 +1316,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (req.byUserId !== undefined && s.createdBy !== req.byUserId) {
         return { refused: "forbidden" as const, ...no };
       }
-      const m = s.members.find((mm) => mm.memberId === memberId);
+      // A member who has left is a row of its own and not on the record (ADR 0019), and
+      // still answers here: the idempotent path below is for exactly that member.
+      const m = s.members.find((mm) => mm.memberId === memberId) ?? await txn.get<Member>(memberKey(memberId));
       if (!m) return { refused: "not_found" as const, ...no };
       // One value for "there is a live door to shut". Nothing prunes an expired
       // record, so a code's presence in joinCodes is not the same as a door
@@ -1208,7 +1326,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // happened. Decided before the member's state is looked at, because a live
       // door is owed to one who is already out as much as to one who is not.
       const rec = req.retire ? s.joinCodes[req.retire.role] : undefined;
-      const retiring = req.retire && rec && req.now <= rec.expiresAt
+      const retiring = req.retire && rec && codeIsLive(rec, req.now)
         ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
         : null;
 
@@ -1282,8 +1400,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         (draft, e) => ({ ...draft, ...noteAppend(draft, e) }),
         { ...s, members, joinCodes },
       );
-      await txn.put<unknown>({
-        session: kept,
+      await putRows(txn, {
+        ...memberRows(s, kept),
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
         // The cursor row ends at the LAST event written, or the next append takes
         // that event's cursor and overwrites it (#120).
@@ -1313,22 +1431,90 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return result;
   }
 
-  // updateMember, closeSession and freezeSession below still read and then put.
-  // Unconverted, not exempt: see stored().
+  /**
+   * The briefs of these members, from their rows (ADR 0018). An older room's inline briefs
+   * moved to rows with its members (ADR 0019, D5), so the rows are all there is.
+   */
+  async getBriefs(memberIds: string[]): Promise<Record<string, Brief>> {
+    const out: Record<string, Brief> = {};
+    for (const [key, brief] of await getRows<Brief>(this.ctx.storage, memberIds.map(briefKey))) {
+      out[key.slice(BRIEF_PREFIX.length)] = brief;
+    }
+    return out;
+  }
+
+  /** `BellmanStore.getMember`, for this room: the member's row, in the room or gone from it. */
+  async getMember(memberId: string): Promise<Member | undefined> {
+    return this.ctx.storage.get<Member>(memberKey(memberId));
+  }
+
+  /** `BellmanStore.getMembers`, for this room: their rows, in join order. */
+  async getMembers(memberIds: string[]): Promise<Member[]> {
+    const rows = await getRows<Member>(this.ctx.storage, [...new Set(memberIds)].map(memberKey));
+    return [...rows.values()].sort((a, b) => a.seq - b.seq);
+  }
+
+  /** `BellmanStore.membersOfUser`, for this room: the rows the person's index names, in join order. */
+  async membersOfUser(userId: string): Promise<Member[]> {
+    const ids = await this.ctx.storage.list<string>({ prefix: userPrefix(userId) });
+    return this.getMembers([...ids.values()]);
+  }
+
+  /**
+   * `BellmanStore.departedMembers`, for this room, by `departures`, the rule MemoryStore
+   * answers with. It lists every member's row to find those who have left.
+   */
+  async departedMembers(opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers> {
+    // ponytail: lists every member row; an index on leftAt, when a room's departures outgrow one list.
+    const rows = await this.ctx.storage.list<Member>({ prefix: MEMBER_PREFIX });
+    return departures([...rows.values()], opts);
+  }
+
+  /**
+   * Every member the room has seated, in it or gone from it, from their rows: the roster whose
+   * orgs a purge's and a delete's audit rows name as their parties (audit trail spec, D2), as
+   * MemoryStore's record holds it. The record keeps only the members in the room (ADR 0019).
+   * Read through `from`, so a caller inside a transaction reads them in it.
+   */
+  async #everyone(
+    from: { list<T>(options: { prefix: string }): Promise<Map<string, T>> } = this.ctx.storage,
+  ): Promise<Member[]> {
+    // ponytail: lists every member row, as departedMembers does; once per delete and per purge.
+    return [...(await from.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+  }
+
+  /** `BellmanStore.publicNumbers`, for this room: each label's number, from its `lb:` row. */
+  async publicNumbers(labels: string[]): Promise<Record<string, number>> {
+    const unique = [...new Set(labels)];
+    const rows = await getRows<number>(this.ctx.storage, unique.map(labelKey));
+    return Object.fromEntries(unique.flatMap((label) => {
+      const n = rows.get(labelKey(label));
+      return n === undefined ? [] : [[label, n]];
+    }));
+  }
+
+  // updateMember still reads and then puts. Unconverted, not exempt: see stored().
   async updateMember(memberId: string, patch: MemberPatch): Promise<void> {
     const s = await this.stored();
     if (!s) return;
-    const members = s.members.map((m) => {
-      if (m.memberId !== memberId) return m;
-      const next = { ...m };
-      if (patch.brief !== undefined) next.brief = patch.brief;
-      if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
-      if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
-      if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
-      if (patch.lastReportAt !== undefined) next.lastReportAt = patch.lastReportAt;
-      return next;
+    // A member who has left is read by its row, so a patch reaches it as it reaches one
+    // still in the room (ADR 0019). An unknown member is a no-op.
+    const was = s.members.find((m) => m.memberId === memberId) ?? await this.ctx.storage.get<Member>(memberKey(memberId));
+    if (!was) return;
+    const next = { ...was };
+    // The agent to the member's row and the brief to its own (ADR 0018).
+    if (patch.brief !== undefined) next.agent = patch.brief.agent;
+    if (patch.capabilities !== undefined) next.capabilities = patch.capabilities;
+    if (patch.leftAt !== undefined) next.leftAt = patch.leftAt;
+    if (patch.lastSeenAt !== undefined) next.lastSeenAt = patch.lastSeenAt;
+    if (patch.lastReportAt !== undefined) next.lastReportAt = patch.lastReportAt;
+    const members = s.members.includes(was) ? s.members.map((m) => (m === was ? next : m)) : [...s.members, next];
+    // One put of every key, so the member's agent and the brief's row cannot disagree. A
+    // stamp writes the member's row and not the record; a leave writes both.
+    await putRows(this.ctx.storage, {
+      ...memberRows(s, { ...s, members }),
+      ...(patch.brief !== undefined ? { [briefKey(memberId)]: patch.brief } : {}),
     });
-    await this.ctx.storage.put("session", { ...s, members });
     // addMember's rule, and `leftAt` is the only field in MemberPatch that can
     // flip nextTickAt off null: clearing it returns a departed member to the
     // roster. Nothing calls it that way today — every caller sets a time — but
@@ -1360,7 +1546,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const rows = released ? await this.driver.enqueue(txn, intents) : {};
       // `closedAt` once (#65): the window starts at the first close, and a second one
       // does not move it.
-      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
+      await putRows(txn, { ...memberRows(s, { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }), ...rows });
     });
     // The purge is due from the close, and the alarm may be pointing at an abandonment
     // time months off: nothing else re-arms it for a room with no code to retire and
@@ -1398,7 +1584,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const intents = hostedReleaseIntents(s);
       released = intents.length > 0;
       const rows = released ? await this.driver.enqueue(txn, intents) : {};
-      await txn.put<unknown>({ session: { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }, ...rows });
+      await putRows(txn, { ...memberRows(s, { ...s, closed: true, closedAt: s.closedAt ?? Date.now() }), ...rows });
       return true;
     });
     // After the commit, never inside the closure (see stored()), and for closeSession's reason.
@@ -1431,10 +1617,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s.closed) return { ok: false, reason: "open" };
       if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
+      // Every org that sat in the room, those of members who have left included (ADR 0019), and for
+      // the rows' parties the whole roster, which only the member rows still hold (`#everyone`).
+      const parties = rosterParties({ members: await this.#everyone(txn) });
       const rows = await this.driver.enqueue(
-        txn, orgsOnRoster(s).map((orgId) => auditIntent(roomDeletedEntry(s, orgId, rosterParties(s), by, now))),
+        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, parties, by, now))),
       );
-      await txn.put<unknown>({ session: { ...s, purgeAt: at }, ...rows });
+      await putRows(txn, { ...memberRows(s, { ...s, purgeAt: at }), ...rows });
       return { ok: true, purgeAt: at };
     });
     if (outcome.ok) {
@@ -1447,12 +1636,30 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   /**
    * `BellmanStore.unpublishSession`, for this room. One transaction, so two requests cannot both
    * find the room public: the first time is the one kept. An empty object is left empty.
+   *
+   * The room's permanent codes go in the same transaction (ADR 0020), their registry drops queued
+   * by the `enqueue` `clearJoinCodes` uses and delivered once it has committed.
    */
   async unpublishSession(at: number): Promise<void> {
+    const dropped = await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s || s.unpublishedAt != null) return false;
+      const permanent = Object.entries(s.joinCodes).filter(([, rec]) => rec.expiresAt === null);
+      const rows = await this.driver.enqueue(txn, permanent.map(([, rec]) => dropCodeIntent(rec.code)));
+      const joinCodes = { ...s.joinCodes };
+      for (const [role] of permanent) delete joinCodes[role];
+      await putRows(txn, { ...memberRows(s, { ...s, unpublishedAt: at, joinCodes }), ...rows });
+      return permanent.length > 0;
+    });
+    if (dropped) await this.driver.deliverNow();
+  }
+
+  /** `BellmanStore.setPublicName`, for this room (public names spec, D5). An empty object is left empty. */
+  async setPublicName(name: string): Promise<void> {
     await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
-      if (!s || s.unpublishedAt != null) return;
-      await txn.put("session", { ...s, unpublishedAt: at });
+      if (!s) return;
+      await putRows(txn, memberRows(s, { ...s, publicName: name }));
     });
   }
 
@@ -1514,12 +1721,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * transition.
    */
   async freezeSession(frozenAt: number | null): Promise<void> {
-    const s = await this.stored();
-    if (!s) return;
-    const thawing = frozenAt === null && s.frozenAt !== null;
-    const now = Date.now();
-    const members = thawing ? stampSeen(clearSilence(s, now), now) : s.members;
-    await this.ctx.storage.put("session", { ...s, frozenAt, members, thawedAt: thawing ? now : s.thawedAt });
+    // One transaction: a thaw writes a row for every member in the room as well as the
+    // record (ADR 0019), more keys than one put takes, and they land together or not at all.
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      const thawing = frozenAt === null && s.frozenAt !== null;
+      const now = Date.now();
+      const members = thawing ? stampSeen(clearSilence(s, now), now) : s.members;
+      await putRows(txn, memberRows(s, { ...s, frozenAt, members, thawedAt: thawing ? now : s.thawedAt }));
+    });
     await this.driver.reArm();
   }
 
@@ -1722,8 +1933,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // carries a higher cursor. A removal leaves no tombstone, so re-applying
         // the original write would read no row to compare against and could only
         // put back what was removed. It also means a replay deletes nothing.
-        const owed = await extraRows(txn, s, original, { ...extras, surface: undefined });
-        if (Object.keys(owed.puts).length > 0) await txn.put<unknown>(owed.puts);
+        const owed = asRows(s, (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts);
+        if (Object.keys(owed).length > 0) await putRows(txn, owed);
         return { outcome: "replayed", event: original };
       }
 
@@ -1769,7 +1980,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.transaction(async (txn) => {
       const s = await this.stored(txn);
       if (!s || s.hostUnits.month >= month) return;
-      await txn.put<unknown>({ session: { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } } });
+      await putRows(txn, memberRows(s, { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } }));
     });
   }
 
@@ -1827,8 +2038,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return this.ctx.storage.transaction<BlobCharge>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "not_found", used: 0 };
-      const charge = decideBlobCharge(s, readsClosed(s, Date.now(), this.#attachedIds()), bytes);
-      if (charge.ok) await txn.put("session", { ...s, blobBytes: charge.used });
+      const charge = decideBlobCharge(s, readsClosed(s, Date.now(), await this.#connected(s, txn)), bytes);
+      if (charge.ok) await putRows(txn, memberRows(s, { ...s, blobBytes: charge.used }));
       return charge;
     });
   }
@@ -1974,8 +2185,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     try {
       const s = await this.stored();
       if (!s) return;
-      const cut = new Set(s.members.filter(isRemovedMember).map((m) => m.memberId));
-      const known = new Set(s.members.map((m) => m.memberId));
+      // The members the sockets name, read by row: a removed member has left, so it is
+      // not on the record (ADR 0019).
+      const named = await this.#membersById(s, this.#attachedIds());
+      const cut = new Set(named.filter(isRemovedMember).map((m) => m.memberId));
+      const known = new Set(named.map((m) => m.memberId));
       for (const ws of this.ctx.getWebSockets()) {
         // One socket must not starve the rest, for the reason #wake gives: a throw would
         // leave every later socket unclosed, and a socket that stays open is the open feed.
@@ -2220,12 +2434,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   async #closeIfAbandoned(s: StoredSession, now: number): Promise<void> {
     const due = abandonedAt(s);
     if (due === null || now <= due) return;
-    // The sockets as they are now, synchronous, so the decision and the write are
-    // made against the same set. Nothing but storage is awaited between the read
-    // that produced `s` and the put below, so the input gate holds across both.
-    const connected = connectedAmong(s.members, this.#attachedIds());
+    // The sockets as they are now, so the decision and the write are made against
+    // the same set. Nothing but storage is awaited between the read that produced
+    // `s` and the put below, so the input gate holds across both.
+    const connected = await this.#connected(s);
     if (!isAbandoned(s, now, connected)) {
-      await this.ctx.storage.put("session", { ...s, members: stampSeen(s.members, now, connected) });
+      // The stamped members' rows, in one transaction however many there are (ADR 0019).
+      const rows = memberRows(s, { ...s, members: stampSeen(s.members, now, connected) });
+      await this.ctx.storage.transaction(async (txn) => { await putRows(txn, rows); });
       return;
     }
     // The close clears the session's codes, so their rows leave the registry's index
@@ -2241,7 +2457,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const rows = await this.driver.enqueue(txn, intents);
       const expired: SessionEvent = {
         cursor: await this.nextCursor(txn),
-        type: "session_expired" as EventType,
+        type: "session_expired",
         fromMemberId: "system",
         fromUserId: "system",
         fromLabel: "bellman",
@@ -2277,7 +2493,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    *
    * - A **frozen** room gets ticks naming members silent who cannot report out
    *   of it, and a freeze must cost nobody their standing — the same rule that
-   *   keeps `reclaimStaleSeats` out of a frozen room.
+   *   keeps `seatMember` from reclaiming a seat in a frozen room.
    * - A **closed** room gets a tick nobody can answer, because every send into
    *   it is refused.
    * - An **abandoned** room gets the same, and it is reachable where the other
@@ -2314,7 +2530,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const s = await this.stored(txn);
       if (!s) return null;
       if (s.closed || s.frozenAt !== null) return null;
-      const connected = connectedAmong(s.members, this.#attachedIds());
+      const connected = await this.#connected(s, txn);
       if (isAbandoned(s, now, connected)) return null;
       if (s.manifest.heartbeatOnMs === null) return null;
 
@@ -2322,13 +2538,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const plan = tickPlan(s, now, connected);
       if (!plan.write) {
         // Nothing to ask, but the clock still moves. See the comment above.
-        await txn.put<unknown>({ session: { ...s, lastTickAt: now } });
+        await putRows(txn, memberRows(s, { ...s, lastTickAt: now }));
         return null;
       }
 
       const tick: SessionEvent = {
         cursor: await this.nextCursor(txn),
-        type: "heartbeat" as EventType,
+        type: "heartbeat",
         // The server is not a member and holds no role, so it needs no verb.
         fromMemberId: "system",
         fromUserId: "system",
@@ -2390,7 +2606,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const written = await this.ctx.storage.transaction<SessionEvent[]>(async (txn) => {
       const s = await this.stored(txn);
       if (!s) return [];
-      if (isAbandoned(s, now, connectedAmong(s.members, this.#attachedIds()))) return [];
+      if (isAbandoned(s, now, await this.#connected(s, txn))) return [];
 
       const cleared = clearedKeys(s, now);
       const due = dueFindings(s, now);
@@ -2404,7 +2620,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         raised[f.key] = { at: now, repeat: f.payload.repeat, since: f.payload.since };
         events.push({
           cursor: cursor++,
-          type: "housekeeping" as EventType,
+          type: "housekeeping",
           // The room speaks, not a member: no seat and no verb, as the tick has none.
           fromMemberId: "system",
           fromUserId: "system",
@@ -2418,7 +2634,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // the order of the puts inside the transaction does not matter. A forgetting with
       // nothing to say is a put of its own.
       const next: StoredSession = { ...s, raised };
-      if (events.length === 0) await txn.put<unknown>({ session: next });
+      if (events.length === 0) await putRows(txn, memberRows(s, next));
       for (const e of events) await this.#writeEvent(txn, s, e, { session: next });
       return events;
     });
@@ -2461,13 +2677,17 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await registry.dropCreatedIndex(s.createdBy, s.id);
     // The close gave the slot back already (I7); a purge makes sure, and the delete is idempotent.
     if (s.manifest.host !== null) await registry.releaseHostedRoom(s.createdBy, s.id);
-    for (const userId of new Set(s.members.map((m) => m.userId))) {
+    // Everyone who ever sat in the room, from the person index rows, since those who left
+    // are not on the record (ADR 0019); and every org, which the record keeps.
+    const handles = await this.ctx.storage.list({ prefix: USER_PREFIX });
+    for (const userId of new Set([...handles.keys()].map(userOfKey))) {
       await registry.dropMembershipIndex(userId, s.id);
     }
-    for (const orgId of orgsOnRoster(s)) await registry.dropOrgIndex(orgId, s.id);
-    for (const orgId of orgsOnRoster(s)) {
+    for (const orgId of s.orgs) await registry.dropOrgIndex(orgId, s.id);
+    const parties = rosterParties({ members: await this.#everyone() });
+    for (const orgId of s.orgs) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
-        .append(roomPurgedEntry(s, orgId, rosterParties(s), now), `purge:${s.id}:${orgId}`);
+        .append(roomPurgedEntry(s, orgId, parties, now), `purge:${s.id}:${orgId}`);
     }
     await this.driver.deliverNow();
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
@@ -2571,9 +2791,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.transaction(async (txn) => {
       const live = await this.stored(txn);
       if (!live || live.blobsSwept) return;
-      await txn.put("session", {
+      await putRows(txn, memberRows(live, {
         ...live, blobBytes: creditedBlobBytes(live.blobBytes ?? 0, credited), blobsSwept: true,
-      });
+      }));
     });
     return { removed: orphans.length, credited };
   }
@@ -2584,6 +2804,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 // ---------------------------------------------------------------------------
 
 /** One definition of "expired", so every path agrees on what a grant is. */
+/** One record per person, and the count beside them (#258). */
+const userKey = (userId: string): string => `us:${userId}`;
+const USER_COUNT = "us:count";
+
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
 
@@ -2608,6 +2832,28 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   async dropJoinCode(code: string): Promise<void> {
     await this.ctx.storage.delete(`jc:${code}`);
+  }
+
+  async lookupPublicName(name: string): Promise<PublicNameEntry | undefined> {
+    return this.ctx.storage.get<PublicNameEntry>(`pn:${name}`);
+  }
+
+  /** `BellmanStore.claimPublicName`, in one transaction (public names spec, D5). */
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.put(`pn:${name}`, entry);
+      return true;
+    });
+  }
+
+  /** `BellmanStore.releasePublicName`, in one transaction. */
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.delete(`pn:${name}`);
+      return true;
+    });
   }
 
   async putPendingConnect(p: PendingConnect): Promise<void> {
@@ -3170,6 +3416,115 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     if ((await this.getPreset(userId, name)) === undefined) return false;
     return this.ctx.storage.delete(`pr:${userId}:${name}`);
   }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(`uh:${userId}`);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(`hn:${handle}`);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const holder = await txn.get<string>(`hn:${handle}`);
+      if (holder !== undefined) return holder === userId ? "claimed" : "taken";
+      const old = await txn.get<string>(`uh:${userId}`);
+      if (old !== undefined) await txn.delete(`hn:${old}`);
+      await txn.put({ [`hn:${handle}`]: userId, [`uh:${userId}`]: handle });
+      return "claimed";
+    });
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    await this.ctx.storage.transaction((txn) => this.#release(txn, userId));
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const userId = await txn.get<string>(`hn:${handle}`);
+      if (userId !== undefined) await this.#release(txn, userId);
+      return userId;
+    });
+  }
+
+  /** A person's handle and every signature, inside the caller's transaction. */
+  async #release(txn: DurableObjectTransaction, userId: string): Promise<void> {
+    const handle = await txn.get<string>(`uh:${userId}`);
+    const signed = (await this.#signed(txn, userId)).map(([sessionId]) => `hs:${userId}:${sessionId}`);
+    const keys = [`uh:${userId}`, ...signed, ...(handle === undefined ? [] : [`hn:${handle}`])];
+    // A delete takes at most KEYS_PER_CALL keys.
+    for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const handle = await txn.get<string>(`uh:${userId}`);
+      if (handle !== undefined) await txn.put(`hs:${userId}:${sessionId}`, at);
+      return handle;
+    });
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`hs:${userId}:${sessionId}`);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return (await this.#signed(this.ctx.storage, userId))
+      .map(([sessionId, signedAt]) => ({ sessionId, signedAt }))
+      .sort((a, b) => b.signedAt - a.signedAt || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+  }
+
+  /**
+   * `hs:<userId>:<sessionId>` — the rooms a person signed (bylines spec D2), as `[sessionId, signedAt]`.
+   * The same shape as `pr:`, so the same collision: an operator-issued user id may hold a colon, and
+   * one person's prefix then covers the rows of someone whose id extends it. A session id is
+   * `qs_<uuid>` and holds none, so a key with a colon past this person's prefix is not theirs. The read
+   * and the release both list through here, so they agree on whose rows these are.
+   */
+  async #signed(
+    storage: { list<T>(options: { prefix: string }): Promise<Map<string, T>> },
+    userId: string,
+  ): Promise<[string, number][]> {
+    const prefix = `hs:${userId}:`;
+    const rows = await storage.list<number>({ prefix });
+    return [...rows]
+      .map(([key, signedAt]): [string, number] => [key.slice(prefix.length), signedAt])
+      .filter(([sessionId]) => !sessionId.includes(":"));
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    const [handle, signed] = await Promise.all([
+      this.ctx.storage.get<string>(`uh:${userId}`),
+      this.ctx.storage.get<number>(`hs:${userId}:${sessionId}`),
+    ]);
+    return handle !== undefined && signed !== undefined ? handle : undefined;
+  }
+
+  /**
+   * The record and the counter move together, or the count drifts from the
+   * records it is meant to count.
+   *
+   * The counter starts at 0 and only ever increments on a first insert. It is
+   * never seeded by reading the keys back, which is how AuthDO's client count
+   * came to report 2 for one registration (#122): there were no users before
+   * this landed, so 0 is the true starting point and there is nothing to seed.
+   */
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const seen = await txn.get<UserRecord>(userKey(userId));
+      if (!seen) await txn.put(USER_COUNT, ((await txn.get<number>(USER_COUNT)) ?? 0) + 1);
+      await txn.put(userKey(userId), {
+        userId,
+        firstSeenAt: seen?.firstSeenAt ?? now,
+        lastSeenAt: now,
+      } satisfies UserRecord);
+    });
+  }
+
+  async countUsers(): Promise<number> {
+    return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3362,6 +3717,8 @@ export interface BellmanEnv {
    * its wakes (`hostedSeatOn`, src/host.ts); unset, empty or anything but "on" is off.
    */
   BELLMAN_HOSTED_SEAT?: string;
+  /** User ids the hosted seat is on for while BELLMAN_HOSTED_SEAT is off (`hostedSeatUsers`, src/host.ts). */
+  BELLMAN_HOSTED_SEAT_USERS?: string;
   /** A Worker secret. Absent, the seat's model calls go out unauthenticated and are refused. */
   ANTHROPIC_API_KEY?: string;
   /** Where the seat's model calls go. Unset means Anthropic's Messages API (spec D7). */
@@ -3429,7 +3786,7 @@ export class DurableObjectStore implements BellmanStore {
     }
   }
 
-  async createSession(s: Session): Promise<void> {
+  async createSession(s: NewSession): Promise<void> {
     // Join codes register themselves from inside SessionDO, in the same
     // transaction as the session write. See #62.
     await this.session(s.id).createSession(s);
@@ -3451,10 +3808,10 @@ export class DurableObjectStore implements BellmanStore {
     // The members a session is created with are seated directly — bellman_start hands
     // over the creator in `members` and never calls addMember — so the joined index is
     // written here as well as in addMember. A missed entry leaves the room out of that
-    // person's joined listing.
-    for (const m of s.members) {
-      await this.writeIndex("um", m.userId, s.id, () =>
-        this.registry.indexMembership(m.userId, s.id));
+    // person's joined listing. Once a person, however many of the seats are theirs.
+    for (const userId of new Set(s.members.map((m) => m.userId))) {
+      await this.writeIndex("um", userId, s.id, () =>
+        this.registry.indexMembership(userId, s.id));
     }
     // `uo:` is how an org's admin finds a closed room its people sat in (#65, D5): one row for each
     // org on the roster it starts with, the creator's included. A missed entry leaves the room out of
@@ -3476,7 +3833,7 @@ export class DurableObjectStore implements BellmanStore {
     const hit = Object.entries(session.joinCodes).find(([, rec]) => rec.code === code);
     if (!hit) return undefined; // consumed or rotated
     const [role, rec] = hit;
-    if (Date.now() > rec.expiresAt) return undefined;
+    if (!codeIsLive(rec, Date.now())) return undefined;
     return { session, role };
   }
 
@@ -3489,13 +3846,13 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async setJoinCode(
-    sessionId: string, role: string, code: string, expiresAt: number,
+    sessionId: string, role: string, code: string, expiresAt: number | null,
     guard: { replaceLive: boolean; now: number },
   ): Promise<SetJoinCode> {
     return this.session(sessionId).setJoinCode(role, code, expiresAt, guard);
   }
 
-  async addMember(sessionId: string, member: Member): Promise<boolean> {
+  async addMember(sessionId: string, member: ArrivingMember): Promise<boolean> {
     const added = await this.session(sessionId).addMember(member);
     // Gated on the result: addMember refuses an unknown, frozen or closed
     // session, and indexing regardless would put rooms into a person's joined
@@ -3520,7 +3877,7 @@ export class DurableObjectStore implements BellmanStore {
 
   async seatMember(
     sessionId: string,
-    member: Member,
+    member: ArrivingMember,
     staleBefore: number,
     now: number,
   ): Promise<SeatOutcome> {
@@ -3553,6 +3910,33 @@ export class DurableObjectStore implements BellmanStore {
 
   async updateMember(sessionId: string, memberId: string, patch: MemberPatch): Promise<void> {
     await this.session(sessionId).updateMember(memberId, patch);
+  }
+
+  async getBriefs(sessionId: string, memberIds: readonly string[]): Promise<Record<string, Brief>> {
+    if (memberIds.length === 0) return {};
+    return this.session(sessionId).getBriefs([...memberIds]);
+  }
+
+  async getMember(sessionId: string, memberId: string): Promise<Member | undefined> {
+    return this.session(sessionId).getMember(memberId);
+  }
+
+  async getMembers(sessionId: string, memberIds: readonly string[]): Promise<Member[]> {
+    if (memberIds.length === 0) return [];
+    return this.session(sessionId).getMembers([...memberIds]);
+  }
+
+  async membersOfUser(sessionId: string, userId: string): Promise<Member[]> {
+    return this.session(sessionId).membersOfUser(userId);
+  }
+
+  async departedMembers(sessionId: string, opts?: { limit?: number; leftAfter?: number }): Promise<DepartedMembers> {
+    return this.session(sessionId).departedMembers(opts);
+  }
+
+  async publicNumbers(sessionId: string, labels: readonly string[]): Promise<Record<string, number>> {
+    if (labels.length === 0) return {};
+    return this.session(sessionId).publicNumbers([...labels]);
   }
 
   async closeSession(sessionId: string): Promise<void> {
@@ -3589,6 +3973,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async unpublishSession(sessionId: string, at: number): Promise<void> {
     await this.session(sessionId).unpublishSession(at);
+  }
+
+  async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
+    return (await this.registry.lookupPublicName(name)) ?? null;
+  }
+
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    return this.registry.claimPublicName(name, entry, expected);
+  }
+
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.registry.releasePublicName(name, expected);
+  }
+
+  async setPublicName(sessionId: string, name: string): Promise<void> {
+    await this.session(sessionId).setPublicName(name);
   }
 
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {
@@ -3771,6 +4171,50 @@ export class DurableObjectStore implements BellmanStore {
 
   async deletePreset(userId: string, name: string): Promise<boolean> {
     return this.registry.deletePreset(userId, name);
+  }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.registry.handleOf(userId);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.registry.userOfHandle(handle);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    return this.registry.claimHandle(userId, handle);
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    await this.registry.releaseHandle(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.registry.releaseHandleNamed(handle);
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.registry.signRoom(userId, sessionId, at);
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    await this.registry.unsignRoom(userId, sessionId);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return this.registry.signedRooms(userId);
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    return this.registry.bylineFor(userId, sessionId);
+  }
+
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    await this.registry.recordSignIn(userId, now);
+  }
+
+  async countUsers(): Promise<number> {
+    return this.registry.countUsers();
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

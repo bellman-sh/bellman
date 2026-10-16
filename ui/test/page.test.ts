@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPage, type Page } from "../src/page.js";
 import type { ToolOutcome } from "../src/screen.js";
-import { roomsFixture, surfaceFixture } from "./fixtures.js";
+import { roomsFixture, startFixture, surfaceFixture } from "./fixtures.js";
 
 type Deferred = { resolve: (r: ToolOutcome) => void; reject: (e: Error) => void };
 
@@ -115,5 +115,14 @@ describe("createPage", () => {
     expect(h.calls.at(-1)).toEqual({ name: "bellman_rooms", args: {} });
     [...h.root.querySelectorAll("button")].find((b) => b.textContent === "Surface")!.click();
     expect(h.calls.at(-1)).toEqual({ name: "bellman_surface", args: { session_id: "qs_1" } });
+  });
+});
+
+describe("the room card on the page", () => {
+  it("shows a bellman_start result as the card, and reads nothing", () => {
+    const h = host();
+    h.page.render({ structuredContent: startFixture() });
+    expect(h.root.textContent).toContain("BELL-7F3K-92");
+    expect(h.calls).toEqual([]);
   });
 });

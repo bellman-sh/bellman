@@ -26,7 +26,7 @@ import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
 import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
-import { jesseActor, member, oneCode, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
+import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
 const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -144,6 +144,56 @@ export function describeStoreContract(
       expect(await store.getSession("qs_nope")).toBeUndefined();
     });
 
+    describe("the public name index (public names spec, D5)", () => {
+      it("holds no entry for a name never claimed", async () => {
+        expect(await store.publicNameEntry("bellman-dev")).toBeNull();
+      });
+
+      it("claims a name only while its entry is still what the claimer read, compared whole", async () => {
+        const a = { id: "qs_a", at: 1 };
+        const b = { id: "qs_b", at: 2 };
+        expect(await store.claimPublicName("bellman-dev", a, null)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(a);
+        expect(await store.claimPublicName("bellman-dev", b, null)).toBe(false);
+        // The same room's id from another claim is another entry: the claim it read has been replaced.
+        expect(await store.claimPublicName("bellman-dev", b, { id: "qs_a", at: 9 })).toBe(false);
+        expect(await store.claimPublicName("bellman-dev", b, a)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(b);
+      });
+
+      it("lets exactly one of two claims on one name win", async () => {
+        const won = await Promise.all([
+          store.claimPublicName("race", { id: "qs_a", at: 1 }, null),
+          store.claimPublicName("race", { id: "qs_b", at: 1 }, null),
+        ]);
+        expect(won.filter(Boolean)).toHaveLength(1);
+        expect((await store.publicNameEntry("race"))?.id).toBe(won[0] ? "qs_a" : "qs_b");
+      });
+
+      it("gives a claim back only while its entry is still the one given", async () => {
+        const a = { id: "qs_a", at: 1 };
+        await store.claimPublicName("given-back", a, null);
+        expect(await store.releasePublicName("given-back", { id: "qs_a", at: 2 })).toBe(false);
+        expect(await store.publicNameEntry("given-back")).toEqual(a);
+        expect(await store.releasePublicName("given-back", a)).toBe(true);
+        expect(await store.publicNameEntry("given-back")).toBeNull();
+        expect(await store.releasePublicName("given-back", a)).toBe(false);
+      });
+
+      it("writes the name on the room's record, keeps one a room is created with, and leaves a room that is not there not there", async () => {
+        const s = session({ id: "qs_named", manifest: roomManifest({ public: true }) });
+        await store.createSession(s);
+        expect((await store.getSession(s.id))?.publicName).toBeNull();
+        await store.setPublicName(s.id, "bellman-dev");
+        expect((await store.getSession(s.id))?.publicName).toBe("bellman-dev");
+        const born = session({ id: "qs_born_named", manifest: roomManifest({ public: true }), publicName: "born-named" });
+        await store.createSession(born);
+        expect((await store.getSession(born.id))?.publicName).toBe("born-named");
+        await store.setPublicName("qs_nope", "bellman-dev");
+        expect(await store.getSession("qs_nope")).toBeUndefined();
+      });
+    });
+
     it("returns undefined for an unknown session", async () => {
       expect((await store.getSession("qs_nope"))).toBeUndefined();
     });
@@ -161,14 +211,50 @@ export function describeStoreContract(
       const read = (await store.getSession(s.id))!;
       read.closed = true;
       read.members.push(member({ memberId: "m_smuggled" }));
-      read.members[0].brief.goal = "mutated";
+      read.members[0].agent.model = "mutated";
       read.orgOnly = true;
+      (await store.getBriefs(s.id, ["m_creator"])).m_creator.goal = "mutated";
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(false);
       expect(fresh.members).toHaveLength(1);
-      expect(fresh.members[0].brief.goal).not.toBe("mutated");
+      expect(fresh.members[0].agent.model).not.toBe("mutated");
       expect(fresh.orgOnly).toBe(false);
+      expect((await store.getBriefs(s.id, ["m_creator"])).m_creator.goal).not.toBe("mutated");
+    });
+
+    /**
+     * Briefs live beside the room, one row per member (ADR 0018), so the record a room is
+     * stored as stays small however many join. A member keeps its brief's `agent`, which the
+     * roster shows, and the brief comes back by member id.
+     */
+    it("keeps each member's brief beside the room, and hands it back by member id", async () => {
+      const s = swarmSession({ members: [member({ brief: brief({ goal: "the creator's" }) })] });
+      await store.createSession(s);
+      expect(await store.addMember(s.id, member({ memberId: "m_added", userId: "u_added", brief: brief({ goal: "added", agent: openaiAgent }) }))).toBe(true);
+      const seat = await store.seatMember(s.id, member({ memberId: "m_seated", userId: "u_seated", brief: brief({ goal: "seated" }) }), 0, Date.now());
+      expect(seat.refused).toBeNull();
+
+      const read = (await store.getSession(s.id))!;
+      for (const m of read.members) expect(m, m.memberId).not.toHaveProperty("brief");
+      expect(read.members.find((m) => m.memberId === "m_added")!.agent).toEqual(openaiAgent);
+      expect(await store.getBriefs(s.id, ["m_creator", "m_added", "m_seated", "m_nobody"])).toEqual({
+        m_creator: brief({ goal: "the creator's" }),
+        m_added: brief({ goal: "added", agent: openaiAgent }),
+        m_seated: brief({ goal: "seated" }),
+      });
+      expect(await store.getBriefs(s.id, [])).toEqual({});
+      expect(await store.getBriefs("qs_nowhere", ["m_creator"])).toEqual({});
+    });
+
+    it("replaces a member's brief on updateMember, and the agent the record keeps with it", async () => {
+      const s = session();
+      await store.createSession(s);
+      const newer = brief({ goal: "newer", agent: openaiAgent });
+      await store.updateMember(s.id, "m_creator", { brief: newer });
+
+      expect((await store.getBriefs(s.id, ["m_creator"])).m_creator).toEqual(newer);
+      expect((await store.getSession(s.id))!.members[0].agent).toEqual(openaiAgent);
     });
 
     it("does not let the caller's original object mutate stored state either", async () => {
@@ -198,7 +284,11 @@ export function describeStoreContract(
       expect((await store.getSessionByJoinCode("BELL-TTL0-01"))).toBeUndefined();
     });
 
-    /** INVARIANT 2: join codes are single-use. */
+    /**
+     * INVARIANT 2: a consumed join code resolves nothing, and consuming it twice is
+     * harmless. Redeeming a code does not consume it: a swarm code seats joiner after
+     * joiner until it expires or the room fills (ADR 0010).
+     */
     it("consumeJoinCode makes the code unusable and idempotent", async () => {
       const s = session({ joinCodes: oneCode("BELL-ONCE-01") });
       (await store.createSession(s));
@@ -363,6 +453,292 @@ export function describeStoreContract(
       expect(await store.getSessionByJoinCode("BELL-7F3K-92")).toBeUndefined();
     });
 
+    // ------------------------------------------------- members as rows (ADR 0019)
+    /**
+     * A member is a row of its own beside the room, so the record holds who is in it now and
+     * not everyone who ever was. These are the reads that reach the rest: by id, by person, as
+     * a list of those who left, and the public numbers their labels were given at seating.
+     */
+    describe("members as rows (ADR 0019)", () => {
+      const joiner = (memberId: string, over: Partial<Parameters<typeof member>[0]> = {}) =>
+        member({ memberId, userId: `u_${memberId}`, label: `${memberId}@codenerd`, roomRole: "peer_b", ...over });
+
+      it("reads the members in the room now, in join order, and keeps the creator and every org that sat in it", async () => {
+        const s = swarmSession({ members: [member(), joiner("m_a", { orgId: "org_a" })] });
+        await store.createSession(s);
+        expect(await store.addMember(s.id, joiner("m_b", { orgId: null }))).toBe(true);
+        expect((await store.seatMember(s.id, joiner("m_c", { orgId: "org_c" }), 0, Date.now())).refused).toBeNull();
+        await store.updateMember(s.id, "m_a", { leftAt: Date.now() });
+        await store.updateMember(s.id, "m_creator", { leftAt: Date.now() });
+
+        const read = (await store.getSession(s.id))!;
+        expect(read.members.map((m) => m.memberId)).toEqual(["m_b", "m_c"]);
+        expect(read.creator).toEqual({ memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd", joinedAt: s.members[0].joinedAt });
+        expect(read.orgs).toEqual(["org_codenerd", "org_a", "org_c"]);
+      });
+
+      it("numbers each member in join order, across the room's creation and every seat after it", async () => {
+        const s = swarmSession({ members: [member(), joiner("m_a")] });
+        await store.createSession(s);
+        await store.addMember(s.id, joiner("m_b"));
+        await store.updateMember(s.id, "m_a", { leftAt: Date.now() });
+        await store.seatMember(s.id, joiner("m_c"), 0, Date.now());
+
+        expect((await store.getSession(s.id))!.members.map((m) => [m.memberId, m.seq]))
+          .toEqual([["m_creator", 1], ["m_b", 3], ["m_c", 4]]);
+        expect((await store.getMember(s.id, "m_a"))?.seq).toBe(2);
+      });
+
+      it("reads a member who has left by id, as a copy, and nothing for an id or a room it never held", async () => {
+        const s = session({ members: [member(), joiner("m_peer")] });
+        await store.createSession(s);
+        await store.updateMember(s.id, "m_peer", { leftAt: 9_000_000 });
+
+        expect((await store.getSession(s.id))!.members.map((m) => m.memberId)).toEqual(["m_creator"]);
+        const gone = (await store.getMember(s.id, "m_peer"))!;
+        expect(gone).toMatchObject({ memberId: "m_peer", userId: "u_m_peer", roomRole: "peer_b", leftAt: 9_000_000, seq: 2 });
+        expect(gone).not.toHaveProperty("brief");
+        expect(await store.getMember(s.id, "m_creator")).toMatchObject({ memberId: "m_creator", leftAt: null });
+        expect(await store.getMember(s.id, "m_nobody")).toBeUndefined();
+        expect(await store.getMember("qs_nowhere", "m_peer")).toBeUndefined();
+
+        gone.label = "mutated";
+        expect((await store.getMember(s.id, "m_peer"))!.label).toBe("m_peer@codenerd");
+      });
+
+      it("reads members by id in join order, leaving out an id the room never seated", async () => {
+        const s = session({ members: [member(), joiner("m_peer")] });
+        await store.createSession(s);
+        await store.updateMember(s.id, "m_peer", { leftAt: 9_000_000 });
+
+        expect((await store.getMembers(s.id, ["m_peer", "m_nobody", "m_creator"])).map((m) => m.memberId))
+          .toEqual(["m_creator", "m_peer"]);
+        expect(await store.getMembers(s.id, [])).toEqual([]);
+        expect(await store.getMembers("qs_nowhere", ["m_creator"])).toEqual([]);
+      });
+
+      it("reads every handle a person has held, those gone included, and keeps a user apart from one whose id it begins", async () => {
+        const s = swarmSession({ members: [member()] });
+        await store.createSession(s);
+        await store.addMember(s.id, joiner("m_a1", { userId: "u_a" }));
+        await store.addMember(s.id, joiner("m_ab", { userId: "u_a:b" }));
+        await store.addMember(s.id, joiner("m_a2", { userId: "u_a" }));
+        await store.updateMember(s.id, "m_a1", { leftAt: Date.now() });
+
+        expect((await store.membersOfUser(s.id, "u_a")).map((m) => m.memberId)).toEqual(["m_a1", "m_a2"]);
+        expect((await store.membersOfUser(s.id, "u_a:b")).map((m) => m.memberId)).toEqual(["m_ab"]);
+        expect(await store.membersOfUser(s.id, "u_nobody")).toEqual([]);
+        expect(await store.membersOfUser("qs_nowhere", "u_a")).toEqual([]);
+      });
+
+      it("lists the members who left, in join order: the most recent when asked for a few, those after a time when asked", async () => {
+        const s = swarmSession({ members: [member()] });
+        await store.createSession(s);
+        for (const id of ["m_1", "m_2", "m_3", "m_4"]) await store.addMember(s.id, joiner(id));
+        // Out of join order, and m_2 stays.
+        await store.updateMember(s.id, "m_3", { leftAt: 1_000 });
+        await store.updateMember(s.id, "m_1", { leftAt: 2_000 });
+        await store.updateMember(s.id, "m_4", { leftAt: 3_000 });
+        const ids = async (opts?: { limit?: number; leftAfter?: number }) => {
+          const { members, omitted } = await store.departedMembers(s.id, opts);
+          return { ids: members.map((m) => m.memberId), omitted };
+        };
+
+        expect(await ids()).toEqual({ ids: ["m_1", "m_3", "m_4"], omitted: 0 });
+        expect(await ids({ limit: 2 })).toEqual({ ids: ["m_1", "m_4"], omitted: 1 });
+        expect(await ids({ leftAfter: 1_000 })).toEqual({ ids: ["m_1", "m_4"], omitted: 0 });
+        expect(await ids({ leftAfter: 1_000, limit: 1 })).toEqual({ ids: ["m_4"], omitted: 1 });
+        expect(await store.departedMembers("qs_nowhere")).toEqual({ members: [], omitted: 0 });
+      });
+
+      it("numbers labels for a public room in the order they first sat, once each, and never the hosted seat's", async () => {
+        const m = hostedManifest();
+        const s = session({ manifest: m, members: [member({ roomRole: "lead" }), hostMember(m, Date.now())] });
+        await store.createSession(s);
+        await store.addMember(s.id, joiner("m_a", { roomRole: "lead" }));
+        // The same person on a second machine: one label, so one number.
+        await store.addMember(s.id, joiner("m_a2", { userId: "u_m_a", label: "m_a@codenerd", roomRole: "lead" }));
+        await store.updateMember(s.id, "m_a", { leftAt: Date.now() });
+        await store.updateMember(s.id, "m_a2", { leftAt: Date.now() });
+        // Numbered after the labels that left, not in their place.
+        await store.seatMember(s.id, joiner("m_b", { roomRole: "lead" }), 0, Date.now());
+
+        expect(await store.publicNumbers(s.id, ["jesse@codenerd", "m_a@codenerd", "m_b@codenerd", "host@bellman", "nobody"]))
+          .toEqual({ "jesse@codenerd": 1, "m_a@codenerd": 2, "m_b@codenerd": 3 });
+        expect((await store.getMember(s.id, "m_a2"))?.publicNumber).toBe(2);
+        expect((await store.getSession(s.id))!.members.find((x) => x.memberId === HOST_MEMBER_ID)?.publicNumber).toBeNull();
+        expect(await store.publicNumbers(s.id, [])).toEqual({});
+        expect(await store.publicNumbers("qs_nowhere", ["jesse@codenerd"])).toEqual({});
+      });
+
+      it("refuses to create a room with nobody to seat as its creator", async () => {
+        await expect(store.createSession(session({ id: "qs_empty", members: [] }))).rejects.toThrow(/creator/);
+        expect(await store.getSession("qs_empty")).toBeUndefined();
+      });
+    });
+
+    // ------------------------------------------- permanent codes (ADR 0020)
+    //
+    // A public room may hold a code with no expiry for its default seat, so a link put on
+    // a page keeps seating people until it is revoked, the room goes private, or the room
+    // closes. Each case reads the door back before the call it is about: a store that
+    // never resolved a permanent code would pass every case that asks for one to be gone.
+    describe("a permanent code", () => {
+      const PERMANENT = "BELL-PERM-01-PEER-B";
+      /** The default seat's door, with no expiry. `session()`'s default role is peer_b. */
+      const door = () => ({ peer_b: { code: PERMANENT, expiresAt: null } });
+      const publicRoom = (over: Parameters<typeof session>[0] = {}) =>
+        session({ manifest: roomManifest({ public: true }), joinCodes: door(), ...over });
+      const isOpen = async (what = "the permanent door resolves") =>
+        expect(await store.getSessionByJoinCode(PERMANENT), what).toMatchObject({ role: "peer_b" });
+      const joiner = (memberId: string) =>
+        member({ memberId, userId: `u_${memberId}`, roomRole: "peer_b" });
+      const body = (type: EventBody["type"], memberId: string): EventBody => ({
+        type, fromMemberId: memberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null,
+      });
+
+      it("still resolves a week on, when a temporary code beside it has long expired", async () => {
+        const s = publicRoom({ joinCodes: { ...door(), ...oneCode("BELL-TEMP-01", "peer_a") } });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves at once");
+
+        vi.setSystemTime(Date.now() + 7 * 24 * 3_600_000);
+
+        // The control that the clock moved far enough to matter: the temporary code is gone.
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toBeUndefined();
+        expect(await store.getSessionByJoinCode(PERMANENT)).toMatchObject({ session: { id: s.id }, role: "peer_b" });
+      });
+
+      it("stays when a seating fills the room, while every temporary code goes", async () => {
+        const doors = { ...door(), ...oneCode("BELL-TEMP-01", "peer_a") };
+        const s = publicRoom({ joinCodes: doors, members: [member({ memberId: "m_creator" })] });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01"), "control: the temporary door resolves before the call")
+          .toMatchObject({ role: "peer_a" });
+
+        const outcome = await store.seatMember(s.id, joiner("m_late"), 1, 9_000_000);
+
+        // It cleared the temporary code, so it says so.
+        expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(door());
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toBeUndefined();
+        await isOpen();
+      });
+
+      it("refuses joiners while the room is full and seats one again once a seat frees", async () => {
+        const s = publicRoom({ members: [member({ memberId: "m_creator" })] });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        const filled = await store.seatMember(s.id, joiner("m_late"), 1, 9_000_000);
+
+        // The room filled holding only the permanent code, which stays, so nothing was cleared.
+        expect(filled).toEqual({ refused: null, reclaimed: [], codesCleared: false });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(door());
+        expect((await store.seatMember(s.id, joiner("m_later"), 1, 9_000_000)).refused, "the premise: the room is full")
+          .toBe("full");
+
+        await store.removeMember(s.id, "m_late", {
+          now: 9_000_001, frozen: "allow", cut: false, event: body("member_left", "m_late"), audit: [],
+        });
+
+        await isOpen("the door is still open after the seat frees");
+        expect((await store.seatMember(s.id, joiner("m_later"), 1, 9_000_002)).refused).toBeNull();
+      });
+
+      it("is retired by a revoke of its role, and by a revoke of every role", async () => {
+        const one = publicRoom();
+        const all = publicRoom({ id: "qs_perm_all", joinCodes: { peer_b: { code: "BELL-PERM-02-PEER-B", expiresAt: null } } });
+        await store.createSession(one);
+        await store.createSession(all);
+        await isOpen("control: the first door resolves");
+        expect(await store.getSessionByJoinCode("BELL-PERM-02-PEER-B"), "control: the second door resolves")
+          .toMatchObject({ role: "peer_b" });
+
+        await store.consumeJoinCode(one.id, "peer_b");
+        await store.clearJoinCodes(all.id);
+
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        expect(await store.getSessionByJoinCode("BELL-PERM-02-PEER-B")).toBeUndefined();
+        expect((await store.getSession(one.id))!.joinCodes).toEqual({});
+        expect((await store.getSession(all.id))!.joinCodes).toEqual({});
+      });
+
+      it("is retired when the room is made private, and a temporary code is left to run out", async () => {
+        const temporary = oneCode("BELL-TEMP-01", "peer_a");
+        const s = publicRoom({ joinCodes: { ...door(), ...temporary } });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        await store.unpublishSession(s.id, Date.now());
+
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        // The record, and not only what resolves: a store that stopped resolving the code
+        // and kept it listed would show a private room a door it does not have.
+        expect((await store.getSession(s.id))!.joinCodes).toEqual(temporary);
+        expect(await store.getSessionByJoinCode("BELL-TEMP-01")).toMatchObject({ role: "peer_a" });
+      });
+
+      it("is a live code, so replacing it takes replaceLive", async () => {
+        const s = publicRoom();
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEWW-02", null, { replaceLive: false, now: Date.now() }))
+          .toEqual({ ok: false, reason: "live_code_exists" });
+        await isOpen("a refusal leaves the door as it was");
+        expect(await store.getSessionByJoinCode("BELL-NEWW-02")).toBeUndefined();
+
+        expect(await store.setJoinCode(s.id, "peer_b", "BELL-NEWW-02", null, { replaceLive: true, now: Date.now() }))
+          .toEqual({ ok: true, replacedLive: true });
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+        expect((await store.getSession(s.id))!.joinCodes).toEqual({ peer_b: { code: "BELL-NEWW-02", expiresAt: null } });
+        expect(await store.getSessionByJoinCode("BELL-NEWW-02")).toMatchObject({ role: "peer_b" });
+      });
+
+      it("is refused to a room that is not public, and nothing is written", async () => {
+        // Decided where the write happens, as replaceLive is (#90): a room made private
+        // between a caller's read and this write would otherwise keep a permanent code
+        // that unpublishing had already run past.
+        const rooms = [
+          session({ id: "qs_private", joinCodes: {} }),
+          session({ id: "qs_unpublished", manifest: roomManifest({ public: true }), unpublishedAt: Date.now(), joinCodes: {} }),
+        ];
+        for (const r of rooms) {
+          await store.createSession(r);
+          expect(await store.setJoinCode(r.id, "peer_b", "BELL-PERM-03-PEER-B", null, { replaceLive: true, now: Date.now() }), r.id)
+            .toEqual({ ok: false, reason: "not_public" });
+          expect((await store.getSession(r.id))!.joinCodes, r.id).toEqual({});
+          expect(await store.getSessionByJoinCode("BELL-PERM-03-PEER-B"), r.id).toBeUndefined();
+        }
+      });
+
+      it("is retired by removing a member of its seat, as any live code is", async () => {
+        // The member removed may hold the link, so a removal that names the seat's door
+        // shuts it, permanent or not.
+        const s = publicRoom({
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", roomRole: "peer_b" })],
+        });
+        await store.createSession(s);
+        await isOpen("control: the permanent door resolves before the call");
+
+        const outcome = await store.removeMember(s.id, "m_peer", {
+          now: Date.now(),
+          frozen: "refuse",
+          cut: true,
+          byUserId: "u_jesse",
+          event: body("member_evicted", "m_peer"),
+          retire: { role: "peer_b", event: body("invite_revoked", "m_peer") },
+          audit: [],
+        });
+
+        expect(outcome).toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+        expect((await store.getSession(s.id))!.joinCodes).toEqual({});
+        expect(await store.getSessionByJoinCode(PERMANENT)).toBeUndefined();
+      });
+    });
+
     // --------------------------------------------------------------- members
     it("recentEvents returns the tail in cursor order, shorter when the log is, and nothing for a bad limit", async () => {
       const s = session();
@@ -398,11 +774,13 @@ export function describeStoreContract(
         capabilities: ["read_context"],
         leftAt: Date.now(),
       }));
-      const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members[0].capabilities).toEqual(["read_context"]);
-      expect(fresh.members[0].leftAt).toBe(Date.now());
+      // Gone from the room's record, and read by id (ADR 0019).
+      expect((await store.getSession(s.id))!.members).toEqual([]);
+      const fresh = (await store.getMember(s.id, "m_creator"))!;
+      expect(fresh.capabilities).toEqual(["read_context"]);
+      expect(fresh.leftAt).toBe(Date.now());
       // untouched fields survive the patch
-      expect(fresh.members[0].label).toBe("jesse@codenerd");
+      expect(fresh.label).toBe("jesse@codenerd");
     });
 
     /**
@@ -485,8 +863,8 @@ export function describeStoreContract(
       expect(outcome.reclaimed[0].leftAt).toBe(at(9_000_000));
 
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_peer", "m_late"]);
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(at(9_000_000));
+      expect(fresh.members.map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBe(at(9_000_000));
       expect(fresh.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
     });
 
@@ -728,7 +1106,8 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, reclaimed: [], codesCleared: false });
       const after = (await store.getSession(s.id))!;
-      expect(after.members, "the premise: three rows").toHaveLength(3);
+      expect(after.members.map((m) => m.memberId), "the premise: two in the room").toEqual(["m_creator", "m_late"]);
+      expect((await store.getMember(s.id, "m_gone"))?.leftAt, "and one gone").toBe(5_000);
       expect(after.joinCodes, "the door is untouched").toEqual(doors);
     });
 
@@ -813,16 +1192,19 @@ export function describeStoreContract(
       expect(after.members.map((m) => m.memberId), "nobody was seated").not.toContain("m_late");
     });
 
-    it("seatMember seats a 100th member into a swarm room and refuses a 101st", async () => {
+    // One person on every machine: a seat is a member and not a person, so the room fills all the
+    // same, and a store that indexes each person a room is created with does it once, not once a seat.
+    it("seatMember seats a swarm room's last member and refuses one more", async () => {
       const present = (i: number) =>
-        member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "peer_b", lastSeenAt: Date.now() });
+        member({ memberId: `m_${i}`, userId: "u_crowd", roomRole: "peer_b", lastSeenAt: Date.now() });
       const s = swarmSession({ members: Array.from({ length: ROOM_MEMBER_CEILING - 1 }, (_, i) => present(i)) });
       (await store.createSession(s));
 
-      const hundredth = await store.seatMember(s.id, present(100), 1, Date.now());
-      const beyond = await store.seatMember(s.id, present(101), 1, Date.now());
+      // Ids the room has not seated: a member id is the member's row (ADR 0019).
+      const last = await store.seatMember(s.id, present(ROOM_MEMBER_CEILING - 1), 1, Date.now());
+      const beyond = await store.seatMember(s.id, present(ROOM_MEMBER_CEILING), 1, Date.now());
 
-      expect(hundredth).toEqual({ refused: null, reclaimed: [], codesCleared: true });
+      expect(last).toEqual({ refused: null, reclaimed: [], codesCleared: true });
       expect(beyond).toEqual({ refused: "full", reclaimed: [], codesCleared: false });
       expect((await store.getSession(s.id))!.members.filter((m) => m.leftAt === null)).toHaveLength(ROOM_MEMBER_CEILING);
     });
@@ -1379,9 +1761,16 @@ export function describeStoreContract(
      * that one index can serve a panel screen and a freeze sweep that disagree
      * about what counts as current (D1, D4).
      */
+    /**
+     * A room seated with its creator alone, who is nobody the case below asks about: a room is
+     * created with its creator (ADR 0019), and these cases are about who joins it afterwards.
+     */
+    const ownedBy = (id: string, createdBy = "u_owner") =>
+      session({ id, createdBy, members: [member({ memberId: "m_owner", userId: createdBy, label: "owner@elsewhere" })] });
+
     it("lists the rooms a person joined, and nobody else's", async () => {
-      await store.createSession(session({ id: "qs_hers", createdBy: "u_peer", members: [] }));
-      await store.createSession(session({ id: "qs_his", createdBy: "u_peer", members: [] }));
+      await store.createSession(ownedBy("qs_hers", "u_peer"));
+      await store.createSession(ownedBy("qs_his", "u_peer"));
       await store.addMember("qs_hers", member({ memberId: "m_1", userId: "u_jesse" }));
       await store.addMember("qs_his", member({ memberId: "m_2", userId: "u_other" }));
 
@@ -1394,8 +1783,8 @@ export function describeStoreContract(
       // A user id that is a prefix of another's must not pull the other's rooms
       // into its listing, or the reverse. Whatever a store keys its index on,
       // u_a lists only u_a's rooms and u_ab only u_ab's.
-      await store.createSession(session({ id: "qs_of_a", createdBy: "u_a", members: [] }));
-      await store.createSession(session({ id: "qs_of_ab", createdBy: "u_ab", members: [] }));
+      await store.createSession(ownedBy("qs_of_a", "u_a"));
+      await store.createSession(ownedBy("qs_of_ab", "u_ab"));
       await store.addMember("qs_of_a", member({ memberId: "m_a", userId: "u_a" }));
       await store.addMember("qs_of_ab", member({ memberId: "m_ab", userId: "u_ab" }));
 
@@ -1404,7 +1793,7 @@ export function describeStoreContract(
     });
 
     it("lists a room once for a person who joined it from two machines", async () => {
-      await store.createSession(session({ id: "qs_twice", members: [] }));
+      await store.createSession(ownedBy("qs_twice"));
       await store.addMember("qs_twice", member({ memberId: "m_laptop", userId: "u_jesse" }));
       await store.addMember("qs_twice", member({ memberId: "m_desktop", userId: "u_jesse" }));
 
@@ -1443,7 +1832,7 @@ export function describeStoreContract(
     });
 
     it("keeps listing a room after the member left it", async () => {
-      await store.createSession(session({ id: "qs_past", members: [] }));
+      await store.createSession(ownedBy("qs_past"));
       await store.addMember("qs_past", member({ memberId: "m_gone", userId: "u_jesse" }));
       await store.updateMember("qs_past", "m_gone", { leftAt: Date.now() });
 
@@ -1452,7 +1841,7 @@ export function describeStoreContract(
 
     /** REVIEW FOCUS 5 — status is the caller's filter, not the store's. */
     it("keeps listing a room after it closed", async () => {
-      await store.createSession(session({ id: "qs_over", members: [] }));
+      await store.createSession(ownedBy("qs_over"));
       await store.addMember("qs_over", member({ memberId: "m_was", userId: "u_jesse" }));
       await store.closeSession("qs_over");
 
@@ -1461,7 +1850,7 @@ export function describeStoreContract(
 
     it("honours the limit on the joined listing", async () => {
       for (const id of ["qs_j1", "qs_j2", "qs_j3"]) {
-        await store.createSession(session({ id, members: [] }));
+        await store.createSession(ownedBy(id));
         await store.addMember(id, member({ memberId: `m_${id}`, userId: "u_jesse" }));
       }
 
@@ -1469,7 +1858,7 @@ export function describeStoreContract(
     });
 
     it("indexes nothing when addMember refuses a frozen session", async () => {
-      await store.createSession(session({ id: "qs_cold", members: [] }));
+      await store.createSession(ownedBy("qs_cold"));
       await store.freezeSession("qs_cold", Date.now());
 
       expect(await store.addMember("qs_cold", member({ memberId: "m_no", userId: "u_jesse" })))
@@ -1496,12 +1885,12 @@ export function describeStoreContract(
      * turned away.
      */
     it("indexes nothing when addMember refuses a closed session", async () => {
-      await store.createSession(session({ id: "qs_shut", members: [] }));
+      await store.createSession(ownedBy("qs_shut"));
       await store.closeSession("qs_shut");
 
       expect(await store.addMember("qs_shut", member({ memberId: "m_no", userId: "u_jesse" })))
         .toBe(false);
-      expect((await store.getSession("qs_shut"))?.members).toEqual([]);
+      expect((await store.getSession("qs_shut"))?.members.map((m) => m.memberId)).toEqual(["m_owner"]);
       expect(await store.sessionsJoinedBy("u_jesse", 10)).toEqual([]);
     });
 
@@ -2043,8 +2432,9 @@ export function describeStoreContract(
 
       const books = async (id: string) => {
         const row = (await store.getSession(id))!;
+        const everyone = [...row.members, ...(await store.departedMembers(id)).members];
         return {
-          lastSent: Object.fromEntries(row.members.map((m) => [m.memberId, m.lastSentAt])),
+          lastSent: Object.fromEntries(everyone.map((m) => [m.memberId, m.lastSentAt])),
           openRequests: row.openRequests,
           lastMemberEventAt: row.lastMemberEventAt,
         };
@@ -2189,7 +2579,7 @@ export function describeStoreContract(
           const row = (await store.getSession(s.id))!;
           // The books replace the roster's member objects, and the leave must land on the
           // roster that is stored, not on one the append just replaced.
-          expect(row.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect((await store.getMember(s.id, "m_peer"))!.leftAt).toBe(9_000_000);
           expect(row.openRequests).toEqual(mineOnly(mine));
           const departure = (await store.eventsAfter(s.id, 0)).at(-1)!;
           expect(row.lastMemberEventAt, "a member's own leaving is that member's last act").toBe(departure.at);
@@ -2206,7 +2596,7 @@ export function describeStoreContract(
           expect(outcome.removed).toBe(true);
           const row = (await store.getSession(s.id))!;
           expect(row.openRequests).toEqual(mineOnly(mine));
-          expect(row.members.find((m) => m.memberId === "m_peer")!.removedAtCursor).toBeDefined();
+          expect((await store.getMember(s.id, "m_peer"))!.removedAtCursor).toBeDefined();
           expect(row.lastMemberEventAt, "an eviction is the server's word, not a member's").toBe(before);
         });
 
@@ -2250,7 +2640,7 @@ export function describeStoreContract(
           expect(await books(s.id)).toEqual({
             lastSent: { m_creator: undefined, m_peer: undefined }, openRequests: {}, lastMemberEventAt: null,
           });
-          expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")!.leftAt).toBe(9_000_000);
+          expect((await store.getMember(s.id, "m_peer"))!.leftAt).toBe(9_000_000);
         });
       });
     });
@@ -2536,8 +2926,10 @@ export function describeStoreContract(
       const NOW = () => Date.now();
       const hostedRoom = (over: Partial<Session> = {}) => {
         const m = hostedManifest();
+        // As if its host had just asked: a host that has never asked is due the moment its room
+        // starts, and the Durable Object's alarm would fire that question into these cases.
         return session({ manifest: m, members: [member(), hostMember(m, NOW())], hostUnitsPerMonth: 10,
-          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, ...over });
+          hostUnits: { month: monthKey(NOW()), used: 0, wakes: [] }, lastTickAt: NOW(), lastHostTickAt: NOW(), ...over });
       };
       /** What the host writes on a tick: a thread root, the tick's cursor in its payload (I1). */
       const question = (): Omit<SessionEvent, "cursor" | "at"> => ({
@@ -2876,8 +3268,7 @@ export function describeStoreContract(
           markRemoved: target,
         }))!;
 
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         // One write, not two: a store that set only one of these is the bug
         // this rides in the transaction to prevent.
         expect(m.removedAtCursor).toBe(event.cursor);
@@ -2922,8 +3313,7 @@ export function describeStoreContract(
 
         await store.appendEvent(s.id, removal(target), { markRemoved: target });
 
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         // Otherwise a second eviction widens the window the first one closed.
         expect(m.removedAtCursor).toBe(first.cursor);
       });
@@ -2954,8 +3344,7 @@ export function describeStoreContract(
         // The announcement still lands, as it does for an unknown member: the
         // rule declines to write the member, and nothing about the append.
         expect(event).not.toBeNull();
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBeUndefined();
         expect(m.leftAt).toBe(leftAt);
       });
@@ -2971,8 +3360,7 @@ export function describeStoreContract(
 
         // The two go together or the design's atomicity claim is false.
         expect(event).toBeNull();
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBeUndefined();
         expect(m.leftAt).toBeNull();
       });
@@ -2986,8 +3374,7 @@ export function describeStoreContract(
         );
 
         expect(write.outcome).toBe("appended");
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBe(write.outcome === "appended" ? write.event.cursor : -1);
       });
 
@@ -3011,8 +3398,7 @@ export function describeStoreContract(
         );
 
         expect(retry.outcome).toBe("replayed");
-        const after = (await store.getSession(s.id))!;
-        const m = after.members.find((mm) => mm.memberId === target)!;
+        const m = (await store.getMember(s.id, target))!;
         expect(m.removedAtCursor).toBe(first.event.cursor);
         expect(m.leftAt).not.toBeNull();
         // And still one event: the repair is a cut, not a second append.
@@ -3036,9 +3422,8 @@ export function describeStoreContract(
           { creditReport: true, markRemoved: target },
         ))!;
 
-        const after = (await store.getSession(s.id))!;
-        const sender = after.members.find((mm) => mm.memberId === "m_creator")!;
-        const removed = after.members.find((mm) => mm.memberId === target)!;
+        const sender = (await store.getMember(s.id, "m_creator"))!;
+        const removed = (await store.getMember(s.id, target))!;
         expect(sender.lastReportAt).toBe(event.at);
         expect(removed.removedAtCursor).toBe(event.cursor);
         expect(removed.leftAt).not.toBeNull();
@@ -3840,6 +4225,122 @@ export function describeStoreContract(
       });
     });
 
+    describe("handles and bylines", () => {
+      it("claims a handle once, refuses it to a second user, and answers claimed on a repeat", async () => {
+        expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
+        expect(await store.claimHandle("u_b", "ada")).toBe("taken");
+        expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
+        expect(await store.handleOf("u_a")).toBe("ada");
+        expect(await store.userOfHandle("ada")).toBe("u_a");
+      });
+
+      it("frees the old handle when one changes", async () => {
+        await store.claimHandle("u_a", "ada");
+        expect(await store.claimHandle("u_a", "lovelace")).toBe("claimed");
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.claimHandle("u_b", "ada")).toBe("claimed");
+        expect(await store.handleOf("u_a")).toBe("lovelace");
+      });
+
+      it("signs and unsigns, lists newest first, and answers a byline only while handle and signature both hold", async () => {
+        await store.claimHandle("u_a", "ada");
+        expect(await store.signRoom("u_a", "qs_1", 1000)).toBe("ada");
+        await store.signRoom("u_a", "qs_2", 2000);
+        expect(await store.signedRooms("u_a")).toEqual([
+          { sessionId: "qs_2", signedAt: 2000 },
+          { sessionId: "qs_1", signedAt: 1000 },
+        ]);
+        expect(await store.bylineFor("u_a", "qs_1")).toBe("ada");
+        await store.unsignRoom("u_a", "qs_1");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+        expect(await store.bylineFor("u_b", "qs_2")).toBeUndefined();
+      });
+
+      it("releases the handle and every signature at once, so a later handle revives none", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        await store.releaseHandle("u_a");
+        expect(await store.handleOf("u_a")).toBeUndefined();
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        await store.claimHandle("u_a", "ada2");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+      });
+
+      // More keys than one storage delete takes (128), so the release must batch them.
+      it("releases every signature of a handle, however many", async () => {
+        await store.claimHandle("u_a", "ada");
+        for (let i = 0; i < 130; i++) await store.signRoom("u_a", `qs_${i}`, i);
+        await store.releaseHandle("u_a");
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        expect(await store.handleOf("u_a")).toBeUndefined();
+      });
+
+      it("reads nothing for a user who never claimed one", async () => {
+        expect(await store.handleOf("u_none")).toBeUndefined();
+        expect(await store.signedRooms("u_none")).toEqual([]);
+        await store.releaseHandle("u_none");
+      });
+
+      // The handle is read where the signature is written, so a release cannot land between the two and leave a
+      // signature with no handle, which a handle claimed later would revive.
+      it("signs nothing for a user who holds no handle, so a handle claimed later revives nothing", async () => {
+        expect(await store.signRoom("u_none", "qs_1", 1000)).toBeUndefined();
+        expect(await store.signedRooms("u_none")).toEqual([]);
+        await store.claimHandle("u_none", "nora");
+        expect(await store.bylineFor("u_none", "qs_1")).toBeUndefined();
+      });
+
+      // Operator-issued ids may hold a colon (`isIdentity` takes any non-empty string), so one person's id
+      // can extend another's past the key's separator. Neither a read nor a release may reach the other's
+      // signatures through it.
+      it("lists no signature of an id that extends this one past a colon", async () => {
+        await store.claimHandle("u_x:y", "yara");
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        expect(await store.signedRooms("u_x")).toEqual([]);
+        expect(await store.signedRooms("u_x:y")).toEqual([{ sessionId: "qs_1", signedAt: 1000 }]);
+      });
+
+      it("releases no signature of an id that extends this one past a colon", async () => {
+        await store.claimHandle("u_x:y", "yara");
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        await store.releaseHandle("u_x");
+        expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
+      });
+
+      // The operator's release (ADR 0021): the handle names whose record goes.
+      it("releases a handle by its name: answers its holder, and the handle and every signature go", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        await store.signRoom("u_a", "qs_2", 2000);
+        expect(await store.releaseHandleNamed("ada")).toBe("u_a");
+        expect(await store.handleOf("u_a")).toBeUndefined();
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        await store.claimHandle("u_a", "ada2");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+        expect(await store.claimHandle("u_b", "ada")).toBe("claimed");
+      });
+
+      it("answers undefined for a handle nobody holds, and releases nothing", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        expect(await store.releaseHandleNamed("bob")).toBeUndefined();
+        expect(await store.handleOf("u_a")).toBe("ada");
+        expect(await store.bylineFor("u_a", "qs_1")).toBe("ada");
+      });
+
+      it("releases by name no signature of an id that extends the holder's past a colon", async () => {
+        await store.claimHandle("u_x", "xena");
+        await store.signRoom("u_x", "qs_1", 1000);
+        await store.claimHandle("u_x:y", "yara");
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        expect(await store.releaseHandleNamed("xena")).toBe("u_x");
+        expect(await store.signedRooms("u_x")).toEqual([]);
+        expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
+      });
+    });
+
     // ----------------------------------------------------------------- audit
     it("scopes audit reads to a single org", async () => {
       (await store.appendAudit({
@@ -4096,8 +4597,8 @@ export function describeStoreContract(
 
       const fresh = (await store.getSession(s.id))!;
       expect(fresh.closed).toBe(false);
-      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt]))
-        .toEqual([["m_creator", Date.now()], ["m_gone", AGED()]]);
+      expect(fresh.members.map((m) => [m.memberId, m.lastSeenAt])).toEqual([["m_creator", Date.now()]]);
+      expect((await store.getMember(s.id, "m_gone"))?.lastSeenAt).toBe(AGED());
       // And the sweep agrees: the window restarted at the thaw.
       (await store.sweep(Date.now()));
       expect((await store.getSession(s.id))?.closed).toBe(false);
@@ -4279,6 +4780,30 @@ export function describeStoreContract(
             parties: ["org_codenerd", "org_other"], crossing: "cross_org",
             direction: org === "org_codenerd" ? "outbound" : "inbound",
           })]);
+        }
+      });
+
+      // The record holds only the members in the room (ADR 0019), and a delete's and a purge's parties are the
+      // roster all the same: a member who left sat in the room, with an org or with none (audit trail spec, D2).
+      it("names the members who left among a delete's and a purge's parties", async () => {
+        const s = session({
+          id: "qs_left", joinCodes: {},
+          members: [member(), peer(), peer({ memberId: "m_solo", userId: "u_solo", orgId: null })],
+        });
+        await store.createSession(s);
+        await store.updateMember(s.id, "m_peer", { leftAt: Date.now() });
+        await store.updateMember(s.id, "m_solo", { leftAt: Date.now() });
+        await store.closeSession(s.id);
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor)).toMatchObject({ ok: true });
+        await sweepRoom(s.id);
+
+        expect(await store.getSession(s.id)).toBeUndefined();
+        for (const org of ["org_codenerd", "org_other"]) {
+          const filed = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
+          expect(filed.map((a) => [a.action, a.parties]), org).toEqual([
+            ["room_deleted", ["org_codenerd", "org_other", null]],
+            ["room_purged", ["org_codenerd", "org_other", null]],
+          ]);
         }
       });
 
@@ -4549,7 +5074,7 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, removed: true, codeRetired: null });
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBe(9_000_000);
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBe(9_000_000);
       expect((await store.eventsAfter(s.id, 0)).map((e) => e.type)).toEqual(["member_left"]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action)).toEqual(["member_left"]);
     });
@@ -4587,7 +5112,7 @@ export function describeStoreContract(
       expect(outcome.removed).toBe(true);
       const departure = (await store.eventsAfter(s.id, 0))
         .filter((e) => e.type === "member_evicted").at(-1)!;
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // The cursor the removal's own event carries, read back from the log rather
       // than computed here: a store numbering its events differently would still
       // have to agree with itself.
@@ -4612,7 +5137,7 @@ export function describeStoreContract(
       });
 
       expect(outcome.removed).toBe(true);
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // Out, and still reading. R2: a member who chose to go keeps the open feed,
       // and a store that cut here would be the symmetry `announceReclaimed` warns
       // against. The departure is written either way — this is not a no-op path.
@@ -4634,7 +5159,7 @@ export function describeStoreContract(
       const events = await store.eventsAfter(s.id, 0);
       expect(events.map((e) => e.type), "arrangement: two events, so the cursors differ")
         .toEqual(["member_evicted", "invite_revoked"]);
-      const m = (await store.getSession(s.id))!.members.find((mm) => mm.memberId === "m_peer")!;
+      const m = (await store.getMember(s.id, "m_peer"))!;
       // The removal writes two events and the cut names the FIRST. Pinned because
       // the last one written is the easier thing to reach for, and a cut one cursor
       // too high admits the evicted member past the door's own announcement — an
@@ -4813,7 +5338,7 @@ export function describeStoreContract(
 
       expect(outcome).toEqual({ refused: null, removed: false, codeRetired: null });
       // The original stamp stands: a retry must not restate when they went.
-      expect((await store.getSession(s.id))!.members.find((m) => m.memberId === "m_peer")?.leftAt)
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt)
         .toBe(5_000);
       expect(await store.eventsAfter(s.id, 0)).toEqual([]);
       expect(await store.auditForOrg("org_codenerd", 10)).toEqual([]);
@@ -4841,8 +5366,8 @@ export function describeStoreContract(
       });
 
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt).toBeNull();
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.removedAtCursor).toBeUndefined();
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt).toBeNull();
+      expect((await store.getMember(s.id, "m_peer"))?.removedAtCursor).toBeUndefined();
       // The record as planted, code and expiry: pinning the code alone passes a store
       // that kept the entry and expired it.
       expect(fresh.joinCodes["peer_b"], "the door is untouched").toEqual(door["peer_b"]);
@@ -4930,7 +5455,7 @@ export function describeStoreContract(
       // Two answers, not one: nobody was removed, and a code was retired.
       expect(outcome).toEqual({ refused: null, removed: false, codeRetired: "peer_b" });
       const fresh = (await store.getSession(s.id))!;
-      expect(fresh.members.find((m) => m.memberId === "m_peer")?.leftAt, "the original stamp stands")
+      expect((await store.getMember(s.id, "m_peer"))?.leftAt, "the original stamp stands")
         .toBe(5_000);
       expect(fresh.joinCodes["peer_b"]).toBeUndefined();
       expect(await store.getSessionByJoinCode("BELL-LIVE-01")).toBeUndefined();
@@ -5060,6 +5585,39 @@ export function describeStoreContract(
       expect(await store.auditForOrg("", 10)).toEqual([]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
         .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    describe("signing in (#258)", () => {
+        it("counts nobody on a fresh store", async () => {
+          expect(await store.countUsers()).toBe(0);
+        });
+
+        it("counts a person once, however many times they sign in", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+          await store.recordSignIn("u_github_1", 2_000);
+          await store.recordSignIn("u_github_1", 3_000);
+
+          expect(await store.countUsers()).toBe(1);
+        });
+
+        it("counts each person once", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+          await store.recordSignIn("u_google_2", 1_000);
+          await store.recordSignIn("u_github_3", 1_000);
+
+          expect(await store.countUsers()).toBe(3);
+        });
+
+        /**
+         * The off-by-one AuthDO's client count had (#122) was a counter seeded by
+         * reading the keys back. This one starts at 0 and only increments on a
+         * first insert, so the first person counts as one.
+         */
+        it("counts the first person as one, not two", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+
+          expect(await store.countUsers()).toBe(1);
+        });
     });
   });
 }

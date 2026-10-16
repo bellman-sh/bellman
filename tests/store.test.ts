@@ -7,7 +7,7 @@ import { hydrateStoredSession } from "../src/stored-session.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
 import { tickStep } from "../src/heartbeat.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
-import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { member, roomManifest, session, type SeededSession } from "./helpers/fixtures.js";
 
 // A fresh blob store for each case, handed both to the store, which purges from it, and to the cases,
 // which put objects in it: a purge that missed the bucket the store was built over is seen.
@@ -89,8 +89,8 @@ describe("the sweep at close, on MemoryStore", () => {
       bytes, type: "text/plain", name: `${id}.txt`, by: "m_creator", at: Date.now(),
     });
   /** Created closed, so no close of the store's has swept it, and charged 45 bytes: `Session` carries no `blobBytes`, stored rooms do. */
-  const closedAndCharged = (id: string): Session =>
-    ({ ...session({ id, closed: true, closedAt: Date.now(), joinCodes: {} }), blobBytes: 45 }) as Session;
+  const closedAndCharged = (id: string): SeededSession =>
+    ({ ...session({ id, closed: true, closedAt: Date.now(), joinCodes: {} }), blobBytes: 45 }) as SeededSession;
 
   it("answers what it removed and credited, from a room the close has not swept", async () => {
     const blobs = new MemoryBlobStore();
@@ -287,7 +287,7 @@ describe("MemoryStore ticks its rooms with the step it is handed", () => {
   const room = (id: string, { host = true, reports = false, seenAt = T - 1_000, lastTickAt = T - HOUR - 1 } = {}) => {
     const m = manifest(host, reports);
     const members = [member({ roomRole: "lead", joinedAt: T - 2 * HOUR, lastSeenAt: seenAt }), ...(host ? [hostMember(m, T)] : [])];
-    return { ...session({ id, manifest: m, members, joinCodes: {} }), lastTickAt, ...(host ? { lastHostTickAt: lastTickAt } : {}) } as Session;
+    return { ...session({ id, manifest: m, members, joinCodes: {} }), lastTickAt, ...(host ? { lastHostTickAt: lastTickAt } : {}) } as SeededSession;
   };
   const ticked = async (store: MemoryStore, id: string) => ({
     events: await store.eventsAfter(id, 0),

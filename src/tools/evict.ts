@@ -8,7 +8,6 @@ import { evictMember } from "../rooms.js";
 import type { BellmanStore } from "../store.js";
 
 export function registerEvict(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // -------------------------------------------------------------- bellman_evict
   server.registerTool(
     "bellman_evict",
     {

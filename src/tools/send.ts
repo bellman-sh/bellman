@@ -13,7 +13,6 @@ import type { BlobStore } from "../blobs.js";
 import { MAX_PAYLOAD_CHARS, MAX_PAYLOAD_DEPTH, PayloadTooDeepError, assertPayloadDepth } from "../payload.js";
 
 export function registerSend(server: McpServer, identity: Identity, s: BellmanStore, blobs: BlobStore): void {
-  // --------------------------------------------------------------- bellman_send
   server.registerTool(
     "bellman_send",
     {
@@ -23,7 +22,7 @@ export function registerSend(server: McpServer, identity: Identity, s: BellmanSt
 Args:
   - session_id, member_id: your handles from start/confirm
   - type:
-      "message"        — free-form text for the peer agent+human
+      "message"        — free-form text for the room's agents and their humans
       "artifact"       — code/doc/data payload ({ name, content })
       "action_request" — ask the room to do something. Only members that granted request_actions may act on it, and THEIR HUMAN approves, not their agent.
                          It ends in exactly one of three states and cannot sit between them: answered, declined (a human said no), or expired (30 minutes passed and nobody did). Silence and refusal are different answers, and this is what tells them apart. Until it ends it appears in every member's bellman_sync as \`outstanding\`. An answer that arrives after the deadline still lands and still counts.
@@ -73,7 +72,7 @@ Errors: a verb your role does not hold is refused by name, and nothing is delive
       const session = await s.getSession(session_id);
       if (!session || session.closed) return fail("session not found or closed.");
       if (session.frozenAt !== null) return fail(FROZEN);
-      const me = findMember(session, member_id, identity);
+      const me = await findMember(s, session, member_id, identity);
       if (!me || me.leftAt !== null) return fail("member_id is not yours or has left the session.");
 
       // Sending is as good a sign of life as polling. Before the verb check, so

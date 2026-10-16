@@ -19,7 +19,14 @@
  *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
  *                     Launch with --dangerously-load-development-channels server:<name>.
  *                     "hook": queue them for the Bellman Stop hook and bellman_wait.
- *   BELLMAN_BUS       "on" (default) or "off". On, the bridges on a machine share one
+ *                     "queue": queue them for the agent to collect, with bellman_sync when a
+ *                     turn starts and bellman_wait mid-turn, in a host that runs no Stop
+ *                     hook. The Claude Desktop bundle sets it (#241).
+ *   BELLMAN_INSTALL   "bundle" (the Claude Desktop bundle sets it) or "plugin" (the Claude Code
+ *                     plugin sets it): how this bridge was installed, so the notice it gives when
+ *                     its server runs a newer release names the step that updates it. Anything
+ *                     else, unset included, gets npm's step: `bellman update`.
+ *   BELLMAN_BUS      "on" (default) or "off". On, the bridges on a machine share one
  *                     connection per room, over a Unix socket under ~/.claude/bellman/bus,
  *                     where each used to long-poll for every member it watches. "off" is
  *                     the way back to that: this bridge polls for its own members and
@@ -35,7 +42,7 @@
  *                     refused: name it here to allow that much. "/" is any file. Read on
  *                     each upload.
  *
- * The sign-in is NOT lazy, and it is worth being plain about it. Claude Code
+ * The sign-in is NOT lazy. Claude Code
  * lists a server's tools as soon as it connects, the bridge proxies tools/list
  * to Bellman, and proxying it means connecting — so on a machine with no cached
  * credential the browser opens at Claude Code LAUNCH, not at the first bellman_*
@@ -49,14 +56,14 @@
  */
 import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { connectRemote, createBridge, type Delivery, type Remote, type WhoAmI } from "./bridge.js";
+import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
 const key = process.env.BELLMAN_KEY;
 const url = process.env.BELLMAN_URL ?? "https://mcp.bellman.sh/mcp";
-const delivery: Delivery = process.env.BELLMAN_DELIVERY === "hook" ? "hook" : "channel";
+const delivery = deliveryOf(process.env.BELLMAN_DELIVERY);
 const log = (message: string) => console.error(`[bellman] ${message}`);
 
 /**
@@ -121,11 +128,12 @@ const connect: () => Promise<Remote> = key
 /** Who peers will see. A key is unattributable here; the server resolves it per call. */
 const whoami = (): WhoAmI => (key ? { source: "env", label: null } : signedInAs(url, { log }));
 
-const inboxDir = delivery === "hook" ? inboxDirFor(process.ppid) : undefined;
-if (delivery === "hook") sweepStaleInboxes();
+const inboxDir = delivery !== "channel" ? inboxDirFor(process.ppid) : undefined;
+if (inboxDir) sweepStaleInboxes();
 
 const bridge = createBridge({
   delivery,
+  install: installOf(process.env.BELLMAN_INSTALL),
   inboxDir,
   remote: connect,
   whoami,

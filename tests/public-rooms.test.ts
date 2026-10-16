@@ -106,3 +106,49 @@ describe("the creator's public link", () => {
     }
   });
 });
+
+// Public rooms are a paid plan's (public rooms spec, D10). One check on the resolved manifest covers
+// every way of asking for one, and a refusal creates nothing and counts nothing.
+describe("a public room's plan", () => {
+  const refusal = 'a public room requires the pro, max or team plan (you are on "free"). Start it with public: false, or upgrade.';
+  const preset: SavedPreset = {
+    name: "open_review", description: null, mode: "pair", heartbeat: null, public: true,
+    roles: { a: { can: ["send"], description: null, heartbeat_on: false }, b: { can: ["send"], description: null, heartbeat_on: false } },
+    default_role: "b", creator_role: "a", updated_at: null,
+  };
+
+  it("refuses a free account by every way of asking, before anything is created or counted", async () => {
+    const h = new Harness();
+    try {
+      const peer = await h.connect(DEV_KEY.peer);
+      await h.store.putPreset(peer.identity.userId, preset, 20);
+      for (const manifest of [
+        { room: "Open", preset: "pair", public: true },
+        { ...authored, public: true },
+        { room: "Open", preset: "open_review" },
+      ]) {
+        const res = await peer.call("bellman_start", { manifest, brief: brief() });
+        expect(res.isError, JSON.stringify(manifest)).toBe(true);
+        expect(res.text).toContain(refusal);
+      }
+      expect(await h.store.countCreatesThisMonth(peer.identity.userId)).toBe(0);
+      const shut = await peer.call("bellman_start", { manifest: { room: "Shut", preset: "open_review", public: false }, brief: brief() });
+      expect(shut.isError, shut.text).toBe(false);
+      expect((shut.data.room as { public: boolean }).public).toBe(false);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it("starts one on pro", async () => {
+    const h = new Harness();
+    try {
+      const pro = await h.connectAs({ userId: "u_pro", orgId: null, plan: "pro", role: "member", label: "pro" });
+      const open = await pro.call("bellman_start", { manifest: { room: "Open", preset: "pair", public: true }, brief: brief() });
+      expect(open.isError, open.text).toBe(false);
+      expect(open.data.public_url).toBe(`https://dash.bellman.sh/r/${String(open.data.session_id)}`);
+    } finally {
+      await h.close();
+    }
+  });
+});

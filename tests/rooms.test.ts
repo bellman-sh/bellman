@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { manifestFixture, member, oneCode, session, swarmSession } from "./helpers/fixtures.js";
+import { manifestFixture, member, oneCode, roomManifest, session, swarmSession } from "./helpers/fixtures.js";
 import { resolveManifest } from "../src/manifest.js";
 import { HOST_USER_ID, MemoryStore, ROOM_MEMBER_CEILING } from "../src/store.js";
 import { activeMembers, audit, evictMember, issueInvite, leaveRoom, revokeInvite } from "../src/rooms.js";
-import type { Identity, Member } from "../src/types.js";
+import type { ArrivingMember, Identity, Member } from "../src/types.js";
 
 /**
  * The operations in src/rooms.ts, driven directly. The authority rules are the
@@ -35,7 +35,7 @@ beforeEach(() => {
  * operation that went back to reading the roster and calling closeSession would
  * never meet the join, and pass.
  */
-function joinJustBeforeClose(joiner: Member): void {
+function joinJustBeforeClose(joiner: ArrivingMember): void {
   const closeSession = store.closeSession.bind(store);
   vi.spyOn(store, "closeSession").mockImplementation(async (id) => {
     await store.addMember(id, joiner);
@@ -59,8 +59,9 @@ describe("leaveRoom", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
     expect(r.value.sessionStatus).toBe("active");
-    const after = await store.getSession("qs_test");
-    expect(after?.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
+    // Gone from the room, so read by id (ADR 0019).
+    expect((await store.getSession("qs_test"))?.members.map((m) => m.memberId)).toEqual(["m_creator"]);
+    expect((await store.getMember("qs_test", "m_peer"))?.leftAt).toEqual(expect.any(Number));
   });
 
   it("refuses a handle that belongs to someone else", async () => {
@@ -285,7 +286,7 @@ describe("issueInvite", () => {
     if (r.ok) return;
     expect(r.code).toBe("conflict");
     expect(r.reason).toMatch(/full/);
-    expect(r.reason).toContain("100 members");
+    expect(r.reason).toContain(`${ROOM_MEMBER_CEILING} members`);
     expect(r.reason).toContain("ceiling");
   });
 
@@ -385,6 +386,58 @@ describe("issueInvite", () => {
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
   });
+
+  // Refused for what it asks, before anything is asked of the store: the store's own
+  // check is for a room made private after this read (ADR 0020).
+  it("refuses a permanent code to a room that is not public without asking the store", async () => {
+    await store.createSession(session());
+    const setJoinCode = vi.spyOn(store, "setJoinCode");
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator", undefined, true);
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+    expect(r.reason).toContain("not public");
+    expect(setJoinCode).not.toHaveBeenCalled();
+  });
+
+  // Made private between the gate's read and the write: the store refuses the permanent
+  // code (ADR 0020), and the caller hears that, not the live-code refusal, with nothing
+  // announced or audited.
+  it("says the room is not public when the store refuses a permanent code for that", async () => {
+    await store.createSession(session({ manifest: roomManifest({ public: true }) }));
+    vi.spyOn(store, "setJoinCode").mockResolvedValueOnce({ ok: false, reason: "not_public" });
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator", undefined, true);
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("conflict");
+    expect(r.reason).toContain("not public");
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_issued")).toHaveLength(0);
+    const rows = await store.auditForOrg("org_codenerd", 50);
+    expect(rows.filter((a) => a.action === "invite_issued")).toHaveLength(0);
+  });
+
+  // A permanent code never expires, so a seat that may not replace it is not told to
+  // wait until it does.
+  it("does not tell a seat holding invite alone to wait out a permanent code", async () => {
+    const base = roomManifest({ public: true });
+    await store.createSession(session({
+      manifest: { ...base, roles: { ...base.roles, peer_a: { ...base.roles.peer_a, can: ["send", "invite"] } } },
+      joinCodes: { peer_b: { code: "BELL-PERM-01", expiresAt: null } },
+    }));
+
+    const r = await issueInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.code).toBe("forbidden");
+    expect(r.reason).toContain("permanent and will not expire");
+    expect(r.reason).not.toContain("Wait for that code to expire");
+  });
 });
 
 describe("revokeInvite", () => {
@@ -409,6 +462,24 @@ describe("revokeInvite", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.roles).toEqual([]);
+  });
+
+  // ADR 0020: a permanent code has no expiry to compare against, and is live until
+  // something retires it, so revoking it is a door shutting and is announced.
+  it("retires a permanent code, reports its role and announces it", async () => {
+    await store.createSession(session({
+      manifest: roomManifest({ public: true }),
+      joinCodes: { peer_b: { code: "BELL-PERM-01", expiresAt: null } },
+    }));
+
+    const r = await revokeInvite(store, jesse, "qs_test", "m_creator");
+
+    expect(r.ok, JSON.stringify(r)).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.roles).toEqual(["peer_b"]);
+    const events = await store.eventsAfter("qs_test", 0);
+    expect(events.filter((e) => e.type === "invite_revoked")).toHaveLength(1);
+    expect(await store.getSessionByJoinCode("BELL-PERM-01")).toBeUndefined();
   });
 
   // Without the guard a mistyped role retires nothing and answers { roles: [] },
@@ -1022,8 +1093,8 @@ describe("evictMember", () => {
     const out = await evictMember(store, creator, session.id, target.memberId);
     expect(out.ok).toBe(true);
 
-    const after = (await store.getSession(session.id))!;
-    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    // Gone from the room, so read by id (ADR 0019).
+    const m = (await store.getMember(session.id, target.memberId))!;
     const announcement = (await store.eventsAfter(session.id, 0))
       .filter((e) => e.type === "member_evicted")
       .at(-1)!;
@@ -1070,8 +1141,8 @@ describe("evictMember", () => {
     const out = await evictMember(store, creator, session.id, target.memberId);
     expect(out.ok).toBe(true);
 
-    const after = (await store.getSession(session.id))!;
-    const m = after.members.find((mm) => mm.memberId === target.memberId)!;
+    const m = (await store.getMember(session.id, target.memberId))!;
+    expect(m.leftAt, "control: the member had left before the eviction").not.toBeNull();
     // Spec D6: the cut rides the announcement, and the early return writes
     // none. A voluntary leaver keeps the open feed (R2); the late eviction is
     // about the door, not their reading.
@@ -1107,7 +1178,9 @@ describe("evictMember", () => {
     expect(r.ok, JSON.stringify(r)).toBe(true);
     const after = await store.getSession("qs_test");
     expect(after?.frozenAt, "control: the freeze landed after the removal").not.toBeNull();
-    const m = after?.members.find((mm) => mm.memberId === "m_peer");
+    // Gone from the room, so read by id (ADR 0019).
+    expect(after?.members.some((mm) => mm.memberId === "m_peer")).toBe(false);
+    const m = await store.getMember("qs_test", "m_peer");
     expect(m?.leftAt).not.toBeNull();
     // Out AND cut, not out alone: the cut rides the removal's own transaction, so
     // a freeze arriving after it cannot have taken one without the other (#113).

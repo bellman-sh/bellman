@@ -3,7 +3,7 @@ import {
   HOST_MEMBER_ID, HOST_USER_ID, HOST_MODELS, REPLIES_PER_QUESTION, MAX_REPLY_CHARS, MAX_ANSWER_CHARS, READ_LIMIT,
   WAKES_PER_HOUR, hostMember, isHostMember, unitsFor, hostWakeIntent, isReplyToHost, emptyHostState, decide,
   questionPrompt, answerPrompt, messagesBody, parseModelText, applyDecision, emptyHostRecord, joinsQueue, handleWake,
-  callMessages, hostedSeatOn, HOST_RULES, RULES_OUTRANK, type HostDriver, type HostRecord,
+  callMessages, hostedSeatFor, hostedSeatOn, hostedSeatUsers, HOST_RULES, RULES_OUTRANK, type HostDriver, type HostRecord,
 } from "../src/host.js";
 import { SOCIAL_HOST_INSTRUCTIONS, resolveManifest } from "../src/manifest.js";
 import { decideHostCharge, type HostAppend } from "../src/store.js";
@@ -92,9 +92,9 @@ describe("decide", () => {
   // Read after that write, as the seat reads the room, the same test would refuse every
   // tick, so the seat asks on whatever wake reaches it.
   it("asks on a tick however long since anyone was seen, because the store guards presence", () => {
-    const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), hostMember(hosted(), NOW)] });
+    const quiet = room({ members: [member({ lastSeenAt: NOW - 2 * 3_600_000 }), member(hostMember(hosted(), NOW))] });
     expect(decide(emptyHostState(), tick(9), quiet, [], NOW)).toEqual({ kind: "question", tick: 9 });
-    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), hostMember(hosted(), NOW)] });
+    const gone = room({ members: [member({ lastSeenAt: NOW - 60_000, leftAt: NOW - 30_000 }), member(hostMember(hosted(), NOW))] });
     expect(decide(emptyHostState(), tick(9), gone, [], NOW)).toEqual({ kind: "question", tick: 9 });
   });
 
@@ -153,7 +153,7 @@ describe("decide", () => {
 
   // Evicting the host is the creator's off-switch (C1): a wake that reaches it anyway settles, with no model call.
   it("skips any wake once the host has left the room", () => {
-    const evicted = room({ members: [member({ lastSeenAt: NOW - 60_000 }), { ...hostMember(hosted(), NOW), leftAt: NOW - 1 }] });
+    const evicted = room({ members: [member({ lastSeenAt: NOW - 60_000 }), member({ ...hostMember(hosted(), NOW), leftAt: NOW - 1 })] });
     expect(decide(emptyHostState(), tick(9), evicted, [], NOW)).toMatchObject({ kind: "skip", why: expect.stringMatching(/left the room/) });
     const asked = { ...emptyHostState(), cursor: 10, questions: [{ cursor: 10, text: "q", askedAt: NOW, answers: 0 }] };
     expect(decide(asked, reply(11), evicted, [ev({ cursor: 11, refId: "10" })], NOW))
@@ -314,7 +314,7 @@ describe("the answer", () => {
  * and writes, and what it keeps. The room is a hosted one with ten units a month, a reply
  * wake's open question is at cursor 10, and the model answers "Fine." unless told otherwise.
  */
-function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown }; plan?: Plan; enabled?: boolean } = {}) {
+function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord>; sent?: SessionEvent; write?: HostAppend; model?: { status: number; json: unknown }; plan?: Plan; enabled?: boolean; users?: string[] } = {}) {
   const { events: _e, ...rest } = session({ manifest: hosted(), members: [member({ lastSeenAt: NOW }), hostMember(hosted(), NOW)],
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(NOW), used: 0, wakes: [] } });
   const room = { ...rest, ...over.room } as StoredSession;
@@ -324,6 +324,7 @@ function seat(over: { room?: Partial<StoredSession>; record?: Partial<HostRecord
   const driver: HostDriver = {
     retryMs: [1, 1, 1],
     enabled: over.enabled ?? true,
+    users: new Set(over.users ?? []),
     read: async () => {
       seen.rooms++;
       return {
@@ -581,6 +582,45 @@ describe("the allowance at the month turn (I7)", () => {
  * the seat on. Unset, empty and "off" are off without a word, and any other value is off and
  * logged, so a typo cannot start a seat that spends the key.
  */
+describe("handleWake with the seat off but on for listed creators", () => {
+  // The fixture's room was created by u_jesse.
+  it("wakes a listed creator's room as the switch would: the room read, the model called, a unit charged", async () => {
+    const { driver, seen } = seat({ enabled: false, users: ["u_jesse"] });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen).toMatchObject({ rooms: 1, calls: 1, writes: [{ payload: { kind: "question" }, units: 1 }] });
+  });
+
+  it("keeps anyone else's room quiet: read to learn whose it is, then no plan, unit or model call", async () => {
+    const { driver, seen } = seat({ enabled: false, users: ["u_peer"] });
+    expect(await handleWake(driver, tickWake(12), NOW)).toBeNull();
+    expect(seen).toEqual({ rooms: 1, reads: [], keys: [], calls: 0, writes: [], plans: [], renewals: [] });
+  });
+});
+
+describe("hostedSeatUsers", () => {
+  it("reads comma-separated user ids, spaces allowed, and no one from unset or empty", () => {
+    expect([...hostedSeatUsers("u_github_8698, u_jesse")]).toEqual(["u_github_8698", "u_jesse"]);
+    for (const raw of [undefined, "", " , "]) expect(hostedSeatUsers(raw).size, JSON.stringify(raw)).toBe(0);
+  });
+
+  it("skips and logs what is not a user id, so a subject key or a typo lists no one", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect([...hostedSeatUsers("github:8698, u_ok, 8698")]).toEqual(["u_ok"]);
+    expect(logged.mock.calls.flat().join(" ")).toContain("github:8698");
+    logged.mockRestore();
+  });
+});
+
+describe("hostedSeatFor", () => {
+  it("is on for everyone with the switch on, and only for listed users with it off", () => {
+    expect(hostedSeatFor("u_anyone", "on", undefined)).toBe(true);
+    expect(hostedSeatFor("u_jesse", "off", "u_jesse")).toBe(true);
+    expect(hostedSeatFor("u_jesse", undefined, "u_peer, u_jesse")).toBe(true);
+    expect(hostedSeatFor("u_peer", "off", "u_jesse")).toBe(false);
+    expect(hostedSeatFor("u_jesse", undefined, undefined)).toBe(false);
+  });
+});
+
 describe("hostedSeatOn", () => {
   afterEach(() => { vi.restoreAllMocks(); });
   const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
@@ -614,6 +654,14 @@ describe("a host never trades in personal information", () => {
   it("says so in the rules every host is given", () => {
     expect(HOST_RULES).toMatch(/personal information/);
     expect(HOST_RULES).toMatch(/ask for, repeat or invite/);
+  });
+
+  // The ban names what to keep out; the sentence ahead of it names what to ask instead, so the
+  // model steers by a target rather than by the list it must avoid.
+  it("pairs the ban with what to ask instead, ahead of it", () => {
+    const target = HOST_RULES.indexOf("Keep every question and answer about the work itself, so any agent can answer it anonymously.");
+    expect(target).toBeGreaterThanOrEqual(0);
+    expect(target).toBeLessThan(HOST_RULES.indexOf("Never ask for secrets"));
   });
 
   it("puts the rule, then the social preset's question, then the outrank line in a social room's prompt", () => {

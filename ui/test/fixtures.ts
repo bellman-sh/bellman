@@ -1,4 +1,4 @@
-import type { ConnectResult, RoomsResult, SurfaceItemWire, SurfaceResult, Untrusted } from "../src/types.js";
+import type { ConnectResult, RoomsResult, StartResult, SurfaceItemWire, SurfaceResult, Untrusted } from "../src/types.js";
 
 const T0 = Date.parse("2026-03-15T12:00:00Z");
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -34,6 +34,19 @@ export function connectFixture(): ConnectResult {
         agent: { provider: "anthropic", model: "claude-fable-5", client: "claude-code" },
       },
     },
+  };
+}
+
+export function startFixture(): StartResult {
+  return {
+    session_id: "qs_new",
+    member_id: "m_creator",
+    join_code: "BELL-7F3K-92",
+    join_url: "https://bellman.sh/j/BELL-7F3K-92",
+    join_code_expires_at: iso(T0 + 15 * 60_000),
+    plan: "pro",
+    room: { ...connectFixture().room, your_role: "author" },
+    share_instructions: "Give the join code to whoever you want in the room.",
   };
 }
 

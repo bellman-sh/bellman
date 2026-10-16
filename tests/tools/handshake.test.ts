@@ -1,7 +1,8 @@
 /**
  * INVARIANT 1: plan entitlements gate session CREATION only — joining is free.
  * INVARIANT 2: two-phase connect. Nothing of the joiner crosses until confirm.
- *              Join codes are single-use with a 15-minute unused TTL.
+ *              A join code lives 15 minutes and seats every joiner who redeems
+ *              it until then, unless it is retired first (ADR 0010, decision 4).
  * INVARIANT 7: member_id is per-connection, and a handle is drivable only by
  *              the identity that minted it.
  * INVARIANT 10: every room is declared. bellman_start needs a manifest and
@@ -656,7 +657,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     expect(preview.isError, preview.text).toBe(false);
     expect((preview.data.session as { mode: string }).mode).toBe("swarm");
     // The number an agent can act on: the room's capacity, not a plan limit.
-    expect((preview.data.session as { max_members: number }).max_members).toBe(100);
+    expect((preview.data.session as { max_members: number }).max_members).toBe(ROOM_MEMBER_CEILING);
   });
 
   it("reports a pair room's capacity as two in the connect preview", async () => {
@@ -789,7 +790,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "roles", "text",
+      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "public_name", "roles", "text",
         "your_heartbeat_on", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
@@ -1121,8 +1122,9 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     // The two heartbeat keys (#111) are spine: a number or null and a boolean, computed by
     // the server, so there is no authored string in them to leak and the guard below holds.
     // So is `host` (#188): a role key, as creator_role is, and a model from a fixed list.
+    // And `public_name` (public names spec, D7): a name held to a grammar the server checked, like a role key.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "roles", "text",
+      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "public_name", "roles", "text",
         "your_heartbeat_on", "your_role", "your_verbs"],
     );
 

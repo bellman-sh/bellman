@@ -99,7 +99,7 @@ describe("a removed member's bellman_sync on the real object", () => {
     const events = envelopes(answer.data.events).map((e) => e.data as { cursor: number; type: string });
     expect(events.map((e) => e.type)).toEqual(["member_evicted"]);
     // Inside the cut: the cursor the roster recorded is the cursor of the event delivered.
-    const cut = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!.removedAtCursor;
+    const cut = (await store.getMember(id, "m_target"))!.removedAtCursor;
     expect(cut).toBeDefined();
     expect(events[0].cursor).toBe(cut);
     expect(answer.data.cursor).toBe(cut);
@@ -195,7 +195,7 @@ describe("a removed member's bellman_sync on the real object", () => {
 
     // Both are committed before the poll starts, so its read finds events past its cursor
     // and returns them at once. No waiter is registered, which is the path this is for.
-    const cut = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!.removedAtCursor;
+    const cut = (await store.getMember(id, "m_target"))!.removedAtCursor;
     expect(cut, "arrangement: the removal is committed").toBeDefined();
     expect((await store.eventsAfter(id, 0)).map((e) => e.type)).toEqual(["member_evicted", "message"]);
 
@@ -254,7 +254,7 @@ describe("a removed member's bellman_sync on the real object", () => {
       payload: { member_id: "m_target", label: "jesse@codenerd", room_role: "peer_b" }, refId: null,
     }, { markRemoved: "m_target" });
 
-    const record = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!;
+    const record = (await store.getMember(id, "m_target"))!;
     expect(record.leftAt, "arrangement: they left").not.toBeNull();
     expect(record.removedAtCursor, "arrangement: the store declined the cut").toBeUndefined();
 
@@ -301,7 +301,7 @@ describe("a removed member's bellman_sync on the real object", () => {
 
     // The state this case is about, read from the record: they left, the store declined to
     // cut them, and the removal is in the log all the same.
-    const record = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!;
+    const record = (await store.getMember(id, "m_target"))!;
     expect(record.leftAt, "arrangement: they left").not.toBeNull();
     expect(record.removedAtCursor, "arrangement: the store declined the cut").toBeUndefined();
     const stored = await store.eventsAfter(id, 0);
@@ -360,7 +360,7 @@ describe("a removed member's bellman_sync on the real object", () => {
     const { id, store, asMember, asCreator } = await room();
     const removal = await asCreator.call("bellman_evict", { session_id: id, member_id: "m_target" });
     expect(removal.isError, removal.text).toBe(false);
-    const cut = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!.removedAtCursor!;
+    const cut = (await store.getMember(id, "m_target"))!.removedAtCursor!;
 
     // From the cut, asking to be held. Nothing exists past it yet, which is the only state in
     // which waiting can be seen: with an event ahead of it a poll answers at once whatever the

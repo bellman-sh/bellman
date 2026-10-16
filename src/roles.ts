@@ -50,8 +50,8 @@ export function mustReport(manifest: RoomManifest, role: string): boolean {
  * Takes a Session and a Member and NOT an Identity, deliberately. `Identity.role`
  * ("member" | "admin") is platform authority over an org and buys nothing inside
  * a room; an org admin is not automatically anything in a room, and a room's
- * creator need not be an org admin. Keeping Identity out of this signature is
- * what makes that structural rather than a convention.
+ * creator need not be an org admin. Keeping Identity out of this signature means
+ * the compiler enforces that, not a convention.
  *
  * DO NOT add an Identity parameter. See the design's D2, and the grep invariant
  * in tests/tools/verbs.test.ts.

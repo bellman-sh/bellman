@@ -4,7 +4,7 @@
  * member routes, a web Request in and a Response out over MemoryStore and
  * MemoryBlobStore, with the member routes beside them for the writes a case needs.
  */
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { publicRoutes } from "../src/http/public.js";
@@ -73,8 +73,8 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["closed_at", "id", "mode", "status", "text"]);
-    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair" });
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text"]);
+    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", by: null });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });
@@ -226,6 +226,9 @@ describe("members' names on a public read", () => {
     await say(member(), "message", { text: "hello" });
     await say(peer(), "member_joined", { member: storedMember(peer()), brief: brief() });
     await say(peer(), "member_left", { label: "peer@codenerd" });
+    // And has left: the session holds the members in the room now, and a member who left keeps the
+    // number its label was given at seating (ADR 0019, D6).
+    await store.updateMember(PUB, "m_peer", { leftAt: Date.now() });
     await store.appendEvent(PUB, {
       type: "heartbeat", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
       payload: { members: [{ member_id: "m_peer", label: "peer@codenerd" }], about: { origin: { label: "jesse@codenerd" } } }, refId: null,
@@ -242,5 +245,45 @@ describe("members' names on a public read", () => {
     ]);
     expect(events[3].data.payload).toEqual({ label: "member 2" });
     expect(events[4].data.payload).toEqual({ members: [{ member_id: "m_peer", label: "member 2" }], about: { origin: { label: "member 1" } } });
+  });
+});
+
+describe("a public room read by its name (public names spec, D6)", () => {
+  const name = async (id: string, n: string) => {
+    await store.claimPublicName(n, { id, at: Date.now() }, null);
+    await store.setPublicName(id, n);
+  };
+
+  it("reads the room, its surface and its log by its name as by its session id", async () => {
+    await name(PUB, "open-review");
+    for (const part of ["", "/surface", "/events"]) {
+      const byName = (await read(`/public/rooms/open-review${part}`))!;
+      expect(byName.status, part).toBe(200);
+      expect(await byName.json(), part).toEqual(await (await read(`/public/rooms/${PUB}${part}`))!.json());
+    }
+  });
+
+  // Review Focus 3: a closed room's name is free, and the room is still readable by its id.
+  it("answers a name its room no longer holds as no public room, and keeps a closed room readable by its id", async () => {
+    await store.createSession(session({
+      id: "qs_closed_pub", manifest: roomManifest({ public: true }), members: [member()], closed: true, closedAt: Date.now(), joinCodes: {},
+    }));
+    await name("qs_closed_pub", "closed-room");
+    expect((await read("/public/rooms/closed-room"))!.status).toBe(404);
+    expect((await read("/public/rooms/qs_closed_pub"))!.status).toBe(200);
+    await name(PUB, "open-review");
+    // The positive control: the name reads while its room holds it, so the 404 below is the release.
+    expect((await read("/public/rooms/open-review"))!.status).toBe(200);
+    await store.unpublishSession(PUB, Date.now());
+    const gone = (await read("/public/rooms/open-review"))!;
+    expect(gone.status).toBe(404);
+    expect(await gone.json()).toEqual(NOT_PUBLIC);
+  });
+
+  // Review Focus 5: a name nobody holds is answered from the index alone.
+  it("answers a name nobody claimed without reading any room", async () => {
+    const reads = vi.spyOn(store, "getSession");
+    expect((await read("/public/rooms/never-claimed"))!.status).toBe(404);
+    expect(reads).not.toHaveBeenCalled();
   });
 });

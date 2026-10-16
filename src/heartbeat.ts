@@ -135,10 +135,11 @@ export function nextTickAt(s: StoredSession): number | null {
  * role in a hosted room need report, `social`'s included, and `nextTickAt` takes the
  * earlier of this and every reporter's own deadline, so a reporter is still asked on time.
  *
- * A host that has never asked anchors on the room's first seat, which is stored state
- * like every other anchor here, and not on the clock. `#derivedDue` recomputes this on
- * every re-arm, so an answer measured from now would move a cadence later each time
- * anything re-armed the alarm, and a busy room would never tick at all.
+ * A host that has never asked is due at the room's first seat, so it asks when the room
+ * starts rather than a cadence later. That anchor is stored state like every other here,
+ * and not the clock: `#derivedDue` recomputes this on every re-arm, so an answer measured
+ * from now would slide later each time anything re-armed the alarm, and a busy room would
+ * never tick at all.
  *
  * A firing at or after that time that found nobody to ask (`personSince`) moved
  * `lastTickAt` and not `lastHostTickAt`, so the answer is then a cadence after that
@@ -148,10 +149,12 @@ export function nextTickAt(s: StoredSession): number | null {
  */
 function hostedTickAt(s: StoredSession): number | null {
   const every = s.manifest.heartbeatOnMs;
-  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. A
-  // seated host is on the roster, so the roster is never empty below.
+  // A host the room has evicted is asked nothing again (C1), so its cadence arms nothing. Until
+  // the host first asks, its cadence runs from the room's creation, which is its first seat's
+  // join (ADR 0019 keeps that seat on the record however many have left since).
   if (s.manifest.host === null || every === null || !hostSeated(s)) return null;
-  const due = (s.lastHostTickAt ?? Math.min(...s.members.map((m) => m.joinedAt))) + every;
+  const asked = s.lastHostTickAt ?? null;
+  const due = asked === null ? s.creator.joinedAt : asked + every;
   return s.lastTickAt !== undefined && s.lastTickAt >= due ? s.lastTickAt + every : due;
 }
 
@@ -318,8 +321,8 @@ export function snapshotOf(s: StoredSession, now: number): HeartbeatPayload {
   for (const [key, def] of Object.entries(s.manifest.roles)) {
     if (def.reports && def.report) said[key] = def.report;
   }
-  const creator = s.members[0];
-  const instructions: HeartbeatPayload["instructions"] = Object.keys(said).length > 0 && creator
+  const creator = s.creator;
+  const instructions: HeartbeatPayload["instructions"] = Object.keys(said).length > 0
     ? { trust: "untrusted", origin: { memberId: creator.memberId, label: creator.label }, data: said }
     : null;
   return {

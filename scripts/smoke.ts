@@ -111,7 +111,7 @@ async function main(): Promise<void> {
   let pCursor = Number(confirmed.data.cursor);
 
   const reused = await call(outsider, "bellman_connect", { join_code: joinCode });
-  assert(reused.isError, "join code consumed once pair fills (single-use)");
+  assert(reused.isError, "join code consumed once pair fills");
 
   console.log("\n— brief exchange visible to creator —");
   const jSync1 = await call(jesse, "bellman_sync", {

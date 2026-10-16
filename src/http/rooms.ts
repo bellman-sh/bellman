@@ -26,7 +26,7 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../o
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -67,6 +67,7 @@ const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
+const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 const STATUS: Record<RoomFailure, number> = {
@@ -119,6 +120,26 @@ const overQuota = (used: number, ceiling: number, bytes: number, origin: string 
 
 export const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
+
+/**
+ * The refusal for a JSON write whose declared length rules it out, or `undefined` when its body may be
+ * read. Decided from the Content-Length header, before a byte of the body is parsed: a length that is
+ * present must be a digit string (400), because `Number` would read "garbage" as NaN and "1e3" as 1000
+ * and pass both under the bound, and it may not pass `max` (413). An absent one is a chunked body,
+ * which is allowed; the bound on those is a follow-up, not this check. `what` names the body in the
+ * 413's words ("a preset", "a surface write"). The presets, the surface writes and the handle all
+ * bound their bodies here, each with its own `max`.
+ */
+export function lengthRefusal(request: Request, max: number, what: string, origin: string | undefined): Response | undefined {
+  const length = request.headers.get("content-length");
+  if (length !== null && !/^\d+$/.test(length)) {
+    return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
+  }
+  if (Number(length ?? "0") > max) {
+    return problem(413, "too_large", `${what} is at most ${max} bytes of JSON`, origin);
+  }
+  return undefined;
+}
 
 /**
  * The room routes. `undefined` for a path that is neither `/rooms` (the list)
@@ -175,6 +196,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (download) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await downloadBlob(request, download[1], download[2], origin, deps);
+    }
+    const byline = BYLINE.exec(path);
+    if (byline) {
+      if (request.method !== "PUT" && request.method !== "DELETE") return methodNotAllowed("PUT, DELETE", origin);
+      return await writeByline(request, byline[1], origin, deps);
     }
     const unpublish = UNPUBLISH.exec(path);
     if (unpublish) {
@@ -236,8 +262,8 @@ async function uploadBlob(
   // (#65, D4) is told it holds no seat, as the surface write tells it: the same
   // fact is the same status at either door (review M1).
   const found = await deps.store.getSession(sessionId);
-  if (!found || !findMember(found, memberId, who.identity)) {
-    return adminWriteRefusal(found, who.identity, origin)
+  if (!found || !(await findMember(deps.store, found, memberId, who.identity))) {
+    return await adminWriteRefusal(deps.store, found, who.identity, origin)
       ?? problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   const gate = await gateSeat(deps.store, who.identity, sessionId, memberId, "write_surface");
@@ -320,7 +346,7 @@ async function downloadBlob(
 
   const notFound = () => problem(404, "not_found", "no such blob", origin);
   const session = await deps.store.getSession(sessionId);
-  const mine = session ? handlesOf(session, who.identity) : [];
+  const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
   const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
   if (!session || (mine.length === 0 && !asAdmin)) return notFound();
   if (mine.every(isRemovedMember) && !asAdmin) {
@@ -335,9 +361,11 @@ async function downloadBlob(
 
 /**
  * The list (D1): every room this person created or holds a handle in, from the
- * two registry listings, each resolved with one `getSession`. Membership is
- * checked on the record, not trusted from the index: a listing row names a room,
- * and only the roster says whether this person is in it.
+ * two registry listings, each resolved with a `getSession` and the person's handles
+ * in it (`handlesOf`). Membership is checked in the room, not trusted from the index:
+ * a listing row names a room, and only the room's handles say whether this person
+ * sat in it, those that left included, which the session's roster of who is in the
+ * room now does not hold (ADR 0019).
  *
  * Newest first, by the creator's seat (a room has no creation stamp of its own),
  * among the rooms the indexes returned. Each listing is asked for
@@ -349,7 +377,8 @@ async function downloadBlob(
  * The newest 50 of a larger set is #49's summary index.
  *
  * A room this person was removed from (#113) is listed with its member count as
- * of the removal (`roomListEntry`), the number its detail would give.
+ * of the removal (`roomListEntry`), the number its detail would give, which reads
+ * the members who left after the removal.
  */
 async function listRooms(request: Request, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -361,14 +390,19 @@ async function listRooms(request: Request, origin: string | undefined, deps: Roo
     deps.store.sessionsJoinedBy(userId, MAX_ROOMS_LISTED),
   ]);
   const ids = [...new Set([...created, ...joined])];
-  const found = await Promise.all(ids.map((id) => deps.store.getSession(id)));
+  const found = await Promise.all(ids.map(async (id) => {
+    const s = await deps.store.getSession(id);
+    return s && { s, handles: await handlesOf(deps.store, s, who.identity) };
+  }));
   const mine = found
-    .filter((s): s is StoredSession => s !== undefined && s.members.some((m) => m.userId === userId))
-    .sort((a, b) => b.members[0].joinedAt - a.members[0].joinedAt);
+    .filter((r): r is { s: StoredSession; handles: Member[] } => r !== undefined && r.handles.length > 0)
+    .sort((a, b) => b.s.creator.joinedAt - a.s.creator.joinedAt);
   const truncated = created.length >= MAX_ROOMS_LISTED || joined.length >= MAX_ROOMS_LISTED || mine.length > MAX_ROOMS_LISTED;
-  const rooms = mine
-    .slice(0, MAX_ROOMS_LISTED)
-    .map((s) => roomListEntry(s, userId, sessionStatus(s), cutAtFor(handlesOf(s, who.identity))));
+  const rooms = await Promise.all(mine.slice(0, MAX_ROOMS_LISTED).map(async ({ s, handles }) => {
+    const at = cutAtFor(handles);
+    const departed = at === undefined ? [] : (await deps.store.departedMembers(s.id, { leftAfter: at })).members;
+    return roomListEntry(s, userId, sessionStatus(s), at === undefined ? undefined : { at, departed });
+  }));
   return json(200, { rooms, truncated, viewer: "member" }, origin);
 }
 
@@ -423,10 +457,10 @@ const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string 
 
 /**
  * Whether the room admits this caller as the admin of an org that sat in it (#65, D4): the audit
- * log's three conditions, plus the org tie on the roster. The roster keeps a member who left and
- * one a creator removed, so an org whose only member was removed still sat in the room, and its
- * admin reads all of it: the cut is a seat's, and an admin holds none. Whether the caller reads
- * the room as that admin or as a member is `readsAsAdmin`'s to say.
+ * log's three conditions, plus the org tie, from the orgs the record keeps (ADR 0019). Those count
+ * the org of a member who left and of one a creator removed, so an org whose only member was
+ * removed still sat in the room, and its admin reads all of it: the cut is a seat's, and an admin
+ * holds none. Whether the caller reads the room as that admin or as a member is `readsAsAdmin`'s to say.
  *
  * Never an open room: that is its members', and the audit log is the admin's window into it
  * while it runs. A 404 for an open room says to an admin what it says to a stranger.
@@ -434,7 +468,7 @@ const isOrgAdmin = (identity: Identity): identity is Identity & { orgId: string 
 const admitsAdmin = (session: StoredSession, identity: Identity): boolean =>
   session.closed &&
   isOrgAdmin(identity) &&
-  session.members.some((m) => m.orgId === identity.orgId);
+  session.orgs.includes(identity.orgId);
 
 /**
  * Whether this person reads the room as an org admin and not as a member (#65, D4): the room admits
@@ -459,10 +493,10 @@ const readsAsAdmin = (session: StoredSession, identity: Identity, mine: readonly
  * One answer for every door that writes, the surface's and the upload's, so one fact is not two statuses.
  * Undefined for everyone else, who keeps the 404.
  */
-const adminWriteRefusal = (
-  found: StoredSession | undefined, identity: Identity, origin: string | undefined,
-): Response | undefined =>
-  found && handlesOf(found, identity).length === 0 && admitsAdmin(found, identity)
+const adminWriteRefusal = async (
+  store: BellmanStore, found: StoredSession | undefined, identity: Identity, origin: string | undefined,
+): Promise<Response | undefined> =>
+  found && admitsAdmin(found, identity) && (await handlesOf(store, found, identity)).length === 0
     ? problem(403, "forbidden", "an admin reads a closed room and holds no seat in it, so it cannot write to it", origin)
     : undefined;
 
@@ -476,10 +510,25 @@ const myHandles = (session: StoredSession, mine: readonly Member[]) =>
     removed: isRemovedMember(m),
   }));
 
-/** The roster now: every member, with `presence` read off the clock and the sockets. */
+/**
+ * How many members who have left the panel's roster shows beside those in the room: the ones who
+ * left most recently (ADR 0019, D7). A room that has seen thousands come and go would otherwise
+ * send every one of them on each read, and `departed_omitted` counts the rest.
+ */
+export const ROSTER_DEPARTED = 100;
+
+/**
+ * The roster now (ADR 0019, D7): every member in the room and the `ROSTER_DEPARTED` who left most
+ * recently, in join order, with `presence` read off the clock and the sockets, and
+ * `departed_omitted`, how many more have left.
+ */
 const liveRoster = async (store: BellmanStore, session: StoredSession) => {
-  const connected = await store.connectedMembers(session.id);
-  return session.members.map((m) => publicMember(m, connected));
+  const [connected, departed] = await Promise.all([
+    store.connectedMembers(session.id),
+    store.departedMembers(session.id, { limit: ROSTER_DEPARTED }),
+  ]);
+  const members = [...session.members, ...departed.members].sort((a, b) => a.seq - b.seq);
+  return { members: members.map((m) => publicMember(m, connected)), departed_omitted: departed.omitted };
 };
 
 /**
@@ -504,13 +553,14 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * Both envelopes carry `closed_at` and `purge_at` (`retentionOf`, review M8): when the room closed
  * and when it goes, so a member of a closed room can learn how long it has, and null where the
  * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
- * R3): the creator alone may make a public room private.
+ * R3): the creator alone may make a public room private. And `signed` (bylines spec D6): true only
+ * for the creator of a room they have signed with their handle, false for every other caller.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
-  const mine = session ? handlesOf(session, who.identity) : [];
+  const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
   // Membership first, then the admin's fallback (#65, D4): a seat is the closer fact, and a person
   // who sits in the room reads it as the member they are, cut and all. `readsAsAdmin` is false for
   // anyone with a handle that is still a seat.
@@ -520,9 +570,10 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       session_status: sessionStatus(session),
       viewer: "admin",
       mine: session.createdBy === who.identity.userId,
+      signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
       ...retentionOf(session),
       preview: roomPreview(session, null),
-      members: await liveRoster(deps.store, session),
+      ...await liveRoster(deps.store, session),
       my_handles: myHandles(session, mine),
     }, origin);
   }
@@ -530,18 +581,26 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   const cutAt = cutAtFor(mine);
-  const members = cutAt === undefined
+  // As of the removal, the room as it stood (ADR 0019, D7): those in it now, those who left after
+  // the cut, and the person's own handles, every one of which left at the cut or before it.
+  const roster = cutAt === undefined
     ? await liveRoster(deps.store, session)
-    : rosterAsOf(session.members, cutAt);
+    : {
+      members: rosterAsOf(
+        [...session.members, ...(await deps.store.departedMembers(session.id, { leftAfter: cutAt })).members, ...mine],
+        cutAt,
+      ),
+    };
   const viewer = mine.find((m) => m.leftAt === null) ?? mine[0];
   return json(200, {
     id: session.id,
     session_status: sessionStatus(session),
     viewer: "member",
     mine: session.createdBy === who.identity.userId,
+    signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
     ...retentionOf(session),
     preview: roomPreview(session, viewer.roomRole),
-    members,
+    ...roster,
     my_handles: myHandles(session, mine),
   }, origin);
 }
@@ -570,7 +629,7 @@ async function deleteRoom(request: Request, sessionId: string, origin: string | 
   if (refusal) return refusal;
 
   const session = await deps.store.getSession(sessionId);
-  const sits = session !== undefined && handlesOf(session, who.identity).length > 0;
+  const sits = session !== undefined && (await handlesOf(deps.store, session, who.identity)).length > 0;
   const admin = session !== undefined && admitsAdmin(session, who.identity);
   const notFound = () => problem(404, "not_found", "no such room, or no member of yours in it", origin);
   if (!session || (!sits && !admin)) return notFound();
@@ -604,7 +663,7 @@ async function unpublishRoom(request: Request, sessionId: string, origin: string
   const refusal = csrfRefusal(request, who.via, origin);
   if (refusal) return refusal;
   const session = await deps.store.getSession(sessionId);
-  if (!session || handlesOf(session, who.identity).length === 0) {
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   if (session.createdBy !== who.identity.userId) {
@@ -612,6 +671,32 @@ async function unpublishRoom(request: Request, sessionId: string, origin: string
   }
   await deps.store.unpublishSession(sessionId, Date.now());
   return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
+
+/**
+ * Sign or unsign a public room with the creator's handle (bylines spec D3, D6). The room is read
+ * for who created it and whether it is public; the signature is written to the registry alone.
+ */
+async function writeByline(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const userId = who.identity.userId;
+  if (session.createdBy !== userId) return problem(403, "forbidden", "only the room's creator may sign it", origin);
+  if (request.method === "DELETE") {
+    await deps.store.unsignRoom(userId, sessionId);
+    return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  }
+  if (!isPublic(session)) return problem(409, "room_not_public", "only a public room can carry a byline", origin);
+  // One registry call reads the handle and writes the signature, so a release cannot land between them.
+  const handle = await deps.store.signRoom(userId, sessionId, Date.now());
+  if (handle === undefined) return problem(409, "no_handle", "claim a handle in Settings first", origin);
+  return json(200, { handle }, origin);
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
@@ -629,21 +714,6 @@ export const etagMatches = (header: string | null, tag: string): boolean =>
   });
 
 /**
- * The surface read (D2): the same envelopes `bellman_sync surface: true`
- * returns, with the surface cursor as the ETag. A member still in the room is
- * answered from the record alone on a match — no row read, which is what makes
- * a four-second poll cheap. A removed member reads to its cut, and its cursor
- * is derived from the rows it is shown, as the tool derives it: the record's
- * number would claim a change the member never saw. The record and the rows are
- * two reads, so an eviction that commits between them leaves this one poll
- * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
- * gap from the `member_evicted` event in its slice, and this route reads no events.
- *
- * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
- * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
- * Its ETag is the record's cursor, as a member still in the room has.
- */
-/**
  * The room's log, for the panel's Log view: the envelopes `bellman_sync` returns, the caller's own
  * included, because a person reading the log reads the whole conversation. Without `?after`, the
  * newest MAX_EVENTS_READ; with it, the next MAX_EVENTS_READ past that cursor, so a poll that carries
@@ -655,7 +725,7 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
-  const mine = session ? handlesOf(session, who.identity) : [];
+  const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
   const asAdmin = session !== undefined && readsAsAdmin(session, who.identity, mine);
   if (!session || (mine.length === 0 && !asAdmin)) {
     return problem(404, "not_found", "no such room, or no member of yours in it", origin);
@@ -682,11 +752,26 @@ async function readEventsRoute(request: Request, url: URL, sessionId: string, or
   }, origin);
 }
 
+/**
+ * The surface read (D2): the same envelopes `bellman_sync surface: true`
+ * returns, with the surface cursor as the ETag. A member still in the room is
+ * answered from the record alone on a match — no row read, which is what makes
+ * a four-second poll cheap. A removed member reads to its cut, and its cursor
+ * is derived from the rows it is shown, as the tool derives it: the record's
+ * number would claim a change the member never saw. The record and the rows are
+ * two reads, so an eviction that commits between them leaves this one poll
+ * uncut, and the next poll reads the committed cut; `bellman_sync` closes that
+ * gap from the `member_evicted` event in its slice, and this route reads no events.
+ *
+ * An admin of an org in a *closed* room reads all of it (#65, D4), whether it holds no
+ * handle or only removed ones (`readsAsAdmin`): the cut is a seat's, and it holds none.
+ * Its ETag is the record's cursor, as a member still in the room has.
+ */
 async function readSurfaceRoute(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
   if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
   const session = await deps.store.getSession(sessionId);
-  const mine = session ? handlesOf(session, who.identity) : [];
+  const mine = session ? await handlesOf(deps.store, session, who.identity) : [];
   // The admin's fallback (#65, D4): the whole surface of a closed room, with no cut. `cutFor` is not
   // asked of an empty list, which would read as every handle removed and cut the read to nothing, nor
   // of an admin whose every handle was removed: the cut is a seat's, and this read is not one.
@@ -752,17 +837,8 @@ async function writeSurfaceRoute(
   if (request.method === "DELETE") {
     payload = { key, remove: true };
   } else {
-    // A length that is present must be a digit string: `Number` would read
-    // "garbage" as NaN and "1e3" as 1000 and pass both under the bound. An
-    // absent one is a chunked body, which is allowed; the bound on those is a
-    // follow-up, not this check.
-    const length = request.headers.get("content-length");
-    if (length !== null && !/^\d+$/.test(length)) {
-      return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
-    }
-    if (Number(length ?? "0") > MAX_SURFACE_WRITE_BYTES) {
-      return problem(413, "too_large", `a surface write is at most ${MAX_SURFACE_WRITE_BYTES} bytes of JSON`, origin);
-    }
+    const refused = lengthRefusal(request, MAX_SURFACE_WRITE_BYTES, "a surface write", origin);
+    if (refused) return refused;
     const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the item, without its key or with the path's", origin);
     let body: unknown;
     try {
@@ -785,10 +861,10 @@ async function writeSurfaceRoute(
   // an upload: a handle that is not the caller's is 404, and the gate's
   // `forbidden` then means the seat itself.
   const found = await deps.store.getSession(sessionId);
-  if (!found || !findMember(found, memberId, who.identity)) {
+  if (!found || !(await findMember(deps.store, found, memberId, who.identity))) {
     // An admin admitted to read a closed room (#65, D4) knows it is there, and holds no seat in
     // it: that is a refusal, and not a room that is hidden. Everyone else keeps the 404.
-    return adminWriteRefusal(found, who.identity, origin)
+    return await adminWriteRefusal(deps.store, found, who.identity, origin)
       ?? problem(404, "not_found", "no such room, or no member of yours in it", origin);
   }
   const out = await writeSurface(deps.store, deps.blobs, who.identity, sessionId, memberId, payload);

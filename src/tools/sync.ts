@@ -13,7 +13,6 @@ import { publicEvent } from "../public-event.js";
 import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // --------------------------------------------------------------- bellman_sync
   server.registerTool(
     "bellman_sync",
     {
@@ -59,7 +58,7 @@ If a room's creator has removed you, you still get the history up to and includi
       const { member_id, since_cursor, wait_seconds, surface } = args;
       const session = await s.getSession(session_id);
       if (!session) return fail("session not found.");
-      const me = findMember(session, member_id, identity);
+      const me = await findMember(s, session, member_id, identity);
       if (!me) return fail("member_id is not yours.");
 
       // This is the liveness signal, and the reason #103 needs no heartbeat
@@ -200,7 +199,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // snapshot the stamp was absent, so the read was skipped and the response
       // carried the request event with no `outstanding` entry beside it — the
       // one case the field exists for, missing it.
-      const stampedAt = (answering as { lastActionRequestAt?: number }).lastActionRequestAt;
+      const stampedAt = answering.lastActionRequestAt;
 
       // Or the slice itself carries one. The stamp is a separate write from the
       // event, so between this poll's record read and its event read a request
@@ -221,8 +220,8 @@ If a room's creator has removed you, you still get the history up to and includi
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
       // exists because an eviction that committed after `me` was read leaves
-      // `cut === undefined` on a record that is already stale — the race line 148
-      // caps `all` for. Testing only `cut` here handed a member the room past
+      // `cut === undefined` on a record that is already stale — the race `all` is
+      // capped for above. Testing only `cut` here handed a member the room past
       // their own removal through this field: every action_request appended after
       // they were cut, with its sender's member id, label and cursor.
       const stopAt = cut ?? removal?.cursor;
@@ -274,8 +273,8 @@ If a room's creator has removed you, you still get the history up to and includi
           // when it looks, which is what looking is for.
           ...(outstanding.length > 0 ? { outstanding } : {}),
           // Only when true, as `replayed` and `ambient` are: a client that has
-          // never heard of it keeps working, and the twelve-field shape every
-          // other poll returns does not change.
+          // never heard of it keeps working, and the shape every other poll
+          // returns does not change.
           //
           // It exists because the cut is otherwise INVISIBLE to the caller. A
           // member polling from past it gets an empty slice and
@@ -317,7 +316,10 @@ If a room's creator has removed you, you still get the history up to and includi
           ...(sfCursor > 0 ? { surface_cursor: sfCursor } : {}),
           ...(surfaceBlock !== undefined ? { surface: surfaceBlock } : {}),
         },
-        foreign.length > 0 ? UNTRUSTED_PREAMBLE : undefined
+        // The surface block is peer content as the events are. A poll that asks for it
+        // after reading the events that changed it has no foreign event, and the block is
+        // then all the result holds (ADR 0008, decision 1).
+        foreign.length > 0 || (surfaceBlock?.items.length ?? 0) > 0 ? UNTRUSTED_PREAMBLE : undefined
       );
     }
   );

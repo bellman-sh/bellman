@@ -69,9 +69,8 @@ describe("bellman_send — a seat that holds the verb", () => {
     });
     expect(res.isError, res.text).toBe(false);
 
-    const stored = (await h.store.getSession(p.sessionId))!
-      .members.find((m) => m.memberId === p.joinerMemberId)!;
-    expect(stored.brief.goal).toBe("Now porting the webhook");
+    const stored = (await h.store.getBriefs(p.sessionId, [p.joinerMemberId]))[p.joinerMemberId];
+    expect(stored.goal).toBe("Now porting the webhook");
   });
 
   it("allows action_response to a seat holding respond_actions", async () => {
@@ -131,9 +130,8 @@ describe("bellman_send — a seat that lacks the verb", () => {
     });
     expect(res.isError).toBe(true);
 
-    const stored = (await h.store.getSession(p.sessionId))!
-      .members.find((m) => m.memberId === p.joinerMemberId)!;
-    expect(stored.brief.goal).toBe("The brief I joined with");
+    const stored = (await h.store.getBriefs(p.sessionId, [p.joinerMemberId]))[p.joinerMemberId];
+    expect(stored.goal).toBe("The brief I joined with");
   });
 
   it("refuses every kind to a wholly verbless seat", async () => {
@@ -798,8 +796,8 @@ describe("sync and leave are never gated", () => {
     // Not refused is not the same as left: a gate that answered "left" without
     // leaving would pass an isError check on its own. So read the seat itself in
     // the store, before and after; the "before" keeps the "after" from being vacuous.
-    const joinerSeat = async () =>
-      (await h.store.getSession(p.sessionId))!.members.find((m) => m.memberId === p.joinerMemberId)!;
+    // By id: once it has left, the seat is not on the session (ADR 0019).
+    const joinerSeat = async () => (await h.store.getMember(p.sessionId, p.joinerMemberId))!;
     expect((await joinerSeat()).leftAt, "the seat is present before it leaves").toBeNull();
 
     const left = await p.joiner.call("bellman_leave", {

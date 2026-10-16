@@ -1,5 +1,6 @@
 import { ENTITLEMENTS, entitlementsFor } from "../auth.js";
 import { isOrgId } from "../grant-index.js";
+import { handleFromSegment } from "../handles.js";
 import { isLinkableUserId } from "../billing/stripe.js";
 import { PURCHASE, canPurchaseAs } from "../billing/grants.js";
 import type { BellmanStore } from "../store.js";
@@ -47,8 +48,7 @@ export interface OAuthConfig {
    *
    * Absent or empty means no browser may hold a session: see allowedOrigin.
    * Browser authentication is a capability this list grants, not a default the
-   * list restricts. Optional so that the Worker program keeps compiling between
-   * here and Task 10, which is where the value arrives.
+   * list restricts.
    */
   panelOrigins?: string[];
   /**
@@ -68,6 +68,12 @@ export interface OAuthConfig {
   honourPurchases?: boolean;
   /** Runtime plan grants. Absent means only BELLMAN_USERS decides a plan. */
   plans?: PlanStore;
+  /**
+   * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
+   * operator's platform-wide powers, which no plan, role or grant confers.
+   * Today that is releasing anyone's handle. Absent or empty names no one.
+   */
+  operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -77,6 +83,8 @@ export type PlanStore = Pick<
   | "getGrant" | "putGrant" | "deleteGrant" | "moveGrant" | "listGrants"
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "countCreatesThisMonth"
+  | "releaseHandleNamed"
+  | "recordSignIn"
 >;
 
 export type PlanSource = "operator" | "grant" | "default";
@@ -102,6 +110,29 @@ export type PlanSource = "operator" | "grant" | "default";
  * settings page shows it, so that a plan resting on an address is visible.
  */
 export async function resolvePlan(
+  profile: ProviderProfile,
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
+): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {
+  const resolved = await decidePlan(profile, config);
+  /**
+   * The one place a sign-in is observable. Every caller of this function has
+   * just exchanged an authorization code — the panel, /upgrade and /authorize —
+   * and nothing else calls it, so recording here cannot be forgotten by a
+   * fourth caller the way three call sites could (#258).
+   *
+   * Swallowed on purpose. The record is an observation for counting accounts;
+   * losing one is a wrong number, and failing the sign-in over it is a person
+   * locked out.
+   */
+  try {
+    await config.plans?.recordSignIn(resolved.identity.userId, Date.now());
+  } catch (err) {
+    console.error("recording the sign-in failed:", err);
+  }
+  return resolved;
+}
+
+async function decidePlan(
   profile: ProviderProfile,
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
 ): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {
@@ -809,9 +840,6 @@ export async function handleOAuth(
     if (available.length === 0) {
       return html(`<h1>No sign-in configured</h1><p>This Bellman server has no identity provider set up.</p>`, 503);
     }
-    // Validated now as well as on the way out. Sealing an unusable destination
-    // into a signed blob and discovering it after the provider round trip is a
-    // worse error message for the same outcome.
     // Binds this sign-in to this browser. Without it the signed state is a
     // bearer credential anyone can replay: an attacker completes the provider
     // half as themselves, keeps the callback URL, and gets a victim to open it
@@ -820,6 +848,9 @@ export async function handleOAuth(
     // account is theirs. SameSite=Lax does not help, because the callback is a
     // top-level GET navigation, which is the case Lax deliberately allows.
     const nonce = randomId();
+    // Validated now as well as on the way out. Sealing an unusable destination
+    // into a signed blob and discovering it after the provider round trip is a
+    // worse error message for the same outcome.
     const pending: SessionRequest = {
       return_to: panelDestination(url.searchParams.get("return_to") ?? undefined, panels),
       nonce,
@@ -1311,7 +1342,57 @@ export async function handleOAuth(
     return new Response("Method not allowed", { status: 405, headers: { allow: "GET, POST, DELETE" } });
   }
 
+  // ---------------------------------------------- /admin/handles/:handle
+  // The operator releases someone's handle, for a deletion or an abusive name
+  // (ADR 0021): the handle and every room signed with it go in one registry
+  // transaction, as the holder's own release does. A handle belongs to no org,
+  // so this reaches every account, and it is given by name: a bearer token for
+  // a user id BELLMAN_OPERATORS lists. No plan, role or grant confers it, so a
+  // team admin BELLMAN_USERS makes for one org releases nothing. Bearer only,
+  // for /admin/grants' reason. The segment is read as the handle page reads it.
+  const named = ADMIN_HANDLE.exec(path);
+  if (named) {
+    const who = await caller(request, config);
+    if (!who) return oauthError("invalid_token", "sign in first", 401);
+    if (who.via === "cookie") {
+      return oauthError(
+        "invalid_token",
+        "this endpoint requires a bearer token, not a browser session",
+        401
+      );
+    }
+    if (!config.operators?.has(who.identity.userId)) {
+      return oauthError("insufficient_scope", "releasing a handle is limited to the user ids BELLMAN_OPERATORS lists", 403);
+    }
+    if (method !== "DELETE") {
+      return new Response("Method not allowed", { status: 405, headers: { allow: "DELETE" } });
+    }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    const handle = handleFromSegment(named[1]);
+    if (handle === undefined || (await config.plans.releaseHandleNamed(handle)) === undefined) {
+      return oauthError("not_found", "no such handle", 404);
+    }
+    return new Response(null, { status: 204 });
+  }
+
   return undefined;
+}
+
+const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
+
+/**
+ * BELLMAN_OPERATORS, a Worker secret: the user ids, comma-separated, that hold
+ * the operator's platform-wide powers. Unset or empty names no one. An entry
+ * that is not a user id (`isLinkableUserId`'s shape) is skipped and logged, so
+ * a subject key such as BELLMAN_USERS is keyed by, or a typo, names no one.
+ */
+export function parseOperators(raw: string | undefined): ReadonlySet<string> {
+  const operators = new Set<string>();
+  for (const entry of (raw ?? "").split(",").map((e) => e.trim()).filter(Boolean)) {
+    if (isLinkableUserId(entry)) operators.add(entry);
+    else console.error(`BELLMAN_OPERATORS lists "${entry}", which is not a user id — skipping it`);
+  }
+  return operators;
 }
 
 /**

@@ -68,7 +68,10 @@ async function hostedRoom(id = "qs_hosted") {
   const m = hosted();
   const now = Date.now();
   const s = session({ id, manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], joinCodes: {},
-    hostUnitsPerMonth: 10, hostUnits: { month: monthKey(now), used: 0, wakes: [] } });
+    hostUnitsPerMonth: 10, hostUnits: { month: monthKey(now), used: 0, wakes: [] },
+    // A host that has never asked is due the moment its room starts. These cases drive each tick
+    // themselves (\`tick\`), so the room starts as if its host had just asked, and arms a cadence out.
+    lastTickAt: now, lastHostTickAt: now });
   await store.createSession(s);
   return { store, id, stub: env.SESSION.get(env.SESSION.idFromName(id)), host: env.HOST.get(env.HOST.idFromName(id)) };
 }

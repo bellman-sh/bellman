@@ -52,17 +52,25 @@ export interface SubscriptionReading {
 }
 
 /**
- * The subscription as Stripe has it now. A subscription Stripe no longer has
- * reads as cancelled. Anything else Stripe answers throws, so the webhook
- * replies 5xx and Stripe delivers the event again later.
+ * The subscription as Stripe has it now. Anything but a success throws, so the
+ * webhook replies 5xx and Stripe delivers the event again later.
+ *
+ * A 404 too. Stripe keeps a cancelled subscription readable, so the only way to
+ * miss one is a key that cannot see it: a test-mode key reading a live
+ * subscription, or another account's key. Read as "cancelled", that recorded
+ * the first live purchase as over before anyone had a plan from it.
  */
 export async function readSubscription(id: string, source: SubscriptionSource): Promise<SubscriptionReading> {
   const get = source.fetchImpl ?? fetch;
   const res = await get(`https://api.stripe.com/v1/subscriptions/${encodeURIComponent(id)}`, {
     headers: { authorization: `Bearer ${source.apiKey}` },
   });
-  if (res.status === 404) return { plan: null, status: "canceled" };
-  if (!res.ok) throw new Error(`Stripe answered ${res.status} reading subscription ${id}`);
+  if (!res.ok) {
+    // Stripe's message names the cause, such as "a test mode key was used".
+    const body: unknown = await res.json().catch(() => null);
+    const said = isRecord(body) && isRecord(body.error) && typeof body.error.message === "string" ? `: ${body.error.message}` : "";
+    throw new Error(`Stripe answered ${res.status} reading subscription ${id}${said}`);
+  }
   const body: unknown = await res.json();
   if (!isRecord(body)) throw new Error(`Stripe returned a non-object for subscription ${id}`);
   const prices = pricesOf(body.items);

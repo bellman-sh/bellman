@@ -15,7 +15,6 @@ import { APP_UI_META } from "../ui/resource.js";
 export const ROOMS_LIMIT = 50;
 
 export function registerRooms(server: McpServer, identity: Identity, s: BellmanStore): void {
-  // --------------------------------------------------------------- bellman_rooms
   server.registerTool(
     "bellman_rooms",
     {

@@ -221,7 +221,8 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     expect(outcome.reclaimed[0].leftAt).toEqual(expect.any(Number));
 
     const after = await read();
-    expect(after.members.find((m) => m.memberId === "m_peer")?.leftAt).toEqual(expect.any(Number));
+    // Gone from the room, so read by id (ADR 0019).
+    expect((await store.getMember("qs_test", "m_peer"))?.leftAt).toEqual(expect.any(Number));
     expect(after.members.find((m) => m.memberId === "m_creator")?.leftAt).toBeNull();
     expect(seatedMembers(after).map((m) => m.memberId)).toEqual(["m_creator", "m_late"]);
   });
@@ -244,7 +245,7 @@ describe("seatMember claims the seat and frees it in one operation", () => {
     expect(second.reclaimed).toEqual([]);
     const room = await read();
     expect(seatedMembers(room)).toHaveLength(2);
-    expect(room.members.filter((m) => m.leftAt !== null)).toHaveLength(1);
+    expect((await store.departedMembers("qs_test")).members).toHaveLength(1);
   });
 
   it("refuses a full room of present members, and reclaims nobody", async () => {
@@ -342,10 +343,11 @@ describe("touchMember", () => {
   /** Quiet for a whole window: past the half that touchMember waits out, inside the 90 days a room is kept. */
   const QUIET = NOW - STALE_AFTER_MS;
 
+  // `me` is read by id: a member who has left is not on the session (ADR 0019).
   const seed = async (over: Parameters<typeof member>[0] = {}) => {
     await store.createSession(session({ members: [member({ lastSeenAt: QUIET, ...over })] }));
     const s = (await store.getSession("qs_test"))!;
-    return { session: s, me: s.members[0] };
+    return { session: s, me: (await store.getMember("qs_test", "m_creator"))! };
   };
 
   it("moves lastSeenAt", async () => {
@@ -380,7 +382,7 @@ describe("touchMember", () => {
 
     await touchMember(store, s, me, NOW);
 
-    expect((await store.getSession("qs_test"))!.members[0].lastSeenAt).toBe(QUIET);
+    expect((await store.getMember("qs_test", "m_creator"))!.lastSeenAt).toBe(QUIET);
   });
 
   it("writes nothing to a frozen or closed room", async () => {
@@ -436,7 +438,7 @@ describe("the seat comes back", () => {
     expect(confirmed.isError, confirmed.text).toBe(false);
 
     const room = await h.store.getSession(sessionId);
-    expect(room?.members.find((m) => m.memberId === joinerMemberId)?.leftAt)
+    expect((await h.store.getMember(sessionId, joinerMemberId))?.leftAt)
       .toEqual(expect.any(Number));
     expect(seatedMembers(room!)).toHaveLength(2);
 
@@ -588,7 +590,7 @@ describe("the seat comes back", () => {
 
     const room = (await h.store.getSession(sessionId))!;
     expect(room.members.find((m) => m.memberId === creatorMemberId)?.leftAt).toBeNull();
-    expect(room.members.find((m) => m.memberId === joinerMemberId)?.leftAt)
+    expect((await h.store.getMember(sessionId, joinerMemberId))?.leftAt)
       .toEqual(expect.any(Number));
   });
 
@@ -763,10 +765,10 @@ describe("capacity is the manifest's (#18)", () => {
     expect(capacityOf(roomManifest({ mode: "swarm" }))).toBe(ROOM_MEMBER_CEILING);
   });
 
-  it("puts the ceiling at 100, which a room of maximal briefs keeps under one stored value", () => {
-    // A brief at the schema's maximum is 14,710 characters; 100 of them are 1.47 MB
-    // of a 2 MB Durable Object value. 250 would be 3.7 MB.
-    expect(ROOM_MEMBER_CEILING).toBe(100);
+  it("puts the ceiling at 5,000, the roster every call still loads", () => {
+    // Storage no longer bounds it: each member is a row of its own (ADR 0019). Every call
+    // still reads the members in the room, about 300 bytes each, so 5,000 is about 1.5 MB.
+    expect(ROOM_MEMBER_CEILING).toBe(5000);
   });
 });
 
@@ -786,7 +788,7 @@ describe("the hosted seat and liveness (hosted seat spec, D5)", () => {
 
   it("never reclaims the host's seat", () => {
     const stale = NOW - STALE_AFTER_MS - 1;
-    const host = { ...hostMember(hostedManifest(), NOW), lastSeenAt: stale };
+    const host = member({ ...hostMember(hostedManifest(), NOW), lastSeenAt: stale });
     const quiet = member({ memberId: "m_q", lastSeenAt: stale });
     const victims = seatVictims([host, quiet], 2, NOW - STALE_AFTER_MS, new Set());
     expect(victims?.map((m) => m.memberId)).toEqual(["m_q"]);

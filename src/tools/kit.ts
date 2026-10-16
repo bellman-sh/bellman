@@ -78,7 +78,7 @@ export const AgentShape = z.object({
     .describe('Model identifier, e.g. "claude-fable-5", "gpt-5"'),
   client: z.string().min(1).max(80)
     .describe('Client surface, e.g. "claude-code", "claude-chat", "cursor", "chatgpt", "gemini-cli"'),
-}).describe("Provider-neutral description of the agent on this side");
+}).describe("Provider-neutral description of the agent writing this brief");
 
 export const BriefShape = z.object({
   goal: z.string().min(1).max(500).describe("One sentence: what this session is trying to accomplish"),
@@ -98,20 +98,14 @@ export const CapabilitiesShape = z
   );
 
 /**
- * A heartbeat reply. `strictObject`, so every key the shape does not name is
- * refused — which is how `status`, `alive`, `present` and `healthy` are kept out
- * without a denylist that falls behind the first name somebody forgets. The
- * payload is a claim about when it was sent, never about now (invariant 7).
- */
-/**
  * An answer to an `action_request`. `approved` is a REQUIRED boolean, and that
  * is the whole point of the shape: the field was unvalidated, so a client could
  * send `{ approved: "false" }` and have a human's refusal read as an approval
  * on the way back out (see `verdictOf` in src/action-state.ts). `result` is the
  * sentence the requester is shown.
  *
- * Not strict, unlike the shapes above: an `action_response` payload is also
- * carried to the peer as content, and a build that adds a field to it should
+ * Not strict, unlike `ProgressShape` below: an `action_response` payload is also
+ * carried to the room's members as content, and a build that adds a field to it should
  * not have the whole answer refused.
  */
 export const ActionResponseShape = z.object({
@@ -119,6 +113,12 @@ export const ActionResponseShape = z.object({
   result: z.string().max(2_000).optional(),
 });
 
+/**
+ * A heartbeat reply. `strictObject`, so every key the shape does not name is
+ * refused — which is how `status`, `alive`, `present` and `healthy` are kept out
+ * without a denylist that falls behind the first name somebody forgets. The
+ * payload is a claim about when it was sent, never about now (invariant 7).
+ */
 export const ProgressShape = z.strictObject({
   note: z.string().min(1).max(500),
   step: z.string().max(40).optional(),
@@ -161,8 +161,8 @@ export class FrozenError extends Error {
  * **Nothing catches `FrozenError`.** It is thrown here and caught nowhere in
  * `src/`, so it leaves the handler as an exception rather than as the `fail()`
  * refusal the frozen guards produce — a caller that races a freeze gets a
- * different shape from one that arrives after it. Worth knowing before relying
- * on the two reading alike. (This docblock was stranded in `projections.ts` by
+ * different shape from one that arrives after it, so do not rely on the
+ * two reading alike. (This docblock was stranded in `projections.ts` by
  * the #92 split, above no declaration, and claimed "the tool's catch turns it
  * into the same refusal as the guards"; there is no such catch.)
  */

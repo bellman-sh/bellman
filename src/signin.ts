@@ -9,8 +9,8 @@ import { InvalidGrantError } from "@modelcontextprotocol/sdk/server/auth/errors.
 import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Remote, WhoAmI } from "./bridge.js";
+import { remoteOf, type Remote, type WhoAmI } from "./bridge.js";
+import { VERSION } from "./version.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockHandle, type LockOptions, type ServerCredential,
@@ -306,7 +306,6 @@ export function openBrowser(
 // Signing in: the OAuth client half, over the credential file.
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.1.0";
 const CALLBACK_TIMEOUT_MS = 300_000;
 
 /**
@@ -516,14 +515,6 @@ class BridgeAuth implements OAuthClientProvider {
   }
 }
 
-function remoteFrom(client: Client): Remote {
-  return {
-    listTools: () => client.listTools(),
-    callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
-    close: () => client.close(),
-  };
-}
-
 interface Attempt {
   /** Set when the connect succeeded. */
   remote?: Remote;
@@ -573,7 +564,7 @@ async function connectCached(
   });
   try {
     await client.connect(transport);
-    return { remote: remoteFrom(client), provider };
+    return { remote: remoteOf(client), provider };
   } catch (err) {
     await transport.close().catch(() => undefined);
     if (opts.signal?.aborted) throw new SignInCancelled("the sign-in was cancelled");
@@ -619,14 +610,6 @@ function makePersist(
   };
 }
 
-/**
- * Merge a credential into the file, under the lock.
- *
- * The lock options are the caller's, and the difference matters: a post-connect
- * refresh passes no signal, because a shutdown must not cost it the rotation,
- * while a write that happens INSIDE connectSignedIn passes one, because an
- * uninterruptible wait there is a shutdown the process cannot complete.
- */
 /** What a credential that could not be saved costs, said the same way everywhere. */
 const saveFailed = (dir: string, error: unknown): string =>
   `could not save the sign-in under ${dir}: ${error instanceof Error ? error.message : String(error)}. ` +
@@ -670,6 +653,14 @@ function saveOrCarryOn(
   }
 }
 
+/**
+ * Merge a credential into the file, under the lock.
+ *
+ * The lock options are the caller's, and the difference matters: a post-connect
+ * refresh passes no signal, because a shutdown must not cost it the rotation,
+ * while a write that happens INSIDE connectSignedIn passes one, because an
+ * uninterruptible wait there is a shutdown the process cannot complete.
+ */
 async function writeMerged(
   dir: string,
   serverUrl: string,
@@ -1114,6 +1105,6 @@ async function signIn(
     log(label ? `signed in as ${label}${plan ? ` (${plan} plan)` : ""}` : "signed in");
     // The provider goes back with the Remote: it outlives this call inside the
     // transport, and connectSignedIn arms its persist once the lock is released.
-    return { remote: remoteFrom(client), provider };
+    return { remote: remoteOf(client), provider };
   }
 }

@@ -603,7 +603,7 @@ describe("a creator removes a member who holds a socket", () => {
     const hit = await runInDurableObject(stub, (instance) => (instance as unknown as Spied).failed);
     expect(hit, "arrangement: the pass's read is the one that threw").toBe(true);
     expect(event).not.toBeNull();
-    const cut = (await store.getSession(id))!.members.find((m) => m.memberId === "m_target")!;
+    const cut = (await store.getMember(id, "m_target"))!;
     expect(cut.removedAtCursor).toBe(event!.cursor);
   });
 });

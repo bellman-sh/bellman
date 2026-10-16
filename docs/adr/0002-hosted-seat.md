@@ -170,3 +170,12 @@ sets the key and makes a live call with each of the three models, which checks
 the request each is sent (`HOST_MODELS`) against the live API and not only
 against its documentation. Turning it on is then a reviewed one-line commit to
 the var. The decisions above describe the seat once it is on.
+
+## Amended 2026-10-12
+
+The host asks its first question when the room starts. It used to wait one
+cadence from the room's first seat, so a new hosted room was silent for its first
+hour at least. A host that has never asked is now due at that first seat, and the
+alarm fires as the room is created, with its creator there to be asked. After
+that the host asks a cadence after each question, as decision 5 says. The first
+question spends one of the month's units at creation.

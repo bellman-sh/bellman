@@ -11,7 +11,7 @@ export interface Identity {
   label: string; // display name, e.g. "jesse@codenerd"
 }
 
-/** Provider-neutral description of the agent on this side of the wire. */
+/** Provider-neutral description of the agent that wrote the brief. */
 export interface AgentInfo {
   provider: string; // "anthropic" | "openai" | "google" | ...
   model: string;    // "claude-fable-5", "gpt-5", ...
@@ -33,7 +33,12 @@ export interface Member {
   orgId: string | null;
   capabilities: Capability[];
   roomRole: string; // the manifest role this member holds — NOT Identity.role (admin/member)
-  brief: Brief;
+  /**
+   * The agent this member's brief names, kept on the record for the roster. The brief
+   * itself lives beside the room in a row of its own (`BellmanStore.getBriefs`), so the
+   * record stays small however many join (ADR 0018).
+   */
+  agent: AgentInfo;
   joinedAt: number;
   leftAt: number | null;
   /**
@@ -73,7 +78,26 @@ export interface Member {
    * wrong, and every legacy row would have read as reclaimable.
    */
   removedAtCursor?: number;
+  /**
+   * Where this member comes in the room's join order, from 1 (ADR 0019). The store gives it
+   * at seating. A member is a row of its own beside the room, and this is what puts rows
+   * read back separately into the order they joined in.
+   */
+  seq: number;
+  /**
+   * The number a public room names this member's label by, "member 3" (public rooms spec
+   * D4). Given when the room first seats the label, and shared by every later seat with that
+   * label, so one person's handles share it; null for the hosted seat, whose label names no
+   * person (ADR 0019, D6).
+   */
+  publicNumber: number | null;
 }
+
+/**
+ * Who started the room: its first seat, kept on the room's record because the record no
+ * longer holds its members (ADR 0019). It stays when that member leaves.
+ */
+export type RoomCreator = Pick<Member, "memberId" | "userId" | "label" | "joinedAt">;
 
 export type EventType =
   | "member_joined"
@@ -128,8 +152,25 @@ export interface SessionEvent {
 /** One live join code, and when it stops resolving. */
 export interface JoinCodeRecord {
   code: string;
-  expiresAt: number;
+  /**
+   * Null for a permanent code (ADR 0020): a public room's default seat, live until it is
+   * revoked, the room is made private, or the room closes. `codeIsLive` is the one reading.
+   */
+  expiresAt: number | null;
 }
+
+/**
+ * A member as it is seated: with the brief it brings. The store keeps the brief in a row of
+ * its own beside the room (ADR 0018), and the member with only the brief's `agent`. Its
+ * `seq` and `publicNumber` are the store's to give (ADR 0019).
+ */
+export type ArrivingMember = Omit<Member, "agent" | "seq" | "publicNumber"> & { brief: Brief };
+
+/**
+ * A session as it is created: its first members arriving with their briefs, the creator
+ * first. The store takes `creator` and `orgs` from them.
+ */
+export type NewSession = Omit<Session, "members" | "creator" | "orgs"> & { members: ArrivingMember[] };
 
 export interface Session {
   id: string;
@@ -169,7 +210,20 @@ export interface Session {
   hostUnitsPerMonth: number;
   /** The meter. See `HostUnits`. */
   hostUnits: HostUnits;
+  /**
+   * The members in the room now, `leftAt` null, in join order. A member who has left is a
+   * row of its own beside the room (ADR 0019), read by id (`BellmanStore.getMember`), by
+   * person (`membersOfUser`) or in a list (`departedMembers`).
+   */
   members: Member[];
+  /** The room's first seat (ADR 0019), which no departure removes from the record. */
+  creator: RoomCreator;
+  /**
+   * Every org that has sat in the room, in the order each first did, the orgs of members who
+   * have left included (ADR 0019): the orgs a delete and a purge owe an audit row, and the
+   * orgs whose admin may read the room once it has closed (#65, D4).
+   */
+  orgs: string[];
   events: SessionEvent[];
   closed: boolean;
   /** When `closed` was set (#65). null while open, and on rows closed before #65. */
@@ -185,6 +239,11 @@ export interface Session {
    * nothing makes a room public again. Read as null for a row written before it.
    */
   unpublishedAt: number | null;
+  /**
+   * The public name this room's record gives it (public names spec, D5), or null. It holds the
+   * name only while public and open (`holdsName`). Read as null for a row written before it.
+   */
+  publicName: string | null;
   /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
@@ -287,6 +346,23 @@ export interface PlanGrant {
   expiresAt: number | null;
 }
 
+/**
+ * That a person exists.
+ *
+ * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org
+ * from the provider profile on every request, so anyone on the default free
+ * plan left no trace and "how many accounts are there" had no answer (#258).
+ *
+ * It is an observation, never a source of authority. Plan, role and org still
+ * come from BELLMAN_USERS and the grant store, in that order.
+ */
+export interface UserRecord {
+  /** u_<provider>_<subject>, byte-identical to what defaultIdentity mints. */
+  userId: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
 export interface Entitlements {
   modes: SessionMode[];
   monthlyCreates: number;
@@ -320,6 +396,11 @@ export interface Entitlements {
    * expiry, which is what happens today. `/account` sends it, and the panel's Audit page says it.
    */
   auditRetentionMs: number | null;
+  /**
+   * Whether a room this plan creates may be public (public rooms spec, D10): a paid
+   * plan's. Checked at creation, the only time a room becomes public.
+   */
+  publicRooms: boolean;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.
@@ -375,7 +456,7 @@ export interface RoleDef {
    * What this seat reports when the heartbeat ticks: the room creator's words, at
    * most 300 characters, only on a seat that answers it (heartbeat instructions
    * spec D1, D2). Optional in the type because a row written before it has none,
-   * and read as null on every row (`withHeartbeatDefaults`): plan ruling R1.
+   * and read as null on every row (`withManifestDefaults`): plan ruling R1.
    */
   report?: string | null;
 }
@@ -414,7 +495,7 @@ export interface RoomManifest {
   /**
    * Whether anyone with the room's link may read it (public rooms spec D1): chosen when the
    * room starts, false unless given. Optional in the type because a row written before it has
-   * none; `withHeartbeatDefaults` reads it as false, and readers test `=== true` for the
+   * none; `withManifestDefaults` reads it as false, and readers test `=== true` for the
    * in-memory store, which does not hydrate (plan ruling R1). Immutable with the rest: a room
    * made private is marked on the session (`unpublishedAt`), never here.
    */

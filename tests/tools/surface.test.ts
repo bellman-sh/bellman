@@ -1,5 +1,5 @@
 /**
- * INVARIANT 9: the tool surface stays at 11. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 12. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: tools first — every tool's text result stands alone; one UI
@@ -8,12 +8,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY, type Peer } from "../helpers/harness.js";
 import { brief, manifestFixture } from "../helpers/fixtures.js";
+import { ROOM_MEMBER_CEILING } from "../../src/store.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { VERBS } from "../../src/manifest.js";
 import { SURFACE_KINDS } from "../../src/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
+  "bellman_public_name",
   "bellman_start",
   "bellman_connect",
   "bellman_confirm",
@@ -46,7 +48,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(11);
+    expect(EXPECTED_TOOLS).toHaveLength(12);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -83,9 +85,14 @@ describe("tool surface", () => {
       default_role: "ghost", creator_role: "lead",
     };
 
+    await jesse.call("bellman_start", { brief: brief(), manifest: manifestFixture({ public: true }), public_name: "taken-name" });
     const rejections: [string, Peer, Record<string, unknown>][] = [
       ["invalid manifest — ", jesse, { manifest: dangling }],
       ["swarm mode requires", peer, { manifest: manifestFixture({ preset: "swarm" }) }],
+      ["a public room requires", peer, { manifest: manifestFixture({ public: true }) }],
+      ["public_name needs a public room", jesse, { manifest: manifestFixture(), public_name: "bellman-dev" }],
+      ["use 3 to 40 lowercase letters", jesse, { manifest: manifestFixture({ public: true }), public_name: "Bad_Name" }],
+      ["is taken: choose another", jesse, { manifest: manifestFixture({ public: true }), public_name: "taken-name" }],
       ["org_only sessions require", peer, { manifest: manifestFixture(), org_only: true }],
       ["org_only was set but", teamless, { manifest: manifestFixture(), org_only: true }],
       ["monthly session limit", spent, { manifest: manifestFixture() }],
@@ -111,7 +118,7 @@ describe("tool surface", () => {
 
     // What each mode holds is what a caller chooses a preset by.
     expect(flat).toContain('"pair" room holds exactly 2 members');
-    expect(flat).toContain('a "swarm" room holds as many as you invite, up to 100');
+    expect(flat).toContain(`a "swarm" room holds as many as you invite, up to ${ROOM_MEMBER_CEILING}`);
   });
 
   // A joiner's human decides on the verbs a room declares, and since #2 the
@@ -195,12 +202,12 @@ describe("tool surface", () => {
   // The host renders a tool through the resource its _meta names. A tool that
   // named a resource this server does not serve would render nothing, so every
   // ui meta present must point at the one resource.
-  it("attaches the app to bellman_connect, bellman_confirm, bellman_rooms and bellman_surface, and to no other tool", async () => {
+  it("attaches the app to bellman_start, bellman_connect, bellman_confirm, bellman_rooms and bellman_surface, and to no other tool", async () => {
     const { tools } = await jesse.listTools();
     const uiOf = (t: { _meta?: Record<string, unknown> }) =>
       (t._meta as { ui?: { resourceUri?: string } } | undefined)?.ui;
     const withApp = tools.filter((t) => uiOf(t)?.resourceUri === APP_RESOURCE_URI).map((t) => t.name).sort();
-    expect(withApp).toEqual(["bellman_confirm", "bellman_connect", "bellman_rooms", "bellman_surface"]);
+    expect(withApp).toEqual(["bellman_confirm", "bellman_connect", "bellman_rooms", "bellman_start", "bellman_surface"]);
     for (const t of tools) {
       const ui = uiOf(t);
       if (ui) expect(ui.resourceUri, t.name).toBe(APP_RESOURCE_URI);

@@ -39,7 +39,7 @@ The bridge signs you in when Claude Code launches, not at your first `bellman_*`
 
 To see which account peers will see, ask your agent for [`bellman_whoami`](/reference/bridge-tools/#bellman_whoami). It answers from the cached sign-in without contacting Bellman, so it is safe to ask before anything else.
 
-**You would rather open the URL yourself.** Set `BELLMAN_NO_BROWSER=1` in the bridge's environment and it prints the sign-in URL on stderr, as `[bellman] sign in here: <url>`, instead of opening a browser. This suits a terminal-only session on your own desktop, or a container that shares the browser's network namespace. It does not make sign-in work from another machine. The bridge listens on `127.0.0.1`, on the first free port from 51004 to 51008, and the sign-in sends the browser back to `http://127.0.0.1:<port>/callback`. A browser on a different machine hands the code to its own loopback, where the bridge cannot see it.
+**You would rather open the URL yourself.** With the npm registration (`claude mcp add`), set `BELLMAN_NO_BROWSER=1` in the bridge's environment and it prints the sign-in URL on stderr, as `[bellman] sign in here: <url>`, instead of opening a browser. This suits a terminal-only session on your own desktop, or a container that shares the browser's network namespace. It does not make sign-in work from another machine. The bridge listens on `127.0.0.1`, on the first free port from 51004 to 51008, and the sign-in sends the browser back to `http://127.0.0.1:<port>/callback`. A browser on a different machine hands the code to its own loopback, where the bridge cannot see it.
 
 **You are connected over SSH.** Forward the port and open the URL in your local browser:
 
@@ -55,7 +55,7 @@ The bridge takes the first free port in the range, and the `redirect_uri` in the
 claude mcp add --scope user bellman -e BELLMAN_KEY=<key> -- bellman-channel
 ```
 
-When a sign-in fails, the bridge says why on stderr, as `[bellman] sign-in failed: …`. Two reasons you can fix:
+When a sign-in fails under the npm registration, the bridge says why on stderr, as `[bellman] sign-in failed: …`. Two reasons you can fix:
 
 - `no free loopback port in 51004-51008 to receive the sign-in` means some other program holds all five ports. Free one and start Claude Code again.
 - `timed out after 300s waiting for the sign-in to finish` means nobody completed the sign-in within five minutes. Start Claude Code again and finish it.

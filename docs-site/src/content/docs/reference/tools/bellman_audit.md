@@ -7,7 +7,7 @@ description: "Bellman org audit log"
 
 **Reads**
 
-Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving, and the end of a room's record: room_deleted when its creator or an org admin asked for it to be deleted, room_purged when it was purged. Cross-org sessions appear in BOTH orgs' logs.  
+Enterprise: list every context crossing that touched your org's boundary — sessions created, briefs exchanged, messages/artifacts/action_requests sent, members joining and leaving, and the end of a room's record: room_deleted when its creator or an org admin asked for it to be deleted, room_purged when it was purged. Cross-org sessions appear in the logs of every org with a person in the room.  
 
 Requires: team plan + admin role. Args: limit (default 50).  
 Returns: { entries: [{ at, session_id, actor, action, detail }] }  

@@ -5,7 +5,7 @@ import type { HostDO } from "../src/host-do.js";
 import { HOST_MEMBER_ID, hostMember, ANTHROPIC_MESSAGES_URL, type HostRecord, type HostWake } from "../src/host.js";
 import { monthKey } from "../src/stored-session.js";
 import type { SessionEvent } from "../src/types.js";
-import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
+import { jesseActor, member, roomManifest, session } from "../tests/helpers/fixtures.js";
 
 const hosted = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
   roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
@@ -358,7 +358,7 @@ const seatRows = (host: DurableObjectStub<HostDO>) =>
 /** Close the room and delete it now (#65, D6), and wait for the room's own alarm to purge it. */
 async function closeAndPurge(store: DurableObjectStore, id: string) {
   await store.closeSession(id);
-  expect(await store.schedulePurge(id, Date.now(), "u_jesse")).toMatchObject({ ok: true });
+  expect(await store.schedulePurge(id, Date.now(), jesseActor)).toMatchObject({ ok: true });
   await vi.waitFor(async () => expect(await store.getSession(id)).toBeUndefined(), { timeout: 5_000, interval: 10 });
 }
 

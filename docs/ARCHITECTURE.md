@@ -8,7 +8,7 @@ applies-when: |
   and plans resolve, where trust boundaries sit, and what is still missing.
 siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
 last-verified-against-source: 21f13b4
-last-updated: 2026-10-09
+last-updated: 2026-10-15
 ---
 
 # Bellman Architecture
@@ -210,9 +210,11 @@ past `?after`, in the envelopes `bellman_sync` returns with the caller's own
 included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
 (#184), `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
 saved presets, `GET`, `PUT` and `DELETE /account/handle` to read, claim or
-change, and release a person's public handle, and `PUT`/`DELETE
+change, and release a person's public handle, `PUT`/`DELETE
 /rooms/:id/byline` for a public room's creator to sign it with that handle or
-unsign it (ADR 0021), beside the blob routes (#183). The routes authenticate through the same composed caller the blob
+unsign it (ADR 0021), and `GET /audit` and `GET /audit/export` for an org
+admin's read of the org's audit stream (dash#11), beside the blob routes
+(#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
@@ -341,7 +343,9 @@ sends it. The decisions are in the
 
 **Read-and-register still applies.** `SessionDO.fetch` awaits the events the
 client missed, then attaches the cursor, accepts the socket and sends the
-replay, with nothing yielding between those. An event appended in that gap
+replay, with nothing yielding between those. It replays 1,000 at most: a
+client further behind is refused with 410 and catches up by polling
+`bellman_sync`, which pages (#208). An event appended in that gap
 would be delivered to nobody and skipped by the cursor: the gap `waitForEvents`
 closes by registering its waiter with no `await` after its read (invariant 2
 below). The rule governs both paths and only the registration mechanism
@@ -483,9 +487,10 @@ Why the split is shaped that way:
   join code must resolve without knowing the room, a plan grant must resolve
   from an identity key, and a public handle must resolve to the one person who
   holds it.
-- **`AuditDO` is per org** because a cross-org room writes into *both* orgs'
-  streams, and each side must see only the crossings that touched its own
-  boundary.
+- **`AuditDO` is per org** because an action in a room that holds more than one org is written
+  to every one of their streams (`auditEntries`, `src/rooms.ts`), and each side must see only
+  the crossings that touched its own boundary. Its rows are a SQL table (`entries`, with the
+  delivery marks in `delivered`), so one query serves the panel's filters, paging and export.
 - **`HostDO`, one per hosted seat,** because a model call takes seconds and the
   room's object must never wait on one: the room stays a record of events, and
   the seat that calls the model is an object of its own, keyed by the room's
@@ -517,7 +522,9 @@ cadence a room declares in its manifest, and it earns its row by carrying what
 only the server can see: for every member the room expects to report, when it
 last did and how long it had been silent at the tick's own `at`. It is written
 only when some member is due, never into a frozen or closed room, and a room
-that declares no cadence gets none. Members answer with `progress` events —
+that declares no cadence gets none. A member asked for three cadences without
+answering is not due again until it reports (#208), so an unattended room stops
+ticking instead of writing a tick every cadence until it is abandoned. Members answer with `progress` events —
 "still working, currently on the migration script" — which exist to reach a peer
 and have no timer of their own. A role on the heartbeat may carry its creator's
 instruction for what that note says (its `heartbeat_on` set to the text, at most
@@ -1552,8 +1559,13 @@ It is used four times:
   carries: the seat runs the wake again and finds its post (`hostEventFor`).
 
 Delivery is at least once, so each consumer absorbs a redelivery in its own way.
-`AuditDO.append` dedupes on the intent id (a `d:<id>` row written in the entry's
-transaction), because appending is not idempotent. Join-code delivery needs no
+`AuditDO.append` dedupes on the intent id, because appending is not idempotent: it
+looks for the intent in `delivered`, inserts the row into `entries` and records the
+intent in `delivered`, and the look and both inserts are one `transactionSync`, so no
+second delivery can come between them. A stream the KV-shaped `AuditDO` wrote (`a:`
+rows, a `seq` counter, `d:` markers) is moved into those tables once, by the
+constructor, in one `transactionSync` with its delivery marks, so an intent delivered
+before the move is still absorbed after it. Join-code delivery needs no
 marker: a put and a delete of one key already are. `HostDO.wake` drops a wake
 whose cause cursor the seat has handled or already queued.
 
@@ -1634,8 +1646,9 @@ off its documentation, decide how code here is written.
    closure that throws. If it fails, the outbox's arming is unsound; the test is
    not wrong.
 2. **Everything awaited inside a transaction closure holds every other call to
-   that object until it commits.** With a 250 ms await inside `AuditDO.append`'s
-   closure, a `recent()` issued mid-closure waited 220 ms; a registry call made
+   that object until it commits.** With a 250 ms await inside the closure
+   `AuditDO.append` had while its rows were KV (`append` is one `transactionSync` now,
+   which takes no await), a `recent()` issued mid-closure waited 220 ms; a registry call made
    inside a closure held a read for 510 ms, which was as long as the registry took
    to answer. So
    **never put a cross-object call inside a transaction**. The closure queues and the wrapper delivers after the
@@ -1756,6 +1769,16 @@ abandonment time. A build older than #18 does not know that name: for a row #18
 rewrote, its `reArm()` calls `setAlarm(undefined)`, which workerd rejects, so
 rolling back past #18 is not supported (ADR 0001).
 
+Rolling back past the move of `AuditDO` into SQL (dash#11) loses no row, but a
+build older than the move reads and writes only the KV rows. It cannot see the
+SQL stream, so `bellman_audit` there shows only what that build wrote itself.
+It cannot see the delivery marks in `delivered` either, so an intent delivered
+before the rollback and redelivered after it lands twice: a double, never a
+drop. Rolling forward again moves what the older build wrote into the table,
+appended after the rows already there with fresh seqs, so the object still
+wakes ([audit trail spec](superpowers/specs/2026-10-09-audit-trail-design.md),
+D5).
+
 **Where it is not applied.** `DurableObjectStore.createSession` writes three
 registry indexes after the session commits, all outside the outbox and all
 through `writeIndex`, which logs a failure instead of throwing: `us:` so a
@@ -1844,7 +1867,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,806** | every request, whether or not you are in a room |
+| Tool definitions | **~8,724** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
@@ -1859,6 +1882,11 @@ main's wording that evicting a member of a code's seat ends the code reached `be
 names no role when an account holds several, and says a code's string and link show when any of
 those seats holds `invite`. `bellman_surface` is up 25, to 308, for `your_seats` and the same
 null `your_role`. No other tool changed. That is 8,806.
+
+Re-measured on 2026-10-16 for #208, by the method below: 30 tokens over the 8,694 that main
+(`c34d089`) measures, all of them `bellman_sync`'s (740 to 770), whose `Returns:` line names
+`more` and says to call again at once when a page comes back full. No other tool changed.
+That is 8,724.
 
 Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
 (`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no

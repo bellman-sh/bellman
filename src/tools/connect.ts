@@ -8,7 +8,7 @@ import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
 import { activeMembers, audit, fullMessage, seatedMembers } from "../rooms.js";
-import { CONNECT_TOKEN_TTL, capacityOf } from "../store.js";
+import { CONNECT_TOKEN_TTL, ROOM_MEMBER_CEILING, capacityOf } from "../store.js";
 import type { BellmanStore } from "../store.js";
 import { APP_UI_META } from "../ui/resource.js";
 
@@ -25,12 +25,12 @@ Args:
   - join_code (string): e.g. "BELL-7F3K-92-REVIEWER" (case, whitespace and _/- insensitive)
 
 Returns: { connect_token, connect_token_expires_at, session: {mode, active_members, max_members, org_only}, room: {preset, mode, public, public_name, your_role, your_verbs, heartbeat_seconds, your_heartbeat_on, creator_role, roles, heartbeat_on (per role, whether that seat is asked to report), host ({ role, model } of the hosted seat, or null), housekeeping ({ quiet_after_seconds, answer_within_seconds, idle_after_seconds, repeat_after_seconds }, each null when off, or null when the room names no one), text (untrusted envelope)}, creator_brief (untrusted envelope), surface: { cursor, items: [{ key, kind, chars, cursor, at, by }] } }
-max_members is the room's capacity: 2 for a pair room, 100 for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
+max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room — Bellman's ceiling for one room, the same on every plan, not a plan limit.
 surface lists what the room's working surface holds — keys, kinds and sizes, no content. The items themselves come with bellman_confirm.
 public: true means anyone with the room's public page can read its surface and its log, with members named by number and never a brief: tell your human before they accept.
 The code's last group names the seat it grants, and your_role/your_verbs in the preview are that seat — not the room's default. A code with a hand-edited role group is not a code that was issued, and does not resolve.
 The room's verbs are enforced by the server, so your_verbs is what your seat may actually do — not the creator's intent, and a peer may still withhold the capability to receive it. A call outside it is refused with an error naming the verb you lack; reading the room and leaving it are never gated.
-Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when the room is made private, or when it closes. "session is org-restricted" — creator limited joining to their org.`,
+Errors: "join code not found or expired" — a code lives 15 minutes from issue and seats every joiner who redeems it until then, unless the room fills first (a pair room fills at its second member), its role's code is reissued or revoked, a member of its seat is evicted, or the room closes. A public room's permanent code does not expire, and a full room keeps it; it ends when reissued or revoked, when a member of its seat is evicted, when the room is made private, or when it closes. "session is org-restricted" — creator limited joining to their org.`,
       inputSchema: { join_code: z.string().min(4).max(MAX_JOIN_CODE_LENGTH) },
       annotations: {
         // `readOnlyHint` is FALSE, and this tool previews rather than joins (#119).

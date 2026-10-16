@@ -22,7 +22,11 @@
  *                     "queue": queue them for the agent to collect, with bellman_sync when a
  *                     turn starts and bellman_wait mid-turn, in a host that runs no Stop
  *                     hook. The Claude Desktop bundle sets it (#241).
- *   BELLMAN_BUS       "on" (default) or "off". On, the bridges on a machine share one
+ *   BELLMAN_INSTALL   "bundle" (the Claude Desktop bundle sets it) or "plugin" (the Claude Code
+ *                     plugin sets it): how this bridge was installed, so the notice it gives when
+ *                     its server runs a newer release names the step that updates it. Anything
+ *                     else, unset included, gets npm's step: `bellman update`.
+ *   BELLMAN_BUS      "on" (default) or "off". On, the bridges on a machine share one
  *                     connection per room, over a Unix socket under ~/.claude/bellman/bus,
  *                     where each used to long-poll for every member it watches. "off" is
  *                     the way back to that: this bridge polls for its own members and
@@ -52,7 +56,7 @@
  */
 import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { connectRemote, createBridge, deliveryOf, type Remote, type WhoAmI } from "./bridge.js";
+import { connectRemote, createBridge, deliveryOf, installOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
@@ -129,6 +133,7 @@ if (inboxDir) sweepStaleInboxes();
 
 const bridge = createBridge({
   delivery,
+  install: installOf(process.env.BELLMAN_INSTALL),
   inboxDir,
   remote: connect,
   whoami,

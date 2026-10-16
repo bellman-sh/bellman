@@ -14,14 +14,15 @@ import { CallToolRequestSchema, type CallToolResult, type Notification, type Too
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import { resolveIdentity } from "../src/auth.js";
 import {
-  createBridge, deliveryOf, loadRoomManifest,
-  type BridgeOptions, type Delivery, type Remote, type WhoAmI,
+  createBridge, deliveryOf, installOf, loadRoomManifest,
+  type BridgeOptions, type Delivery, type Install, type Remote, type WhoAmI,
 } from "../src/bridge.js";
 import { drain, pendingCount, readMemberships } from "../src/inbox.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { readServer, writeServer } from "../src/credentials.js";
+import { VERSION } from "../src/version.js";
 import { connectSignedIn } from "../src/signin.js";
 import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
@@ -62,6 +63,7 @@ async function remoteFor(store: BellmanStore, key: string): Promise<Remote> {
   return {
     listTools: () => client.listTools(),
     callTool: (params) => client.callTool(params) as Promise<CallToolResult>,
+    serverVersion: () => client.getServerVersion()?.version,
     close: () => client.close(),
   };
 }
@@ -671,6 +673,64 @@ describe("channel delivery", () => {
     expect(synced.isError, synced.text).toBe(false);
 
     expect(a.bridge.watching()).toHaveLength(1);
+  });
+});
+
+describe("the update notice", () => {
+  // The Worker cannot read package.json, so the server carries its version as a constant, and this pins that
+  // constant to the package: a release PR that forgets it fails here (#222). A bridge compares it with its own.
+  it("reads the server's version, which is the package's", async () => {
+    expect((await remoteFor(store, DEV_KEY.jesse)).serverVersion?.()).toBe(VERSION);
+  });
+
+  /** A bridge whose server says it runs `version`: ahead of the bridge, level with it, or behind. */
+  const openAt = (version: string | undefined, extra: Partial<BridgeOptions> = {}) =>
+    open(DEV_KEY.jesse, "channel", {
+      remote: async () => ({ ...(await remoteFor(store, DEV_KEY.jesse)), serverVersion: () => version }),
+      ...extra,
+    });
+  const notices = (text: string) => text.split("\n").filter((line) => line.includes("is out; this bridge is"));
+
+  // The server deploys on every merge and its version moves only in a release PR, so a server newer than the bridge
+  // means a release this person has not installed. The first tool result is where the agent reads it, and once per
+  // bridge process is enough to be heard without being repeated on every call.
+  it("says once, in the first tool result, that a newer release is out and how to install it", async () => {
+    const logs: string[] = [];
+    const a = await openAt("99.0.0", { log: (message) => logs.push(message) });
+    const line = `Bellman 99.0.0 is out; this bridge is ${VERSION}. Tell your user: run \`bellman update\`, then restart the session.`;
+
+    expect(notices((await a.call("bellman_rooms")).text)).toEqual([line]);
+    expect(notices((await a.call("bellman_rooms")).text)).toEqual([]);
+    expect(logs).toContain(line);
+  });
+
+  it.each<[string, string | undefined]>([
+    ["level with it", VERSION],
+    ["behind it", "0.0.1"],
+    ["not a version", "unknown"],
+    ["silent about it", undefined],
+  ])("says nothing when the server is %s", async (_, version) => {
+    const a = await openAt(version);
+
+    expect(notices((await a.call("bellman_rooms")).text)).toEqual([]);
+  });
+
+  it.each<[Install, string]>([
+    ["bundle", "download https://bellman.sh/bellman.mcpb and install it again in Claude Desktop"],
+    ["plugin", "run `claude plugin update bellman@bellman`, then restart Claude Code"],
+    ["npm", "run `bellman update`, then restart the session"],
+  ])("names the step that updates a %s install", async (install, step) => {
+    const a = await openAt("99.0.0", { install });
+
+    expect(notices((await a.call("bellman_rooms")).text).join("\n")).toContain(step);
+  });
+
+  // src/channel.ts reads BELLMAN_INSTALL through this, and each package's env sets it: the Desktop manifest and the
+  // plugin's .mcp.json. An npm install sets nothing, and anything unknown is npm's step, which works anywhere npm does.
+  it("reads BELLMAN_INSTALL: bundle and plugin by name, anything else as npm", () => {
+    expect(installOf("bundle")).toBe("bundle");
+    expect(installOf("plugin")).toBe("plugin");
+    for (const other of [undefined, "", "npm", "Bundle", "desktop"]) expect(installOf(other)).toBe("npm");
   });
 });
 

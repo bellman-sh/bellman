@@ -10,6 +10,7 @@ import type {
   OAuthClientInformationFull, OAuthClientMetadata, OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { remoteOf, type Remote, type WhoAmI } from "./bridge.js";
+import { VERSION } from "./version.js";
 import {
   acquireLock, credentialsDir, decodeIdentity, LOCK_FILE, readServer, writeServer,
   type LockHandle, type LockOptions, type ServerCredential,
@@ -305,7 +306,6 @@ export function openBrowser(
 // Signing in: the OAuth client half, over the credential file.
 // ---------------------------------------------------------------------------
 
-const VERSION = "0.1.0";
 const CALLBACK_TIMEOUT_MS = 300_000;
 
 /**

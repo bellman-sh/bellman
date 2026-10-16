@@ -31,7 +31,7 @@ import {
   writeMemberships, type PeerEvent, type WireEnvelope,
 } from "./inbox.js";
 import type { EventType } from "./types.js";
-import { VERSION } from "./version.js";
+import { compareVersions, VERSION } from "./version.js";
 
 /**
  * The Bellman bridge for Claude Code.
@@ -74,6 +74,23 @@ export function deliveryOf(value: string | undefined): Delivery {
   return value === "hook" || value === "queue" ? value : "channel";
 }
 
+/** How this bridge was installed, which is how it is updated: Claude Desktop's bundle, Claude Code's plugin, or npm. */
+export type Install = "bundle" | "plugin" | "npm";
+
+/** BELLMAN_INSTALL as an install: "bundle" and "plugin" by name, anything else, unset included, "npm". */
+export function installOf(value: string | undefined): Install {
+  return value === "bundle" || value === "plugin" ? value : "npm";
+}
+
+/** The step the update notice gives each install. */
+const UPDATE_STEP: Record<Install, string> = {
+  bundle:
+    "download https://bellman.sh/bellman.mcpb and install it again in Claude Desktop " +
+    "(drag it onto the window, or Settings → Extensions → Advanced settings → Install extension)",
+  plugin: "run `claude plugin update bellman@bellman`, then restart Claude Code",
+  npm: "run `bellman update`, then restart the session",
+};
+
 const MAX_WAIT_SECONDS = 25;
 /** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
 const START_TOOL = "bellman_start";
@@ -110,6 +127,8 @@ export interface Remote {
   listResources?(): Promise<ListResourcesResult>;
   listResourceTemplates?(): Promise<ListResourceTemplatesResult>;
   readResource?(params: { uri: string }): Promise<ReadResourceResult>;
+  /** The version the server said it runs, in its serverInfo: what the update notice compares with this bridge's. */
+  serverVersion?(): string | undefined;
   close(): Promise<void>;
 }
 
@@ -125,6 +144,7 @@ export function remoteOf(client: Client): Remote {
     listResources: () => client.listResources(),
     listResourceTemplates: () => client.listResourceTemplates(),
     readResource: (params) => client.readResource(params),
+    serverVersion: () => client.getServerVersion()?.version,
     close: () => client.close(),
   };
 }
@@ -167,6 +187,8 @@ export function unauthorized(err: unknown): boolean {
 
 export interface BridgeOptions {
   delivery: Delivery;
+  /** How this bridge was installed, so an update notice names the step that updates it. Absent, npm. */
+  install?: Install;
   /** Connects to Bellman. Called lazily, and again after a failed attempt. */
   remote: () => Promise<Remote>;
   /** Where hook and queue delivery queue events. Required unless delivery is "channel". */
@@ -645,6 +667,8 @@ export function createBridge(opts: BridgeOptions) {
   }
   const log = opts.log ?? (() => {});
   const pollWait = opts.pollWaitSeconds ?? MAX_WAIT_SECONDS;
+  /** Whether this process has told its agent a newer release is out. Once is enough: see `withUpdateNotice`. */
+  let updateNoticed = false;
   const whoami = opts.whoami ?? ((): WhoAmI => ({ source: "env", label: null }));
   const watches = new Map<string, Watch>(); // keyed by member_id
   /**
@@ -764,6 +788,7 @@ export function createBridge(opts: BridgeOptions) {
       ...(readResource
         ? { readResource: (params: { uri: string }) => readResource.call(fresh, params).catch(fail) }
         : {}),
+      serverVersion: () => fresh.serverVersion?.(),
       close: () => fresh.close(),
     };
     return self;
@@ -840,10 +865,33 @@ export function createBridge(opts: BridgeOptions) {
       }
     }
 
-    const result = await (await remote()).callTool({ name, arguments: args });
+    const connected = await remote();
+    const result = await connected.callTool({ name, arguments: args });
     observe(name, args, result);
-    return result;
+    return withUpdateNotice(result, connected);
   });
+
+  /**
+   * The first tool result after this bridge learns its server runs a newer release carries one more line, saying so
+   * and naming the step that updates this install, and the log gets the same line. The server deploys on every merge
+   * and its version moves only in a release PR (#222), so it is the latest release. A version either side cannot
+   * parse says nothing: ordering it would be a guess.
+   */
+  function withUpdateNotice(result: CallToolResult, connected: Remote): CallToolResult {
+    const latest = updateNoticed ? undefined : connected.serverVersion?.();
+    if (latest === undefined) return result;
+    let order: number;
+    try {
+      order = compareVersions(VERSION, latest);
+    } catch {
+      return result;
+    }
+    if (order >= 0) return result;
+    updateNoticed = true;
+    const line = `Bellman ${latest} is out; this bridge is ${VERSION}. Tell your user: ${UPDATE_STEP[opts.install ?? "npm"]}.`;
+    log(line);
+    return { ...result, content: [...(result.content ?? []), { type: "text", text: line }] };
+  }
 
   /** Learn memberships from the tool traffic the bridge is already relaying. */
   function observe(name: string, args: Record<string, unknown>, result: CallToolResult): void {

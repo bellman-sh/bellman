@@ -100,3 +100,55 @@ it("keeps the seq each key carries when the move is into an empty table, gaps in
   await stub.append(entry("sent_message"));
   expect(await seqs(stub)).toEqual([2, 5, 6]);
 });
+
+/**
+ * The move lands whole or not at all, however many batches it reads. One of its INSERTs fails
+ * in the second batch, after the first batch's rows went in and their keys were deleted: that
+ * wake fails, and the next moves every row once, each with the seq its key carried, and every
+ * mark. The keys are even so a move that half landed would show: the rows it kept would leave
+ * the table non-empty, and the rest would take fresh seqs instead of their keys'.
+ */
+it("moves the whole stream or none of it when an insert fails past its first batch", async () => {
+  const rows = 1_100; // three batches of rows and three of marks
+  const failAt = 700;
+  let inserts = 0;
+  let unpatch = () => {};
+  await runInDurableObject(env.AUDIT.get(env.AUDIT.idFromName("org_old")), (_i: AuditDO, ctx) => {
+    ctx.storage.sql.exec("DROP TABLE entries");
+    ctx.storage.sql.exec("DROP TABLE delivered");
+    for (let n = 1; n <= rows; n++) {
+      ctx.storage.kv.put(`a:${String(2 * n).padStart(12, "0")}`, entry(`row_${n}`));
+      ctx.storage.kv.put(`d:intent-${n}`, 2 * n);
+    }
+    ctx.storage.kv.put("seq", 2 * rows);
+    // The prototype, since the move runs in the constructor of an object not built yet.
+    const proto = Object.getPrototypeOf(ctx.storage.sql) as SqlStorage;
+    const exec = proto.exec;
+    Object.defineProperty(proto, "exec", {
+      configurable: true,
+      writable: true,
+      value(this: SqlStorage, query: string, ...bindings: SqlStorageValue[]) {
+        if (/^\s*INSERT/i.test(query) && ++inserts === failAt) throw new Error("interrupted");
+        return exec.call(this, query, ...bindings);
+      },
+    });
+    unpatch = () => Object.defineProperty(proto, "exec", { configurable: true, writable: true, value: exec });
+  });
+  await abortAllDurableObjects();
+
+  try {
+    // Wrapped because an RPC promise is callable, and `.rejects` would call it.
+    await expect(Promise.resolve(env.AUDIT.get(env.AUDIT.idFromName("org_old")).recent(1))).rejects.toThrow(/interrupted/);
+  } finally {
+    unpatch();
+  }
+  // The hook sat in front of the move's writes. Without this the case proves nothing.
+  expect(inserts).toBe(failAt);
+
+  const stub = env.AUDIT.get(env.AUDIT.idFromName("org_old"));
+  expect(await seqs(stub)).toEqual(Array.from({ length: rows }, (_, i) => 2 * (i + 1)));
+  expect(await runInDurableObject(stub, (_i: AuditDO, ctx) => ({
+    marks: ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM delivered").one().n,
+    kv: [...ctx.storage.kv.list()].map(([key]) => key),
+  }))).toEqual({ marks: rows, kv: [] });
+});

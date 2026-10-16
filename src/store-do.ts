@@ -3205,29 +3205,50 @@ function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = nul
   ).one().seq;
 }
 
+/** How many KV rows the move holds in memory at once, whatever the stream's size. */
+const MOVE_BATCH = 500;
+
+/**
+ * Every KV row under `prefix`, in key order, handed to `move` and deleted, a batch at a time.
+ * Each batch starts after the last key of the one before, so the walk ends however a delete
+ * inside the transaction shows to the next list.
+ */
+function moveKv<T>(storage: DurableObjectStorage, prefix: string, move: (key: string, value: T) => void): void {
+  let after: string | undefined;
+  for (;;) {
+    const batch = [...storage.kv.list<T>({ prefix, startAfter: after, limit: MOVE_BATCH })];
+    if (batch.length === 0) return;
+    for (const [key, value] of batch) {
+      move(key, value);
+      storage.kv.delete(key);
+    }
+    after = batch.at(-1)![0];
+  }
+}
+
 /**
  * The tables, and a stream written in the KV shape (`a:<seq>` rows, the `seq` counter,
  * `d:<intent>` markers) moved into them. Run inside one `transactionSync`, so it lands
- * whole or not at all.
+ * whole or not at all, however many batches it reads.
  *
  * Into an empty table each row keeps the seq its key carries, so every cursor already handed
  * out still names its row. Once the table holds rows, what is in KV was written there by an
  * older Worker after a rollback: it read the deleted `seq` counter as 0 and counted again
  * from 1, so its keys would collide with rows that exist. Those are appended in key order
  * with the next seqs instead, so nothing collides and nothing is lost, and a stream moved
- * once and then written to by an older Worker still wakes.
- * ponytail: one transaction, fine for thousands of rows; a stream far past any team's would batch it.
+ * once and then written to by an older Worker still wakes. Which of the two applies is decided
+ * once, before the first batch: after that batch the table is never empty.
+ * ponytail: memory is flat, MOVE_BATCH rows at a time. Time is the ceiling left: blockConcurrencyWhile
+ * allows 30 s, about two million rows at the 15 µs a row measured locally. Past that, move it across wakes.
  */
 function migrateAudit(storage: DurableObjectStorage): void {
   for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
-  const rows = [...storage.kv.list<AuditEntry>({ prefix: "a:" })];
-  const marks = [...storage.kv.list<number>({ prefix: "d:" })];
   const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
-  for (const [key, entry] of rows) insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null);
-  for (const [key, seq] of marks) {
+  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
+  // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
+  moveKv<number>(storage, "d:", (key, seq) => {
     storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
-  }
-  for (const [key] of [...rows, ...marks]) storage.kv.delete(key);
+  });
   storage.kv.delete("seq");
 }
 

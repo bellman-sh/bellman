@@ -154,15 +154,17 @@ by construction.
 
 **Migration** runs in the constructor, under `blockConcurrencyWhile`, as one
 `transactionSync`. It creates the tables, copies every `a:` row and every `d:`
-marker, and deletes the `a:`, `d:` and `seq` keys. An interruption leaves the
-KV state or the SQL state, never half of each. Into an empty table each row
-keeps the seq in its key, which keeps every cursor already handed out valid,
-and that is the only time the key seqs are kept. A later wake can find KV rows
-beside rows already in the table: an older Worker wrote them during a
-rollback, reading the `seq` counter the move deleted as 0 and counting again
-from 1. Those are appended in key order with fresh seqs, so nothing collides
-and the object still wakes. `ponytail:` one transaction is fine for thousands
-of rows. A stream far larger than any team holds today would batch it.
+marker, 500 at a time in key order, and deletes the `a:`, `d:` and `seq` keys.
+An interruption leaves the KV state or the SQL state, never half of each. Into
+an empty table each row keeps the seq in its key, which keeps every cursor
+already handed out valid, and that is the only time the key seqs are kept. A
+later wake can find KV rows beside rows already in the table: an older Worker
+wrote them during a rollback, reading the `seq` counter the move deleted as 0
+and counting again from 1. Those are appended in key order with fresh seqs, so
+nothing collides and the object still wakes. Which of the two applies is
+decided once, before the first batch. `ponytail:` memory stays flat whatever
+the stream's size. Time is the ceiling left: `blockConcurrencyWhile` allows
+30 s, about two million rows at the 15 µs a row measured locally.
 
 ### D6. One query, in both stores
 
@@ -406,7 +408,9 @@ already existed. This adds routes.
 - **Worker:** 401 without a caller; 403 naming the failed condition; 400
   naming the bad parameter; 405 for another method; 500 in the module's usual
   words. A migration that throws leaves the KV state, and the next wake runs it
-  again.
+  again. A failure that does not pass, such as a stream too large to move in
+  `blockConcurrencyWhile`'s 30 s, recurs on every wake, so that org's stream,
+  and every audited action that writes to it, fails until it is fixed.
 - **Panel:** a 401 from a loader goes to sign-in; anything else from the loader
   shows the route's error screen and its retry. An export or a room check that
   fails says so inline and keeps the page.
@@ -428,7 +432,8 @@ Worker:
 - **`AuditDO`**, in `worker-tests/`: a stream seeded in the KV shape (`a:`,
   `d:`, `seq`) wakes into SQL with its seqs; a redelivered intent that was
   delivered before the migration appends nothing; the next append takes the
-  next seq.
+  next seq; a move that fails partway, past its first batch, leaves nothing
+  moved, and the next wake moves all of it.
 - **Routes**, in `tests/http-audit.test.ts`: 401; each 403; each 400; 405;
   CORS and the exposed header; the list's shape and facets on the first page
   only. Each acceptance check of dash#11 runs through HTTP: a crossing read by

@@ -13,6 +13,7 @@ npm start             # local Node server on :3900 (MemoryStore)
 npm run smoke         # end-to-end; BELLMAN_URL points it at any deployment
 npm run dev:worker    # wrangler dev, real Durable Objects
 npm run docs:gen      # the docs site's tool reference, from the tools themselves
+npm --prefix docs-site run build   # the docs site (npm --prefix docs-site ci first); fails on a broken link
 ```
 
 ## Architecture
@@ -44,6 +45,9 @@ producing bugs. Read it before changing how the pieces fit together.
 - `plugin/` — the Claude Code plugin: the bridge in hook delivery (`.mcp.json`), the Stop hook
   (`hooks/hooks.json`), the two skills, and `bridge/`, the bundles those two run.
   `.claude-plugin/marketplace.json` at the root lists it.
+- `docs-site/` — docs.bellman.sh, an Astro Starlight site with its own `package.json` and lockfile.
+  Pages are Markdown in `src/content/docs/`; `reference/tools/` and `reference/bridge-tools.md` are
+  generated. `docs-site/wrangler.toml` names the assets-only Worker that serves it.
 
 ## Writing
 

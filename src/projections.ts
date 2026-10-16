@@ -5,6 +5,7 @@ import { reportRow } from "./heartbeat.js";
 import { asked, capacityOf, codeIsLive, isActiveMember } from "./store.js";
 import { activeMembers, isPublic, sessionStatus } from "./rooms.js";
 import { joinUrl } from "./codes.js";
+import { heldName } from "./public-names.js";
 import { purgeDueAt } from "./retention.js";
 import type { StoredSession } from "./stored-session.js";
 
@@ -178,6 +179,9 @@ export function roomPreview(session: StoredSession, viewerRole: string | null) {
     // Whether anyone with the room's link reads it (public rooms spec D5): a boolean the server
     // computed, so it is spine, and the room as it stands, so a room made private says so.
     public: isPublic(session),
+    // The name in the room's link while it holds one (public names spec, D7). Chosen by the creator
+    // but held to a grammar the server checked, like a role key, so it is spine beside `public`.
+    public_name: heldName(session),
     your_role: viewerRole,
     your_verbs: viewerRole === null ? [] : verbsOfRole(m, viewerRole),
     heartbeat_seconds: seconds(m.heartbeatOnMs),

@@ -84,10 +84,14 @@ describe("tool surface", () => {
       default_role: "ghost", creator_role: "lead",
     };
 
+    await jesse.call("bellman_start", { brief: brief(), manifest: manifestFixture({ public: true }), public_name: "taken-name" });
     const rejections: [string, Peer, Record<string, unknown>][] = [
       ["invalid manifest — ", jesse, { manifest: dangling }],
       ["swarm mode requires", peer, { manifest: manifestFixture({ preset: "swarm" }) }],
       ["a public room requires", peer, { manifest: manifestFixture({ public: true }) }],
+      ["public_name needs a public room", jesse, { manifest: manifestFixture(), public_name: "bellman-dev" }],
+      ["use 3 to 40 lowercase letters", jesse, { manifest: manifestFixture({ public: true }), public_name: "Bad_Name" }],
+      ["is taken: choose another", jesse, { manifest: manifestFixture({ public: true }), public_name: "taken-name" }],
       ["org_only sessions require", peer, { manifest: manifestFixture(), org_only: true }],
       ["org_only was set but", teamless, { manifest: manifestFixture(), org_only: true }],
       ["monthly session limit", spent, { manifest: manifestFixture() }],

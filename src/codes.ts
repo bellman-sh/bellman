@@ -1,5 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { MAX_ROLE_KEY_LENGTH } from "./manifest.js";
+import { heldName } from "./public-names.js";
+import type { StoredSession } from "./stored-session.js";
 
 // No 0/O, 1/I/L — codes get relayed over voice and chat.
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -60,11 +62,13 @@ export function joinUrl(code: string): string {
 }
 
 /**
- * The page a public room is read at (public rooms spec D6): dash, outside sign-in, by the room's id.
+ * The page a public room is read at (public rooms spec D6): dash, outside sign-in, by the room's name
+ * while it holds one (public names spec, D7) and by its id otherwise.
  * A page to read and not a door: it seats nobody, where a join URL hands a seat to whoever redeems it until it expires.
  */
 export const PUBLIC_ROOM_URL_BASE = "https://dash.bellman.sh/r/";
 
-export function publicRoomUrl(sessionId: string): string {
-  return `${PUBLIC_ROOM_URL_BASE}${sessionId}`;
+/** A public room's page (public names spec, D7): its name's link while it holds one, its session id's otherwise. */
+export function publicRoomUrl(s: Pick<StoredSession, "id" | "publicName" | "manifest" | "unpublishedAt" | "closed">): string {
+  return `${PUBLIC_ROOM_URL_BASE}${heldName(s) ?? s.id}`;
 }

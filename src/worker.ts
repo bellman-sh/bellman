@@ -10,7 +10,7 @@ import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
-import { caller, handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
+import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
@@ -48,6 +48,12 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
+  /**
+   * A secret: the user ids, comma-separated, that hold the operator's
+   * platform-wide powers (`parseOperators`). Unset, nobody holds them; no plan
+   * BELLMAN_USERS grants stands in.
+   */
+  BELLMAN_OPERATORS?: string;
   /**
    * Comma-separated origins the control panel is served from, e.g.
    * "https://dash.bellman.sh". Unset means no browser may hold a session —
@@ -94,6 +100,7 @@ function oauthConfig(
     overrides: parseOverrides(env.BELLMAN_USERS),
     panelOrigins: parsePanelOrigins(env.BELLMAN_PANEL_ORIGINS),
     plans,
+    operators: parseOperators(env.BELLMAN_OPERATORS),
     paymentLinks: billingSettings(env).paymentLinks,
     // The switch has to reach plans already stored, or it only stops new
     // purchases and every earlier one keeps issuing paid tokens.

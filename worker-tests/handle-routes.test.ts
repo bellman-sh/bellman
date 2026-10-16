@@ -79,30 +79,37 @@ describe("the handle routes through the Worker", () => {
     }
   });
 
-  // /admin is the authorization server's, so this needs OAuth on and a token it signed for an admin the operator
-  // made (ADR 0021). The gate's cases are pinned in tests/http-bylines.test.ts; this is the wiring.
-  it("lets the operator release someone's handle at /admin/handles/:handle, over the real registry", async () => {
+  // /admin is the authorization server's, so this needs OAuth on and a token it signed, here for a user id the
+  // BELLMAN_OPERATORS secret lists (ADR 0021). The gate's cases are pinned in tests/http-bylines.test.ts. This is the
+  // wiring, so the listed id's token is also refused with the secret unset: the Worker reads the list from its env.
+  it("lets a user id BELLMAN_OPERATORS lists release someone's handle at /admin/handles/:handle, over the real registry", async () => {
     const secret = "test-signing-secret";
-    const oauthEnv = { ...env, BELLMAN_TOKEN_SECRET: secret } as unknown as Parameters<typeof worker.fetch>[1];
-    const operator: Identity = { userId: "u_operator", orgId: "org_ops", plan: "team", role: "admin", label: "ops@example.dev" };
-    const token = await signJwt(
-      { iss: ORIGIN, sub: operator.userId, aud: canonicalResource(`${ORIGIN}/mcp`), bellman: operator, plan_source: "operator" },
+    const envWith = (operators: string | undefined) =>
+      ({ ...env, BELLMAN_TOKEN_SECRET: secret, BELLMAN_OPERATORS: operators }) as unknown as Parameters<typeof worker.fetch>[1];
+    const listed = envWith("u_operator");
+    const tokenFor = (identity: Identity, planSource: string) => signJwt(
+      { iss: ORIGIN, sub: identity.userId, aud: canonicalResource(`${ORIGIN}/mcp`), bellman: identity, plan_source: planSource },
       secret, ACCESS_TOKEN_TTL_SECONDS,
     );
-    const release = (segment: string, authorization: string) =>
-      worker.fetch(new Request(`${ORIGIN}/admin/handles/${segment}`, { method: "DELETE", headers: { authorization } }), oauthEnv, ctx);
+    const operator = await tokenFor({ userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" }, "default");
+    const teamAdmin = await tokenFor({ userId: "u_team_admin", orgId: "org_ops", plan: "team", role: "admin", label: "admin@example.dev" }, "operator");
+    const release = (segment: string, authorization: string, on = listed) =>
+      worker.fetch(new Request(`${ORIGIN}/admin/handles/${segment}`, { method: "DELETE", headers: { authorization } }), on, ctx);
     const registry = new DurableObjectStore(env as never);
     await registry.claimHandle("u_someone", "wire-held");
     await registry.signRoom("u_someone", "qs_wire", 1_000);
 
     // The key map's team admin holds no token the authorization server signed, so /admin does not know them.
     expect((await release("wire-held", `Bearer ${KEY}`)).status).toBe(401);
+    // A team admin BELLMAN_USERS made is not on the list, and the list's own id passes nothing with the secret unset.
+    expect((await release("wire-held", `Bearer ${teamAdmin}`)).status).toBe(403);
+    expect((await release("wire-held", `Bearer ${operator}`, envWith(undefined))).status).toBe(403);
     expect(await registry.userOfHandle("wire-held")).toBe("u_someone");
 
-    const released = await release("Wire-Held", `Bearer ${token}`);
+    const released = await release("Wire-Held", `Bearer ${operator}`);
     expect(released.status, await released.clone().text()).toBe(204);
     expect(await registry.userOfHandle("wire-held")).toBeUndefined();
     expect(await registry.signedRooms("u_someone")).toEqual([]);
-    expect((await release("wire-held", `Bearer ${token}`)).status).toBe(404);
+    expect((await release("wire-held", `Bearer ${operator}`)).status).toBe(404);
   });
 });

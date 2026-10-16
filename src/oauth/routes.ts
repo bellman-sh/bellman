@@ -68,6 +68,12 @@ export interface OAuthConfig {
   honourPurchases?: boolean;
   /** Runtime plan grants. Absent means only BELLMAN_USERS decides a plan. */
   plans?: PlanStore;
+  /**
+   * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
+   * operator's platform-wide powers, which no plan, role or grant confers.
+   * Today that is releasing anyone's handle. Absent or empty names no one.
+   */
+  operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -1148,14 +1154,60 @@ export async function handleOAuth(
   // Plans as runtime data. Same bar as the audit log: team plan, admin role,
   // and an org — the three things that make someone an operator here.
   if (path === "/admin/grants") {
-    const admin = await adminCaller(request, config, method !== "GET");
-    if (admin instanceof Response) return admin;
-    const { identity, plans } = admin;
+    const who = await caller(request, config);
+    if (!who) return oauthError("invalid_token", "sign in first", 401);
+    /**
+     * Bearer only, and deliberately not a role check.
+     *
+     * The writes below gate on planSource === "operator", so a cookie that
+     * carried it would be an operator bit on the customer session — the thing
+     * #61 rules out, even though the endpoint is itself org-scoped. Operator
+     * authority derives from deploy access, and converting "can deploy" into
+     * "holds a session cookie" is a strictly weaker credential for the one
+     * account whose compromise is every customer's problem rather than one
+     * customer's.
+     *
+     * No CORS either, so a browser cannot read this refusal — there is nothing
+     * here for the panel to do with it. When #53-#58 build the org-admin UI,
+     * that is the point to design a cookie-reachable admin surface on purpose.
+     */
+    if (who.via === "cookie") {
+      return oauthError(
+        "invalid_token",
+        "this endpoint requires a bearer token, not a browser session",
+        401
+      );
+    }
+    const { identity } = who;
+    if (!entitlementsFor(identity).audit || identity.role !== "admin" || !identity.orgId) {
+      return oauthError("insufficient_scope", "granting plans requires a team admin", 403);
+    }
+    // Writing is for admins the operator made, not admins a purchase made.
+    //
+    // Buying team makes you admin of your own org. If that also let you write
+    // grants, one month of team would buy permanent team: an admin can write a
+    // grant for their own key, billing only ever removes grants it wrote
+    // itself, and the self-written one would survive the cancellation. Granting
+    // a second identity into the org does the same thing one step removed.
+    //
+    // Closing that properly means org membership with a lifetime tied to the
+    // purchase, which is not built — the README already says adding people to
+    // a purchased org is not a feature yet. Until it is, a purchased admin gets
+    // the plan and the org scoping and reads the grant list, and nothing else.
+    const writing = method !== "GET";
+    if (writing && who.planSource !== "operator") {
+      return oauthError(
+        "insufficient_scope",
+        "writing grants is limited to admins the operator granted; a purchased team admin cannot",
+        403
+      );
+    }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
 
     if (method === "GET") {
       // Scoped to the caller's org: a listing of every grant on the platform
       // would leak other orgs' customers and their plans.
-      return json({ grants: await plans.listGrants(200, identity.orgId) });
+      return json({ grants: await config.plans.listGrants(200, identity.orgId) });
     }
 
     if (method === "POST") {
@@ -1239,7 +1291,7 @@ export async function handleOAuth(
       // record: read-then-write let another org's admin land a grant for the
       // same key in the gap, and write-then-audit let the record of a change
       // that already happened be lost with no way to retry it.
-      if ((await plans.putGrantIfOwned(grant, identity.orgId,
+      if ((await config.plans.putGrantIfOwned(grant, identity.orgId,
         { actorUserId: identity.userId })) === "conflict") {
         return oauthError("insufficient_scope", "that key already has a grant in another org", 403);
       }
@@ -1255,7 +1307,7 @@ export async function handleOAuth(
       // key, the delete finds nothing, and this would still answer 200 while
       // the grant carried on applying. The store records plan_revoked only for
       // a delete that removed something, so a refusal leaves no entry either.
-      const outcome = await plans.deleteGrantIfOwned(key, identity.orgId,
+      const outcome = await config.plans.deleteGrantIfOwned(key, identity.orgId,
         { actorUserId: identity.userId });
       if (outcome !== "deleted") {
         return oauthError("insufficient_scope", "no such grant in your org", 403);
@@ -1269,17 +1321,31 @@ export async function handleOAuth(
   // ---------------------------------------------- /admin/handles/:handle
   // The operator releases someone's handle, for a deletion or an abusive name
   // (ADR 0021): the handle and every room signed with it go in one registry
-  // transaction, as the holder's own release does. A write, so only an admin
-  // the operator made. The segment is read as the handle page reads it.
+  // transaction, as the holder's own release does. A handle belongs to no org,
+  // so this reaches every account, and it is given by name: a bearer token for
+  // a user id BELLMAN_OPERATORS lists. No plan, role or grant confers it, so a
+  // team admin BELLMAN_USERS makes for one org releases nothing. Bearer only,
+  // for /admin/grants' reason. The segment is read as the handle page reads it.
   const named = ADMIN_HANDLE.exec(path);
   if (named) {
-    const admin = await adminCaller(request, config, true);
-    if (admin instanceof Response) return admin;
+    const who = await caller(request, config);
+    if (!who) return oauthError("invalid_token", "sign in first", 401);
+    if (who.via === "cookie") {
+      return oauthError(
+        "invalid_token",
+        "this endpoint requires a bearer token, not a browser session",
+        401
+      );
+    }
+    if (!config.operators?.has(who.identity.userId)) {
+      return oauthError("insufficient_scope", "releasing a handle is limited to the user ids BELLMAN_OPERATORS lists", 403);
+    }
     if (method !== "DELETE") {
       return new Response("Method not allowed", { status: 405, headers: { allow: "DELETE" } });
     }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
     const handle = handleFromSegment(named[1]);
-    if (handle === undefined || (await admin.plans.releaseHandleNamed(handle)) === undefined) {
+    if (handle === undefined || (await config.plans.releaseHandleNamed(handle)) === undefined) {
       return oauthError("not_found", "no such handle", 404);
     }
     return new Response(null, { status: 204 });
@@ -1291,60 +1357,18 @@ export async function handleOAuth(
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
 
 /**
- * Who may use /admin, or the refusal to answer with. One gate for every
- * route under it.
- *
- * Bearer only, and deliberately not a role check. Writes gate on planSource
- * === "operator", so a cookie that carried it would be an operator bit on the
- * customer session — the thing #61 rules out, even though /admin/grants is
- * itself org-scoped. Operator authority derives from deploy access, and
- * converting "can deploy" into "holds a session cookie" is a strictly weaker
- * credential for the one account whose compromise is every customer's problem
- * rather than one customer's.
- *
- * No CORS either, so a browser cannot read this refusal — there is nothing
- * here for the panel to do with it. When #53-#58 build the org-admin UI, that
- * is the point to design a cookie-reachable admin surface on purpose.
- *
- * Writing is for admins the operator made, not admins a purchase made. Buying
- * team makes you admin of your own org. If that also let you write grants, one
- * month of team would buy permanent team: an admin can write a grant for their
- * own key, billing only ever removes grants it wrote itself, and the
- * self-written one would survive the cancellation. Granting a second identity
- * into the org does the same thing one step removed. Closing that properly
- * means org membership with a lifetime tied to the purchase, which is not
- * built — the README already says adding people to a purchased org is not a
- * feature yet. Until it is, a purchased admin gets the plan and the org
- * scoping and reads the grant list, and nothing else.
+ * BELLMAN_OPERATORS, a Worker secret: the user ids, comma-separated, that hold
+ * the operator's platform-wide powers. Unset or empty names no one. An entry
+ * that is not a user id (`isLinkableUserId`'s shape) is skipped and logged, so
+ * a subject key such as BELLMAN_USERS is keyed by, or a typo, names no one.
  */
-async function adminCaller(
-  request: Request,
-  config: OAuthConfig,
-  writing: boolean
-): Promise<{ identity: Identity & { orgId: string }; plans: PlanStore } | Response> {
-  const who = await caller(request, config);
-  if (!who) return oauthError("invalid_token", "sign in first", 401);
-  if (who.via === "cookie") {
-    return oauthError(
-      "invalid_token",
-      "this endpoint requires a bearer token, not a browser session",
-      401
-    );
+export function parseOperators(raw: string | undefined): ReadonlySet<string> {
+  const operators = new Set<string>();
+  for (const entry of (raw ?? "").split(",").map((e) => e.trim()).filter(Boolean)) {
+    if (isLinkableUserId(entry)) operators.add(entry);
+    else console.error(`BELLMAN_OPERATORS lists "${entry}", which is not a user id — skipping it`);
   }
-  const { identity } = who;
-  if (!entitlementsFor(identity).audit || identity.role !== "admin" || !identity.orgId) {
-    return oauthError("insufficient_scope", "the admin endpoints require a team admin", 403);
-  }
-  if (writing && who.planSource !== "operator") {
-    return oauthError(
-      "insufficient_scope",
-      "writing is limited to admins the operator granted; a purchased team admin cannot",
-      403
-    );
-  }
-  if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
-  // The org, typed as checked: a null one would widen listGrants to every org.
-  return { identity: { ...identity, orgId: identity.orgId }, plans: config.plans };
+  return operators;
 }
 
 /**

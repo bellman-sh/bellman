@@ -244,8 +244,10 @@ the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first. One handle route is the operator's, not the
 panel's: `DELETE /admin/handles/:handle` releases someone's handle and every
 signature with it, for an account deletion or an abusive name. It sits beside
-`/admin/grants` in the authorization server, behind the same gate: a bearer
-token from an admin the operator made, never a cookie.
+`/admin/grants` in the authorization server with a gate of its own: it passes
+an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
+lists, and no one else. No plan, role or grant passes it, and with the list
+unset or empty nobody does.
 
 **A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 

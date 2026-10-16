@@ -8,7 +8,7 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
 import { HANDLE_PAGE_BATCH, HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
-import type { OAuthConfig } from "../src/oauth/routes.js";
+import { parseOperators, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import { HOST_USER_ID, MemoryStore } from "../src/store.js";
 import type { Identity } from "../src/types.js";
@@ -514,15 +514,18 @@ describe("GET /public/handles/:handle", () => {
   });
 });
 
-// The operator's release (ADR 0021), behind /admin/grants' gate: a bearer token and never a cookie, from a team admin
-// the operator made. The handle's holder created PUB and signed it, so a release shows on the room's public read.
+// The operator's release (ADR 0021): an access token, never a cookie, for a user id BELLMAN_OPERATORS lists. No plan,
+// role or grant passes it. The handle's holder created PUB and signed it, so a release shows on the room's public read.
 describe("DELETE /admin/handles/:handle", () => {
-  const OPERATOR: Identity = { userId: "u_operator", orgId: "org_ops", plan: "team", role: "admin", label: "ops@example.dev" };
+  // Listed, and a free member, so a pass is the list's and not a plan's or a role's.
+  const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
+  // A team admin BELLMAN_USERS made, whom /admin/grants lets write, and whom the list does not name.
+  const TEAM_ADMIN: Identity = { userId: "u_team_admin", orgId: "org_ops", plan: "team", role: "admin", label: "admin@example.dev" };
   let cfg: OAuthConfig;
   let route: (request: Request) => Promise<Response>;
 
   beforeEach(async () => {
-    cfg = panelConfig({ plans: store });
+    cfg = panelConfig({ plans: store, operators: new Set([OPERATOR.userId]) });
     route = routeWith(cfg);
     await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
     await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
@@ -537,8 +540,8 @@ describe("DELETE /admin/handles/:handle", () => {
   const release = (segment: string, headers: Record<string, string>, method = "DELETE") =>
     route(new Request(`${ISSUER}/admin/handles/${segment}`, { method, headers }));
 
-  it("releases the handle and every signature for the operator: 204, and the byline and the page go", async () => {
-    const res = await release("jesse", await bearer(OPERATOR, "operator"));
+  it("releases the handle and every signature for a user id the list names, a free member's: 204, and the byline and the page go", async () => {
+    const res = await release("jesse", await bearer(OPERATOR, "default"));
     expect(res.status).toBe(204);
     expect(await store.handleOf("u_jesse")).toBeUndefined();
     expect(await store.signedRooms("u_jesse")).toEqual([]);
@@ -547,12 +550,12 @@ describe("DELETE /admin/handles/:handle", () => {
   });
 
   it("reads the segment as the handle page does: percent-decoded, trimmed and lowercased", async () => {
-    expect((await release("%20%4AESSE%20", await bearer(OPERATOR, "operator"))).status).toBe(204);
+    expect((await release("%20%4AESSE%20", await bearer(OPERATOR, "default"))).status).toBe(204);
     expect(await store.userOfHandle("jesse")).toBeUndefined();
   });
 
   it("is 404 for a handle nobody holds, and for a segment that cannot be a handle, and asks the registry nothing for that", async () => {
-    const auth = await bearer(OPERATOR, "operator");
+    const auth = await bearer(OPERATOR, "default");
     expect([(await release("nobody", auth)).status, await store.userOfHandle("jesse")]).toEqual([404, "u_jesse"]);
     const asked = vi.spyOn(store, "releaseHandleNamed");
     for (const segment of ["ab", "9lives", "a".repeat(3_000), "%E0%A4%A"]) {
@@ -563,10 +566,11 @@ describe("DELETE /admin/handles/:handle", () => {
     expect(await store.userOfHandle("jesse")).toBe("u_jesse");
   });
 
-  it("refuses a member, a team admin a purchase made, and no credential, and the handle stays", async () => {
-    for (const [identity, planSource] of [[IDENTITY, "default"], [OPERATOR, "grant"]] as const) {
+  // The control for these is the first case: the list's own user id releases.
+  it("refuses a user id the list does not name, a team admin BELLMAN_USERS made among them, and no credential, and the handle stays", async () => {
+    for (const [identity, planSource] of [[TEAM_ADMIN, "operator"], [IDENTITY, "default"]] as const) {
       const res = await release("jesse", await bearer(identity, planSource));
-      expect(res.status, planSource).toBe(403);
+      expect(res.status, identity.userId).toBe(403);
       expect(await res.json()).toMatchObject({ error: "insufficient_scope" });
     }
     expect((await release("jesse", {})).status).toBe(401);
@@ -574,9 +578,22 @@ describe("DELETE /admin/handles/:handle", () => {
     expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "jesse" } });
   });
 
+  it("lets no one through when the list is unset or empty, and the handle stays", async () => {
+    for (const operators of [undefined, new Set<string>()]) {
+      const unlisted = routeWith(panelConfig({ plans: store, operators }));
+      for (const [identity, planSource] of [[OPERATOR, "default"], [TEAM_ADMIN, "operator"]] as const) {
+        const res = await unlisted(new Request(`${ISSUER}/admin/handles/jesse`, {
+          method: "DELETE", headers: await bearer(identity, planSource),
+        }));
+        expect(res.status, `${identity.userId}, ${operators ? "an empty list" : "no list"}`).toBe(403);
+      }
+    }
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+  });
+
   // The control for this is the first case: the same identity over a bearer token releases.
-  it("refuses the operator's own identity over a cookie, and the handle stays", async () => {
-    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "operator" });
+  it("refuses a listed user id over a cookie, and the handle stays", async () => {
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "default" });
     const res = await release("jesse", { cookie: `${COOKIE}=${sid}`, origin: PANEL });
     expect([res.status, await res.json()]).toEqual([401, {
       error: "invalid_token", error_description: "this endpoint requires a bearer token, not a browser session",
@@ -586,8 +603,22 @@ describe("DELETE /admin/handles/:handle", () => {
   });
 
   it("takes DELETE alone: a GET answers 405 and releases nothing", async () => {
-    const res = await release("jesse", await bearer(OPERATOR, "operator"), "GET");
+    const res = await release("jesse", await bearer(OPERATOR, "default"), "GET");
     expect([res.status, res.headers.get("allow")]).toEqual([405, "DELETE"]);
     expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+  });
+});
+
+describe("parseOperators", () => {
+  it("reads comma-separated user ids, spaces allowed, and no one from unset or empty", () => {
+    expect([...parseOperators("u_github_8698, u_jesse")]).toEqual(["u_github_8698", "u_jesse"]);
+    for (const raw of [undefined, "", " , "]) expect(parseOperators(raw).size, JSON.stringify(raw)).toBe(0);
+  });
+
+  it("skips and logs what is not a user id, so a subject key or a typo names no one", () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect([...parseOperators("github:8698, u_ok, 8698")]).toEqual(["u_ok"]);
+    expect(logged.mock.calls.flat().join(" ")).toContain("github:8698");
+    logged.mockRestore();
   });
 });

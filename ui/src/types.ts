@@ -65,13 +65,24 @@ export interface MemberRow {
   beat: Beat;
 }
 
+/** One seat an account holds in a room, as bellman_rooms lists it. */
+export interface Seat {
+  member_id: string;
+  role: string;
+  verbs: string[];
+}
+
 export interface RoomSummary {
   session_id: string;
   status: string;
   max_members: number;
   active_members: number;
-  your_member_id: string;
-  room: RoomBlock;
+  /** The seat's id when the account holds one; null when it holds several, which name none of them as its own. */
+  your_member_id: string | null;
+  /** Every seat the account holds in the room, oldest first. */
+  your_seats: Seat[];
+  /** From the one seat; with several the block names none, and `your_role` is null. */
+  room: Omit<RoomBlock, "your_role"> & { your_role: string | null };
   members: MemberRow[];
   /** `expires_at` is null for a public room's permanent code (ADR 0020). */
   join_codes: { role: string; expires_at: string | null; code?: string; join_url?: string }[];

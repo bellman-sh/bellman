@@ -116,6 +116,39 @@ describe("createPage", () => {
     [...h.root.querySelectorAll("button")].find((b) => b.textContent === "Surface")!.click();
     expect(h.calls.at(-1)).toEqual({ name: "bellman_surface", args: { session_id: "qs_1" } });
   });
+
+  // bellman_surface names one seat, and for an account on two machines that is not a seat it can call its own. The
+  // monitor listed them all, so the canvas opened from it says so, and keeps saying so when a poll redraws the header.
+  it("hands the canvas the seats the monitor listed", async () => {
+    const h = host(); pages.push(h.page);
+    const rooms = roomsFixture();
+    rooms.rooms[0].your_member_id = null;
+    rooms.rooms[0].your_seats.push({ member_id: "m_second", role: "helper", verbs: ["send"] });
+    h.page.render({ structuredContent: rooms });
+    [...h.root.querySelectorAll("button")].find((b) => b.textContent === "Surface")!.click();
+    h.answer({ structuredContent: surfaceFixture() });
+    await settle();
+    const header = () => h.root.querySelector(".canvas-screen h1")?.textContent;
+    expect(header()).toContain("Your seats: lead (send, invite), helper (send)");
+
+    const poll = h.page.surface("qs_1");
+    h.answer({ structuredContent: surfaceFixture() });
+    await poll; await settle();
+    expect(header()).toContain("Your seats: lead (send, invite), helper (send)");
+  });
+
+  it("gives a canvas for another room none of the seats the monitor listed, only the one bellman_surface named", async () => {
+    const h = host(); pages.push(h.page);
+    const rooms = roomsFixture();
+    rooms.rooms[0].your_seats.push({ member_id: "m_second", role: "helper", verbs: ["send"] });
+    h.page.render({ structuredContent: rooms });
+    const read = h.page.surface("qs_2", { user: true });
+    const other = surfaceFixture(); other.session_id = "qs_2";
+    h.answer({ structuredContent: other });
+    await read; await settle();
+    expect(h.root.querySelector(".canvas-screen h1 .chip")?.textContent).toBe("lead");
+    expect(h.root.querySelector(".canvas-screen h1")?.textContent).not.toContain("Your seats");
+  });
 });
 
 describe("the room card on the page", () => {

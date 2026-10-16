@@ -21,7 +21,7 @@ import { renderJoin, verdictMessage, type Delivery } from "./join.js";
 import { renderMonitor } from "./monitor.js";
 import { pickScreen, type ToolOutcome } from "./screen.js";
 import { el } from "./shared.js";
-import type { SurfaceResult } from "./types.js";
+import type { Seat, SurfaceResult } from "./types.js";
 
 /** How often the monitor re-reads bellman_rooms, and the canvas bellman_surface, while the page is visible. */
 export const POLL_MS = 15_000;
@@ -54,6 +54,8 @@ export function createPage(deps: PageDeps): Page {
   const { root } = deps;
   /** session_id to the first last_event cursor this view saw (spec D4). */
   const seen = new Map<string, number>();
+  /** session_id to the seats the last monitor read listed for this account there: the canvas's own read, bellman_surface, names one. */
+  const seatsIn = new Map<string, readonly Seat[]>();
   const pollMs = deps.pollMs ?? POLL_MS;
   const visible = deps.visible ?? (() => document.visibilityState === "visible");
   let current: Current = null;
@@ -119,6 +121,7 @@ export function createPage(deps: PageDeps): Page {
     }
     const canvas = createCanvas(data, {
       nested,
+      seats: seatsIn.get(data.session_id),
       onRefresh: () => void surface(data.session_id, { user: true }),
       onRooms: () => void rooms({ user: true }),
       openLink: deps.openLink,
@@ -150,6 +153,7 @@ export function createPage(deps: PageDeps): Page {
         return;
       case "monitor":
         current = { kind: "monitor" };
+        for (const room of screen.data.rooms) seatsIn.set(room.session_id, room.your_seats);
         show(renderMonitor(screen.data, seen, () => void rooms({ user: true }), Date.now(), (id) => void surface(id, { user: true })));
         startPolling();
         return;

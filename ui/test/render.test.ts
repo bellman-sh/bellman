@@ -204,6 +204,25 @@ describe("renderMonitor", () => {
     expect(header).toBe("Your seat: lead (send, invite) · 2 of 8 seats · 0 new since you opened this");
   });
 
+  // An account on two machines holds two seats in one room, and bellman_rooms names none of them as its own: the
+  // room block comes with no role. The line names every seat, and reads nothing from the block, which would say
+  // "Your seat: null (read only)".
+  it("names every seat when the account holds several, read-only ones included", () => {
+    const r = roomsFixture();
+    r.rooms[0].your_member_id = null;
+    r.rooms[0].your_seats = [
+      { member_id: "m_lead", role: "lead", verbs: ["send", "invite"] },
+      { member_id: "m_second", role: "helper", verbs: ["send"] },
+      { member_id: "m_third", role: "observer", verbs: [] },
+    ];
+    Object.assign(r.rooms[0].room, { your_role: null, your_verbs: [], your_heartbeat_on: false });
+    const header = renderMonitor(r, new Map(), () => {}, NOW).querySelector("h2 + p")!.textContent!;
+
+    const [seats, capacity] = header.split(" \u{B7} ");
+    expect(seats).toBe("Your seats: lead (send, invite), helper (send), observer (read only)");
+    expect(capacity).toBe("2 of 8 seats");
+  });
+
   it("marks a public room", () => {
     const r = roomsFixture();
     const chips = () => [...renderMonitor(r, new Map(), () => {}, NOW).querySelectorAll("h2 .chip")].map((c) => c.textContent);
@@ -295,6 +314,24 @@ describe("createCanvas", () => {
     expect(c.root.querySelector("h1")?.textContent).toContain("send, invite");
     expect(c.root.querySelector("[role=status]")?.textContent).toContain("8 items");
     expect(c.root.querySelector("[role=status]")?.textContent).toContain("artifacts render here");
+  });
+
+  // bellman_surface names one seat, and for an account on two machines it is not a seat the account can call its
+  // own. The seats the monitor listed come in beside it, and when there are several they replace the one.
+  it("names every seat it is given when the account holds several, and the block's one seat otherwise", () => {
+    const lead = { member_id: "m_lead", role: "lead", verbs: ["send", "invite"] };
+    const helper = { member_id: "m_second", role: "helper", verbs: ["send"] };
+    const several = createCanvas(surfaceFixture(), deps({ seats: [lead, helper] }).deps, NOW);
+    const title = several.root.querySelector("h1")!.textContent!;
+    expect(title).toContain("migration-swarm");
+    expect(title).toContain("Your seats: lead (send, invite), helper (send)");
+    expect(several.root.querySelector("h1 .chip")).toBeNull();
+
+    for (const seats of [undefined, [], [lead]]) {
+      const one = createCanvas(surfaceFixture(), deps({ seats }).deps, NOW);
+      expect(one.root.querySelector("h1 .chip")?.textContent).toBe("lead");
+      expect(one.root.querySelector("h1")!.textContent).not.toContain("Your seats");
+    }
   });
 
   it("renders each kind: text with its whitespace, a link's host and Open, a blob's name, type and size, a diagram's source", () => {

@@ -5,8 +5,8 @@
  */
 import { artifactFrame } from "./artifact.js";
 import { centerOf, fit, layout, zoomAbout, type Box, type Line, type Transform } from "./canvas-layout.js";
-import { el, relative, text } from "./shared.js";
-import type { SurfaceItemWire, SurfaceResult, Untrusted } from "./types.js";
+import { el, relative, seatsLine, text } from "./shared.js";
+import type { Seat, SurfaceItemWire, SurfaceResult, Untrusted } from "./types.js";
 
 export const DASH_ORIGIN = "https://dash.bellman.sh";
 /** The room's canvas page in the panel (`roomRoute` in dash's src/router.tsx). */
@@ -18,6 +18,12 @@ export interface CanvasDeps {
   onRefresh: () => void;
   onRooms: () => void;
   openLink: (url: string) => void;
+  /**
+   * Every seat the account holds in this room, from the monitor's read. bellman_surface names one seat, and for an
+   * account on two machines that is not a seat it can call its own, so several seats here replace it in the header.
+   * Absent when the model opened the canvas with its own call: the one seat bellman_surface named stands.
+   */
+  seats?: readonly Seat[];
 }
 
 export interface Canvas {
@@ -194,10 +200,15 @@ export function createCanvas(first: SurfaceResult, deps: CanvasDeps, now = Date.
     const items = Array.isArray(r.surface?.items) ? r.surface.items : [];
     const n = items.length;
     status.textContent = `${n} item${n === 1 ? "" : "s"} · read at ${new Date(at).toLocaleTimeString()} · ${deps.nested ? "artifacts render here" : "artifacts open in dash"}`;
+    const seats = deps.seats ?? [];
     title.replaceChildren(
       text(r.room?.text?.data?.room),
-      el("span", { class: "chip" }, text(r.room?.your_role)),
-      el("span", { class: "muted" }, ` ${(r.room?.your_verbs ?? []).join(", ") || "read only"}`),
+      ...(seats.length > 1
+        ? [el("span", { class: "muted" }, ` ${seatsLine(seats)}`)]
+        : [
+          el("span", { class: "chip" }, text(r.room?.your_role)),
+          el("span", { class: "muted" }, ` ${(r.room?.your_verbs ?? []).join(", ") || "read only"}`),
+        ]),
     );
     const cursor = typeof r.surface?.cursor === "number" ? r.surface.cursor : null;
     if (cursor !== null && cursor === drawn) return;

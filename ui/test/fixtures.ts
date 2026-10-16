@@ -58,6 +58,7 @@ export function roomsFixture(): RoomsResult {
       max_members: 8,
       active_members: 2,
       your_member_id: "m_lead",
+      your_seats: [{ member_id: "m_lead", role: "lead", verbs: ["send", "invite"] }],
       room: {
         preset: null, mode: "swarm", your_role: "lead", your_verbs: ["send", "invite"],
         heartbeat_seconds: 300, housekeeping: null, your_heartbeat_on: true, creator_role: "lead",
@@ -93,7 +94,7 @@ function item(over: Partial<SurfaceItemWire> & { key: string; kind: string }, au
 export function surfaceFixture(): SurfaceResult {
   return {
     session_id: "qs_1",
-    room: roomsFixture().rooms[0].room,
+    room: { ...roomsFixture().rooms[0].room, your_role: "lead" },
     surface: {
       cursor: 9,
       items: [

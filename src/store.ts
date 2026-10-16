@@ -1144,6 +1144,18 @@ export interface BellmanStore {
    */
   unpublishSession(sessionId: string, at: number): Promise<void>;
   /**
+   * The session id the public name index holds for `name`, or null (public names spec, D5). A hint:
+   * whoever reads it checks the room's record (`holdsName`), which is the truth.
+   */
+  publicNameEntry(name: string): Promise<string | null>;
+  /**
+   * Point `name` at `sessionId` if the index still holds `expected` for it (null for no entry), in
+   * one step, so of two claims that read the same entry exactly one wins. True when this one did.
+   */
+  claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean>;
+  /** Write `name` on the room's record, which is what holds a name (D5). A room that is not there stays not there. */
+  setPublicName(sessionId: string, name: string): Promise<void>;
+  /**
    * The close-time sweep (#65, D3), run now: delete every object under this closed room's prefix
    * that no surface item names, and credit the room's `blobBytes` with their sizes. They are the
    * uploads that never reached an item: a put whose answer was lost, and a charge that threw and
@@ -1459,6 +1471,7 @@ export class MemoryStore implements BellmanStore {
    */
   private sessions = new Map<string, Session>();
   private byJoinCode = new Map<string, string>();
+  private byPublicName = new Map<string, string>(); // public name -> session id, a hint (public names spec, D5)
   private byCreator = new Map<string, Set<string>>();
   private byMember = new Map<string, Set<string>>();
   /** Rooms by the orgs that sat in them (#65, D5): written where `byMember` is, cleared by the purge. */
@@ -1992,6 +2005,21 @@ export class MemoryStore implements BellmanStore {
       this.byJoinCode.delete(rec.code);
       delete s.joinCodes[role];
     }
+  }
+
+  async publicNameEntry(name: string): Promise<string | null> {
+    return this.byPublicName.get(name) ?? null;
+  }
+
+  async claimPublicName(name: string, sessionId: string, expected: string | null): Promise<boolean> {
+    if ((this.byPublicName.get(name) ?? null) !== expected) return false;
+    this.byPublicName.set(name, sessionId);
+    return true;
+  }
+
+  async setPublicName(sessionId: string, name: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (s) s.publicName = name;
   }
 
   async sessionsCreatedBy(userId: string, limit: number): Promise<string[]> {

@@ -4,7 +4,8 @@
  * The route is tests/http-public.test.ts; the store methods are the store contract's.
  */
 import { describe, expect, it } from "vitest";
-import { PUBLIC_NAME, heldName, holdsName, publicNameRefusal } from "../src/public-names.js";
+import { PUBLIC_NAME, claimName, heldName, holdsName, publicNameRefusal, roomNamed } from "../src/public-names.js";
+import { MemoryStore } from "../src/store.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { roomManifest, session } from "./helpers/fixtures.js";
 
@@ -50,5 +51,38 @@ describe("holding a name (D5)", () => {
     const old = structuredClone(session()) as unknown as { publicName?: string | null };
     delete old.publicName;
     expect(hydrateStoredSession(old)!.publicName).toBeNull();
+  });
+});
+
+describe("claiming a name through the index (D5)", () => {
+  const named = (id: string, name: string) => session({ id, manifest: roomManifest({ public: true }), publicName: name });
+
+  it("finds the room that holds a name, and nothing once it holds another", async () => {
+    const store = new MemoryStore();
+    await store.createSession(named("qs_a", "bellman-dev"));
+    await store.claimPublicName("bellman-dev", "qs_a", null);
+    expect((await roomNamed(store, "bellman-dev"))?.id).toBe("qs_a");
+    await store.setPublicName("qs_a", "renamed");
+    expect(await roomNamed(store, "bellman-dev")).toBeUndefined();
+  });
+
+  it("takes a free name, refuses a held one, and takes over one its room no longer holds", async () => {
+    const store = new MemoryStore();
+    await store.createSession(named("qs_a", "bellman-dev"));
+    expect(await claimName(store, "bellman-dev", "qs_a")).toBe(true);
+    expect(await claimName(store, "bellman-dev", "qs_b")).toBe(false);
+    await store.unpublishSession("qs_a", Date.now());
+    expect(await claimName(store, "bellman-dev", "qs_b")).toBe(true);
+    expect(await store.publicNameEntry("bellman-dev")).toBe("qs_b");
+  });
+
+  it("answers yes to the room the entry already points at, and frees a name whose room was never created", async () => {
+    const store = new MemoryStore();
+    await store.createSession(named("qs_a", "bellman-dev"));
+    await store.claimPublicName("bellman-dev", "qs_a", null);
+    expect(await claimName(store, "bellman-dev", "qs_a")).toBe(true);
+    await store.claimPublicName("orphan", "qs_never", null);
+    expect(await roomNamed(store, "orphan")).toBeUndefined();
+    expect(await claimName(store, "orphan", "qs_b")).toBe(true);
   });
 });

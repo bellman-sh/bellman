@@ -14,6 +14,7 @@ import { pairUp } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
 import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
+import { SYNC_PAGE } from "../../src/tools/sync.js";
 
 let h: Harness;
 
@@ -676,6 +677,37 @@ describe("send / sync / leave mechanics", () => {
     expect(envelopes(first.data.events).length).toBeGreaterThan(0);
     expect(second.data.events).toEqual([]);
     expect(second.data.cursor).toBe(first.data.cursor);
+  });
+
+  // #208: a poll from far behind is one page of the log, not all of it, and says there is more.
+  it("returns the log a page at a time, and says when there is more", async () => {
+    const p = await pairUp(h);
+    const said = Array.from({ length: SYNC_PAGE + 5 }, (_, i) => `m${i}`);
+    for (const text of said) {
+      await h.store.appendEvent(p.sessionId, {
+        type: "message", fromMemberId: p.joinerMemberId, fromUserId: "u_peer", fromLabel: "peer", payload: { text }, refId: null,
+      });
+    }
+
+    const pages: Array<Record<string, unknown>> = [];
+    let cursor = 0;
+    for (let n = 0; n < 4; n++) {
+      const page = await p.creator.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.creatorMemberId, since_cursor: cursor,
+      });
+      expect(page.isError, page.text).toBe(false);
+      pages.push(page.data);
+      cursor = Number(page.data.cursor);
+      if (page.data.more !== true) break;
+    }
+
+    expect(pages.map((d) => d.more)).toEqual([true, undefined]);
+    expect(pages[0].cursor).toBe(SYNC_PAGE);
+    const texts = pages.flatMap((d) => envelopes(d.events))
+      .map((e) => e.data as { type: string; payload: { text?: string } })
+      .filter((d) => d.type === "message")
+      .map((d) => d.payload.text);
+    expect(texts).toEqual(said);
   });
 
   it("broadcasts a departure and closes the session when the last member leaves", async () => {

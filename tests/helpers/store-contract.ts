@@ -3441,6 +3441,19 @@ export function describeStoreContract(
       await expect(store.waitForEvents(s.id, 0, 10_000)).resolves.toHaveLength(1);
     });
 
+    // bellman_sync's page (#208): a poll from far behind reads the earliest `limit`, the next poll the rest.
+    it("waitForEvents returns at most `limit` events when given one, the earliest after the cursor", async () => {
+      const s = session();
+      await store.createSession(s);
+      for (const text of ["one", "two", "three"]) {
+        await store.appendEvent(s.id, {
+          type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: "jesse", payload: { text }, refId: null,
+        });
+      }
+      expect((await store.waitForEvents(s.id, 0, 10_000, 2)).map((e) => e.cursor)).toEqual([1, 2]);
+      expect((await store.waitForEvents(s.id, 2, 10_000, 2)).map((e) => e.cursor)).toEqual([3]);
+    });
+
     it("waitForEvents resolves early when an event arrives", async () => {
       const s = session();
       (await store.createSession(s));

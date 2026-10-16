@@ -2040,8 +2040,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * own timeout. Storage is async here, so the read is awaited FIRST and the
    * registration then runs synchronously — no await between check and push.
    */
-  async waitForEvents(cursor: number, waitMs: number): Promise<SessionEvent[]> {
-    const immediate = await this.events(cursor);
+  async waitForEvents(cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]> {
+    const immediate = await this.events(cursor, limit);
     if (immediate.length > 0 || waitMs <= 0) return immediate;
 
     return new Promise<SessionEvent[]>((resolve) => {
@@ -3993,9 +3993,10 @@ export class DurableObjectStore implements BellmanStore {
   async waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
-    return this.session(sessionId).waitForEvents(cursor, waitMs);
+    return this.session(sessionId).waitForEvents(cursor, waitMs, limit);
   }
 
   async putPendingConnect(p: PendingConnect): Promise<void> {

@@ -12,6 +12,13 @@ import type { BellmanStore } from "../store.js";
 import { publicEvent } from "../public-event.js";
 import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
 
+/**
+ * The most events one poll returns (#208), the earliest after the caller's cursor. A member
+ * far behind reads the log a page per poll, told by `more` to ask again, where it used to
+ * read all of it in one response; the panel's log route pages by the same number.
+ */
+export const SYNC_PAGE = 200;
+
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
     "bellman_sync",
@@ -25,7 +32,8 @@ Args:
   - wait_seconds (0-${MAX_WAIT_SECONDS}): long-poll — the server holds the request until an event arrives or the wait elapses. Use 15-20 when expecting a reply; some MCP clients time out slow tool calls, so stay conservative.
   - surface (boolean, default false): also return the room's working surface in full — every item in an untrusted envelope. Use it after a restart, or when you want the current state without replaying the log.
 
-Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, surface_cursor?, surface?, removed?, outstanding? }
+Returns: { events[] (untrusted envelopes, your own events excluded), cursor, session_status, more?, surface_cursor?, surface?, removed?, outstanding? }
+more: true means this page was full (at most ${SYNC_PAGE} events): call again at once with the returned cursor for the rest.
 surface_cursor: the cursor of the last change to the working surface, present once it has ever changed. cursor minus surface_cursor is how many events have landed since. A surface event in events[] carries the item that changed; ask for surface: true for all of them.
 A member a creator removed sees only items changed at or before its cut, and surface_cursor, when it asks for the surface, is the last of those.
 outstanding: action requests still waiting, present only when there are any. Each is { cursor, from_member_id, from_label, mine, age_seconds, expires_at }. \`mine: true\` is one YOU sent and the room has not answered; \`mine: false\` is one the room is waiting on YOUR human for — surface it to them. An entry leaves this list when it is answered, declined, or expires 30 minutes after it was sent. It is not re-announced as an event: the request interrupted once when it arrived, and this is what you read when you look.
@@ -92,8 +100,8 @@ If a room's creator has removed you, you still get the history up to and includi
       // last event and that event is in the past.
       const cut = me.removedAtCursor;
       const read = cut === undefined
-        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000)
-        : (await s.eventsAfter(session_id, since_cursor)).filter((e) => e.cursor <= cut);
+        ? await s.waitForEvents(session_id, since_cursor, wait_seconds * 1000, SYNC_PAGE)
+        : (await s.eventsAfter(session_id, since_cursor, SYNC_PAGE)).filter((e) => e.cursor <= cut);
 
       // The status is the room's as it is when this poll answers, not as it was when the
       // call began (#74). `session` is from before the wait, which is up to `wait_seconds`
@@ -255,6 +263,10 @@ If a room's creator has removed you, you still get the history up to and includi
       const surfaceBlock = surface ? await readSurface(s, answering, stopAt) : undefined;
       const sfCursor = stopAt === undefined ? surfaceCursor(answering) : (surfaceBlock?.cursor ?? 0);
 
+      // A full page may have more behind it (#208), unless it already reached the cut: a
+      // removed member's feed ends there however long the room goes on.
+      const more = read.length === SYNC_PAGE && (stopAt === undefined || cursor < stopAt);
+
       return ok(
         {
           events: foreign.map((e) =>
@@ -262,6 +274,9 @@ If a room's creator has removed you, you still get the history up to and includi
           ),
           cursor,
           session_status: status,
+          // Only when true, as `removed` is below: a poll that read everything has the shape
+          // it always had.
+          ...(more ? { more: true as const } : {}),
           // Only when there are any, as `replayed` and `ambient` are: a client
           // that has never heard of it keeps working, and a quiet room's poll
           // does not grow a field saying nothing is pending.

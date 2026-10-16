@@ -7,7 +7,7 @@ import { resolveIdentity } from "../src/auth.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { MAX_GRANTS_COUNTED, statsRoutes, type StatsRouteDeps } from "../src/http/stats.js";
 import { MemoryStore } from "../src/store.js";
-import type { PlanGrant } from "../src/types.js";
+import type { Identity, PlanGrant } from "../src/types.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -52,6 +52,16 @@ const grant = (over: Partial<PlanGrant> = {}): PlanGrant => ({
   grantedAt: Date.now(),
   grantedBy: "u_jesse",
   expiresAt: null,
+  ...over,
+});
+
+/** A BELLMAN_USERS entry as parseOverrides hands it over: an identity, filed under an identity key. */
+const identity = (over: Partial<Identity> = {}): Identity => ({
+  userId: "u_github_1",
+  orgId: null,
+  plan: "pro",
+  role: "member",
+  label: "someone@github",
   ...over,
 });
 
@@ -132,7 +142,7 @@ describe("GET /operator/stats", () => {
     });
   });
 
-  it("counts accounts, and reads free as the ones no grant covers", async () => {
+  it("counts accounts, and reads free as the ones no paid plan covers", async () => {
     await store.recordSignIn("u_a", Date.now());
     await store.recordSignIn("u_b", Date.now());
     await store.recordSignIn("u_c", Date.now());
@@ -167,6 +177,48 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 0, free: 0, paid: 1 });
   });
 
+  // BELLMAN_USERS comps an account with no grant behind it, and free must not count it.
+  it("counts an override with a paid plan as paid when no grant covers it", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.recordSignIn("u_b", Date.now());
+    deps = { ...deps, overrides: { "github:1": identity({ plan: "team" }) } };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toEqual({
+      accounts: 2, free: 1, paid: 1, paidCapped: false,
+    });
+  });
+
+  it("counts a key held by both an override and a grant once", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.recordSignIn("u_b", Date.now());
+    await store.putGrant(grant({ key: "github:1", plan: "pro" }));
+    deps = { ...deps, overrides: { "github:1": identity({ plan: "team" }) } };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toEqual({
+      accounts: 2, free: 1, paid: 1, paidCapped: false,
+    });
+  });
+
+  // Sign-in resolves a key's override before its grant (decidePlan), whatever either says.
+  it("lets a free override outrank a paid grant on the same key", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.putGrant(grant({ key: "github:1", plan: "pro" }));
+    deps = { ...deps, overrides: { "github:1": identity({ plan: "free" }) } };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({ accounts: 1, free: 1, paid: 0 });
+  });
+
+  // parseOverrides casts its JSON without checking it, so a value need not be an identity.
+  it("neither fails on nor counts an override that is not an identity with a plan", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    const malformed = { "github:1": null, "github:2": {}, "github:3": "pro" };
+    deps = { ...deps, overrides: malformed as unknown as Record<string, Identity> };
+
+    const res = await call(DEV_KEY.jesse);
+    expect(res!.status).toBe(200);
+    expect(await bodyOf(res)).toMatchObject({ accounts: 1, free: 1, paid: 0 });
+  });
+
   // listGrants(limit, null) keeps only the grants with no org, and a team seat has one.
   it("counts a grant that belongs to an org", async () => {
     await store.putGrant(grant({ key: "github:1", plan: "team", orgId: "org_x" }));
@@ -184,6 +236,17 @@ describe("GET /operator/stats", () => {
 
     expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({
       paid: MAX_GRANTS_COUNTED - 1, paidCapped: true,
+    });
+  });
+
+  // The flag is the grant scan's. An override set is a parsed secret, with no bound to reach.
+  it("leaves paidCapped to the grant scan, however many overrides there are", async () => {
+    const overrides: Record<string, Identity> = {};
+    for (let i = 0; i < MAX_GRANTS_COUNTED; i += 1) overrides[`github:${i}`] = identity();
+    deps = { ...deps, overrides };
+
+    expect(await bodyOf(await call(DEV_KEY.jesse))).toMatchObject({
+      paid: MAX_GRANTS_COUNTED, paidCapped: false,
     });
   });
 

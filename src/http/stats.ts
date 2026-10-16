@@ -9,11 +9,17 @@
  * behind a bearer token, whose refusal of browser sessions this does not touch.
  */
 import { allowedOrigin, preflightResponse } from "../oauth/browser.js";
+import type { Identity } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type StatsRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
   /** The user ids BELLMAN_OPERATORS names. Absent or empty admits nobody. */
   operators?: ReadonlySet<string>;
+  /**
+   * BELLMAN_USERS as `parseOverrides` returns it: identity key to identity. Only the
+   * plan is read. Absent or empty adds no one.
+   */
+  overrides?: Readonly<Record<string, Identity>>;
 };
 
 /**
@@ -71,15 +77,28 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
       deps.store.countUsers(),
       deps.store.listGrants(MAX_GRANTS_COUNTED),
     ]);
-    const paid = grants.filter((g) => g.plan !== "free").length;
+    // Paid is an identity key whose plan is not free, from a grant or from BELLMAN_USERS.
+    // An override outranks a grant on the same key, as at sign-in (decidePlan), so a key
+    // in both counts once, at the override's plan. parseOverrides casts its JSON without
+    // checking it: an entry can be null or lack a plan, and neither is paid.
+    // ponytail: keys, not people. Someone filed under two keys (a subject and an address)
+    // counts twice; UserRecord keeps no keys to join them by.
+    const plans = new Map<string, unknown>();
+    for (const g of grants) plans.set(g.key, g.plan);
+    for (const [key, who] of Object.entries<Identity>(deps.overrides ?? {})) {
+      if (who) plans.set(key, who.plan);
+    }
+    const paid = [...plans.values()].filter((plan) => typeof plan === "string" && plan !== "free").length;
     const stats: PlatformStats = {
       accounts,
-      // Floored: a grant for a key that has never signed in makes this
-      // negative, and a negative count of people is worse than a floor.
+      // Floored: a grant or an override for a key that has never signed in, or a
+      // person filed under two keys, makes this negative, and a negative count of
+      // people is worse than a floor.
       free: Math.max(0, accounts - paid),
       paid,
-      // The scan's bound, not the paid count (ruling R1): free grants come out
-      // of `paid`, so `paid` can sit below the limit on a scan that reached it.
+      // The scan's bound, not the paid count (ruling R1): free grants come out of
+      // `paid`, so it can sit below the limit on a scan that reached it, and
+      // overrides add to it, so it can sit above the limit on one that did not.
       paidCapped: grants.length === MAX_GRANTS_COUNTED,
     };
     return json(200, stats, origin);

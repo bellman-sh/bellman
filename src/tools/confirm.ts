@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { BriefShape, CapabilitiesShape, appendOrFrozen, fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, publicMember, roomPreview, storedMember, untrusted } from "../projections.js";
+import { BANNED } from "../bans.js";
 import type { ArrivingMember, Brief, Capability, Identity } from "../types.js";
 import { FROZEN, announceReclaimed, audit, fullMessage, readSurface } from "../rooms.js";
 import { STALE_AFTER_MS } from "../presence.js";
@@ -56,6 +57,10 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
       const session = await s.getSession(pending.sessionId);
       if (!session || session.closed) return fail("session no longer exists.");
       if (session.frozenAt !== null) return fail(FROZEN);
+      // A preview holds its token for ten minutes, so a creator-wide ban made since is read again
+      // here, from the registry, as the preview read it. A ban on this room alone is the seating's,
+      // below, where the room's own record cannot move under the read.
+      if (await s.isBannedByCreator(session.createdBy, identity.userId)) return fail(BANNED);
       // No capacity check here. It used to be one, and a read-then-write
       // capacity check is the bug: `seatMember` below decides and writes inside
       // the object, so there is no gap for a second confirm to agree on the same
@@ -105,6 +110,9 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           return fail("session no longer exists.");
         }
         if (seated.refused === "frozen") return fail(FROZEN);
+        // Named, and before the message below: that one is what every refusal left unnamed
+        // reads as, and a banned account is never told the room is full.
+        if (seated.refused === "banned") return fail(BANNED);
         return fail(`session filled while you were confirming. ${fullMessage(session.manifest)}`);
       }
 

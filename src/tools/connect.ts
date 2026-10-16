@@ -3,6 +3,7 @@ import { z } from "zod";
 import { fail, ok } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, roomPreview, surfaceIndex, untrusted } from "../projections.js";
+import { BANNED } from "../bans.js";
 import type { Identity } from "../types.js";
 import { surfaceCursor } from "../surface.js";
 import { MAX_JOIN_CODE_LENGTH, generateConnectToken, normalizeJoinCode } from "../codes.js";
@@ -66,6 +67,12 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         return fail("join code not found or expired. Codes expire 15 minutes after creation, except a public room's permanent code, and are consumed when a pair session fills. Ask the creator to start a new session.");
       }
       const { session, role } = hit;
+      // A creator-wide ban, asked here beside the code's resolution and not inside it: the registry's
+      // code rows map a code to a room and do not know who created it, and the room is already read.
+      // Before the room is described to anyone. A ban on this room alone is the seating's to refuse,
+      // in `bellman_confirm`, where it cannot be raced; the preview still answers that account as it
+      // answers any holder of the code.
+      if (await s.isBannedByCreator(session.createdBy, identity.userId)) return fail(BANNED);
       if (session.orgOnly && session.orgId !== identity.orgId) {
         return fail("session is org-restricted and your identity is not in the creator's org.");
       }

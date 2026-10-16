@@ -587,7 +587,12 @@ export interface RemovalRequest {
    * removal that only widens writes no event, as one that only bans writes none.
    */
   ban?: BanScope;
-  /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
+  /**
+   * Queued in the same transaction and delivered by the outbox, only if this call did the removing or
+   * wrote this room's ban (`ban`). A ban on someone who already left is an eviction in the audit log's
+   * terms, and an org reading it expects every ban there. Not for a creator-wide ban alone: the Durable
+   * Objects store cannot tell a first one from a repeat, so a retry would file the row again.
+   */
   audit: readonly AuditEntry[];
 }
 
@@ -1914,9 +1919,11 @@ export class MemoryStore implements BellmanStore {
     if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
     // A falsy org names a stream nobody reads, and the Durable Objects store
     // drops such an entry rather than file it, so this one does too. The member's
-    // rows, then the door's: the order the events were written in.
+    // rows, then the door's: the order the events were written in. The member's rows
+    // are filed for a call that removed them or wrote this room's ban: a ban on someone
+    // who already left is the eviction's row all the same, and a repeat writes none.
     this.recordAudit(
-      [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
+      [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
     );
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };

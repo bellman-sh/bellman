@@ -5494,6 +5494,31 @@ export function describeStoreContract(
         expect((await store.appendEvent(s.id, leaveEvent("m_creator")))?.cursor).toBe(1);
       });
 
+      // The audit log is where an org reads every ban. One on someone who already left is the eviction's
+      // row all the same, carrying the scope, and it is filed once: the call that wrote the ban files it,
+      // and a repeat, which writes none, does not. "all" is the case that tells the stores apart on a
+      // repeat, since the Durable Objects store queues the registry's write each time it is asked.
+      for (const scope of ["room", "all"] as const) {
+        it(`files the eviction's audit row for a ban on a member who already left, and only once (${scope})`, async () => {
+          const s = session({
+            joinCodes: {},
+            members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+          });
+          await store.createSession(s);
+          const asked = (now: number): RemovalRequest => ({
+            ...eviction(now), ban: scope, audit: [{ ...auditRow("member_evicted"), detail: { ban: scope } }],
+          });
+          const filed = async () => (await store.auditForOrg("org_codenerd", 10)).map((a) => [a.action, a.detail]);
+
+          expect(await store.removeMember(s.id, "m_peer", asked(9_000_000)))
+            .toEqual({ refused: null, removed: false, codeRetired: null });
+          expect(await filed()).toEqual([["member_evicted", { ban: scope }]]);
+
+          await store.removeMember(s.id, "m_peer", asked(9_500_000));
+          expect(await filed(), "a repeat files no second row").toEqual([["member_evicted", { ban: scope }]]);
+        });
+      }
+
       it("keeps one ban per account: a repeat records nothing new", async () => {
         const s = twoInRoom();
         await store.createSession(s);

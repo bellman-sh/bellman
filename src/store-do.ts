@@ -1427,8 +1427,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // runtime fact 4). It is filtered here, so a dead row never enters the
       // queue, and again in #deliver, so one that arrives another way is dropped
       // instead of misfiled. The door's rows get the same filter as the member's,
-      // and go in the same order as the events: the outbox delivers in order.
-      const intents = [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])]
+      // and go in the same order as the events: the outbox delivers in order. The member's
+      // rows are for a call that removed them or wrote this room's ban, as MemoryStore files
+      // them: a ban on someone who already left is the eviction's row all the same. Not for
+      // `widening`, which is owed on every ask here because the registry cannot be read from
+      // this transaction, so a retry of "all" would file the row again.
+      const intents = [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])]
         .filter((e) => e.orgId)
         .map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];

@@ -4,7 +4,7 @@ import { MAX_WAIT_SECONDS, fail, ok } from "./kit.js";
 import { NEED_ROOM, RoomRefShape, roomIdOf } from "./kit.js";
 import type { ToolResult } from "./kit.js";
 import { UNTRUSTED_PREAMBLE, untrusted } from "../projections.js";
-import type { Identity } from "../types.js";
+import type { Identity, SessionEvent } from "../types.js";
 import { findMember, readSurface, sessionStatus, touchMember } from "../rooms.js";
 import { surfaceCursor } from "../surface.js";
 import { isActiveMember } from "../store.js";
@@ -18,6 +18,20 @@ import { ACTION_REQUEST_TTL_MS, outstandingFor } from "../action-state.js";
  * read all of it in one response; the panel's log route pages by the same number.
  */
 export const SYNC_PAGE = 200;
+
+/**
+ * The log since `since` (#208): with `since` half an hour back, every request that can still
+ * be outstanding and everything after it. The log is in time order, so its tail is read,
+ * doubled until it reaches back past `since` or holds the whole log, and trimmed to the window.
+ */
+async function requestWindow(s: BellmanStore, sessionId: string, since: number): Promise<SessionEvent[]> {
+  // ponytail: each doubling re-reads the tail, so a poll reads up to four times what the room
+  // said in the window; a store read that pages backward is the upgrade if that gets large.
+  for (let n = 256; ; n *= 2) {
+    const tail = await s.recentEvents(sessionId, n);
+    if (tail.length < n || tail[0].at < since) return tail.filter((e) => e.at >= since);
+  }
+}
 
 export function registerSync(server: McpServer, identity: Identity, s: BellmanStore): void {
   server.registerTool(
@@ -171,19 +185,16 @@ If a room's creator has removed you, you still get the history up to and includi
       const cursor = all.length > 0 ? all[all.length - 1].cursor : since_cursor;
       const foreign = all.filter((e) => e.fromMemberId !== member_id);
 
-      // Every event, not the slice. A request made before `since_cursor` is
-      // still outstanding, and the point of this list is what the caller is
-      // WAITING ON rather than what just happened — a slice would show a
-      // request once, on the poll that carried it, and never again.
+      // The last half hour of the log, not the slice. A request made before
+      // `since_cursor` is still outstanding, and the point of this list is what the
+      // caller is WAITING ON rather than what just happened — a slice would show a
+      // request once, on the poll that carried it, and never again. Half an hour is a
+      // request's whole life (ACTION_REQUEST_TTL_MS), so nothing older is waiting (#208).
       //
       // Capped at the cut for the same reason the slice is: a removed member
       // reads its history and nothing after it (#113), and a request that
       // arrived after they were cut is not theirs to answer or to wait on.
       //
-      // The cost is a full read of the log on every poll. That is bounded by
-      // the room's abandonment rather than by anything here, and the fix if it
-      // stops being enough is a stored cursor for the last `action_request`,
-      // which turns this into a bounded tail read.
       // The guard that keeps this off the common path. `lastActionRequestAt` is
       // the only thing read from the record here, and it decides whether the log
       // is worth reading at all — never what any request's state is, which stays
@@ -196,11 +207,10 @@ If a room's creator has removed you, you still get the history up to and includi
       // every watcher, for the whole life of a room that may never use the
       // feature at all.
       //
-      // What is left unbounded is a room with a request inside the last half
-      // hour, which still reads its whole log. That is the set actually using
-      // the feature, and bounding it further needs a floor cursor this stamp
-      // cannot give: a response may sit far behind the newest request, so there
-      // is no single cursor to start from without tracking the oldest OPEN one.
+      // What is left is a room with a request inside the last half hour, which
+      // reads that half hour (`requestWindow`). It read its whole log, from cursor
+      // 0, on every poll for half an hour after each request, until #208.
+      //
       // From the record this poll ANSWERS with, not the one it began with. A long
       // poll holds for up to `wait_seconds`, and the append that wakes it may be
       // the very `action_request` this is deciding about: read off the pre-wait
@@ -224,7 +234,9 @@ If a room's creator has removed you, you still get the history up to and includi
         askedInSlice
         || (stampedAt !== undefined && Date.now() <= stampedAt + ACTION_REQUEST_TTL_MS);
 
-      const everything = mayHaveOutstanding ? await s.eventsAfter(session_id, 0) : [];
+      const recent = mayHaveOutstanding
+        ? await requestWindow(s, session_id, Date.now() - ACTION_REQUEST_TTL_MS)
+        : [];
       // BOTH caps, not just the recorded one. `cut` is the removal as the record
       // shows it; `removal` is the `member_evicted` found in the slice, and it
       // exists because an eviction that committed after `me` was read leaves
@@ -233,7 +245,7 @@ If a room's creator has removed you, you still get the history up to and includi
       // their own removal through this field: every action_request appended after
       // they were cut, with its sender's member id, label and cursor.
       const stopAt = cut ?? removal?.cursor;
-      const visible = stopAt === undefined ? everything : everything.filter((e) => e.cursor <= stopAt);
+      const visible = stopAt === undefined ? recent : recent.filter((e) => e.cursor <= stopAt);
       // A member who has left or been removed is told nothing is waiting on
       // them, because nothing can be: `bellman_send` refuses their handle, so an
       // `action_response` is not a thing they can produce. `mine: false` says

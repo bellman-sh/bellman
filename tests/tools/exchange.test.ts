@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Harness, DEV_KEY, envelopes } from "../helpers/harness.js";
-import { pairUp } from "../helpers/flows.js";
+import { pairUp, type PairedSession } from "../helpers/flows.js";
 import { brief, manifestFixture, openaiAgent } from "../helpers/fixtures.js";
 import { MAX_PAYLOAD_DEPTH } from "../../src/payload.js";
 import { ACTION_REQUEST_TTL_MS } from "../../src/action-state.js";
@@ -213,25 +213,37 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
   /**
    * The cost of `outstanding`, which is the reason for the stamp on the record.
    *
-   * Computing it means reading the log from cursor 0 — a request made before
+   * Computing it means reading the log back past the page — a request made before
    * `since_cursor` is still outstanding, so a slice cannot answer it. Done
-   * unconditionally that is a full read per poll, per member, for the life of a
-   * room, including every room that never uses action requests at all.
+   * unconditionally that is a read per poll, per member, for the life of a room,
+   * including every room that never uses action requests at all. `events` is how
+   * many events those reads handed back: the read from cursor 0 this replaced, or
+   * the tail it reads now (#208).
    */
-  const countsLogReads = async (run: () => Promise<unknown>) => {
-    const real = h.store.eventsAfter.bind(h.store);
-    let fromZero = 0;
-    h.store.eventsAfter = async (id: string, after: number) => {
-      if (after === 0) fromZero++;
-      return real(id, after);
+  const readsLog = async (run: () => Promise<unknown>) => {
+    const after = h.store.eventsAfter.bind(h.store);
+    const tail = h.store.recentEvents.bind(h.store);
+    const seen = { reads: 0, events: 0 };
+    h.store.eventsAfter = async (id: string, cursor: number, limit?: number) => {
+      const read = await after(id, cursor, limit);
+      if (cursor === 0) { seen.reads++; seen.events += read.length; }
+      return read;
+    };
+    h.store.recentEvents = async (id: string, limit: number) => {
+      const read = await tail(id, limit);
+      seen.reads++;
+      seen.events += read.length;
+      return read;
     };
     try {
       await run();
     } finally {
-      h.store.eventsAfter = real;
+      h.store.eventsAfter = after;
+      h.store.recentEvents = tail;
     }
-    return fromZero;
+    return seen;
   };
+  const countsLogReads = async (run: () => Promise<unknown>) => (await readsLog(run)).reads;
 
   it("reads no log at all on a room that has never had an action request", async () => {
     const p = await pairUp(h);
@@ -311,6 +323,56 @@ describe("INVARIANT 6 — action requests need an explicit grant and a human", (
     expect(out.data.outstanding).toHaveLength(1);
     expect((out.data.outstanding as { cursor: number }[])[0].cursor)
       .toBe(Number(ask.data.cursor));
+  });
+
+  /**
+   * #208. A request expires half an hour after it was sent, so nothing older can be waiting,
+   * and `outstanding` reads the last half hour of the log rather than all of it: a room that
+   * uses requests used to pay a read from cursor 0 on every poll for half an hour after each.
+   */
+  describe("reading for outstanding, a half hour at a time (#208)", () => {
+    const message = (p: PairedSession, text: string, type = "message") => h.store.appendEvent(p.sessionId, {
+      type, fromMemberId: p.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse", payload: { text }, refId: null,
+    } as never);
+    const head = async (p: PairedSession) => (await h.store.recentEvents(p.sessionId, 1))[0].cursor;
+
+    it("reads the last half hour of the log, not the hour of history before it", async () => {
+      const p = await pairUp(h);
+      const now = Date.now();
+      vi.setSystemTime(now - 2 * ACTION_REQUEST_TTL_MS);
+      await message(p, "an hour ago", "action_request");
+      for (let i = 0; i < 600; i++) await message(p, `m${i}`);
+      vi.useRealTimers();
+      const ask = await p.creator.call("bellman_send", {
+        session_id: p.sessionId, member_id: p.creatorMemberId,
+        type: "action_request", payload: { ask: "Deploy to prod" },
+      });
+      expect(ask.isError, ask.text).toBe(false);
+
+      let out: Awaited<ReturnType<typeof p.joiner.call>> | undefined;
+      const seen = await readsLog(async () => {
+        out = await p.joiner.call("bellman_sync", {
+          session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: await head(p),
+        });
+      });
+      expect((out!.data.outstanding as { cursor: number }[]).map((o) => o.cursor)).toEqual([Number(ask.data.cursor)]);
+      expect(seen.events).toBeLessThan(600);
+    });
+
+    it("finds a live request however many events have landed since it", async () => {
+      const p = await pairUp(h);
+      const ask = await p.creator.call("bellman_send", {
+        session_id: p.sessionId, member_id: p.creatorMemberId,
+        type: "action_request", payload: { ask: "Deploy to prod" },
+      });
+      expect(ask.isError, ask.text).toBe(false);
+      for (let i = 0; i < 600; i++) await message(p, `m${i}`);
+
+      const out = await p.joiner.call("bellman_sync", {
+        session_id: p.sessionId, member_id: p.joinerMemberId, since_cursor: await head(p),
+      });
+      expect((out.data.outstanding as { cursor: number }[]).map((o) => o.cursor)).toEqual([Number(ask.data.cursor)]);
+    });
   });
 
   /**

@@ -4243,7 +4243,7 @@ export function describeStoreContract(
 
       it("signs and unsigns, lists newest first, and answers a byline only while handle and signature both hold", async () => {
         await store.claimHandle("u_a", "ada");
-        await store.signRoom("u_a", "qs_1", 1000);
+        expect(await store.signRoom("u_a", "qs_1", 1000)).toBe("ada");
         await store.signRoom("u_a", "qs_2", 2000);
         expect(await store.signedRooms("u_a")).toEqual([
           { sessionId: "qs_2", signedAt: 2000 },
@@ -4281,10 +4281,20 @@ export function describeStoreContract(
         await store.releaseHandle("u_none");
       });
 
+      // The handle is read where the signature is written, so a release cannot land between the two and leave a
+      // signature with no handle, which a handle claimed later would revive.
+      it("signs nothing for a user who holds no handle, so a handle claimed later revives nothing", async () => {
+        expect(await store.signRoom("u_none", "qs_1", 1000)).toBeUndefined();
+        expect(await store.signedRooms("u_none")).toEqual([]);
+        await store.claimHandle("u_none", "nora");
+        expect(await store.bylineFor("u_none", "qs_1")).toBeUndefined();
+      });
+
       // Operator-issued ids may hold a colon (`isIdentity` takes any non-empty string), so one person's id
       // can extend another's past the key's separator. Neither a read nor a release may reach the other's
       // signatures through it.
       it("lists no signature of an id that extends this one past a colon", async () => {
+        await store.claimHandle("u_x:y", "yara");
         await store.signRoom("u_x:y", "qs_1", 1000);
         expect(await store.signedRooms("u_x")).toEqual([]);
         expect(await store.signedRooms("u_x:y")).toEqual([{ sessionId: "qs_1", signedAt: 1000 }]);

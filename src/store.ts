@@ -1424,7 +1424,11 @@ export interface BellmanStore {
    * does, in the same transaction. The holder's user id, or `undefined` when nobody holds the handle.
    */
   releaseHandleNamed(handle: string): Promise<string | undefined>;
-  signRoom(userId: string, sessionId: string, at: number): Promise<void>;
+  /**
+   * Signs with the handle the user holds, read in the same operation as the write, so a release cannot
+   * land between them. The handle it signed with, or `undefined`, writing nothing, when they hold none.
+   */
+  signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined>;
   unsignRoom(userId: string, sessionId: string): Promise<void>;
   /** Newest signature first. */
   signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]>;
@@ -2487,10 +2491,13 @@ export class MemoryStore implements BellmanStore {
     return userId;
   }
 
-  async signRoom(userId: string, sessionId: string, at: number): Promise<void> {
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    const handle = this.handleByUser.get(userId);
+    if (handle === undefined) return undefined;
     const mine = this.signatures.get(userId) ?? new Map<string, number>();
     mine.set(sessionId, at);
     this.signatures.set(userId, mine);
+    return handle;
   }
 
   async unsignRoom(userId: string, sessionId: string): Promise<void> {

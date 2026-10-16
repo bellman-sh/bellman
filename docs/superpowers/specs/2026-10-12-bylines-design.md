@@ -127,7 +127,9 @@ the store contract suite covers them.
 - `releaseHandleNamed(handle): Promise<string | undefined>`. The operator's release
   (ADR 0021): it resolves the handle and releases its holder as `releaseHandle` does,
   in the same transaction, and answers the holder's user id.
-- `signRoom(userId, sessionId, at): Promise<void>`
+- `signRoom(userId, sessionId, at): Promise<string | undefined>`. It reads the
+  user's handle and writes the signature in one operation, and answers the handle
+  it signed with, or `undefined`, writing nothing, when the user holds none.
 - `unsignRoom(userId, sessionId): Promise<void>`
 - `signedRooms(userId): Promise<{ sessionId: string; signedAt: number }[]>`
 - `bylineFor(userId, sessionId): Promise<string | undefined>`. It returns the

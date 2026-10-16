@@ -693,9 +693,9 @@ async function writeByline(request: Request, sessionId: string, origin: string |
     return new Response(null, { status: 204, headers: corsHeaders(origin) });
   }
   if (!isPublic(session)) return problem(409, "room_not_public", "only a public room can carry a byline", origin);
-  const handle = await deps.store.handleOf(userId);
+  // One registry call reads the handle and writes the signature, so a release cannot land between them.
+  const handle = await deps.store.signRoom(userId, sessionId, Date.now());
   if (handle === undefined) return problem(409, "no_handle", "claim a handle in Settings first", origin);
-  await deps.store.signRoom(userId, sessionId, Date.now());
   return json(200, { handle }, origin);
 }
 

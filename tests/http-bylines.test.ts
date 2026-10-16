@@ -139,6 +139,25 @@ describe("signing a room", () => {
     expect(await bodyOf(await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}`))).toMatchObject({ signed: false });
   });
 
+  // A release landing after the route has its handle and before the signature is written (final review M1). The
+  // route's one registry call reads the handle where it writes, so the release can only land before all of it.
+  it("refuses no_handle when the handle is released just before the signature is written, and a later handle revives nothing", async () => {
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "ada" });
+    const sign = store.signRoom.bind(store);
+    vi.spyOn(store, "signRoom").mockImplementation(async (...args) => {
+      await store.releaseHandle("u_jesse");
+      return sign(...args);
+    });
+    const read = vi.spyOn(store, "handleOf");
+    const res = (await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`))!;
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "no_handle" });
+    expect(read).not.toHaveBeenCalled();
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "bob" });
+    expect(await store.signedRooms("u_jesse")).toEqual([]);
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
+  });
+
   it("takes PUT and DELETE alone: a GET answers 405 and signs nothing", async () => {
     await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
     const res = (await roomCall(DEV_KEY.jesse, "GET", `/rooms/${PUB}/byline`))!;

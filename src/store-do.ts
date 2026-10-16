@@ -3439,8 +3439,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
   }
 
-  async signRoom(userId: string, sessionId: string, at: number): Promise<void> {
-    await this.ctx.storage.put(`hs:${userId}:${sessionId}`, at);
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const handle = await txn.get<string>(`uh:${userId}`);
+      if (handle !== undefined) await txn.put(`hs:${userId}:${sessionId}`, at);
+      return handle;
+    });
   }
 
   async unsignRoom(userId: string, sessionId: string): Promise<void> {
@@ -4022,8 +4026,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.registry.releaseHandleNamed(handle);
   }
 
-  async signRoom(userId: string, sessionId: string, at: number): Promise<void> {
-    await this.registry.signRoom(userId, sessionId, at);
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.registry.signRoom(userId, sessionId, at);
   }
 
   async unsignRoom(userId: string, sessionId: string): Promise<void> {

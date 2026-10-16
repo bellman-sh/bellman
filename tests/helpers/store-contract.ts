@@ -25,7 +25,7 @@ import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
-import { member, oneCode, roomManifest, session, swarmSession } from "./fixtures.js";
+import { jesseActor, member, oneCode, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
 const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -4066,7 +4066,7 @@ export function describeStoreContract(
         expect(await blobs.list(s.id)).toEqual([]);
         const audit = await store.auditForOrg("org_codenerd", 50);
         expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });
-        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was")
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor), "a purged room is a room that never was")
           .toEqual({ ok: false, reason: "missing" });
       });
 
@@ -4097,7 +4097,7 @@ export function describeStoreContract(
 
         const asked = Date.now();
         for (const s of [kept, legacy]) {
-          expect(await store.schedulePurge(s.id, asked, "u_jesse"), s.id).toEqual({ ok: true, purgeAt: asked });
+          expect(await store.schedulePurge(s.id, asked, jesseActor), s.id).toEqual({ ok: true, purgeAt: asked });
         }
         for (const s of [kept, legacy]) await sweepRoom(s.id);
         for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeUndefined();
@@ -4106,8 +4106,8 @@ export function describeStoreContract(
       it("refuses to schedule a purge of an open room, and says so for a missing one", async () => {
         const open = session({ id: "qs_open" });
         await store.createSession(open);
-        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
-        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "missing" });
+        expect(await store.schedulePurge(open.id, Date.now(), jesseActor)).toEqual({ ok: false, reason: "open" });
+        expect(await store.schedulePurge("qs_nope", Date.now(), jesseActor)).toEqual({ ok: false, reason: "missing" });
         // The refusal wrote nothing: the room is still open, and a sweep leaves it alone.
         await sweepRoom(open.id);
         expect((await store.getSession(open.id))?.closed).toBe(false);
@@ -4131,6 +4131,8 @@ export function describeStoreContract(
           expect(filed, org).toEqual([{
             at: expect.any(Number), orgId: org, sessionId: s.id, actorUserId: "system",
             action: "room_purged", detail: { session_id: s.id, room: s.manifest.room },
+            actorLabel: null, actorOrgId: null, roomName: s.manifest.room,
+            parties: ["org_codenerd", "org_other", null], crossing: "cross_org", direction: null,
           }]);
         }
       });
@@ -4141,12 +4143,16 @@ export function describeStoreContract(
         await store.closeSession(s.id);
 
         // A minute out, so the room is still there for the second ask: this is about the record of asking.
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toMatchObject({ ok: true });
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, jesseActor)).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, peerActor)).toMatchObject({ ok: true });
 
         for (const org of ["org_codenerd", "org_other"]) {
           const asked = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
-          expect(asked, org).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+          expect(asked, org).toEqual([expect.objectContaining({
+            action: "room_deleted", actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd",
+            parties: ["org_codenerd", "org_other"], crossing: "cross_org",
+            direction: org === "org_codenerd" ? "outbound" : "inbound",
+          })]);
         }
       });
 
@@ -4159,8 +4165,8 @@ export function describeStoreContract(
         const first = Date.now() + 60_000;
         const second = Date.now() + 120_000;
 
-        expect(await store.schedulePurge(s.id, first, "u_jesse")).toEqual({ ok: true, purgeAt: first });
-        expect(await store.schedulePurge(s.id, second, "u_jesse"), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, first, jesseActor)).toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, second, jesseActor), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
         expect((await store.getSession(s.id))!.purgeAt, "and the record holds it").toBe(first);
       });
 

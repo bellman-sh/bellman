@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { MemoryBlobStore, blobBytesUsed } from "../src/blobs.js";
-import { MemoryStore, hostSentEntries } from "../src/store.js";
+import { MemoryStore, hostSentEntries, rosterParties } from "../src/store.js";
 import type { Session } from "../src/types.js";
 import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
@@ -504,5 +504,22 @@ describe("hostSentEntries", () => {
       ["org_a", "outbound", ["org_a", "org_b"]],
       ["org_b", "inbound", ["org_a", "org_b"]],
     ]);
+  });
+});
+
+describe("rosterParties", () => {
+  it("is everyone the room seated, departed included, with the hosted seat left out", () => {
+    const s = session({ members: [
+      member({ orgId: "org_b" }),
+      member({ memberId: "m_gone", userId: "u_gone", orgId: "org_a", leftAt: 1 }),
+      member({ memberId: "m_solo", userId: "u_solo", orgId: null }),
+      member({ memberId: "m_host", userId: HOST_USER_ID, orgId: null }),
+    ] });
+    expect(rosterParties(s)).toEqual(["org_a", "org_b", null]);
+  });
+
+  it("has no null when the only member with no org is the hosted seat", () => {
+    const s = session({ members: [member({ orgId: "org_a" }), member({ memberId: "m_host", userId: HOST_USER_ID, orgId: null })] });
+    expect(rosterParties(s)).toEqual(["org_a"]);
   });
 });

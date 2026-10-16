@@ -12,7 +12,7 @@ import { MAX_EVENTS_READ, roomRoutes, type RoomRouteDeps } from "../src/http/roo
 import { storedMember } from "../src/projections.js";
 import { MemoryStore } from "../src/store.js";
 import type { EventType, Member, Session } from "../src/types.js";
-import { brief, member, roomManifest, session } from "./helpers/fixtures.js";
+import { brief, jesseActor, member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 const ISSUER = "https://mcp.example.test";
@@ -85,7 +85,7 @@ describe("GET /public/rooms/:id", () => {
     await store.createSession(publicRoom({ id: "qs_unpublished" }));
     await store.unpublishSession("qs_unpublished", Date.now());
     await store.createSession(publicRoom({ id: "qs_purged", closed: true, closedAt: Date.now() - 1_000, joinCodes: {} }));
-    await store.schedulePurge("qs_purged", Date.now(), "u_jesse");
+    await store.schedulePurge("qs_purged", Date.now(), jesseActor);
     await store.sweep(Date.now());
     for (const id of ["qs_private", "qs_unpublished", "qs_nope", "qs_purged"]) {
       for (const sub of ["", "/surface", "/events", `/blobs/${"a".repeat(32)}`]) {

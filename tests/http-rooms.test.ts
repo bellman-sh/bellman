@@ -1348,7 +1348,9 @@ describe("DELETE /rooms/:id (#65)", () => {
     expect((await removeRoom(DEV_KEY.jesse, "qs_del_twice"))!.status).toBe(202);
 
     const asked = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.sessionId === "qs_del_twice");
-    expect(asked).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+    expect(asked).toEqual([expect.objectContaining({
+      action: "room_deleted", actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd",
+    })]);
   });
 
   // Review M2. The 202 says when the room goes by the time the record holds, which is the first request's, and never by

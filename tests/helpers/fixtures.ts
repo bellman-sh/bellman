@@ -1,4 +1,5 @@
 import type { Brief, JoinCodeRecord, Member, RoomManifest, Session } from "../../src/types.js";
+import type { AuditActor } from "../../src/audit.js";
 import { ENTITLEMENTS } from "../../src/auth.js";
 import { resolveManifest } from "../../src/manifest.js";
 import { monthKey } from "../../src/stored-session.js";
@@ -96,3 +97,7 @@ export function session(over: Partial<Session> = {}): Session {
 export function swarmSession(over: Partial<Session> = {}): Session {
   return session({ manifest: roomManifest({ mode: "swarm", preset: null }), ...over });
 }
+
+/** The fixture people as an audit row names an actor: who asked for a delete, in the purge tests. */
+export const jesseActor: AuditActor = { userId: "u_jesse", label: "jesse@codenerd", orgId: "org_codenerd" };
+export const peerActor: AuditActor = { userId: "u_peer", label: "peer@other", orgId: "org_other" };

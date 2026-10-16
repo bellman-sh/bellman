@@ -901,11 +901,12 @@ describe("granting plans at runtime", () => {
 
   /**
    * The route does not audit; the store does, in the same operation as the
-   * write. What the route still owns is who each entry is attributed to, so that
-   * is checked on every entry, and each detail is compared whole so a route that
-   * adds something of its own fails too. The three are the shapes the store
-   * gives a first grant, a replacement (which names the plan it replaced) and a
-   * revocation (which names the plan it ended).
+   * write. What the route still owns is who each entry is attributed to, by id,
+   * name and org (audit trail spec, D2), so that is checked on every entry, and
+   * each detail is compared whole so a route that adds something of its own
+   * fails too. The three are the shapes the store gives a first grant, a
+   * replacement (which names the plan it replaced) and a revocation (which
+   * names the plan it ended).
    */
   it("writes plan changes to the org audit log, under the admin who made them", async () => {
     const token = await tokenFor(admin);
@@ -918,7 +919,11 @@ describe("granting plans at runtime", () => {
     await call("/admin/grants?key=github:97", as(token, { method: "DELETE" }));
 
     const entries = await (config.plans as MemoryStore).auditForOrg("org_example", 50);
-    const entry = { at: expect.any(Number), orgId: "org_example", sessionId: "grant:github:97", actorUserId: "u_admin" };
+    const entry = {
+      at: expect.any(Number), orgId: "org_example", sessionId: "grant:github:97", actorUserId: "u_admin",
+      actorLabel: "admin@example", actorOrgId: "org_example", roomName: null,
+      parties: ["org_example"], crossing: "internal", direction: null,
+    };
     const held = { key: "github:97", org_id: "org_example", source: "operator", expires_at: null };
     expect(entries).toEqual([
       { ...entry, action: "plan_granted", detail: { ...held, plan: "pro", role: "member" } },

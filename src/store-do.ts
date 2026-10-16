@@ -13,7 +13,7 @@ import type {
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creditReport, decideBlobCharge,
   decideHostCharge, hostSeated, hostSentEntries, isAbandoned, isActiveMember, isActivePerson, isRemovedMember,
-  isReplyToHost, markRemoved, noteAppend, seatVictims, stampSeen,
+  isReplyToHost, markRemoved, noteAppend, rosterParties, seatVictims, stampSeen,
 } from "./store.js";
 import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
@@ -21,6 +21,7 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
+import type { AuditActor } from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -1427,7 +1428,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * process that died between the commit and them left an alarm only if there was an
    * entry to queue, and the retry is what points it at the purge.
    */
-  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "missing" };
@@ -1435,7 +1436,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
       const rows = await this.driver.enqueue(
-        txn, orgsOnRoster(s).map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
+        txn, orgsOnRoster(s).map((orgId) => auditIntent(roomDeletedEntry(s, orgId, rosterParties(s), by, now))),
       );
       await txn.put<unknown>({ session: { ...s, purgeAt: at }, ...rows });
       return { ok: true, purgeAt: at };
@@ -2470,7 +2471,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     for (const orgId of orgsOnRoster(s)) await registry.dropOrgIndex(orgId, s.id);
     for (const orgId of orgsOnRoster(s)) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
-        .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
+        .append(roomPurgedEntry(s, orgId, rosterParties(s), now), `purge:${s.id}:${orgId}`);
     }
     await this.driver.deliverNow();
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
@@ -3462,7 +3463,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
   }
 

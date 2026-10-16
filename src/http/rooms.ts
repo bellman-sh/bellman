@@ -579,7 +579,8 @@ async function deleteRoom(request: Request, sessionId: string, origin: string | 
     return problem(403, "forbidden", "only the room's creator or an admin of an org in it may delete it", origin);
   }
 
-  const scheduled = await deps.store.schedulePurge(sessionId, Date.now(), who.identity.userId);
+  const asker = { userId: who.identity.userId, label: who.identity.label, orgId: who.identity.orgId };
+  const scheduled = await deps.store.schedulePurge(sessionId, Date.now(), asker);
   if (!scheduled.ok) {
     return scheduled.reason === "open"
       ? problem(409, "conflict", "a room is deleted after it closes", origin)

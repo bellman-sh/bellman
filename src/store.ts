@@ -16,7 +16,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
-import { auditRows, partiesOf } from "./audit.js";
+import { auditRows, partiesOf, type AuditActor } from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -75,6 +75,14 @@ export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId ===
  * these: one predicate, so the three cannot disagree about who is there.
  */
 export const isActivePerson = (m: Member): boolean => isActiveMember(m) && !isHostMember(m);
+
+/**
+ * Everyone a room ever seated, the hosted seat left out, as an audit row's parties (audit trail
+ * spec, D2): what a purge's and a delete's rows say the room held. The roster keeps a member who
+ * left, as `orgsOnRoster` does, because their org sat in the room.
+ */
+export const rosterParties = (s: Pick<StoredSession, "members">): (string | null)[] =>
+  partiesOf(s.members.filter((m) => !isHostMember(m)).map((m) => m.orgId));
 
 /**
  * Whether the room's hosted seat is still in it (C1). Evicting the host is the
@@ -1013,10 +1021,11 @@ export interface BellmanStore {
    * retries a delete it never heard the answer to is the case, and the audit log owes one
    * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
    * `purgeAt` says the same of the time: it is the one the room is stored with, the first
-   * request's, and a repeat is told that and not the `at` it asked for. `by` is null when the
-   * caller is not a person.
+   * request's, and a repeat is told that and not the `at` it asked for. `by` is who asked, named
+   * as an audit row names an actor so each org's row can say whether the delete was its own or
+   * another's, and null when the caller is not a person.
    */
-  schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
+  schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule>;
   /**
    * Make a public room private for good (public rooms spec D2): set `unpublishedAt` to `at`, once.
    * The first time stands, so a retry changes nothing, and a room that is not there is left not
@@ -1774,14 +1783,14 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "missing" };
     if (!s.closed) return { ok: false, reason: "open" };
     // Asked already: the first request stands, is on the record once, and is the time the answer gives.
     if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomDeletedEntry(s, orgId, rosterParties(s), by, Date.now())));
     return { ok: true, purgeAt: at };
   }
 
@@ -2381,7 +2390,7 @@ export class MemoryStore implements BellmanStore {
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of orgsOnRoster(s)) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, now)));
+    this.recordAudit(orgsOnRoster(s).map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);

@@ -200,6 +200,9 @@ describe("GET /operator/stats", () => {
   // Spec D6: the guard that fails if the response type is widened to carry a row.
   it("answers scalars only", async () => {
     await store.recordSignIn("u_a", Date.now());
+    // A row for a leak to carry: spread into the body it puts strings there, where
+    // an empty store would spread nothing.
+    await store.putGrant(grant());
     const body = await bodyOf(await call(DEV_KEY.jesse));
     for (const [field, value] of Object.entries(body)) {
       expect(typeof value, field).toMatch(/^(number|boolean)$/);

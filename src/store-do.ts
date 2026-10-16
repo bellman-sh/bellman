@@ -3204,16 +3204,23 @@ function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = nul
 
 /**
  * The tables, and a stream written in the KV shape (`a:<seq>` rows, the `seq` counter,
- * `d:<intent>` markers) moved into them: each row with the seq its key carries, so every
- * cursor already handed out still names its row. Run inside one `transactionSync`, so it
- * lands whole or not at all.
+ * `d:<intent>` markers) moved into them. Run inside one `transactionSync`, so it lands
+ * whole or not at all.
+ *
+ * Into an empty table each row keeps the seq its key carries, so every cursor already handed
+ * out still names its row. Once the table holds rows, what is in KV was written there by an
+ * older Worker after a rollback: it read the deleted `seq` counter as 0 and counted again
+ * from 1, so its keys would collide with rows that exist. Those are appended in key order
+ * with the next seqs instead, so nothing collides and nothing is lost, and a stream moved
+ * once and then written to by an older Worker still wakes.
  * ponytail: one transaction, fine for thousands of rows; a stream far past any team's would batch it.
  */
 function migrateAudit(storage: DurableObjectStorage): void {
   for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
   const rows = [...storage.kv.list<AuditEntry>({ prefix: "a:" })];
   const marks = [...storage.kv.list<number>({ prefix: "d:" })];
-  for (const [key, entry] of rows) insertAuditRow(storage.sql, entry, Number(key.slice(2)));
+  const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
+  for (const [key, entry] of rows) insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null);
   for (const [key, seq] of marks) {
     storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
   }

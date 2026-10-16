@@ -3283,8 +3283,9 @@ export class AuditDO extends DurableObject {
     const all = auditWhere(q, through, { scope: true, before: false });
     const total = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM entries ${all.clause}`, ...all.params).one().n;
     let unrecorded = 0;
-    if (q.scope !== undefined) {
-      const rest = auditWhere(q, through, { scope: false, before: false });
+    // A row from before D2 records no crossing and no parties, so neither filter can judge it (D4).
+    if (q.scope !== undefined || q.org !== undefined) {
+      const rest = auditWhere({ ...q, org: undefined }, through, { scope: false, before: false });
       unrecorded = sql.exec<{ n: number }>(
         `SELECT COUNT(*) AS n FROM entries ${rest.clause ? `${rest.clause} AND` : "WHERE"} crossing IS NULL`, ...rest.params,
       ).one().n;

@@ -151,7 +151,7 @@ export interface AuditPage {
   through: number | null;
   /** Rows matching the filters at or below `through`: what an export of them holds. */
   total: number;
-  /** Rows matching every filter but scope that record no crossing (D4); 0 without a scope. */
+  /** Rows matching every filter but scope and org that record no crossing (D4); 0 without either. */
   unrecorded: number;
 }
 
@@ -187,7 +187,9 @@ export function pageOf(rows: readonly SeqEntry[], q: AuditQuery): AuditPage {
     next: older.length > q.limit ? entries.at(-1)!.seq : null,
     through,
     total: all.length,
-    unrecorded: q.scope === undefined ? 0 : rows.filter((r) => r.crossing === undefined && matches(r, q, through, false)).length,
+    unrecorded: q.scope === undefined && q.org === undefined
+      ? 0
+      : rows.filter((r) => r.crossing === undefined && matches(r, { ...q, org: undefined }, through, false)).length,
   };
 }
 
@@ -214,7 +216,7 @@ export function facetsOf(rows: readonly SeqEntry[], orgId: string): AuditFacets 
 /**
  * The query as SQL for AuditDO's `entries` table: a WHERE clause built from fixed fragments,
  * with every value a bound parameter. `use.scope` and `use.before` leave those out, for the
- * counts: `total` ignores `before`, and `unrecorded` ignores the scope.
+ * counts: `total` ignores `before`, and `unrecorded` ignores the scope; its caller drops the org too.
  */
 export function auditWhere(
   q: AuditQuery, through: number | null, use: { scope: boolean; before: boolean },

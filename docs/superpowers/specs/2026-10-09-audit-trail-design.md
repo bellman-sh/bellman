@@ -112,8 +112,9 @@ copy it addresses. They are stored as columns, and the scope filter is a plain
 
 A row from before D2 has no parties, crossing or direction, and nothing
 backfills it: the roster today is not the roster then. Such rows show in an
-unfiltered view as "not recorded". A scope filter leaves them out, and the
-response counts what it left out (`unrecorded`, D7), so the page can say so.
+unfiltered view as "not recorded". A scope or org filter leaves them out, since
+they record neither a crossing nor the orgs in the room, and the response
+counts what it left out (`unrecorded`, D7), so the page can say so.
 
 ### D5. `AuditDO` keeps its rows in SQL
 
@@ -185,7 +186,7 @@ export interface AuditPage {
   next: number | null;     // pass as `before` for the next page; null at the end
   through: number | null;  // the highest seq the query covered; null for an empty stream
   total: number;           // rows matching the filters, at or below `through`
-  unrecorded: number;      // rows matching every filter but scope, with no crossing; 0 without scope
+  unrecorded: number;      // rows matching every filter but scope and org, with no crossing; 0 without scope or org
 }
 
 export interface AuditFacets {
@@ -328,7 +329,7 @@ TIME          EVENT          ROOM     MEMBER  ORG          DIRECTION
 - **Filters:** native date inputs, in which the "to" day counts in full;
   native selects filled from `facets`; and a segmented scope control like the
   Rooms status filter. When `unrecorded` is above 0, a line says how many
-  earlier entries the scope filter left out.
+  earlier entries the scope and org filters left out.
 - **Rows:** a cross-org row carries a brass rule and its parties, so it reads
   as one at a glance. Member is the actor; the detail names the subject of an
   eviction or a timeout. Times are local, with the ISO instant in `title`.

@@ -3927,6 +3927,12 @@ export function describeStoreContract(
         expect((await store.queryAudit("org_a", q())).unrecorded).toBe(0);
       });
 
+      // A row from before D2 names no parties either, so an org filter cannot judge it any more than a scope can.
+      it("counts the rows an org filter left out because they record no crossing", async () => {
+        await fill();
+        expect((await store.queryAudit("org_a", q({ org: "org_c" }))).unrecorded).toBe(1);
+      });
+
       it("pages with before and through: no row twice, none skipped, and none written after through", async () => {
         await fill();
         const first = await store.queryAudit("org_a", q({ limit: 4 }));

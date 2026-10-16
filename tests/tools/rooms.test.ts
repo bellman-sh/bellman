@@ -13,6 +13,7 @@ import { snapshotOf } from "../../src/heartbeat.js";
 import { APP_RESOURCE_URI } from "../../src/ui/resource.js";
 import { ROOMS_LIMIT } from "../../src/tools/rooms.js";
 import { session } from "../helpers/fixtures.js";
+import { roomsFixture } from "../../ui/test/fixtures.js";
 
 let h: Harness;
 beforeEach(() => { h = new Harness(); });
@@ -42,6 +43,17 @@ const SWARM = {
 };
 
 describe("bellman_rooms", () => {
+  // The monitor's tests render ui/test/fixtures.ts, and #244 shipped because its room carried an expires_at the server
+  // no longer sent: every UI test passed while the real monitor read "expires NaN… left". So the fixture's room is
+  // held to the keys a real one arrives with.
+  it("sends a room with the keys the monitor's fixture is written against", async () => {
+    const creator = await h.connect(DEV_KEY.jesse);
+    await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm" }), brief: brief() });
+    const [real] = await roomsOf(creator);
+
+    expect(Object.keys(roomsFixture().rooms[0]!).sort()).toEqual(Object.keys(real!).sort());
+  });
+
   it("lists a room to its creator and to a member who joined, each from their own seat", async () => {
     const p = await pairUp(h);
     const [mine] = await roomsOf(p.creator);

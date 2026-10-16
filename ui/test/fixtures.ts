@@ -55,7 +55,6 @@ export function roomsFixture(): RoomsResult {
     rooms: [{
       session_id: "qs_1",
       status: "active",
-      expires_at: iso(T0 + 3 * 3_600_000),
       max_members: 8,
       active_members: 2,
       your_member_id: "m_lead",

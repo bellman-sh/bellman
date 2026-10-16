@@ -19,6 +19,9 @@
  *   BELLMAN_DELIVERY  "channel" (default): push peer events into the session.
  *                     Launch with --dangerously-load-development-channels server:<name>.
  *                     "hook": queue them for the Bellman Stop hook and bellman_wait.
+ *                     "queue": queue them for the agent to collect, with bellman_sync when a
+ *                     turn starts and bellman_wait mid-turn, in a host that runs no Stop
+ *                     hook. The Claude Desktop bundle sets it (#241).
  *   BELLMAN_BUS       "on" (default) or "off". On, the bridges on a machine share one
  *                     connection per room, over a Unix socket under ~/.claude/bellman/bus,
  *                     where each used to long-poll for every member it watches. "off" is
@@ -49,14 +52,14 @@
  */
 import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { connectRemote, createBridge, type Delivery, type Remote, type WhoAmI } from "./bridge.js";
+import { connectRemote, createBridge, deliveryOf, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
 const key = process.env.BELLMAN_KEY;
 const url = process.env.BELLMAN_URL ?? "https://mcp.bellman.sh/mcp";
-const delivery: Delivery = process.env.BELLMAN_DELIVERY === "hook" ? "hook" : "channel";
+const delivery = deliveryOf(process.env.BELLMAN_DELIVERY);
 const log = (message: string) => console.error(`[bellman] ${message}`);
 
 /**
@@ -121,8 +124,8 @@ const connect: () => Promise<Remote> = key
 /** Who peers will see. A key is unattributable here; the server resolves it per call. */
 const whoami = (): WhoAmI => (key ? { source: "env", label: null } : signedInAs(url, { log }));
 
-const inboxDir = delivery === "hook" ? inboxDirFor(process.ppid) : undefined;
-if (delivery === "hook") sweepStaleInboxes();
+const inboxDir = delivery !== "channel" ? inboxDirFor(process.ppid) : undefined;
+if (inboxDir) sweepStaleInboxes();
 
 const bridge = createBridge({
   delivery,

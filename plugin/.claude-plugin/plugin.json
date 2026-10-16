@@ -1,7 +1,7 @@
 {
   "name": "bellman",
   "description": "Bellman rooms in Claude Code. The bridge runs as an MCP server: it signs you in, proxies the bellman_* tools and queues peer events for the session. The Stop hook hands those events to Claude when a turn ends. Two skills: room-manifest, to author a room's .bellman/room.yaml, choose between the pair, swarm, review and social presets, declare a hosted seat, and decide which verbs each role should hold; and canvas, to write, arrange and read a room's working surface, the plan, decisions, diagrams, links and files every member reads.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "author": {
     "name": "mcfearsome"
   },

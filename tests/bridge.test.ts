@@ -763,7 +763,7 @@ describe("bellman_whoami", () => {
 
     expect({ ...(await asked(a)), logs }).toEqual({
       isError: false,
-      data: signedIn,
+      data: { ...signedIn, door: null },
       text: SIGNED_IN_TEXT,
       logs: [],
     });
@@ -775,7 +775,7 @@ describe("bellman_whoami", () => {
 
     expect(await asked(a)).toEqual({
       isError: false,
-      data: inOrg,
+      data: { ...inOrg, door: null },
       text: "Signed in as jesse@github — free plan, role member, org org_codenerd.",
     });
   });
@@ -785,9 +785,30 @@ describe("bellman_whoami", () => {
 
     expect(await asked(a)).toEqual({
       isError: false,
-      data: { source: "env", label: null },
+      data: { source: "env", label: null, door: null },
       text: ENV_TEXT,
     });
+  });
+
+  // The Claude Code mod finds the bridge's door here (src/door.ts). The text a person is shown is the same with and
+  // without one, and so is every other field: the door is one more key, which a bridge with none reports as null.
+  it("names the bridge's door, and changes nothing else in the answer", async () => {
+    const a = await open(DEV_KEY.jesse, "channel", { whoami: () => signedIn, door: () => "/tmp/bellman-door.sock" });
+
+    expect(await asked(a)).toEqual({
+      isError: false,
+      data: { ...signedIn, door: "/tmp/bellman-door.sock" },
+      text: SIGNED_IN_TEXT,
+    });
+  });
+
+  it("asks for the door on every call, because the door opens after the bridge is built", async () => {
+    let path: string | null = null;
+    const a = await open(DEV_KEY.jesse, "channel", { door: () => path });
+
+    expect((await asked(a)).data).toEqual({ source: "env", label: null, door: null });
+    path = "/tmp/bellman-door.sock";
+    expect((await asked(a)).data).toEqual({ source: "env", label: null, door: "/tmp/bellman-door.sock" });
   });
 
   it("answers without connecting to Bellman", async () => {
@@ -808,7 +829,7 @@ describe("bellman_whoami", () => {
     expect({ connects, ...who }).toEqual({
       connects: 0,
       isError: false,
-      data: signedIn,
+      data: { ...signedIn, door: null },
       text: SIGNED_IN_TEXT,
     });
   });
@@ -832,7 +853,7 @@ describe("bellman_whoami", () => {
 
     expect({ names, who: await asked(a) }).toEqual({
       names: [...remoteToolNames, "bellman_upload", "bellman_wait", "bellman_whoami"],
-      who: { isError: false, data: { source: "env", label: null }, text: ENV_TEXT },
+      who: { isError: false, data: { source: "env", label: null, door: null }, text: ENV_TEXT },
     });
   });
 
@@ -867,7 +888,7 @@ describe("bellman_whoami", () => {
 
       expect({ ...(await asked(a)), logs }).toEqual({
         isError: false,
-        data: { source: "unknown", label: null },
+        data: { source: "unknown", label: null, door: null },
         text: UNKNOWN_TEXT,
         logs: [`whoami: the sign-in has no usable ${unusable}; reporting unknown`],
       });
@@ -879,7 +900,7 @@ describe("bellman_whoami", () => {
         whoami: () => ({ source: "oauth", label: "jesse@github", plan: "free", role: "member" }) as unknown as WhoAmI,
       });
 
-      expect(await asked(a)).toEqual({ isError: false, data: signedIn, text: SIGNED_IN_TEXT });
+      expect(await asked(a)).toEqual({ isError: false, data: { ...signedIn, door: null }, text: SIGNED_IN_TEXT });
     });
 
     const carrying: [string, unknown, WhoAmI, string][] = [
@@ -893,7 +914,7 @@ describe("bellman_whoami", () => {
     it.each(carrying)("reports only its own fields for %s", async (_what, given, expected, text) => {
       const a = await open(DEV_KEY.jesse, "channel", { whoami: () => given as WhoAmI });
 
-      expect(await asked(a)).toEqual({ isError: false, data: expected, text });
+      expect(await asked(a)).toEqual({ isError: false, data: { ...expected, door: null }, text });
     });
 
     it("says unknown without complaint when the callback says so", async () => {
@@ -905,7 +926,7 @@ describe("bellman_whoami", () => {
 
       expect({ ...(await asked(a)), logs }).toEqual({
         isError: false,
-        data: { source: "unknown", label: null },
+        data: { source: "unknown", label: null, door: null },
         text: UNKNOWN_TEXT,
         logs: [],
       });
@@ -929,7 +950,7 @@ describe("bellman_whoami", () => {
       // where the failure went instead.
       expect({ ...(await asked(a)), logs }).toEqual({
         isError: false,
-        data: { source: "unknown", label: null },
+        data: { source: "unknown", label: null, door: null },
         text: UNKNOWN_TEXT,
         logs: [`whoami: the callback threw: ${message}; reporting unknown`],
       });
@@ -947,7 +968,7 @@ describe("bellman_whoami", () => {
 
       expect({ ...(await asked(a)), logs }).toEqual({
         isError: false,
-        data: { source: "unknown", label: null },
+        data: { source: "unknown", label: null, door: null },
         text: UNKNOWN_TEXT,
         logs: ["whoami: unrecognised answer; reporting unknown"],
       });

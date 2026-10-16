@@ -51,6 +51,7 @@ import { rmSync } from "node:fs";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { connectRemote, createBridge, type Delivery, type Remote, type WhoAmI } from "./bridge.js";
 import { busCredentials } from "./credentials.js";
+import { doorPathFor, startDoor } from "./door.js";
 import { inboxDirFor, sweepStaleInboxes } from "./inbox.js";
 import { connectSignedIn, signedInAs, SignInCancelled } from "./signin.js";
 
@@ -124,11 +125,16 @@ const whoami = (): WhoAmI => (key ? { source: "env", label: null } : signedInAs(
 const inboxDir = delivery === "hook" ? inboxDirFor(process.ppid) : undefined;
 if (delivery === "hook") sweepStaleInboxes();
 
+/** This bridge's door (see below), once it has one. bellman_whoami names `doorPath`; shutdown() closes `door`. */
+let doorPath: string | null = null;
+let door: { close(): Promise<void> } | undefined;
+
 const bridge = createBridge({
   delivery,
   inboxDir,
   remote: connect,
   whoami,
+  door: () => doorPath,
   /**
    * Where bellman_upload posts (#183): the blob routes on this server's origin,
    * as whoever the bridge is — the BELLMAN_KEY, or the cached sign-in's access
@@ -147,6 +153,35 @@ const bridge = createBridge({
   log,
 });
 
+/**
+ * The door (src/door.ts): how the Claude Code mod in this session reads what only the bridge holds: the inbox's counts,
+ * a room's log, whether it is signed in. Named for this pid, under BELLMAN_DOOR_ROOT or ~/.claude/bellman/door, and
+ * bellman_whoami says where.
+ *
+ * The bridge is the session's Bellman server and the door only an aid to something else, so a door that cannot be made
+ * (a folder it cannot create, a path too long for a Unix socket, no home directory to build the path from) is a line in
+ * the log and the bridge goes on without one: bellman_whoami then names none. Everything that can go wrong is inside the
+ * try, the path included.
+ *
+ * The functions are handed over and not their results, so each request sees the bridge as it is then.
+ */
+const doorOpened = (async () => {
+  try {
+    const opened = await startDoor(doorPathFor(process.pid), {
+      delivery,
+      signedIn: () => whoami().source !== "unknown",
+      seats: bridge.seats,
+      recent: bridge.recent,
+      inboxDir,
+      readEvents: bridge.readEvents,
+    });
+    door = opened;
+    doorPath = opened.path;
+  } catch (error) {
+    log(`door unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+})();
+
 let stopping = false;
 async function shutdown(): Promise<void> {
   if (stopping) return;
@@ -154,6 +189,9 @@ async function shutdown(): Promise<void> {
   // Before close(), not after. close() awaits the connect in flight, and a
   // sign-in is the one that can hold for as long as a human takes.
   signingIn.abort();
+  // The door before the bridge, so that nothing is still reading the bridge's rooms through it as close() lets them go.
+  // Closing it also removes its socket.
+  await door?.close();
   // close() also closes the local bus, and that is what removes this bridge's socket file if it was the
   // coordinator. The bridges that were its subscribers race again and one takes over, each from its own cursor.
   await bridge.close().catch(() => undefined);
@@ -171,6 +209,8 @@ process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 process.stdin.on("close", shutdown);
 
+// Before the transport connects, so that the first bellman_whoami already names the door.
+await doorOpened;
 await bridge.server.connect(new StdioServerTransport());
 /**
  * Which of the three states this start is in, because the browser is about to

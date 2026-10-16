@@ -154,6 +154,8 @@ function startBridge(server: Bellman, { key, userId = "u_process", busRoot, env:
   env.BELLMAN_URL = server.url;
   env.XDG_CONFIG_HOME = configHome;
   env.BELLMAN_BUS_ROOT = bus;
+  // The door is made at launch, so a bridge not given a folder of its own makes one under the real HOME.
+  env.BELLMAN_DOOR_ROOT = configHome;
   env.BELLMAN_NO_BROWSER = "1";
   delete env.BELLMAN_BUS; // a developer's own switch must not decide what these tests start
   Object.assign(env, extra);

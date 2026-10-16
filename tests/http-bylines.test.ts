@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
-import { HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
+import { HANDLE_PAGE_BATCH, HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
 import type { OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
@@ -364,18 +364,36 @@ describe("GET /public/handles/:handle", () => {
     expect([res.status, await res.json()]).toEqual([404, { error: "not_found", error_description: "no such handle" }]);
   });
 
-  it("lists the newest signatures first, at most MAX_ROOMS_LISTED of them, and stops reading once the page is full", async () => {
+  // The sessions are read HANDLE_PAGE_BATCH at a time, each batch at once (final review M2), in signature order, and
+  // no batch is read past the one holding the MAX_ROOMS_LISTED'th room. Three dead signatures newer than every room
+  // put that room mid-batch, so a sequential read, a batch read that never stops, and this one each read a different count.
+  it("lists the newest signatures first, at most MAX_ROOMS_LISTED of them, reading in batches up to the one that fills the page", async () => {
     await store.claimHandle("u_jesse", "jesse");
-    const total = MAX_ROOMS_LISTED + 3;
-    for (let i = 0; i < total; i++) {
+    const live = MAX_ROOMS_LISTED + 30;
+    const dead = 3;
+    for (let i = 0; i < live; i++) {
       await store.createSession(session({ id: `qs_many_${i}`, manifest: roomManifest({ public: true }), members: [member()] }));
       await store.signRoom("u_jesse", `qs_many_${i}`, 1_000 + i);
     }
-    const reads = vi.spyOn(store, "getSession");
+    for (let i = 0; i < dead; i++) await store.signRoom("u_jesse", `qs_dead_${i}`, 100_000 + i);
+    const read = store.getSession.bind(store);
+    let inFlight = 0;
+    let peak = 0;
+    const reads = vi.spyOn(store, "getSession").mockImplementation(async (id) => {
+      peak = Math.max(peak, ++inFlight);
+      try {
+        return await read(id);
+      } finally {
+        inFlight--;
+      }
+    });
     const { rooms } = (await bodyOf(await pub("/public/handles/jesse"))) as { rooms: { id: string; signed_at: string }[] };
-    expect(rooms.map((r) => r.id)).toEqual(Array.from({ length: MAX_ROOMS_LISTED }, (_, k) => `qs_many_${total - 1 - k}`));
-    expect(rooms[0].signed_at).toBe(new Date(1_000 + total - 1).toISOString());
-    expect(reads).toHaveBeenCalledTimes(MAX_ROOMS_LISTED);
+    expect(rooms.map((r) => r.id)).toEqual(Array.from({ length: MAX_ROOMS_LISTED }, (_, k) => `qs_many_${live - 1 - k}`));
+    expect(rooms[0].signed_at).toBe(new Date(1_000 + live - 1).toISOString());
+    const fillingBatchEnd = Math.ceil((dead + MAX_ROOMS_LISTED) / HANDLE_PAGE_BATCH) * HANDLE_PAGE_BATCH;
+    expect(fillingBatchEnd).toBeLessThan(dead + live); // so a read past that batch would show
+    expect(reads).toHaveBeenCalledTimes(fillingBatchEnd);
+    expect(peak).toBe(HANDLE_PAGE_BATCH);
   });
 
   // A handle whose shape breaks the grammar names no one, so the page answers it before the registry is asked anything:

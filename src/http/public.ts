@@ -47,6 +47,12 @@ const HANDLE_PAGE = /^\/public\/handles\/([^/]+)$/;
  */
 export const HANDLE_PAGE_SCAN = 200;
 
+/**
+ * How many of those sessions the page reads at once. A reader waits for each batch's slowest read rather
+ * than the sum of every read, and a page that fills early stops after the batch it filled in.
+ */
+export const HANDLE_PAGE_BATCH = 25;
+
 /** Every origin, and no credentials: there is nothing here a credential could grant. */
 const OPEN: Record<string, string> = { "access-control-allow-origin": "*" };
 
@@ -200,7 +206,8 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
  * is asked anything. Only the shape: the reserved list governs claims, and a read still reaches a name
  * reserved after someone took it, as the byline on that holder's rooms still does. Signatures are keyed
  * by user, so a freed handle someone else claims lists only their rooms. At most `HANDLE_PAGE_SCAN`
- * signatures are looked at, one session read each, and at most `MAX_ROOMS_LISTED` rooms listed.
+ * signatures are looked at, one session read each, `HANDLE_PAGE_BATCH` read at once and in order, and at
+ * most `MAX_ROOMS_LISTED` rooms listed.
  */
 async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response> {
   const handle = handleFromSegment(raw);
@@ -210,16 +217,19 @@ async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response>
   // The scan's cut is the newest signatures, so the page orders them itself and does not lean on the registry's order.
   const newest = [...(await deps.store.signedRooms(userId))].sort((a, b) => b.signedAt - a.signedAt).slice(0, HANDLE_PAGE_SCAN);
   const rooms: unknown[] = [];
-  for (const { sessionId, signedAt } of newest) {
-    if (rooms.length === MAX_ROOMS_LISTED) break;
-    const s = await deps.store.getSession(sessionId);
-    if (!s || !isPublic(s) || sessionStatus(s) === "closed" || s.createdBy !== userId) continue;
-    rooms.push({
-      id: s.id,
-      text: untrusted({ memberId: s.creator.memberId, label: `@${handle}` }, { room: s.manifest.room, purpose: s.manifest.purpose }),
-      public_url: publicRoomUrl(s),
-      signed_at: new Date(signedAt).toISOString(),
-    });
+  for (let at = 0; at < newest.length && rooms.length < MAX_ROOMS_LISTED; at += HANDLE_PAGE_BATCH) {
+    const batch = newest.slice(at, at + HANDLE_PAGE_BATCH);
+    const sessions = await Promise.all(batch.map(({ sessionId }) => deps.store.getSession(sessionId)));
+    for (const [k, s] of sessions.entries()) {
+      if (rooms.length === MAX_ROOMS_LISTED) break;
+      if (!s || !isPublic(s) || sessionStatus(s) === "closed" || s.createdBy !== userId) continue;
+      rooms.push({
+        id: s.id,
+        text: untrusted({ memberId: s.creator.memberId, label: `@${handle}` }, { room: s.manifest.room, purpose: s.manifest.purpose }),
+        public_url: publicRoomUrl(s),
+        signed_at: new Date(batch[k].signedAt).toISOString(),
+      });
+    }
   }
   return answer(200, { handle, rooms });
 }

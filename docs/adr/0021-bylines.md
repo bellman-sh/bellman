@@ -28,8 +28,8 @@ reader unable to tell who started a room, or to find that person's other public 
    `publicNames`, which the page swaps for `@handle` wherever it appears. The events,
    surface and blob reads never look a byline up.
 5. **The handle page reads at most 200 sessions.** `GET /public/handles/:handle` reads
-   the `HANDLE_PAGE_SCAN` (200) most recently signed rooms on each request and lists up
-   to `MAX_ROOMS_LISTED` (50) of them still public and open. It checks only the handle's
+   the most recently signed rooms, 25 at a time, until it lists `MAX_ROOMS_LISTED` (50)
+   still public and open or has read `HANDLE_PAGE_SCAN` (200). It checks only a handle's
    shape: the reserved list governs claims, so a taken name reserved later still reads.
 6. **A handle request body is bounded at 1 KB,** through `lengthRefusal`, the helper
    that bounds presets and room writes.

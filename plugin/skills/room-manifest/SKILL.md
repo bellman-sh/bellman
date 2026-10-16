@@ -59,7 +59,7 @@ What each preset expands to:
 | `peer_b` | send, request_actions, respond_actions | default |
 
 **`swarm`** — mode `swarm`. Holds as many members as its creator invites, up to
-100, Bellman's ceiling for one room, the same on every plan.
+5,000, Bellman's ceiling for one room, the same on every plan.
 
 | Role | Can | |
 |---|---|---|
@@ -146,7 +146,7 @@ can gate it. A room ends when its last member leaves, not on anyone's say-so.
 - `default_role` and `creator_role` must each name a role defined in `roles`.
 - No role may list the same verb twice.
 - `mode` is `pair` or `swarm`. `pair` caps the room at two seats regardless of
-  plan; `swarm` holds as many members as its creator invites, up to 100,
+  plan; `swarm` holds as many members as its creator invites, up to 5,000,
   Bellman's ceiling for one room, the same on every plan.
 - A role's `heartbeat_on` puts its seat on the heartbeat: `true` for the server's
   own ask, or `"what this seat reports"`, its own instruction, at most 300

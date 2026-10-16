@@ -8,6 +8,7 @@ import { handleRoutes } from "./http/handles.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes } from "./http/rooms.js";
+import { statsRoutes } from "./http/stats.js";
 import { buildServer } from "./server.js";
 import type { BellmanStore } from "./store.js";
 
@@ -60,6 +61,11 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
   app.use("/rooms", serve((request) => roomRoutes(request, { store, blobs, caller, panelOrigins: [] })));
   app.use("/presets", serve((request) => presetRoutes(request, { store, caller, panelOrigins: [] })));
   app.use("/account/handle", serve((request) => handleRoutes(request, { store, caller, panelOrigins: [] })));
+  // No operators locally: `npm start` serves the dev identities, and an operator gate that admitted one of
+  // them would make the local server the loose one. `overrides` and `honourPurchases` are left off for a
+  // different reason: nothing here reads BELLMAN_USERS or BELLMAN_BILLING, so there is no value to pass, and
+  // with no operators the route answers 403 before it reads either.
+  app.use("/operator/stats", serve((request) => statsRoutes(request, { store, caller, panelOrigins: [], operators: undefined })));
   app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
 
   app.use(express.json({ limit: "1mb" }));

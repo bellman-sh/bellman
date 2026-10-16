@@ -6,6 +6,7 @@ import { handleRoutes } from "./http/handles.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
+import { statsRoutes } from "./http/stats.js";
 import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
@@ -262,6 +263,25 @@ export default {
         store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The operator's platform stats (operator stats spec D1), on the room routes' rules and behind the
+    // same guard. Gated on the operators set, which is why it takes `operators` where the others take only
+    // `panelOrigins`. It counts plans as sign-in resolves them, so it also takes `overrides` and
+    // `honourPurchases`, off the same OAuth config. Left off, `operators` refuses everyone, which shows at
+    // once; those two leave `paid` wrong and say nothing, so worker-tests/stats-routes.test.ts reads each.
+    if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await statsRoutes(request, {
+        store,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+        operators: oauth?.operators,
+        overrides: oauth?.overrides,
+        honourPurchases: oauth?.honourPurchases,
       });
       if (handled) return handled;
     }

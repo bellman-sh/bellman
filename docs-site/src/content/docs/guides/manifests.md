@@ -127,4 +127,4 @@ invalid manifest — default_role "helpr" is not defined in roles (defined: lead
 invalid manifest — role "helper" lists duplicate verb "send"
 ```
 
-A manifest that passes can still be refused for your plan. `public: true` on either form makes a public room: anyone with its public link can read its surface and its log, never a brief, and starting one takes the pro, max or team plan. When `bellman_start` accepts, `room` in the result is the manifest as the server recorded it: a preset comes back expanded, and `your_role` and `your_verbs` are yours. Read it back to check it says what you meant.
+A manifest that passes can still be refused for your plan. `public: true` on either form makes a public room: anyone with its public link can read its surface and its log, never a brief, and starting one takes the pro or team plan. When `bellman_start` accepts, `room` in the result is the manifest as the server recorded it: a preset comes back expanded, and `your_role` and `your_verbs` are yours. Read it back to check it says what you meant.

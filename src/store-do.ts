@@ -1158,13 +1158,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * once: a write that can flip `nextTickAt` from null to non-null must `reArm()`
    * once it has committed.**
    *
-   * `nextTickAt` returns null for four reasons — no cadence, the room is closed,
-   * the room is frozen, or no active member holds a reporting seat. While it is
+   * `nextTickAt` returns null for five reasons — no cadence, the room is closed,
+   * the room is frozen, no active member holds a reporting seat, or every member
+   * that holds one has gone `ASKS` cadences without reporting (#208). While it is
    * null nothing is armed for the tick, so there is no firing left to notice the
    * state that made it non-null: the answer cannot correct itself. Adding a member
-   * is one such write (this and `seatMember`), and so is clearing `frozenAt`
-   * (`freezeSession`). The other direction needs nothing: the armed alarm fires
-   * once, finds nobody due, and the reArm() that ends `alarm()` drops the tick.
+   * is one such write (this and `seatMember`), so is clearing `frozenAt`
+   * (`freezeSession`), and so is a report from a member the room had stopped asking,
+   * which the appends re-arm for by `tickBroughtForward`. The other direction needs
+   * nothing: the armed alarm fires once, finds nobody due, and the reArm() that ends
+   * `alarm()` drops the tick.
    *
    * After the transaction has COMMITTED, never inside its closure.
    * ARCHITECTURE.md §9: everything awaited in a closure holds every other call to
@@ -1519,8 +1522,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       ...memberRows(s, { ...s, members }),
       ...(patch.brief !== undefined ? { [briefKey(memberId)]: patch.brief } : {}),
     });
-    // addMember's rule, and `leftAt` is the only field in MemberPatch that can
-    // flip nextTickAt off null: clearing it returns a departed member to the
+    // addMember's rule. `leftAt` can flip nextTickAt off null, and so can
+    // `lastReportAt` (below): clearing `leftAt` returns a departed member to the
     // roster. Nothing calls it that way today — every caller sets a time — but
     // MemberPatch permits it, and the predicate is about what a write CAN do.
     //
@@ -1889,9 +1892,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reliable there. The wake comes after the commit, so nobody hears of an event that
    * did not land.
    *
-   * An append that brings housekeeping's soonest time forward re-arms after the commit, as
-   * `appendEvent`'s docblock says, when it is appended. A replay appended nothing, so it
-   * brings nothing forward and asks for no re-arm.
+   * An append that brings housekeeping's soonest time or the next tick forward re-arms after
+   * the commit, as `appendEvent`'s docblock says, when it is appended. A replay appended
+   * nothing and re-runs no books, so it brings housekeeping nothing; it re-arms only when the
+   * credit it re-asserts brings the next tick forward (#208), as the report's own would have.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,

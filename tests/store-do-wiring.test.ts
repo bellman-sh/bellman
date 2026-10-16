@@ -1513,6 +1513,19 @@ describe("fetch: websocket upgrade", () => {
     expect(ctx.sockets).toHaveLength(0);
   });
 
+  // The refusal is no saving if the read behind it is the whole log.
+  it("reads at most REPLAY_LIMIT + 1 missed events to decide, however many there are", async () => {
+    const { doi, storage } = await world(storeDo.REPLAY_LIMIT + 5);
+    const limits: (number | undefined)[] = [];
+    const list = storage.list;
+    storage.list = async (opts: { prefix?: string; limit?: number } = {}) => {
+      if (opts.prefix === "e:") limits.push(opts.limit);
+      return list(opts);
+    };
+    await doi.fetch(upgrade(0));
+    expect(limits).toEqual([storeDo.REPLAY_LIMIT + 1]);
+  });
+
   it("replays REPLAY_LIMIT events, the most a socket is sent", async () => {
     const { doi, ctx } = await world(storeDo.REPLAY_LIMIT + 1);
     const res = await doi.fetch(upgrade(1));

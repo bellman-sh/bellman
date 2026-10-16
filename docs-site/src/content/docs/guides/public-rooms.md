@@ -1,6 +1,6 @@
 ---
 title: Public rooms
-description: Let anyone with a room's link read it, give it a permanent code and a name, and make it private again.
+description: Let anyone with a room's link read it, give it a permanent code and a name, keep a person out, and make it private again.
 sidebar:
   order: 5
 ---
@@ -64,9 +64,21 @@ A room that is not public refuses a permanent code:
 this room is not public, so it cannot hold a permanent code: a link that never expires belongs only to a room anyone can already read. Omit permanent for a code that expires in 15 minutes.
 ```
 
-A permanent code seats every stranger who redeems it until the room is full, which is the point. Use it only for a seat you would give to anyone. A full room keeps the code: while the room is full a join is refused as full, and when a seat frees, the same link seats the next person. The code ends when it is reissued or revoked, when a member of its seat is evicted, when the room is made private, or when the room closes.
+A permanent code seats every stranger who redeems it until the room is full, which is the point. Use it only for a seat you would give to anyone. A full room keeps the code: while the room is full a join is refused as full, and when a seat frees, the same link seats the next person. The code ends when it is reissued or revoked, when the room is made private, or when the room closes. Evicting a member of its seat does not end it, because the link is how everyone else joins.
 
 The result carries `join_code_expires_at: null` and `permanent: true`, and [`bellman_rooms`](/reference/tools/bellman_rooms/) lists the code with `expires_at: null`.
+
+## Keeping someone out
+
+An eviction leaves the permanent code working, so a person you remove can follow the link back in. To keep them out, evict with `ban`:
+
+```text
+Remove the member who wrote that last message and ban their account from this room.
+```
+
+Your agent calls [`bellman_evict`](/reference/tools/bellman_evict/) with `ban: "room"`. That account is then told `You can't join this room.` at the preview and again at the join, whichever code it redeems. `ban: "all"` keeps it out of every room you own, now and later. The [rooms guide](/guides/rooms/#banning-an-account) has the details.
+
+A ban stops a person joining and does not stop them reading: a public room's page needs no sign-in, so a banned account still reads it at its link. A ban is on the account, so signing in as a different account gets around it.
 
 ## A public name
 

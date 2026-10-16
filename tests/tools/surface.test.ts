@@ -129,23 +129,29 @@ describe("tool surface", () => {
     expect(flat).toContain(`max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room`);
   });
 
-  // Evicting a member of a code's seat ends that code, a public room's permanent code included
-  // (evictMember passes `retire` for the target's role). Both descriptions list what ends a code and
-  // left this out, and docs.bellman.sh publishes them as written. bellman_connect lists the ends of an
-  // ordinary code and then the permanent code's own, so each list is read where it stands.
-  it("says in bellman_connect's and bellman_invite's descriptions that a code ends when a member of its seat is evicted", async () => {
+  // Evicting a member of a code's seat ends an ordinary code and leaves a public room's permanent one:
+  // evictMember asks the store to retire the seat's code only when it has an expiry (ADR 0022, decision
+  // 22). Both descriptions list what ends a code, and docs.bellman.sh publishes them as written.
+  // bellman_connect lists the ends of an ordinary code and then the permanent code's own, so each list is
+  // read where it stands.
+  it("says in bellman_connect's and bellman_invite's descriptions that an eviction ends an ordinary code and spares a permanent one", async () => {
     const { tools } = await jesse.listTools();
     const flat = (name: string) => tools.find((t) => t.name === name)!.description!.replace(/\s+/g, " ");
-    const evicted = "a member of its seat is evicted";
+    const ends = "a member of its seat is evicted";
+    const spared = "Evicting a member of its seat does not end it";
 
     const connect = flat("bellman_connect");
     const errors = connect.indexOf("Errors:");
     const permanent = connect.indexOf("A public room's permanent code");
     expect(errors, "the Errors line").toBeGreaterThan(-1);
     expect(permanent, "the Errors line's sentence on the permanent code").toBeGreaterThan(errors);
-    expect(connect.slice(errors, permanent), "bellman_connect, an ordinary code").toContain(evicted);
-    expect(connect.slice(permanent), "bellman_connect, the permanent code").toContain(evicted);
-    expect(flat("bellman_invite"), "bellman_invite, the permanent code").toContain(evicted);
+    expect(connect.slice(errors, permanent), "bellman_connect, an ordinary code").toContain(ends);
+    expect(connect.slice(permanent), "bellman_connect, the permanent code").toContain(spared);
+    expect(connect.slice(permanent), "bellman_connect, the permanent code is not ended by it").not.toContain(ends);
+
+    const invite = flat("bellman_invite");
+    expect(invite, "bellman_invite, the permanent code").toContain(spared);
+    expect(invite, "bellman_invite, the permanent code is not ended by it").not.toContain(ends);
   });
 
   // A joiner's human decides on the verbs a room declares, and since #2 the

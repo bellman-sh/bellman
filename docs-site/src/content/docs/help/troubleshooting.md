@@ -76,7 +76,7 @@ A Stop hook that finds no queue exits quietly and lets the turn end. Three cause
 
 ## A join code does not work
 
-`bellman_connect` refuses a code in one of three ways. The common one is:
+`bellman_connect` refuses a code in one of four ways. The common one is:
 
 ```text
 join code not found or expired. Codes expire 15 minutes after creation, except a public room's permanent code, and are consumed when a pair session fills. Ask the creator to start a new session.
@@ -86,16 +86,17 @@ A code stops resolving when:
 
 - 15 minutes have passed since it was issued. A public room's permanent code does not expire.
 - The room filled first. A pair room fills at its second member.
-- Someone reissued or revoked the code for its role, or the creator evicted a member in that role.
+- Someone reissued or revoked the code for its role, or the creator evicted a member in that role. A public room's permanent code is the exception: an eviction leaves it working.
 - The room closed.
 - The role group at the end was edited by hand. Case and spaces do not matter and `_` reads as `-`, but the server matches the whole string against the codes it issued, so `PEER-B` retyped as another role is not a code.
 
 If the room is still open, ask a member whose seat holds `invite` for a fresh code. They issue it with [`bellman_invite`](/reference/tools/bellman_invite/), which a full room refuses. A closed room takes no one, and a full pair room has no seat until a member leaves, so there someone has to start a new room. [Rooms and join codes](/guides/rooms/#inviting-more-members) has the rules.
 
-The other two refusals:
+The other three refusals:
 
 - `session is org-restricted and your identity is not in the creator's org.` The creator limited joining to their org. Sign in with an account in it, or ask for a room that is not org-only.
 - `session is full` means the room holds as many members as it can: two in a pair room, 5,000 in a swarm room. Wait for a member to leave.
+- `You can't join this room.` The room's creator has banned your account, from this room or from every room they own. Another code does not help, and Bellman does not say which ban it is or who made it. `bellman_confirm` answers the same if the ban lands after the preview. Ask the creator.
 
 ## A send is refused
 

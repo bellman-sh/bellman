@@ -16,6 +16,7 @@ import { acquireLock, readServer, writeServer } from "../src/credentials.js";
 import type { Identity } from "../src/types.js";
 import { fakeBellman, RESOURCE, type FakeBellman } from "./helpers/fake-bellman.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../src/ui/resource.js";
+import { VERSION } from "../src/version.js";
 
 // openBrowser is the one thing here that starts a process. The real spawn stays
 // the default, so a test can ask a real launcher to fail; the tests that must
@@ -627,6 +628,27 @@ describe("connectSignedIn", () => {
     expect((await remote.listResources!()).resources.map((r) => r.uri)).toContain(APP_RESOURCE_URI);
     const page = await remote.readResource!({ uri: APP_RESOURCE_URI });
     expect(page.contents[0]?.mimeType).toBe(APP_MIME_TYPE);
+    await remote.close();
+  });
+
+  // The signed-in connection said it was 0.1.0 whatever its version (#222), so the server could not tell an old
+  // bridge from a current one.
+  it("introduces itself to the server as this package's version", async () => {
+    const bellman = fakeBellman();
+    const remote = await connect(bellman, []);
+
+    expect(bellman.initializes.length).toBeGreaterThan(0);
+    for (const params of bellman.initializes) {
+      expect(params).toMatchObject({ clientInfo: { name: "bellman-bridge", version: VERSION } });
+    }
+    await remote.close();
+  });
+
+  // The update notice compares the server's version with the bridge's, and a browser sign-in is how most bridges connect.
+  it("reads the server's version through the signed-in connection", async () => {
+    const remote = await connect(fakeBellman(), []);
+
+    expect(remote.serverVersion?.()).toBe("0.1.0"); // the fake server's serverInfo
     await remote.close();
   });
 

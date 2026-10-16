@@ -1,8 +1,9 @@
 /**
- * The two tool lists a client can see, as a client lists them: the server's, and a hook-mode
- * bridge's, which is the server's plus the bridge's own. tests/extension.test.ts holds the Claude
- * Desktop manifest to the second; scripts/docs-reference.ts renders the docs site's tool reference
- * from both, so a page and its test read the same lists.
+ * The tool lists a client can see, as a client lists them: the server's, and a bridge's, which is
+ * the server's plus the bridge's own. tests/extension.test.ts holds the Claude Desktop manifest to
+ * a bridge in the delivery the manifest asks for; scripts/docs-reference.ts renders the docs
+ * site's tool reference from the server's list and a hook-mode bridge's, so a page and its test
+ * build their lists with the same code.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,7 +12,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../../src/auth.js";
-import { createBridge, type Remote } from "../../src/bridge.js";
+import { createBridge, type Delivery, type Remote } from "../../src/bridge.js";
 import { buildServer } from "../../src/server.js";
 import { MemoryBlobStore } from "../../src/blobs.js";
 import { MemoryStore } from "../../src/store.js";
@@ -29,12 +30,11 @@ export async function listServerTools(): Promise<Tool[]> {
 }
 
 /**
- * The bundle's own surface: a hook-mode bridge over the real tool handlers, which is
- * exactly what manifest.json's mcp_config launches — node server/channel.js with
- * BELLMAN_DELIVERY=hook. Nothing is stubbed, so a tool added to either side shows up
- * here without this file being told about it.
+ * A bridge over the real tool handlers, in the given delivery, as a client meets it: the tools it
+ * lists and the instructions it hands the model. Nothing is stubbed, so a tool added to either side
+ * shows up here without this file being told about it.
  */
-export async function listHookBridgeTools(): Promise<Tool[]> {
+export async function listBridge(delivery: Delivery): Promise<{ tools: Tool[]; instructions: string }> {
   const store = new MemoryStore();
   const identity = resolveIdentity(`Bearer ${DEV_KEY.jesse}`);
   if (!identity) throw new Error(`dev key ${DEV_KEY.jesse} no longer resolves`);
@@ -42,7 +42,7 @@ export async function listHookBridgeTools(): Promise<Tool[]> {
   const inboxDir = mkdtempSync(join(tmpdir(), "bellman-extension-"));
 
   const bridge = createBridge({
-    delivery: "hook",
+    delivery,
     inboxDir,
     remote: async (): Promise<Remote> => {
       const server = buildServer(identity, store, new MemoryBlobStore(), { hostedSeat: true });
@@ -63,10 +63,15 @@ export async function listHookBridgeTools(): Promise<Tool[]> {
 
   try {
     const { tools } = await client.listTools();
-    return tools;
+    return { tools, instructions: client.getInstructions() ?? "" };
   } finally {
     await bridge.close();
     await client.close();
     rmSync(inboxDir, { recursive: true, force: true });
   }
+}
+
+/** The Claude Code plugin's bridge, which runs in hook delivery. */
+export async function listHookBridgeTools(): Promise<Tool[]> {
+  return (await listBridge("hook")).tools;
 }

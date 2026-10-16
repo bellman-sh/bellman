@@ -6,6 +6,7 @@ import { ABANDONED_AFTER_MS } from "../src/presence.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, hostMember, type HostWake } from "../src/host.js";
 import { tickStep } from "../src/heartbeat.js";
+import { clearedKeys, dueFindings } from "../src/housekeeping.js";
 import { describeStoreContract } from "./helpers/store-contract.js";
 import { member, roomManifest, session, type SeededSession } from "./helpers/fixtures.js";
 
@@ -347,6 +348,90 @@ describe("MemoryStore ticks its rooms with the step it is handed", () => {
     store.tick(T, tickStep);
     expect((await store.eventsAfter("qs_tick_f", 0)).filter((e) => e.type === "heartbeat")).toEqual([]);
     expect(store.wakes).toEqual([]);
+  });
+});
+
+/**
+ * The Node server's housekeeping (#231): for every room, what SessionDO's housekeeping handler does for
+ * one. `MemoryStore.housekeep` is handed its rules, `dueFindings` and `clearedKeys` from housekeeping.ts,
+ * because that module imports this one, as `tick` is handed its step. These cases hand it the real ones.
+ */
+describe("MemoryStore raises housekeeping with the rules it is handed (#231)", () => {
+  const HOUR = 3_600_000;
+  const T = Date.now();
+  const rules = { dueFindings, clearedKeys };
+  /**
+   * A room with a hosted seat that names a person quiet two hours after their last send and again four
+   * hours after a raise, or names nothing when `declared` is false. Each person joined at their entry in
+   * `quietSince`, has sent nothing since, and was last seen at `seenAt`.
+   */
+  const room = (id: string, { quietSince = [T - 3 * HOUR], seenAt = T - 1_000, declared = true, over = {} as Partial<SeededSession> } = {}) => {
+    const m = roomManifest({
+      mode: "swarm", preset: null,
+      roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+      defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null },
+      housekeeping: declared ? { quietAfterMs: 2 * HOUR, answerWithinMs: null, idleAfterMs: null, repeatAfterMs: 4 * HOUR } : null,
+    });
+    const people = quietSince.map((at, i) => member({ memberId: `m_${i}`, userId: `u_${i}`, roomRole: "lead", joinedAt: at, lastSeenAt: seenAt }));
+    return { ...session({ id, manifest: m, members: [...people, hostMember(m, T)], joinCodes: {} }), ...over } as SeededSession;
+  };
+  const housekept = async (store: MemoryStore, id: string) => ({
+    events: (await store.eventsAfter(id, 0)).filter((e) => e.type === "housekeeping"),
+    raised: (await store.getSession(id))!.raised,
+  });
+
+  it("(a) raises one proposal for a person past the threshold, from the room itself, records it, and wakes no seat", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_hk_a"));
+    store.housekeep(T, rules);
+    const { events, raised } = await housekept(store, "qs_hk_a");
+    expect(events).toMatchObject([{
+      cursor: 1, type: "housekeeping", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman", refId: null, at: T,
+      payload: { finding: "member_quiet", about: { member_id: "m_0" }, repeat: 1 },
+    }]);
+    expect(raised).toEqual({ "member_quiet:m_0": { at: T, repeat: 1, since: (events[0]!.payload as { since: number }).since } });
+    expect(store.wakes).toEqual([]);
+  });
+
+  it("(b) raises nothing again inside the repeat window, and raises again at its end, counting up", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_hk_b"));
+    store.housekeep(T, rules);
+    store.housekeep(T + 4 * HOUR - 1, rules);
+    expect((await housekept(store, "qs_hk_b")).events).toHaveLength(1);
+    store.housekeep(T + 4 * HOUR, rules);
+    expect((await housekept(store, "qs_hk_b")).events.map((e) => (e.payload as { repeat: number }).repeat)).toEqual([1, 2]);
+  });
+
+  it("(c) forgets a raised finding that no longer holds, and writes nothing for it", async () => {
+    const store = new Recording();
+    const seeded = room("qs_hk_c");
+    // The person has sent since the raise: the finding holds no longer.
+    (seeded.members[0] as { lastSentAt?: number }).lastSentAt = T - 60_000;
+    await store.createSession({ ...seeded, raised: { "member_quiet:m_0": { at: T - HOUR, repeat: 1, since: T - HOUR } } } as SeededSession);
+    store.housekeep(T, rules);
+    expect(await housekept(store, "qs_hk_c")).toEqual({ events: [], raised: {} });
+  });
+
+  it.each([
+    ["declares no housekeeping", { declared: false }],
+    ["is closed", { over: { closed: true } }],
+    ["is frozen", { over: { frozenAt: T - HOUR } }],
+    ["is abandoned", { seenAt: T - ABANDONED_AFTER_MS - 1_000 }],
+  ] as const)("(d) writes nothing into a room that %s, however long its person has been quiet", async (_, opts) => {
+    const store = new Recording();
+    await store.createSession(room("qs_hk_d", opts));
+    store.housekeep(T, rules);
+    expect(await housekept(store, "qs_hk_d")).toEqual({ events: [], raised: {} });
+  });
+
+  it("(e) writes one proposal per due key in one call, with consecutive cursors", async () => {
+    const store = new Recording();
+    await store.createSession(room("qs_hk_e", { quietSince: [T - 3 * HOUR, T - 5 * HOUR] }));
+    store.housekeep(T, rules);
+    const { events, raised } = await housekept(store, "qs_hk_e");
+    expect(events.map((e) => [e.cursor, (e.payload as { about: { member_id: string } }).about.member_id])).toEqual([[1, "m_0"], [2, "m_1"]]);
+    expect(Object.keys(raised).sort()).toEqual(["member_quiet:m_0", "member_quiet:m_1"]);
   });
 });
 

@@ -284,6 +284,8 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
+**Updates.** A remote connector is always current: the server deploys on every merge. A local bridge (the Desktop bundle, the plugin, or an npm install) compares its version with its server's, and when the server runs a newer release it says so once, in the first tool result it relays, with the step for its install: install the bundle again from `https://bellman.sh/bellman.mcpb`, run `claude plugin update bellman@bellman`, or run `bellman update`. Bridges before 0.3.5 carry no notice.
+
 ## Plans
 
 Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month. Joining somebody else's session is free on every plan — only creating one is gated.
@@ -456,9 +458,8 @@ joiner sees the thresholds before accepting a seat: the connect preview carries
 
 Housekeeping counts people. A hosted seat is never named quiet, what it says is not
 activity (a room only the host speaks in reads idle), and a proposal never wakes it. The Node
-server (`npm start`) keeps the books these findings are read from and raises nothing: its tick
-loop does not run housekeeping, so a housekeeping room shows no proposal there. Run the room
-under `npm run dev:worker` to see one.
+server (`npm start`) raises the same proposals from the loop that ticks its rooms, within a
+minute of a threshold passing.
 
 The bridge reads the file from the directory Claude Code was started in
 (it does not search parent directories) and logs

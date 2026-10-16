@@ -29,11 +29,11 @@ interface Bellman {
 }
 
 /** A Bellman that takes the request and answers however the test says, or never. */
-async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellman> {
+async function fakeBellman(answer: (res: ServerResponse, req: IncomingMessage) => void): Promise<Bellman> {
   const hits: Bellman["hits"] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     hits.push({ authorization: req.headers.authorization, method: req.method, url: req.url });
-    answer(res);
+    answer(res, req);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const { port } = server.address() as { port: number };
@@ -42,6 +42,21 @@ async function fakeBellman(answer: (res: ServerResponse) => void): Promise<Bellm
 
 /** Takes the request and holds it: a server thinking, or a human at a browser. */
 const hangs = () => undefined;
+/** Speaks just enough MCP, as a server running `version`: the handshake, the notice after it, and any tool call. */
+const runs = (version: string) => (res: ServerResponse, req: IncomingMessage) => {
+  if (req.method !== "POST") return void res.writeHead(405).end(); // no standalone event stream here
+  let body = "";
+  req.on("data", (chunk) => (body += String(chunk)));
+  req.on("end", () => {
+    const message = JSON.parse(body) as { id?: unknown; method?: string };
+    if (message.id === undefined) return void res.writeHead(202).end();
+    const result =
+      message.method === "initialize"
+        ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "bellman", version } }
+        : { content: [{ type: "text", text: "{}" }] };
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+  });
+};
 const refuses = (res: ServerResponse) => {
   res.writeHead(500, { "content-type": "text/plain" }).end("nope");
 };
@@ -81,9 +96,13 @@ interface Options {
   uploadRoot?: string;
   /** The directory to start the process in, which is its upload root while `uploadRoot` is unset. */
   cwd?: string;
+  /** BELLMAN_DELIVERY for the process, with its inbox under a temporary BELLMAN_INBOX_ROOT. Unset, it is channel. */
+  delivery?: string;
+  /** BELLMAN_INSTALL for the process, as a package's env would set it. Unset, it is npm's. */
+  install?: string;
 }
 
-function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd }: Options = {}): Bridge {
+function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoot, cwd, delivery, install }: Options = {}): Bridge {
   const configHome = mkdtempSync(join(tmpdir(), "bellman-channel-"));
   dirs.push(configHome);
   servers.push(bellman.server);
@@ -117,6 +136,13 @@ function startBridge(bellman: Bellman, { key, cached = true, identity, uploadRoo
   env.BELLMAN_NO_BROWSER = "1";
   delete env.BELLMAN_UPLOAD_ROOT;
   if (uploadRoot) env.BELLMAN_UPLOAD_ROOT = uploadRoot;
+  if (delivery) {
+    env.BELLMAN_DELIVERY = delivery;
+    env.BELLMAN_INBOX_ROOT = mkdtempSync(join(tmpdir(), "bellman-inbox-"));
+    dirs.push(env.BELLMAN_INBOX_ROOT);
+  }
+  delete env.BELLMAN_INSTALL;
+  if (install) env.BELLMAN_INSTALL = install;
 
   const proc = spawn(TSX, [ENTRY], { env, cwd, stdio: ["pipe", "pipe", "pipe"] });
   spawned.push(proc);
@@ -179,6 +205,21 @@ describe("the bridge as a process", () => {
       ready: true,
       log: [`ready: channel delivery via ${bellman.url} (not signed in yet)`],
       // Not exit 1 with "BELLMAN_KEY is not set; refusing to start".
+      exitCode: null,
+    });
+  });
+
+  // The Claude Desktop bundle launches this entry in queue delivery (#241), which needs the inbox this
+  // file hands the bridge. The in-process tests build their own bridges, so only a process reaches it.
+  it("starts in queue delivery, as the Claude Desktop bundle launches it", async () => {
+    const bellman = await fakeBellman(hangs);
+    const bridge = startBridge(bellman, { delivery: "queue" });
+
+    const ready = await until(() => bridge.log().length > 0);
+
+    expect({ ready, log: bridge.log(), exitCode: bridge.proc.exitCode }).toEqual({
+      ready: true,
+      log: [`ready: queue delivery via ${bellman.url} (not signed in yet)`],
       exitCode: null,
     });
   });
@@ -328,6 +369,29 @@ function answers(bridge: Bridge): Map<number, Answer> {
   });
   return byId;
 }
+
+describe("the update notice through the process", () => {
+  /**
+   * src/channel.ts is the one place the bridge learns how it was installed, from the env each package sets. Every
+   * other test hands its bridge an install of its own, so a channel.ts that never passed one would ship with every
+   * test green and tell a Desktop user to run npm.
+   */
+  it("names the bundle's step to a bridge the bundle's env launched, when its server runs a newer release", async () => {
+    const bellman = await fakeBellman(runs("99.0.0"));
+    const bridge = startBridge(bellman, { key: "qk_dev_jesse", cached: false, install: "bundle" });
+    const answered = answers(bridge);
+    await until(() => bridge.log().length > 0);
+
+    initialize(bridge);
+    bridge.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    bridge.send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "bellman_rooms", arguments: {} } });
+    await until(() => answered.has(3));
+
+    const text = (answered.get(3)?.result?.content ?? []).map((block) => block.text ?? "").join("\n");
+    expect(text).toContain("Bellman 99.0.0 is out");
+    expect(text).toContain("download https://bellman.sh/bellman.mcpb");
+  });
+});
 
 describe("bellman_upload through the process", () => {
   /**

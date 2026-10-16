@@ -188,7 +188,7 @@ flowchart TB
 | Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
-| Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
+| Claude Desktop, consumer app | yes | none | manual `bellman_sync`, which the bundle's `BELLMAN_DELIVERY=queue` tells the agent to make when a turn starts; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
 Two consequences:
@@ -1453,9 +1453,9 @@ loss is findable, and the sweep at close (#65) is what finds it.
    (`thawedAt`): nobody can send in a frozen room, so a freeze is never counted as
    silence. It counts people (`isActivePerson`, hosted seat D5): the hosted seat is never named
    quiet, what it says moves no clock, a room only it speaks in reads idle, and a
-   proposal never wakes it. `MemoryStore` keeps the same books at every append
-   and raises nothing, because the Node server's tick loop (#188) does not run
-   housekeeping.
+   proposal never wakes it. `MemoryStore` keeps the same books at every append,
+   and the Node server's loop raises the same proposals through `housekeep`, run
+   beside `tick` (#188) once a minute, with the same rules handed in (#231).
 
    `sweep` runs once when a room closes and deletes the objects under its R2
    prefix that no surface item names, crediting the room their bytes (#65, D3).
@@ -1844,12 +1844,17 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,697** | every request, whether or not you are in a room |
+| Tool definitions | **~8,694** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
-| `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
+| `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
+(`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no
+longer lists a room-level `expires_at` the listing had stopped sending. No other tool changed.
+That is 8,694.
 
 Re-measured on 2026-10-15 for public names, by the method below: 426 tokens over the 8,271
 that main (`7d4c137`) measures. `bellman_public_name` is new, at 309: its schema, and a

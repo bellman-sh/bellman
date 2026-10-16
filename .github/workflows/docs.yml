@@ -1,0 +1,99 @@
+name: Docs
+
+# docs.bellman.sh: built on every pull request that could change it, deployed from main. A tool
+# change that regenerates the reference also touches docs-site/, which is what usually triggers this.
+on:
+  push:
+    branches: [main]
+    paths: ["docs-site/**", "src/tools/**", ".github/workflows/docs.yml"]
+  pull_request:
+    paths: ["docs-site/**", "src/tools/**", ".github/workflows/docs.yml"]
+
+# A fork PR gets no secrets and no write access. The build needs neither.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@v4
+
+      # @astrojs/prism 4.1.0 needs Node >=22.22.0. setup-node takes a cached match for a bare 22
+      # without looking for a newer one, so the range states the floor itself; <23 stays on the
+      # major the server's workflows use.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ">=22.22.0 <23"
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - run: npm ci
+
+      # starlight-links-validator fails this on a broken internal link.
+      - run: npm run build
+
+      # The pages as a reader gets them. Each line reads one tool's own text, so a change to that
+      # text can move what it looks for: bellman_start writes <role>, and bellman_send writes
+      # kind: "html" and lists its types a line each. The line-break floor guards against the breaks
+      # disappearing altogether, not against a count: the page renders more than it asks for, so a
+      # tool may gain or lose lines without touching it.
+      - name: The built pages show tool text as written
+        run: |
+          set -eu
+          page=dist/reference/tools
+          grep -q '&lt;role&gt;' "$page/bellman_start/index.html" || { echo "::error::bellman_start's <role> is not shown as text"; exit 1; }
+          grep -q 'kind: "html"' "$page/bellman_send/index.html" || { echo "::error::bellman_send's quotes were curled"; exit 1; }
+          [ "$(grep -o '<br>' "$page/bellman_send/index.html" | wc -l)" -ge 3 ] || { echo "::error::bellman_send's description lost its line breaks"; exit 1; }
+
+      # The deploy job's own command, which needs no credentials.
+      - run: npx wrangler deploy --dry-run --outdir .wrangler/dry-run
+
+  deploy:
+    # Only a push to main that already built.
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Never let two deploys race; a queued one waits rather than being dropped.
+    concurrency:
+      group: deploy-docs
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build job's Node, for the same reason.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ">=22.22.0 <23"
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+      # Fail loudly rather than letting wrangler guess at an account.
+      - name: Require deploy credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set as repository secrets"
+            exit 1
+          fi
+
+      # The server deploy's token. If it cannot attach the custom domain, the first deploy is the
+      # owner's, by hand; every later one only uploads.
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Verify the deployment
+        run: sh ./smoke.sh https://docs.bellman.sh

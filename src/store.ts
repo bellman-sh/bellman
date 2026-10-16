@@ -1407,8 +1407,8 @@ export interface BellmanStore {
    * writes nothing to the log.
    *
    * A call of its own, made after a send's checks and before its append (ADR 0022), so both append methods
-   * keep their return types. A send that fails after it was admitted, such as one to a frozen room or one
-   * with a key conflict, still used its place.
+   * keep their return types. A send that fails after it was admitted, such as one with a key conflict or one
+   * to a room that froze in the gap, still used its place.
    *
    * Memory only: `SessionDO` keeps the counts in the instance and writes no storage, so a room object that
    * sleeps forgets them, which a one-minute window can afford. `MemoryStore` keeps them beside the room and

@@ -20,6 +20,7 @@ import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
+import { sendLimitFor } from "./send-limit.js";
 import {
   JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
@@ -43,23 +44,28 @@ import { IMAGE_TYPES, isImageType, normalizeMediaType, type BlobStore } from "./
  * named something the room does not have. It is not `"not_found"`, which is the
  * room itself or a member of it, and a route answers 400 from the one and 404
  * from the other.
+ *
+ * `"rate_limited"` is a send past its member's minute (ADR 0022). It is the one refusal that carries
+ * a number, `retryAfter`, and a route answers it 429.
  */
-export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid";
+export type RoomFailure = "not_found" | "closed" | "frozen" | "forbidden" | "conflict" | "invalid" | "rate_limited";
 
 /**
  * Not a throw, because these are ordinary outcomes — a closed room is not
  * exceptional. Not a ToolResult, because that shape is MCP's and a route has
  * no use for a `content` array.
+ *
+ * `retryAfter` is whole seconds, and only a `rate_limited` refusal has one.
  */
 export type RoomResult<T> =
   | { ok: true; value: T }
-  | { ok: false; code: RoomFailure; reason: string };
+  | { ok: false; code: RoomFailure; reason: string; retryAfter?: number };
 
 export const succeed = <T>(value: T): RoomResult<T> => ({ ok: true, value });
 
 /** `RoomResult<never>` so a refusal is assignable to any operation's result. */
-export const refuse = (code: RoomFailure, reason: string): RoomResult<never> =>
-  ({ ok: false, code, reason });
+export const refuse = (code: RoomFailure, reason: string, extra?: { retryAfter: number }): RoomResult<never> =>
+  ({ ok: false, code, reason, ...extra });
 
 // ---------------------------------------------------------------------------
 // Room primitives
@@ -751,6 +757,37 @@ export async function revokeInvite(
 }
 
 /**
+ * Count one bellman_send against its member's minute (spec D5), or refuse it. Called after every check
+ * that can refuse the send and before its append.
+ *
+ * Last of the checks and ahead of the first write, so a send refused for its verb, its payload or a frozen
+ * room spends no place, and a refusal here leaves the log as it was. Once the count says yes the place is
+ * spent whatever the append then does: a send that meets a key conflict, or a room that froze in the gap,
+ * still used it (R7). A keyed retry is a send like any other, so at the limit it is refused before its key
+ * is looked up, and the same key replays once the minute has room again (R6).
+ *
+ * `retryAfter` is rounded up to whole seconds. The store answers in milliseconds, and a client that waited
+ * the rounded-down second would be refused again.
+ */
+export async function admitSend(
+  store: BellmanStore,
+  sessionId: string,
+  member: Member,
+  now: number = Date.now(),
+): Promise<RoomResult<null>> {
+  const limit = sendLimitFor(member);
+  const admission = await store.admitSend(sessionId, member.memberId, limit, now);
+  if (admission.ok) return succeed(null);
+  const retryAfter = Math.ceil(admission.retryAfterMs / 1000);
+  return refuse(
+    "rate_limited",
+    `rate_limited: this seat has used its ${limit} sends for the minute, and nothing was sent. ` +
+      `Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`,
+    { retryAfter },
+  );
+}
+
+/**
  * A seat writes one item on the room's working surface, or removes one (#129).
  *
  * One operation for both transports — `bellman_send type: "surface"` and
@@ -768,6 +805,10 @@ export async function revokeInvite(
  * state the spec declares a reader handles — so neither moves into the store.
  * The verb guard, the frozen guard and the row's write are not courtesies, and
  * each is where it has to be.
+ *
+ * `countSend` is `bellman_send`'s: its `surface` kind is a send, and counts against the member's minute
+ * (ADR 0022, R6), after every validation and ahead of the append. The routes leave it off, because the
+ * dash's group drag writes one PUT per card and would pass 30.
  */
 export async function writeSurface(
   store: BellmanStore,
@@ -777,6 +818,7 @@ export async function writeSurface(
   memberId: string,
   payload: unknown,
   idempotencyKey?: string,
+  countSend = false,
 ): Promise<RoomResult<{ cursor: number; replayed: boolean; roomMembers: string[] }>> {
   const gate = await gateSeat(store, actor, sessionId, memberId, "write_surface");
   if (!gate.ok) return gate;
@@ -836,6 +878,13 @@ export async function writeSurface(
         }
       }
     }
+  }
+
+  if (countSend) {
+    const me = await findMember(store, session, memberId, actor);
+    if (!me) return refuse("forbidden", "member_id is not yours or has left the session.");
+    const admitted = await admitSend(store, sessionId, me);
+    if (!admitted.ok) return admitted;
   }
 
   const draft: EventBody = {

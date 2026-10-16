@@ -71,7 +71,7 @@ const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 export const STATUS: Record<RoomFailure, number> = {
-  not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400,
+  not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400, rate_limited: 429,
 };
 
 // ponytail: five minutes of private caching, not tuned. It is also how long a

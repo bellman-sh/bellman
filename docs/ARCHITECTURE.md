@@ -1225,6 +1225,23 @@ loud:
   socket open at the time stays open, receive-only, and only the next connect is
   refused. A ban `"all"` that only widens an earlier room ban files no audit row. A ban
   `"all"` leaves a seat the joined-rooms index never recorded (`sessionsJoinedBy`).
+- **A member's sends are counted, and a stranger's are fewer** (ADR 0022). `bellman_send`
+  admits a member 30 sends in a rolling minute, and 6 to a stranger: a member who joined
+  a public room through its permanent code, which the member row records as
+  `via: "permanent"`. The creator, and anyone who joined with a code that expires, is
+  never one. The count is per member and per room, and lives in the room object's memory
+  (`BellmanStore.admitSend`), so it costs no write and a room object that sleeps forgets
+  it. The hosted seat is exempt, because its writes never ask. The count is its own
+  call, made after every check that can refuse the send and before the append: a send
+  refused for another reason spends no place, a send the count refuses writes nothing,
+  and a send that fails after it, on a key conflict or a freeze that lands in the gap,
+  still used its place.
+  A refusal is `rate_limited` with `retry_after` in whole seconds, rounded up, in the
+  tool's `structuredContent` and in its text. Only `bellman_send` counts, its `surface`
+  kind and a keyed retry included. The HTTP surface routes do not, because the dash's
+  group drag writes one PUT per card and would pass 30. The gap that leaves: a stranger
+  whose seat holds `write_surface` could write through a route uncounted, and no
+  built-in preset gives a default seat that verb.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -1875,12 +1892,18 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,894** | every request, whether or not you are in a room |
+| Tool definitions | **~8,940** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for the send limit, by the method below: 46 tokens over the
+8,894 the branch measured before it, which is main's 8,694 and bans' 200. `bellman_send`
+is up 46, to 1,425, all of it the sentence added to its `Errors:` line, which gives a
+member's limit, a stranger's, and what a refusal is. No other tool changed and none was
+added. That is 8,940.
 
 Re-measured on 2026-10-16 for bans, by the method below: 200 tokens over the 8,697 that
 main (`7d1dbad`) measures. `bellman_evict` is up 200, to 713: `ban` in its schema and its

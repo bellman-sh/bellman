@@ -145,6 +145,19 @@ export function fail(message: string): ToolResult {
   return { content: [{ type: "text", text: `Error: ${message}` }], isError: true };
 }
 
+/**
+ * A room operation's refusal as a tool result; rate_limited also carries { error: "rate_limited",
+ * retry_after } as structuredContent.
+ *
+ * The text already names the wait, for a client that shows only text. The structured form is for one that
+ * backs off on its own, and it is the only refusal with one: every other code is read from its sentence.
+ */
+export function refusal(r: { code: string; reason: string; retryAfter?: number }): ToolResult {
+  const out = fail(r.reason);
+  if (r.code !== "rate_limited") return out;
+  return { ...out, structuredContent: { error: "rate_limited", retry_after: r.retryAfter } };
+}
+
 
 export class FrozenError extends Error {
   constructor() { super(FROZEN); }

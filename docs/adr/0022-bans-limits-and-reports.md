@@ -94,9 +94,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     retry. The HTTP surface routes are not counted, because the dash's group drag writes
     one PUT per card and would pass 30.
 15. **The count is its own store call (R7).** `admitSend` runs after a send's checks and
-    before its append, so a send that fails after admission, such as one to a frozen room
-    or one with a key conflict, still used its place. Both append methods keep their
-    return types.
+    before its append, so a send that fails after admission, such as one with a key
+    conflict or one to a room that froze in the gap, still used its place. A send to a room
+    that was already frozen is refused by the frozen check first and spends none. Both
+    append methods keep their return types.
 16. **Reports (D6).** A member files one with `bellman_report`, and a signed-in reader of
     a public room through the dash, which posts to `POST /rooms/:id/reports`. The reason
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most

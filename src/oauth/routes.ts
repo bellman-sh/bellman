@@ -84,6 +84,7 @@ export type PlanStore = Pick<
   | "putGrantIfOwned" | "deleteGrantIfOwned"
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
+  | "recordSignIn"
 >;
 
 export type PlanSource = "operator" | "grant" | "default";
@@ -109,6 +110,29 @@ export type PlanSource = "operator" | "grant" | "default";
  * settings page shows it, so that a plan resting on an address is visible.
  */
 export async function resolvePlan(
+  profile: ProviderProfile,
+  config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
+): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {
+  const resolved = await decidePlan(profile, config);
+  /**
+   * The one place a sign-in is observable. Every caller of this function has
+   * just exchanged an authorization code — the panel, /upgrade and /authorize —
+   * and nothing else calls it, so recording here cannot be forgotten by a
+   * fourth caller the way three call sites could (#258).
+   *
+   * Swallowed on purpose. The record is an observation for counting accounts;
+   * losing one is a wrong number, and failing the sign-in over it is a person
+   * locked out.
+   */
+  try {
+    await config.plans?.recordSignIn(resolved.identity.userId, Date.now());
+  } catch (err) {
+    console.error("recording the sign-in failed:", err);
+  }
+  return resolved;
+}
+
+async function decidePlan(
   profile: ProviderProfile,
   config: Pick<OAuthConfig, "overrides" | "plans" | "honourPurchases">
 ): Promise<{ identity: Identity; source: PlanSource; grantSource?: string; keys: string[]; key: string | null }> {

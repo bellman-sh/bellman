@@ -1,6 +1,6 @@
 import type {
   AgentInfo, ArrivingMember, AuditEntry, Brief, HostUnits, Member, NewSession, PendingConnect, PlanGrant, RoomCreator,
-  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow,
+  RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
@@ -1385,6 +1385,17 @@ export interface BellmanStore {
 
   countCreatesThisMonth(userId: string): Promise<number>;
   recordCreate(userId: string): Promise<void>;
+
+  /**
+   * Note that someone signed in. First sign-in sets firstSeenAt; every one
+   * moves lastSeenAt.
+   *
+   * The provider is not stored: userId is u_<provider>_<subject>, so it is
+   * already in there.
+   */
+  recordSignIn(userId: string, now: number): Promise<void>;
+  /** How many people have ever signed in. */
+  countUsers(): Promise<number>;
   /**
    * Take one of this person's hosted-room slots for `sessionId`, unless `limit` are held
    * already (I7): the count and the record are one operation, so two starts at the limit
@@ -1523,6 +1534,7 @@ export class MemoryStore implements BellmanStore {
   private handleByUser = new Map<string, string>(); // userId -> handle
   private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
+  private users = new Map<string, UserRecord>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
   /**
@@ -2406,6 +2418,15 @@ export class MemoryStore implements BellmanStore {
 
   async recordCreate(userId: string): Promise<void> {
     this.recordMonth(this.creates, userId);
+  }
+
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    const seen = this.users.get(userId);
+    this.users.set(userId, { userId, firstSeenAt: seen?.firstSeenAt ?? now, lastSeenAt: now });
+  }
+
+  async countUsers(): Promise<number> {
+    return this.users.size;
   }
 
   async reserveHostedRoom(userId: string, sessionId: string, limit: number): Promise<HostedSlot> {

@@ -331,6 +331,23 @@ export interface PlanGrant {
   expiresAt: number | null;
 }
 
+/**
+ * That a person exists.
+ *
+ * Sign-in used to persist nothing: `resolvePlan` derives plan, role and org
+ * from the provider profile on every request, so anyone on the default free
+ * plan left no trace and "how many accounts are there" had no answer (#258).
+ *
+ * It is an observation, never a source of authority. Plan, role and org still
+ * come from BELLMAN_USERS and the grant store, in that order.
+ */
+export interface UserRecord {
+  /** u_<provider>_<subject>, byte-identical to what defaultIdentity mints. */
+  userId: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
 export interface Entitlements {
   modes: SessionMode[];
   monthlyCreates: number;

@@ -250,6 +250,21 @@ export interface AuditEntry {
   actorUserId: string;
   action: string;
   detail: Record<string, unknown>;
+  /**
+   * What the row was about, as of the action (audit trail spec, D2). The six are absent
+   * together on a row written before they existed and present together on every row
+   * written since, so `crossing` is the one to test. `actorOrgId` null is an actor with
+   * no org; absent is a row that never said.
+   */
+  actorLabel?: string | null;
+  actorOrgId?: string | null;
+  roomName?: string | null;
+  /** The orgs the action involved (D1), sorted, with null last for a person with no org. */
+  parties?: (string | null)[];
+  /** From this row's stream (D3): whether a party other than this org was involved. */
+  crossing?: "internal" | "cross_org";
+  /** From this row's stream (D3): this org acted, or another did. Null on an internal row and for the system. */
+  direction?: "outbound" | "inbound" | null;
 }
 
 /**

@@ -873,6 +873,69 @@ describe("SessionDO.appendEventOnce", () => {
   });
 
   /**
+   * #208. A member the room has stopped asking arms nothing, so its report brings the next tick
+   * forward from no time at all, and the append re-arms for it as it does for housekeeping (I1).
+   * Without that the room sleeps through the report: nothing else is armed but the abandonment,
+   * 90 days out. The control is the hot path, a report from a member still asked, which only
+   * moves its deadline later and must not cost a re-arm.
+   */
+  describe("a report and the alarm (#208)", () => {
+    const EVERY = 300_000;
+    const reporting = () => {
+      const base = roomManifest();
+      return { ...base, heartbeatOnMs: EVERY, roles: { ...base.roles, peer_a: { ...base.roles.peer_a, reports: true } } };
+    };
+    /** A room whose one member last reported `silentFor` ago, its last tick half a cadence back. */
+    async function room(silentFor: number) {
+      const now = Date.now();
+      const world = await worldOn(storeDo, currentRow({
+        manifest: reporting(),
+        members: [member({ roomRole: "peer_a", lastReportAt: now - silentFor })],
+        lastTickAt: now - EVERY / 2,
+      } as never));
+      return { ...world, now };
+    }
+    const report = (store: Awaited<ReturnType<typeof room>>["store"]) => store.appendEventOnce(
+      LEGACY_ID, keyed({ type: "progress", payload: { note: "back" } }), "send-0001", { creditReport: true },
+    );
+
+    it("re-arms for a report from a member the room had stopped asking", async () => {
+      const { store, legacyStorage } = await room(10 * EVERY);
+      const armed = legacyStorage.alarms.length;
+      const write = await report(store);
+      if (write.outcome !== "appended") throw new Error(`send said ${write.outcome}`);
+      expect(legacyStorage.alarms.slice(armed)).toEqual([write.event.at + EVERY]);
+    });
+
+    it("does not re-arm for a report from a member the room still asks", async () => {
+      const { store, legacyStorage } = await room(EVERY);
+      const armed = legacyStorage.alarms.length;
+      await report(store);
+      expect(legacyStorage.alarms.slice(armed)).toEqual([]);
+    });
+
+    // A replay re-asserts the credit (see appendEventOnce), so a stamp it repairs is that report's.
+    it("re-arms for a replay whose repair is that member's stamp", async () => {
+      const { store, legacyStorage, now } = await room(10 * EVERY);
+      const first = await report(store);
+      if (first.outcome !== "appended") throw new Error(`send said ${first.outcome}`);
+      // The stamp as a first attempt that never landed it would have left it.
+      const row = legacyStorage.snapshot()[memberKey("m_creator")] as Member;
+      await legacyStorage.put(memberKey("m_creator"), { ...row, lastReportAt: now - 10 * EVERY });
+      const armed = legacyStorage.alarms.length;
+      expect((await report(store)).outcome).toBe("replayed");
+      expect(legacyStorage.alarms.slice(armed)).toEqual([first.event.at + EVERY]);
+    });
+
+    it("re-arms for a stamp patched onto a member the room had stopped asking", async () => {
+      const { store, legacyStorage, now } = await room(10 * EVERY);
+      const armed = legacyStorage.alarms.length;
+      await store.updateMember(LEGACY_ID, "m_creator", { lastReportAt: now });
+      expect(legacyStorage.alarms.slice(armed)).toEqual([now + EVERY]);
+    });
+  });
+
+  /**
    * And an append nobody asked to credit writes no session row at all. Three
    * keys, as the case above this block has it — the stamp is not a cost every
    * send pays, and the store does not read the event's type to decide.

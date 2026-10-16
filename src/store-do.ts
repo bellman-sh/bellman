@@ -33,7 +33,7 @@ import {
   PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
-import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
+import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
@@ -558,8 +558,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * tick's clock, which a books row built from `s` alone would overwrite. Nothing is added
    * to the put when the room keeps no books, or the event moves none.
    *
-   * **It answers whether the write brought housekeeping's soonest time forward** (I1): the
-   * record it put against the record the caller read, by `bringsForward`. The two public
+   * **It answers whether the write brought housekeeping's soonest time or the next tick
+   * forward** (I1, #208): the record it put against the record the caller read, by
+   * `bringsForward` and `tickBroughtForward`. The two public
    * member appends re-arm the alarm after their commit when it is true, so the rule is
    * "the soonest time moved earlier" and not a list of the event kinds that can do it. The
    * hosted seat's append and the alarm's own writers ignore it: the books do nothing for the
@@ -587,7 +588,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
     for (const key of deletes) await txn.delete(key);
-    return kept !== s && bringsForward(s, kept, e.at);
+    return kept !== s && (bringsForward(s, kept, e.at) || tickBroughtForward(s, kept));
   }
 
   async createSession(s: NewSession): Promise<void> {
@@ -1513,15 +1514,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
     // here, and that one reaches nextTickAt not at all.
     //
-    // `lastReportAt` DOES reach it, since each member's deadline is its own
-    // report plus the cadence — and it still needs no reArm, because a fresh
-    // stamp only ever moves that deadline LATER. The armed alarm is then early:
-    // it fires, finds nobody due, advances `lastTickAt`, and the closing reArm()
-    // points it at the right time. One wake spent, and the tick that comes out of
-    // it is correct — the same self-healing path a member leaving takes. Arming
-    // here would save that wake and cost a storage read on every sync, which is
-    // a trade about cost and not about correctness.
-    if (patch.leftAt === null) await this.driver.reArm();
+    // `lastReportAt` reaches it too, since each member's deadline is its own report
+    // plus the cadence, and for a member the room has stopped asking (`ASKS`, #208)
+    // a fresh stamp brings a deadline back where there was none. No caller patches
+    // it today; reports ride the append, which re-arms by `tickBroughtForward`. It
+    // is not the hot path, so it re-arms unconditionally.
+    if (patch.leftAt === null || patch.lastReportAt !== undefined) await this.driver.reArm();
   }
 
   async closeSession(): Promise<void> {
@@ -1746,15 +1744,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * the wake, so the member removed is sent the frame announcing it before the
    * socket goes and the notice is the last thing they receive.
    *
-   * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
-   * ever moves a member's deadline LATER, and a removal only takes a member off
-   * the roster, which cannot bring the soonest one forward either. An alarm
-   * already armed is then early — it fires, finds nobody due, advances
-   * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
-   * spent, and the tick it produces is correct.
+   * No `reArm()` as a rule: a credit to a member the room still asks only moves its
+   * deadline LATER, and a removal only takes a member off the roster, which cannot
+   * bring the soonest one forward either. An alarm already armed is then early — it
+   * fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()` points it
+   * at the right time. One wake spent, and the tick it produces is correct.
    *
-   * **One exception, and it is a rule and not a list of event kinds (#66, I1): an append
-   * that brings housekeeping's soonest time forward re-arms after its commit.**
+   * **The exception is a rule and not a list of event kinds (#66, I1; #208): an append
+   * that brings housekeeping's soonest time or the next tick forward re-arms after its
+   * commit.** The tick comes forward when a member the room had stopped asking (`ASKS`)
+   * reports, since it armed nothing until then (`tickBroughtForward`).
    * `#writeEvent` compares that time for the record it wrote against the record this
    * transaction read (`bringsForward`), and a null before counts as later. An
    * `action_request` in a room that declares `answer_within` adds an anchor, the
@@ -1920,8 +1919,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // carries a higher cursor. A removal leaves no tombstone, so re-applying
         // the original write would read no row to compare against and could only
         // put back what was removed. It also means a replay deletes nothing.
-        const owed = asRows(s, (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts);
+        const repair = (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts;
+        const owed = asRows(s, repair);
         if (Object.keys(owed).length > 0) await putRows(txn, owed);
+        // A stamp repaired here is the report's, late, and brings the next tick forward as the
+        // first attempt's would have (#208). Only the tick: the books are not re-run on a replay.
+        broughtForward = repair.session !== undefined && tickBroughtForward(s, repair.session as StoredSession);
         return { outcome: "replayed", event: original };
       }
 
@@ -1952,7 +1955,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     ) {
       await this.#closeCutSockets();
     }
-    if (result.outcome === "appended" && broughtForward) await this.driver.reArm();
+    if (broughtForward) await this.driver.reArm();
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return result;

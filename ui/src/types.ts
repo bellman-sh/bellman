@@ -68,7 +68,6 @@ export interface MemberRow {
 export interface RoomSummary {
   session_id: string;
   status: string;
-  expires_at: string;
   max_members: number;
   active_members: number;
   your_member_id: string;

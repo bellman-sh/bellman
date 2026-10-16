@@ -196,6 +196,14 @@ describe("verdictMessage", () => {
 });
 
 describe("renderMonitor", () => {
+  // Rooms persist (ADR 0001), so a room has no expiry to count down, and against a real server, whose rooms carry no
+  // expires_at, the header read "expires NaN… left" (#244). A join code's own expiry stays, beside the code.
+  it("counts nothing down in a room's header", () => {
+    const header = renderMonitor(roomsFixture(), new Map(), () => {}, NOW).querySelector("h2 + p")!.textContent;
+
+    expect(header).toBe("Your seat: lead (send, invite) · 2 of 8 seats · 0 new since you opened this");
+  });
+
   it("marks a public room", () => {
     const r = roomsFixture();
     const chips = () => [...renderMonitor(r, new Map(), () => {}, NOW).querySelectorAll("h2 .chip")].map((c) => c.textContent);

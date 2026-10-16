@@ -25,6 +25,7 @@ export default defineConfig({
           items: [
             { label: 'Tools', items: [{ autogenerate: { directory: 'reference/tools' } }] },
             'reference/bridge-tools',
+            'reference/bellman-command',
           ],
         },
         { label: 'Help', items: [{ autogenerate: { directory: 'help' } }] },

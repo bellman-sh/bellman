@@ -35,6 +35,17 @@ export function newBanId(): string {
   return `ban_${crypto.randomUUID().replaceAll("-", "").slice(0, 16)}`;
 }
 
+/**
+ * Whether a string has the shape `newBanId` makes. A lift asks it first and answers false for
+ * anything else, before it reads storage. The id a creator names arrives from outside, and Durable
+ * Object storage limits a key to 2 KiB, so an id that long can fail a read where a store that keeps
+ * its bans in memory answers false. The local workerd enforces no such limit, so
+ * worker-tests/ban-id-guard.test.ts counts the storage a lift opens instead.
+ */
+export function isBanId(id: string): boolean {
+  return /^ban_[0-9a-f]{16}$/.test(id);
+}
+
 /** Oldest first, and by id among bans made at one moment, so both stores list in one order. */
 export function oldestFirst(a: Ban, b: Ban): number {
   return a.at - b.at || (a.banId < b.banId ? -1 : a.banId > b.banId ? 1 : 0);

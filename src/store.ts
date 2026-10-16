@@ -3,7 +3,7 @@ import type {
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
-import { newBanId, oldestFirst, type Ban, type BanScope } from "./bans.js";
+import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
@@ -580,8 +580,11 @@ export interface RemovalRequest {
    * refusal. A removal that only bans, the member already out and no live door behind them, writes
    * no event: a public room's log is public, and the person banned is told only that they can't join.
    *
-   * Either scope writes this room's ban. The creator-wide ban that `"all"` also asks for is a
-   * separate record (spec section 1) and is not written here.
+   * Either scope writes this room's ban. `"all"` also writes the creator's ban from every room they
+   * own (`creatorBans`), a separate record: lifting one leaves the other. That one is owed whether or
+   * not this room already holds a ban for the account, so an eviction that asks for `"all"` widens a
+   * room ban made earlier, and a repeat keeps the first creator-wide ban and writes nothing new. A
+   * removal that only widens writes no event, as one that only bans writes none.
    */
   ban?: BanScope;
   /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
@@ -1055,7 +1058,8 @@ export interface BellmanStore {
    * when it did not. With no live code and no ban owed, nothing is written and
    * nothing is queued at all. Closing the room if it has emptied is NOT part of
    * this — `closeSessionIfEmpty` makes that decision atomically on its own, and
-   * folding it in here would close over a member who joined in the gap.
+   * folding it in here would close over a member who joined in the gap. The
+   * creator-wide ban that `"all"` asks for is owed the same way as a room ban.
    */
   removeMember(
     sessionId: string,
@@ -1070,11 +1074,31 @@ export interface BellmanStore {
   roomBans(sessionId: string): Promise<Ban[]>;
   /**
    * Lift one ban by its id, as ONE operation, and say whether there was one. A second lift of
-   * the same id, an id the room never issued and an unknown room all answer false. It removes the
+   * the same id, an id the room never issued and an unknown room all answer false, and so does a
+   * string that is not shaped like a ban id (`isBanId`), without storage being read: the id is a
+   * creator's input, and Durable Object storage limits a key to 2 KiB. It removes the
    * ban and nothing else: the member the ban came with stays out, and the account seats again
    * wherever a door is open to it.
    */
   liftRoomBan(sessionId: string, banId: string): Promise<boolean>;
+  /**
+   * The accounts this creator banned from every room they own (spec section 1), oldest first. Each
+   * carries the user id and the room it was made in: what reaches a creator is `creatorBanView`, which
+   * leaves the user id out. A room's ban and the creator-wide ban that came with it are separate records.
+   */
+  creatorBans(creatorId: string): Promise<CreatorBan[]>;
+  /**
+   * Lift one of this creator's bans by its id, as ONE operation, and say whether there was one. A
+   * second lift, another creator's id and a string that is not shaped like a ban id (`isBanId`) all
+   * answer false, the last without storage being read. It lifts that ban and nothing else: the room
+   * ban that came with it stays.
+   */
+  liftCreatorBan(creatorId: string, banId: string): Promise<boolean>;
+  /**
+   * Whether this creator banned this account from every room they own. The join check, asked of the
+   * room's creator once a code has resolved: the registry's code rows do not know who made the room.
+   */
+  isBannedByCreator(creatorId: string, userId: string): Promise<boolean>;
   /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
@@ -1594,6 +1618,8 @@ export class MemoryStore implements BellmanStore {
   private briefs = new Map<string, Map<string, Brief>>();
   /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
   private roomBanned = new Map<string, Ban[]>();
+  /** Creator-wide bans, by creator (spec section 1): about a creator and not a room, so the purge leaves them. */
+  private creatorBanned = new Map<string, CreatorBan[]>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1836,13 +1862,19 @@ export class MemoryStore implements BellmanStore {
     const banning = req.ban !== undefined && !this.isBanned(s.id, m.userId)
       ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
       : null;
+    // The creator-wide ban that "all" also asks for, owed on its own account: a room ban made earlier
+    // does not stand in for it, so a later eviction widens one. Not owed to an account this creator
+    // already bans, whose first ban stands.
+    const widening = req.ban === "all" && !this.bansCreatorWide(s.createdBy, m.userId)
+      ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now, sessionId: s.id }
+      : null;
 
     // Already out: the idempotent path. The departure is not said again, which is
     // the point of it. A live door behind them, or a ban not yet on the room, is a
     // different matter: it was never done, so doing it is a write that has not
     // happened yet and not a duplicate. With none owed, nothing is written.
     const leaving = isActiveMember(m);
-    if (!leaving && !retiring && !banning) return { refused: null, ...none };
+    if (!leaving && !retiring && !banning && !widening) return { refused: null, ...none };
 
     if (leaving) {
       // The event first, then the member write, because a cut names the
@@ -1879,6 +1911,7 @@ export class MemoryStore implements BellmanStore {
     }
     // Last, so a call that throws above leaves no ban behind.
     if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
+    if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
     // A falsy org names a stream nobody reads, and the Durable Objects store
     // drops such an entry rather than file it, so this one does too. The member's
     // rows, then the door's: the order the events were written in.
@@ -1899,6 +1932,9 @@ export class MemoryStore implements BellmanStore {
   }
 
   async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
+    // The Durable Objects store answers this before it reads storage, so this one does too, though
+    // nothing here can throw on a long id: both stores say false for the same strings.
+    if (!isBanId(banId)) return false;
     // No await from the read to the write, the rule `seatMember` follows. The Durable Objects
     // store gets it from a transaction instead.
     const held = this.roomBanned.get(sessionId) ?? [];
@@ -1906,6 +1942,29 @@ export class MemoryStore implements BellmanStore {
     if (kept.length === held.length) return false;
     this.roomBanned.set(sessionId, kept);
     return true;
+  }
+
+  /** Whether this creator bans the account from every room they own (spec section 1). */
+  private bansCreatorWide(creatorId: string, userId: string): boolean {
+    return (this.creatorBanned.get(creatorId) ?? []).some((b) => b.userId === userId);
+  }
+
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    return detach([...(this.creatorBanned.get(creatorId) ?? [])].sort(oldestFirst));
+  }
+
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    // No await from the read to the write, as `liftRoomBan` has none.
+    const held = this.creatorBanned.get(creatorId) ?? [];
+    const kept = held.filter((b) => b.banId !== banId);
+    if (kept.length === held.length) return false;
+    this.creatorBanned.set(creatorId, kept);
+    return true;
+  }
+
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return this.bansCreatorWide(creatorId, userId);
   }
 
   /**

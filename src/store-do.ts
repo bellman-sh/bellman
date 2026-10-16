@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { newBanId, oldestFirst, type Ban } from "./bans.js";
+import { isBanId, newBanId, oldestFirst, type Ban, type CreatorBan } from "./bans.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
@@ -49,14 +49,14 @@ import { presetInNewWords } from "./presets.js";
  * real scope in the data:
  *
  *   SessionDO   one per room. Holds the session record, its events, its surface
- *               rows and outbox, the live long-poll waiters and the room's
+ *               rows, bans and outbox, the live long-poll waiters and the room's
  *               sockets. Every request for a room routes to the same instance,
  *               which is what makes an in-memory waiter list correct here and
  *               what gives read-then-register its atomicity.
  *   RegistryDO  singleton. What resolves without a room in hand: join codes,
  *               pending connect tokens, plan grants, create counts, the creator,
- *               joined-rooms and org-rooms indexes, saved presets and hosted-room
- *               slots.
+ *               joined-rooms and org-rooms indexes, saved presets, hosted-room
+ *               slots and creator-wide bans.
  *   AuditDO     one per org, so an org's audit stream is physically its own
  *               object. A cross-org room writes to each, and neither org's
  *               DO is reachable from the other.
@@ -179,6 +179,16 @@ const putCodeIntent = (code: string, sessionId: string): OutboxIntent => ({
 });
 const dropCodeIntent = (code: string): OutboxIntent => ({
   id: crypto.randomUUID(), kind: "join_code_drop", payload: { code },
+});
+
+/**
+ * The creator-wide ban an eviction owes the registry (abuse protections spec, section 1), as an outbox
+ * intent. The ban is made by the transaction that queues it, so a redelivery carries the first one's id.
+ * The registry writes it only when the creator holds no ban on the account yet, so a row handed over
+ * twice leaves one ban, as one delivery would.
+ */
+const creatorBanIntent = (creatorId: string, ban: CreatorBan): OutboxIntent => ({
+  id: crypto.randomUUID(), kind: "creator_ban", payload: { creatorId, ban },
 });
 
 /**
@@ -1318,11 +1328,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   ): Promise<RemovalOutcome> {
     // `written` rides out of the closure so the wake can happen after the
     // commit, the way appendEvent does it: nobody hears of an event that did
-    // not land. It is stripped before the result goes back over RPC.
+    // not land. `queued` rides with it, for the delivery: rows can be owed with
+    // no event written. Both are stripped before the result goes back over RPC.
     const outcome = await this.ctx.storage.transaction<
-      RemovalOutcome & { written: SessionEvent[] }
+      RemovalOutcome & { written: SessionEvent[]; queued: boolean }
     >(async (txn) => {
-      const no = { removed: false, codeRetired: null, written: [] };
+      const no = { removed: false, codeRetired: null, written: [], queued: false };
       const s = await this.stored(txn);
       if (!s) return { refused: "not_found" as const, ...no };
       if (s.closed) return { refused: "closed" as const, ...no };
@@ -1352,6 +1363,14 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       const banning: Ban | null = req.ban !== undefined && (await txn.get<string>(banUserKey(m.userId))) === undefined
         ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
         : null;
+      // The creator-wide ban that "all" also asks for. It lives in the registry, which this transaction
+      // cannot write, so it is queued for the outbox below. Owed whenever it is asked for, and not only
+      // while this room holds no ban: the registry cannot be read from here, and its write keeps
+      // whichever ban came first, so a repeat costs one row and changes nothing. The id is made here, so
+      // a redelivery carries the same one.
+      const widening: CreatorBan | null = req.ban === "all"
+        ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now, sessionId: s.id }
+        : null;
 
       // Already out: the idempotent path. The departure is not said again, and
       // queueing nothing for it is the half an idempotency key could not cover. A
@@ -1359,7 +1378,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       // it was never done, so doing it is a write that has not happened yet and not a
       // duplicate. With none owed, nothing is written and nothing is queued.
       const leaving = isActiveMember(m);
-      if (!leaving && !retiring && !banning) return { refused: null, ...no };
+      if (!leaving && !retiring && !banning && !widening) return { refused: null, ...no };
 
       const joinCodes = { ...s.joinCodes };
       if (retiring) delete joinCodes[retiring.role];
@@ -1413,7 +1432,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         .filter((e) => e.orgId)
         .map(auditIntent);
       const codeRows = retiring ? [dropCodeIntent(retiring.code)] : [];
-      const rows = await this.driver.enqueue(txn, [...codeRows, ...intents]);
+      // The registry's writes, the code's and the ban's, ahead of the audit rows: one enqueue, in order.
+      const banRows = widening ? [creatorBanIntent(s.createdBy, widening)] : [];
+      const queue = [...codeRows, ...banRows, ...intents];
+      const rows = await this.driver.enqueue(txn, queue);
 
       // Housekeeping's books (#66), for each event this removal wrote. These events go in
       // the put below and not through `#writeEvent`, so its step does not cover them, and a
@@ -1435,15 +1457,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...(banning ? { [banKey(banning.banId)]: banning, [banUserKey(banning.userId)]: banning.banId } : {}),
         ...rows,
       });
-      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written };
+      return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written, queued: queue.length > 0 };
     });
 
-    const { written, ...result } = outcome;
+    const { written, queued, ...result } = outcome;
     // After the commit, never inside the closure: everything awaited in there
     // holds every other call to this object until it commits, and reArm() reads
     // stored(). `written` is empty when no event was written: a refusal, or a
     // member who was already out behind no live door, with a ban to record or none.
-    // A door shut on its own queues rows that want delivering, and moves nothing else.
+    // A door shut on its own queues rows that want delivering, and moves nothing else,
+    // and so does a creator-wide ban on a member who left long ago.
     for (const e of written) this.#wake(e);
     // After the wake, as appendEvent does it: the member removed is sent the
     // frame announcing it before their socket goes, so the notice is the last
@@ -1451,7 +1474,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // roster, which is a storage read no other removal should pay, and a leave
     // cuts nobody so it has no socket to close.
     if (result.removed && req.cut) await this.#closeCutSockets();
-    if (written.length > 0) await this.driver.deliverNow();
+    // Whenever a row was queued, and not only when an event was written: a creator-wide ban on a member
+    // who already left queues one and writes none, and nothing else would deliver it before the alarm.
+    if (written.length > 0 || queued) await this.driver.deliverNow();
     // A member leaving can take the last reporting seat with them, so the derived
     // tick may have moved.
     if (result.removed) await this.driver.reArm();
@@ -1464,8 +1489,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return [...rows.values()].sort(oldestFirst);
   }
 
-  /** Both of a ban's rows go in one transaction, and the answer is whether there was a ban to lift. */
+  /**
+   * Both of a ban's rows go in one transaction, and the answer is whether there was a ban to lift. An id
+   * that is not shaped like one is answered before the transaction opens: it arrives from outside, and
+   * Durable Object storage limits a key to 2 KiB.
+   */
   async liftRoomBan(banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
     return this.ctx.storage.transaction(async (txn) => {
       const ban = await txn.get<Ban>(banKey(banId));
       if (ban === undefined) return false;
@@ -2272,6 +2302,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     } else if (row.kind === "hosted_release") {
       const { userId, sessionId } = row.payload as { userId: string; sessionId: string };
       await registry().releaseHostedRoom(userId, sessionId);
+    } else if (row.kind === "creator_ban") {
+      const { creatorId, ban } = row.payload as { creatorId: string; ban: CreatorBan };
+      await registry().putCreatorBan(creatorId, ban);
     } else {
       throw new Error(`outbox: unknown kind ${row.kind}`);
     }
@@ -2834,6 +2867,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 /** One record per person, and the count beside them (#258). */
 const userKey = (userId: string): string => `us:${userId}`;
 const USER_COUNT = "us:count";
+
+/**
+ * `cb:<creator>:<user>` is an account a creator banned from every room they own (abuse protections spec,
+ * section 1), one row each, so a seating asks one `get`. Both segments are percent-encoded, so the colon
+ * between them is the only one in a key. An operator-issued user id may hold a colon, and unencoded,
+ * `cb:u_x:` would begin the rows of a creator named `u_x:y`.
+ */
+const creatorBanPrefix = (creatorId: string): string => `cb:${encodeURIComponent(creatorId)}:`;
+const creatorBanKey = (creatorId: string, userId: string): string =>
+  `${creatorBanPrefix(creatorId)}${encodeURIComponent(userId)}`;
 
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
@@ -3552,6 +3595,41 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async countUsers(): Promise<number> {
     return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
   }
+
+  /**
+   * The write a room's outbox delivers as `creator_ban`: the check and the write in one transaction, and
+   * only while the creator holds no ban on the account, so a redelivery and an eviction that asks again
+   * both keep the first ban.
+   */
+  async putCreatorBan(creatorId: string, ban: CreatorBan): Promise<void> {
+    const key = creatorBanKey(creatorId, ban.userId);
+    await this.ctx.storage.transaction(async (txn) => {
+      if ((await txn.get(key)) === undefined) await txn.put(key, ban);
+    });
+  }
+
+  /** This creator's rows, oldest first. The prefix ends at the colon after their encoded id, so it reaches no other creator's. */
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    const rows = await this.ctx.storage.list<CreatorBan>({ prefix: creatorBanPrefix(creatorId) });
+    return [...rows.values()].sort(oldestFirst);
+  }
+
+  /** Found and deleted in one transaction. A string that is not a ban id is answered before storage is read. */
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    return this.ctx.storage.transaction(async (txn) => {
+      const rows = await txn.list<CreatorBan>({ prefix: creatorBanPrefix(creatorId) });
+      const found = [...rows].find(([, ban]) => ban.banId === banId);
+      if (found === undefined) return false;
+      await txn.delete(found[0]);
+      return true;
+    });
+  }
+
+  /** One read, for a seating. */
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return (await this.ctx.storage.get(creatorBanKey(creatorId, userId))) !== undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3813,6 +3891,18 @@ export class DurableObjectStore implements BellmanStore {
 
   async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
     return this.session(sessionId).liftRoomBan(banId);
+  }
+
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    return this.registry.creatorBans(creatorId);
+  }
+
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    return this.registry.liftCreatorBan(creatorId, banId);
+  }
+
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return this.registry.isBannedByCreator(creatorId, userId);
   }
 
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {

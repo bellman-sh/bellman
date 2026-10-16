@@ -4,7 +4,7 @@ import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } fro
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
-  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session,
+  ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session, UserRecord,
   SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
@@ -2790,6 +2790,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 // ---------------------------------------------------------------------------
 
 /** One definition of "expired", so every path agrees on what a grant is. */
+/** One record per person, and the count beside them (#258). */
+const userKey = (userId: string): string => `us:${userId}`;
+const USER_COUNT = "us:count";
+
 const lapsed = (grant: PlanGrant, now = Date.now()): boolean =>
   grant.expiresAt !== null && now > grant.expiresAt;
 
@@ -3482,6 +3486,31 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     ]);
     return handle !== undefined && signed !== undefined ? handle : undefined;
   }
+
+  /**
+   * The record and the counter move together, or the count drifts from the
+   * records it is meant to count.
+   *
+   * The counter starts at 0 and only ever increments on a first insert. It is
+   * never seeded by reading the keys back, which is how AuthDO's client count
+   * came to report 2 for one registration (#122): there were no users before
+   * this landed, so 0 is the true starting point and there is nothing to seed.
+   */
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const seen = await txn.get<UserRecord>(userKey(userId));
+      if (!seen) await txn.put(USER_COUNT, ((await txn.get<number>(USER_COUNT)) ?? 0) + 1);
+      await txn.put(userKey(userId), {
+        userId,
+        firstSeenAt: seen?.firstSeenAt ?? now,
+        lastSeenAt: now,
+      } satisfies UserRecord);
+    });
+  }
+
+  async countUsers(): Promise<number> {
+    return (await this.ctx.storage.get<number>(USER_COUNT)) ?? 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -4040,6 +4069,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
     return this.registry.bylineFor(userId, sessionId);
+  }
+
+  async recordSignIn(userId: string, now: number): Promise<void> {
+    await this.registry.recordSignIn(userId, now);
+  }
+
+  async countUsers(): Promise<number> {
+    return this.registry.countUsers();
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

@@ -513,6 +513,34 @@ describe("plan resolution", () => {
       expect((await resolvePlan(PROFILE, config)).key).toBeNull();
     });
 
+    /**
+     * #258. The free path is the one that used to write nothing, so it is the
+     * one worth pinning: a person on the default plan is why the count existed
+     * at zero no matter how many had signed in.
+     */
+    it("records the sign-in, on the path that grants nothing", async () => {
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(0);
+
+      await resolvePlan(PROFILE, config);
+
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
+    });
+
+    it("records a sign-in that an operator override decided", async () => {
+      config.overrides = { "github:4242": OVERRIDE };
+
+      await resolvePlan(PROFILE, config);
+
+      expect(await (config.plans as MemoryStore).countUsers()).toBe(1);
+    });
+
+    /** A wrong count is worth less than a person locked out of their account. */
+    it("still signs someone in when the record cannot be written", async () => {
+      config.plans!.recordSignIn = () => Promise.reject(new Error("registry unreachable"));
+
+      expect((await resolvePlan(PROFILE, config)).identity.plan).toBe("free");
+    });
+
     it("is the subject or null on a re-check, which consults nothing else", async () => {
       config.overrides = { "email:jesse@example.dev": OVERRIDE };
       expect((await replanOnRefresh(OVERRIDE, KEYS, config)).key).toBeNull();

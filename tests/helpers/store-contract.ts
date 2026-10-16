@@ -5431,5 +5431,38 @@ export function describeStoreContract(
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
         .toEqual(["member_evicted", "invite_revoked"]);
     });
+
+    describe("signing in (#258)", () => {
+        it("counts nobody on a fresh store", async () => {
+          expect(await store.countUsers()).toBe(0);
+        });
+
+        it("counts a person once, however many times they sign in", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+          await store.recordSignIn("u_github_1", 2_000);
+          await store.recordSignIn("u_github_1", 3_000);
+
+          expect(await store.countUsers()).toBe(1);
+        });
+
+        it("counts each person once", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+          await store.recordSignIn("u_google_2", 1_000);
+          await store.recordSignIn("u_github_3", 1_000);
+
+          expect(await store.countUsers()).toBe(3);
+        });
+
+        /**
+         * The off-by-one AuthDO's client count had (#122) was a counter seeded by
+         * reading the keys back. This one starts at 0 and only increments on a
+         * first insert, so the first person counts as one.
+         */
+        it("counts the first person as one, not two", async () => {
+          await store.recordSignIn("u_github_1", 1_000);
+
+          expect(await store.countUsers()).toBe(1);
+        });
+    });
   });
 }

@@ -390,7 +390,9 @@ Then, immediately after the `/account/handle` block and before `if (oauth) {`:
 ```ts
     // The operator's platform stats (operator stats spec D1). On the room routes'
     // rules and the same guard, and gated on the operators set, which is why it
-    // takes `operators` where the others take only `panelOrigins`.
+    // takes `operators`, `overrides` and `honourPurchases` where the others take
+    // only `panelOrigins`. All three are required keys: a mount that omits one is a
+    // compile error, because a forgotten dep would otherwise undercount `paid`.
     if (url.pathname === "/operator/stats" || url.pathname === "/operator/stats/") {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
@@ -398,6 +400,9 @@ Then, immediately after the `/account/handle` block and before `if (oauth) {`:
         store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],
+        operators: oauth?.operators,
+        overrides: oauth?.overrides,
+        honourPurchases: oauth?.honourPurchases,
         operators: oauth?.operators,
       });
       if (handled) return handled;
@@ -417,7 +422,14 @@ Then beside the other `app.use` mounts, after the `/account/handle` line:
 ```ts
   // No operators locally: `npm start` serves the dev identities, and an operator
   // gate that admitted one of them would make the local server the loose one.
-  app.use("/operator/stats", serve((request) => statsRoutes(request, { store, caller, panelOrigins: [], operators: undefined })));
+  app.use("/operator/stats", serve((request) => statsRoutes(request, {
+    store, caller, panelOrigins: [],
+    operators: undefined,
+    // The local server reads neither secret, so these are its true values rather
+    // than undefined, which the route would otherwise read as billing being on.
+    overrides: {},
+    honourPurchases: false,
+  })));
 ```
 
 - [ ] **Step 3: Typecheck both targets**

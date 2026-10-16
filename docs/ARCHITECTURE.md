@@ -1453,9 +1453,9 @@ loss is findable, and the sweep at close (#65) is what finds it.
    (`thawedAt`): nobody can send in a frozen room, so a freeze is never counted as
    silence. It counts people (`isActivePerson`, hosted seat D5): the hosted seat is never named
    quiet, what it says moves no clock, a room only it speaks in reads idle, and a
-   proposal never wakes it. `MemoryStore` keeps the same books at every append
-   and raises nothing, because the Node server's tick loop (#188) does not run
-   housekeeping.
+   proposal never wakes it. `MemoryStore` keeps the same books at every append,
+   and the Node server's loop raises the same proposals through `housekeep`, run
+   beside `tick` (#188) once a minute, with the same rules handed in (#231).
 
    `sweep` runs once when a room closes and deletes the objects under its R2
    prefix that no surface item names, crediting the room their bytes (#65, D3).

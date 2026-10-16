@@ -1,6 +1,7 @@
 import { createApp } from "./app.js";
 import { MemoryBlobStore } from "./blobs.js";
 import { tickStep } from "./heartbeat.js";
+import { clearedKeys, dueFindings } from "./housekeeping.js";
 import { MemoryHost, nodeModel } from "./host-memory.js";
 import { hostedSeatOn } from "./host.js";
 import { MemoryStore } from "./store.js";
@@ -19,8 +20,8 @@ const store = new MemoryStore({ blobs, host: (w) => void host.wake(w) });
 const host = new MemoryHost(store, { modelUrl: model.modelUrl, apiKey: model.apiKey, enabled: hostedSeat });
 const app = createApp(store, blobs, { hostedSeat });
 
-// Periodic expiry of sessions and pending connect tokens, and the heartbeat: what
-// SessionDO's alarm does for one room, tick for every room (#111, #188).
+// Periodic expiry of sessions and pending connect tokens, the heartbeat and housekeeping:
+// what SessionDO's alarm does for one room, tick and housekeep for every room (#111, #188, #231).
 setInterval(() => {
   // sweep is async now; a rejection here must not take down the process.
   store.sweep(Date.now()).catch((err) => console.error("sweep failed:", err));
@@ -28,6 +29,11 @@ setInterval(() => {
     store.tick(Date.now(), tickStep);
   } catch (err) {
     console.error("tick failed:", err);
+  }
+  try {
+    store.housekeep(Date.now(), { dueFindings, clearedKeys });
+  } catch (err) {
+    console.error("housekeeping failed:", err);
   }
 }, 60_000).unref();
 

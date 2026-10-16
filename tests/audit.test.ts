@@ -4,7 +4,9 @@
  * whether it crossed and which way.
  */
 import { describe, expect, it } from "vitest";
-import { AUDIT_COLUMNS, SYSTEM_ACTOR, auditRow, auditRows, entryOf, partiesOf, recordOf, type AuditRecord } from "../src/audit.js";
+import {
+  AUDIT_COLUMNS, SYSTEM_ACTOR, auditRow, auditRows, auditWhere, entryOf, partiesOf, recordOf, type AuditRecord,
+} from "../src/audit.js";
 import type { AuditEntry } from "../src/types.js";
 
 const facts = { at: 7, sessionId: "qs_q3", action: "sent_message", roomName: "q3-plan", detail: { chars: 5 } };
@@ -72,5 +74,19 @@ describe("the entries table's rows", () => {
   it("keeps an actor with no org apart from a row that never said", () => {
     const row = auditRows(["org_a", null], facts, { userId: "u_solo", label: null, orgId: null })[0]!;
     expect(entryOf(record(row, 2))).toMatchObject({ actorOrgId: null, actorLabel: null, crossing: "cross_org" });
+  });
+});
+
+describe("auditWhere", () => {
+  it("binds every value, and builds the clause from fixed fragments only", () => {
+    const w = auditWhere({ limit: 1, actor: "' OR 1=1 --", org: "org_b", scope: "cross_org", before: 9 }, 12, { scope: true, before: true });
+    expect(w.clause).toBe(
+      "WHERE seq <= ? AND seq < ? AND actor_id = ? AND EXISTS (SELECT 1 FROM json_each(entries.parties) WHERE value = ?) AND crossing = ?",
+    );
+    expect(w.params).toEqual([12, 9, "' OR 1=1 --", "org_b", "cross_org"]);
+  });
+
+  it("leaves scope and before out when told to, and is empty with nothing to filter", () => {
+    expect(auditWhere({ limit: 1, scope: "internal", before: 3 }, null, { scope: false, before: false })).toEqual({ clause: "", params: [] });
   });
 });

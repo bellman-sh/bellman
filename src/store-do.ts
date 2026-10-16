@@ -21,7 +21,10 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
-import { AUDIT_COLUMNS, entryOf, recordOf, type AuditActor, type AuditRecord } from "./audit.js";
+import {
+  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
+  type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
+} from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -3268,6 +3271,55 @@ export class AuditDO extends DurableObject {
       .map(entryOf)
       .map(({ seq: _seq, ...entry }) => entry);
   }
+
+  /** One page under the filters, newest first (D6): the same answer `pageOf` gives over memory. */
+  async query(q: AuditQuery): Promise<AuditPage> {
+    const sql = this.ctx.storage.sql;
+    const through = q.through ?? sql.exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM entries").one().seq;
+    const page = auditWhere(q, through, { scope: true, before: true });
+    const rows = sql.exec<AuditRecord>(
+      `SELECT * FROM entries ${page.clause} ORDER BY seq DESC LIMIT ?`, ...page.params, q.limit + 1,
+    ).toArray();
+    const all = auditWhere(q, through, { scope: true, before: false });
+    const total = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM entries ${all.clause}`, ...all.params).one().n;
+    let unrecorded = 0;
+    if (q.scope !== undefined) {
+      const rest = auditWhere(q, through, { scope: false, before: false });
+      unrecorded = sql.exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM entries ${rest.clause ? `${rest.clause} AND` : "WHERE"} crossing IS NULL`, ...rest.params,
+      ).one().n;
+    }
+    const entries = rows.slice(0, q.limit).map(entryOf);
+    return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
+  }
+
+  /**
+   * What the filters offer (D6), newest first. A label or a room's name comes from its newest
+   * row: SQLite reads a bare column of a MAX() group from the row that holds the max.
+   * ponytail: `at` is the only index; these and the filters on actor, room and action read the
+   * table by seq, and gain indexes when a stream is large enough to feel the scan.
+   */
+  async facets(): Promise<AuditFacets> {
+    const sql = this.ctx.storage.sql;
+    return {
+      actors: sql.exec<{ id: string; label: string | null; newest: number }>(
+        "SELECT actor_id AS id, actor_label AS label, MAX(seq) AS newest FROM entries GROUP BY actor_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, label }) => ({ id, label })),
+      rooms: sql.exec<{ id: string; name: string | null; newest: number }>(
+        "SELECT session_id AS id, room_name AS name, MAX(seq) AS newest FROM entries WHERE session_id NOT LIKE 'grant:%' GROUP BY session_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, name }) => ({ id, name })),
+      orgs: sql.exec<{ org: string; newest: number }>(
+        "SELECT p.value AS org, MAX(e.seq) AS newest FROM entries e, json_each(e.parties) p WHERE p.value IS NOT NULL AND p.value != e.org_id GROUP BY p.value ORDER BY newest DESC, org ASC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ org }) => org),
+      actions: sql.exec<{ action: string; newest: number }>(
+        "SELECT action, MAX(seq) AS newest FROM entries GROUP BY action ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ action }) => action),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3758,6 +3810,14 @@ export class DurableObjectStore implements BellmanStore {
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return this.audit(orgId).recent(limit);
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return this.audit(orgId).query(query);
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return this.audit(orgId).facets();
   }
 
   /**

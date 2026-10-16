@@ -121,3 +121,117 @@ export function entryOf(r: AuditRecord): SeqEntry {
     direction: r.direction as "outbound" | "inbound" | null,
   };
 }
+
+/** A read of one org's stream (D6). Every field but `limit` narrows it; together they are an AND. */
+export interface AuditQuery {
+  /** Epoch ms, inclusive. */
+  from?: number;
+  /** Epoch ms, exclusive. */
+  to?: number;
+  actor?: string;
+  room?: string;
+  /** Matches any entry of `parties`. */
+  org?: string;
+  action?: string;
+  scope?: "internal" | "cross_org";
+  /** A seq: only rows older than it. */
+  before?: number;
+  /** A seq: only rows at or below it. */
+  through?: number;
+  limit: number;
+}
+
+export interface AuditPage {
+  /** Newest first. */
+  entries: SeqEntry[];
+  /** Pass as `before` for the next page; null at the end. */
+  next: number | null;
+  /** The highest seq the read covered: its `through`, or the stream's newest when it named none; null for an empty stream. */
+  through: number | null;
+  /** Rows matching the filters at or below `through`: what an export of them holds. */
+  total: number;
+  /** Rows matching every filter but scope that record no crossing (D4); 0 without a scope. */
+  unrecorded: number;
+}
+
+/** What the panel's filters offer (D7), newest first, up to FACET_LIMIT each. `orgs` never holds the reader's own. */
+export interface AuditFacets {
+  actors: { id: string; label: string | null }[];
+  rooms: { id: string; name: string | null }[];
+  orgs: string[];
+  actions: string[];
+}
+
+// ponytail: 200 a list, not tuned. A stream with more distinct values offers its newest 200, and a filter still takes any value by URL.
+export const FACET_LIMIT = 200;
+
+const matches = (e: SeqEntry, q: AuditQuery, through: number | null, scope: boolean): boolean =>
+  (through === null || e.seq <= through)
+  && (q.from === undefined || e.at >= q.from)
+  && (q.to === undefined || e.at < q.to)
+  && (q.actor === undefined || e.actorUserId === q.actor)
+  && (q.room === undefined || e.sessionId === q.room)
+  && (q.action === undefined || e.action === q.action)
+  && (q.org === undefined || (e.parties ?? []).includes(q.org))
+  && (!scope || q.scope === undefined || e.crossing === q.scope);
+
+/** The query over rows in memory: MemoryStore's read, held to AuditDO's SQL by the store contract. */
+export function pageOf(rows: readonly SeqEntry[], q: AuditQuery): AuditPage {
+  const through = q.through ?? (rows.length > 0 ? rows.reduce((max, r) => Math.max(max, r.seq), 0) : null);
+  const all = rows.filter((r) => matches(r, q, through, true)).sort((a, b) => b.seq - a.seq);
+  const older = q.before === undefined ? all : all.filter((r) => r.seq < q.before!);
+  const entries = older.slice(0, q.limit);
+  return {
+    entries,
+    next: older.length > q.limit ? entries.at(-1)!.seq : null,
+    through,
+    total: all.length,
+    unrecorded: q.scope === undefined ? 0 : rows.filter((r) => r.crossing === undefined && matches(r, q, through, false)).length,
+  };
+}
+
+/** The facets over rows in memory, newest first. Ties among orgs first seen in one row go in the row's sorted order, as the SQL's do. */
+export function facetsOf(rows: readonly SeqEntry[], orgId: string): AuditFacets {
+  const newestFirst = [...rows].sort((a, b) => b.seq - a.seq);
+  const firstBy = (key: (e: SeqEntry) => string | undefined): [string, SeqEntry][] => {
+    const seen = new Map<string, SeqEntry>();
+    for (const e of newestFirst) {
+      const k = key(e);
+      if (k !== undefined && !seen.has(k)) seen.set(k, e);
+    }
+    return [...seen].slice(0, FACET_LIMIT);
+  };
+  return {
+    actors: firstBy((e) => e.actorUserId).map(([id, e]) => ({ id, label: e.actorLabel ?? null })),
+    rooms: firstBy((e) => (e.sessionId.startsWith("grant:") ? undefined : e.sessionId)).map(([id, e]) => ({ id, name: e.roomName ?? null })),
+    orgs: [...new Set(newestFirst.flatMap((e) => (e.parties ?? []).filter((p): p is string => p !== null && p !== orgId)))]
+      .slice(0, FACET_LIMIT),
+    actions: firstBy((e) => e.action).map(([action]) => action),
+  };
+}
+
+/**
+ * The query as SQL for AuditDO's `entries` table: a WHERE clause built from fixed fragments,
+ * with every value a bound parameter. `use.scope` and `use.before` leave those out, for the
+ * counts: `total` ignores `before`, and `unrecorded` ignores the scope.
+ */
+export function auditWhere(
+  q: AuditQuery, through: number | null, use: { scope: boolean; before: boolean },
+): { clause: string; params: (string | number)[] } {
+  const parts: string[] = [];
+  const params: (string | number)[] = [];
+  const add = (sql: string, value: string | number) => {
+    parts.push(sql);
+    params.push(value);
+  };
+  if (through !== null) add("seq <= ?", through);
+  if (use.before && q.before !== undefined) add("seq < ?", q.before);
+  if (q.from !== undefined) add("at >= ?", q.from);
+  if (q.to !== undefined) add("at < ?", q.to);
+  if (q.actor !== undefined) add("actor_id = ?", q.actor);
+  if (q.room !== undefined) add("session_id = ?", q.room);
+  if (q.action !== undefined) add("action = ?", q.action);
+  if (q.org !== undefined) add("EXISTS (SELECT 1 FROM json_each(entries.parties) WHERE value = ?)", q.org);
+  if (use.scope && q.scope !== undefined) add("crossing = ?", q.scope);
+  return { clause: parts.length > 0 ? `WHERE ${parts.join(" AND ")}` : "", params };
+}

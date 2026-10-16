@@ -16,7 +16,9 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
-import { auditRows, partiesOf, type AuditActor } from "./audit.js";
+import {
+  auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
+} from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -1325,7 +1327,12 @@ export interface BellmanStore {
   listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
 
   appendAudit(a: AuditEntry): Promise<void>;
+  /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
+  /** One page of an org's stream under the filters, newest first (audit trail spec, D6). */
+  queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
+  /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
+  auditFacets(orgId: string): Promise<AuditFacets>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
@@ -1353,7 +1360,9 @@ export class MemoryStore implements BellmanStore {
   private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
   private presets = new Map<string, Map<string, SavedPreset>>(); // userId -> name -> preset
   private grants = new Map<string, PlanGrant>();
-  private audit: AuditEntry[] = [];
+  /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
+  private audit: { seq: number; entry: AuditEntry }[] = [];
+  private auditSeq = new Map<string, number>();
   private waiters = new Map<string, Waiter[]>();
   /**
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
@@ -2233,7 +2242,13 @@ export class MemoryStore implements BellmanStore {
    * contract suite checks.
    */
   private recordAudit(entries: AuditEntry[]): void {
-    for (const entry of entries) this.audit.push(detach(entry));
+    for (const entry of entries) {
+      // No org, no stream: DurableObjectStore drops it too (ARCHITECTURE.md section 9, runtime fact 4).
+      if (!entry.orgId) continue;
+      const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
+      this.auditSeq.set(entry.orgId, seq);
+      this.audit.push({ seq, entry: detach(entry) });
+    }
   }
 
   async putGrantIfOwned(
@@ -2313,11 +2328,23 @@ export class MemoryStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    this.audit.push(detach(a));
+    this.recordAudit([a]);
   }
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
-    return detach(this.audit.filter((a) => a.orgId === orgId).slice(-limit));
+    return detach(this.audit.filter((r) => r.entry.orgId === orgId).slice(-limit).map((r) => r.entry));
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return detach(pageOf(this.streamOf(orgId), query));
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return detach(facetsOf(this.streamOf(orgId), orgId));
+  }
+
+  private streamOf(orgId: string): SeqEntry[] {
+    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq }));
   }
 
   async sweep(now: number): Promise<void> {

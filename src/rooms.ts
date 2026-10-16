@@ -329,9 +329,9 @@ export async function readSurface(
  * member of org A sends in A's room while a member of org B is in it, A's context reaches B, so
  * B's stream records it too. `alsoOrgs` is for an actor acting on someone else: an eviction
  * touches the evicted member's org, which need be neither the room's nor the creator's, and
- * that member is no longer in the room to be counted. The hosted seat is not a party; it acts
- * for the room. A person with no org is a party with no stream: the room is cross-org for
- * everyone else, and no row is written for them.
+ * that member may already have left the room, where the roster no longer counts them. The
+ * hosted seat is not a party; it acts for the room. A person with no org is a party with no
+ * stream: the room is cross-org for everyone else, and no row is written for them.
  *
  * It lives here rather than in a transport because a transport that writes its own row is a
  * transport that will one day write it for one org and not the other.
@@ -969,9 +969,12 @@ export async function evictMember(
     // so the doors an eviction shut would sit in two places, a field for members who
     // were present and a row for those who had already left, and a query for
     // `invite_revoked` would find half of them. The row goes where revokeInvite's
-    // goes, to the orgs `auditEntries` names, and the departed member's org is not
-    // added to them: it names a role and no person, so that org could not tell whom
-    // it concerned, and a row an org cannot resolve to anyone is worse than none.
+    // goes, to the orgs `auditEntries` names. Those include the evicted member's
+    // org while they are still in the room, since the door shuts as they leave and
+    // their org's `member_evicted` row beside it names them. A member who had
+    // already left is no party to it, and their org is not added: the row names a
+    // role and no person, so that org could not tell whom it concerned, and a row
+    // an org cannot resolve to anyone is worse than none.
     retire: {
       role: target.roomRole,
       event: doorShutEvent(actor, target.roomRole),

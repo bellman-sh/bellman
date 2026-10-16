@@ -129,6 +129,25 @@ describe("tool surface", () => {
     expect(flat).toContain(`max_members is the room's capacity: 2 for a pair room, ${ROOM_MEMBER_CEILING} for a swarm room`);
   });
 
+  // Evicting a member of a code's seat ends that code, a public room's permanent code included
+  // (evictMember passes `retire` for the target's role). Both descriptions list what ends a code and
+  // left this out, and docs.bellman.sh publishes them as written. bellman_connect lists the ends of an
+  // ordinary code and then the permanent code's own, so each list is read where it stands.
+  it("says in bellman_connect's and bellman_invite's descriptions that a code ends when a member of its seat is evicted", async () => {
+    const { tools } = await jesse.listTools();
+    const flat = (name: string) => tools.find((t) => t.name === name)!.description!.replace(/\s+/g, " ");
+    const evicted = "a member of its seat is evicted";
+
+    const connect = flat("bellman_connect");
+    const errors = connect.indexOf("Errors:");
+    const permanent = connect.indexOf("A public room's permanent code");
+    expect(errors, "the Errors line").toBeGreaterThan(-1);
+    expect(permanent, "the Errors line's sentence on the permanent code").toBeGreaterThan(errors);
+    expect(connect.slice(errors, permanent), "bellman_connect, an ordinary code").toContain(evicted);
+    expect(connect.slice(permanent), "bellman_connect, the permanent code").toContain(evicted);
+    expect(flat("bellman_invite"), "bellman_invite, the permanent code").toContain(evicted);
+  });
+
   // A joiner's human decides on the verbs a room declares, and since #2 the
   // server enforces them. Each tool that returns the room block says so. The
   // decision is denyVerb in src/roles.ts, the call sites are bellman_send and

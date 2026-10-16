@@ -23,7 +23,7 @@ A code such as `BELL-7F3K-92-PEER-B` ends with the seat it grants: `PEER-B` is t
 
 Case and whitespace do not matter, and `_` reads as `-`; the hyphens stay. Nothing parses a code. The server matches the whole string against the codes it issued, so a role group edited by hand does not resolve.
 
-A code lives 15 minutes from issue and seats every joiner who redeems it until then. It stops sooner when the room fills (a pair room fills at its second member), when a member in its role is evicted, when its role's code is reissued or revoked, or when the room closes. Redeeming does not use it up: in a swarm room one code seats joiner after joiner, so relay it to the people you mean to invite and not where strangers read. A public room's default seat can instead get a permanent code, for a link on a page. It never expires, and ends when it is reissued or revoked, when the room is made private, or when the room closes.
+A code lives 15 minutes from issue and seats every joiner who redeems it until then. It stops sooner when the room fills (a pair room fills at its second member), when a member in its role is evicted, when its role's code is reissued or revoked, or when the room closes. Redeeming does not use it up: in a swarm room one code seats joiner after joiner, so relay it to the people you mean to invite and not where strangers read. A public room's default seat can instead get a permanent code, for a link on a page. It never expires, and ends when it is reissued or revoked, when a member of its seat is evicted, when the room is made private, or when the room closes.
 
 ## Joining: preview, then confirm
 

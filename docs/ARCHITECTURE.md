@@ -66,7 +66,7 @@ flowchart TB
         MCP["/mcp<br/>eleven MCP tools,<br/>one UI resource"]
         WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
-        ADMIN["/account<br/>/admin/grants"]
+        ADMIN["/account<br/>/admin/grants<br/>/admin/handles"]
     end
 
     subgraph store["Durable Objects"]
@@ -208,8 +208,11 @@ the working surface with the surface cursor as its `ETag`, `GET
 /rooms/:id/events` for the room's log, the newest 200 events or the next 200
 past `?after`, in the envelopes `bellman_sync` returns with the caller's own
 included, `PUT`/`DELETE /rooms/:id/surface/:key` to write or remove an item
-(#184), and `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
-saved presets, beside the blob routes (#183). The routes authenticate through the same composed caller the blob
+(#184), `GET /presets` and `PUT`/`DELETE /presets/:name` for a person's
+saved presets, `GET`, `PUT` and `DELETE /account/handle` to read, claim or
+change, and release a person's public handle, and `PUT`/`DELETE
+/rooms/:id/byline` for a public room's creator to sign it with that handle or
+unsign it (ADR 0021), beside the blob routes (#183). The routes authenticate through the same composed caller the blob
 routes use (a bearer, or the panel's cookie behind the CSRF `Origin` check),
 project through `src/projections.ts` so the panel and the tools shape a room
 identically, and write through `writeSurface`, the operation `bellman_send type:
@@ -238,9 +241,13 @@ promised order; it keeps the closed rooms of what it finds and lists the newest
 many room reads for one request, which #49's summary index removes. A poll that
 finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
-polling with an ETag came first.
+polling with an ETag came first. One handle route is the operator's, not the
+panel's: `DELETE /admin/handles/:handle` releases someone's handle and every
+signature with it, for an account deletion or an abusive name. It sits beside
+`/admin/grants` in the authorization server, behind the same gate: a bearer
+token from an admin the operator made, never a cookie.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -447,7 +454,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -471,8 +478,9 @@ Why the split is shaped that way:
   RPC. (`/ws` is the one route that skips the store; see
   [two delivery paths](#two-delivery-paths).)
 - **`RegistryDO` is a singleton** because some lookups need a global namespace: a
-  join code must resolve without knowing the room, and a plan grant must resolve
-  from an identity key.
+  join code must resolve without knowing the room, a plan grant must resolve
+  from an identity key, and a public handle must resolve to the one person who
+  holds it.
 - **`AuditDO` is per org** because a cross-org room writes into *both* orgs'
   streams, and each side must see only the crossings that touched its own
   boundary.

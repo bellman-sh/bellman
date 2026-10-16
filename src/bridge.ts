@@ -26,6 +26,7 @@ import {
 import { parse as parseYaml } from "yaml";
 import { MAX_BLOB_BYTES, OCTET_STREAM, isImageType } from "./blobs.js";
 import { createBusLink, type BusLinkOptions } from "./bus-link.js";
+import type { DoorEvent, DoorLog, DoorSeat } from "./door-protocol.js";
 import {
   discardThrough, drain, enqueue, fromEnvelope, renderBatch, renderEvent, safeMeta,
   writeMemberships, type PeerEvent, type WireEnvelope,
@@ -68,6 +69,8 @@ import { VERSION } from "./version.js";
 export type Delivery = "channel" | "hook";
 
 const MAX_WAIT_SECONDS = 25;
+/** How many of the events `deliver` saw the bridge remembers, for the door's `recent`. */
+export const RECENT_LIMIT = 50;
 /** The one tool the bridge does more than relay: it lists it differently and, called, fills in its manifest. */
 const START_TOOL = "bellman_start";
 /**
@@ -426,6 +429,11 @@ interface Watch {
   /** Highest cursor delivered to, or already seen by, the agent. */
   delivered: number;
   active: boolean;
+  /**
+   * Whether the long poll is failing and being retried: set where `watch` logs "sync failed", and cleared by the
+   * next poll the server answers.
+   */
+  retrying: boolean;
   /** Ends the bus's delivery for this member, while the bus is what delivers. Set only on the bus path. */
   release?: () => void;
 }
@@ -612,6 +620,8 @@ export function createBridge(opts: BridgeOptions) {
   const pollWait = opts.pollWaitSeconds ?? MAX_WAIT_SECONDS;
   const whoami = opts.whoami ?? ((): WhoAmI => ({ source: "env", label: null }));
   const watches = new Map<string, Watch>(); // keyed by member_id
+  /** The last RECENT_LIMIT events `deliver` saw, newest last. */
+  const recentEvents: PeerEvent[] = [];
   /**
    * Handles whose membership has ENDED, by leaving or by removal. Such a handle is
    * dead for good: rejoining mints a new member_id, so nothing can make this one
@@ -869,7 +879,7 @@ export function createBridge(opts: BridgeOptions) {
 
   function arm(sessionId: string, memberId: string, cursor: number): void {
     if (closed || !sessionId || !memberId || watches.has(memberId) || departed.has(memberId)) return;
-    const w: Watch = { sessionId, memberId, delivered: cursor, active: true };
+    const w: Watch = { sessionId, memberId, delivered: cursor, active: true, retrying: false };
     watches.set(memberId, w);
     persistMemberships();
     // The bus when there is one; the long poll when there is not, and for any member the bus cannot serve.
@@ -985,11 +995,14 @@ export function createBridge(opts: BridgeOptions) {
           return;
         }
         log(`sync failed for ${w.memberId}: ${(err as Error).message}; retrying in ${backoff}ms`);
+        w.retrying = true;
         await sleep(backoff);
         backoff = Math.min(backoff * 2, 30_000);
         continue;
       }
+      // The server answered, so the failure the backoff was for is over, whatever the answer says.
       backoff = 1000;
+      w.retrying = false;
       if (closed || !w.active) return;
 
       if (result.isError) {
@@ -1115,6 +1128,10 @@ export function createBridge(opts: BridgeOptions) {
   }
 
   async function deliver(event: PeerEvent): Promise<void> {
+    // Before either delivery, and before channel delivery lets an ambient event go: the door reports what arrived,
+    // interrupting or not.
+    recentEvents.push(event);
+    if (recentEvents.length > RECENT_LIMIT) recentEvents.shift();
     if (delivery === "hook") {
       // Ambient events are queued like any other. Hook delivery drains at the
       // END of a turn, so it does not interrupt by construction — and skipping
@@ -1352,6 +1369,59 @@ export function createBridge(opts: BridgeOptions) {
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }
 
+  /**
+   * A room's log for the door, read with the credential this bridge already holds for bellman_upload: the mod has
+   * none of its own. Only a room this bridge watches is read, so the door cannot be made to spend the bearer on any
+   * other. The events come back addressed to the room's watched member, as `watch` would deliver them. A 401 is
+   * answered as `uploadAndPlace` answers one: the held connection is asked for something, so that its transport
+   * refreshes the sign-in, and the read is repeated once, and only if the bearer is no longer the one refused. The
+   * one difference is that no connection is made for it (see the call), because nobody asked for this read.
+   *
+   * It never rejects. The door awaits it with nothing to catch, so whatever throws after the 404 and the 503 (a bearer
+   * it cannot read, a server it cannot reach, a 200 it cannot read) is `upstream`, a 502.
+   */
+  async function readEvents(
+    sessionId: string,
+    after?: number,
+  ): Promise<{ status: number; body: DoorLog | { error: string } }> {
+    // The first, should a bridge ever watch two members of one room: the route answers for the bearer and not for a
+    // member, so which one the events are addressed to is only a label.
+    const seat = [...watches.values()].find((w) => w.sessionId === sessionId);
+    if (!seat) return { status: 404, body: { error: "not_watched" } };
+    const upload = opts.upload;
+    if (!upload) return { status: 503, body: { error: "no_credential" } };
+
+    try {
+      const target = new URL(`/rooms/${encodeURIComponent(sessionId)}/events`, upload.serverUrl);
+      if (after !== undefined) target.searchParams.set("after", String(after));
+      const get = (bearer: string): Promise<Response> =>
+        (upload.fetchImpl ?? fetch)(target, { headers: { authorization: `Bearer ${bearer}` } });
+      const bearer = await upload.bearer();
+      let response = await get(bearer);
+      if (response.status === 401) {
+        // Through the connection the bridge holds and never a new one: remote() would make it, and on the signed-in
+        // path that can open a browser, for a read that comes from the door's poll and that nobody asked for. With
+        // none held the 401 is reported as it was, and the next Bellman tool call is what reconnects.
+        await live?.listTools().catch(() => undefined);
+        const fresh = await upload.bearer();
+        if (fresh !== bearer) {
+          await response.body?.cancel().catch(() => undefined);
+          response = await get(fresh);
+        }
+      }
+      if (response.status !== 200) {
+        await response.body?.cancel().catch(() => undefined);
+        return { status: response.status, body: { error: "upstream" } };
+      }
+      const read = (await response.json()) as { events: WireEnvelope[]; cursor: number };
+      const member = { session_id: seat.sessionId, member_id: seat.memberId };
+      const events = read.events.map((env) => fromEnvelope(member, env));
+      return { status: 200, body: { events, cursor: read.cursor } };
+    } catch {
+      return { status: 502, body: { error: "upstream" } };
+    }
+  }
+
   async function close(): Promise<void> {
     closed = true;
     for (const w of watches.values()) w.active = false;
@@ -1380,5 +1450,17 @@ export function createBridge(opts: BridgeOptions) {
       })),
     /** Which part this bridge plays on the local bus, for tests and diagnostics: undefined when it has none. */
     busRole: (): "coordinator" | "subscriber" | undefined => link?.role(),
+    /**
+     * The seats this bridge watches, for the door: each member in its room, and whether its long poll is failing and
+     * being retried.
+     * ponytail: a member on the bus shows `retrying` only once `onFallback` puts it back on polling, and a room
+     * socket degraded inside src/bus-link.ts is not reported; surface it from there if the door should say so.
+     */
+    seats: (): DoorSeat[] =>
+      [...watches.values()].map((w) => ({ session_id: w.sessionId, member_id: w.memberId, retrying: w.retrying })),
+    /** The last RECENT_LIMIT events `deliver` saw, newest last: ambient ones too, in both deliveries. */
+    recent: (): DoorEvent[] => [...recentEvents],
+    /** A room's log read with this bridge's own credential, for the door's `/rooms/<id>/events`. */
+    readEvents,
   };
 }

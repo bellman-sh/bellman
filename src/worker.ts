@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { handleRoutes } from "./http/handles.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
@@ -9,7 +10,7 @@ import { buildServer } from "./server.js";
 import type { Identity } from "./types.js";
 import { DurableObjectStore, type BellmanEnv } from "./store-do.js";
 import { AuthDO, AuthStore } from "./oauth/store.js";
-import { caller, handleOAuth, identityFromAccessToken, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
+import { caller, handleOAuth, identityFromAccessToken, parseOperators, unauthorizedHeaders, type OAuthConfig } from "./oauth/routes.js";
 import { parseOverrides, type ProviderCredentials, type ProviderName } from "./oauth/providers.js";
 import { parsePanelOrigins } from "./oauth/browser.js";
 import { canonicalResource } from "./oauth/tokens.js";
@@ -47,6 +48,12 @@ export interface WorkerEnv extends BellmanEnv {
   GOOGLE_CLIENT_SECRET?: string;
   /** Optional JSON: upstream identity -> a Bellman identity with a plan/org. */
   BELLMAN_USERS?: string;
+  /**
+   * A secret: the user ids, comma-separated, that hold the operator's
+   * platform-wide powers (`parseOperators`). Unset, nobody holds them; no plan
+   * BELLMAN_USERS grants stands in.
+   */
+  BELLMAN_OPERATORS?: string;
   /**
    * Comma-separated origins the control panel is served from, e.g.
    * "https://dash.bellman.sh". Unset means no browser may hold a session —
@@ -93,6 +100,7 @@ function oauthConfig(
     overrides: parseOverrides(env.BELLMAN_USERS),
     panelOrigins: parsePanelOrigins(env.BELLMAN_PANEL_ORIGINS),
     plans,
+    operators: parseOperators(env.BELLMAN_OPERATORS),
     paymentLinks: billingSettings(env).paymentLinks,
     // The switch has to reach plans already stored, or it only stops new
     // purchases and every earlier one keeps issuing paid tokens.
@@ -238,6 +246,19 @@ export default {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await presetRoutes(request, {
+        store,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // A person's public handle (bylines spec D6), ahead of the OAuth routes, which serve /account and
+    // have no store (plan ruling R1). The room routes' rules and the same guard.
+    if (url.pathname === "/account/handle" || url.pathname === "/account/handle/") {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await handleRoutes(request, {
         store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],

@@ -26,7 +26,7 @@ import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../o
 import { publicMember, retentionOf, roomPreview, roomListEntry, rosterAsOf, untrusted } from "../projections.js";
 import { publicEvent } from "../public-event.js";
 import { verbsOfRole } from "../roles.js";
-import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
+import { cutAtFor, cutFor, findMember, gateSeat, handlesOf, isPublic, readSurface, sessionStatus, writeSurface, type RoomFailure } from "../rooms.js";
 import { JOINED_SCAN, isRemovedMember, type BellmanStore } from "../store.js";
 import type { StoredSession } from "../stored-session.js";
 import { surfaceCursor } from "../surface.js";
@@ -67,6 +67,7 @@ const SURFACE_ITEM = /^\/rooms\/([^/]+)\/surface\/([^/]+)$/;
 const UPLOAD = /^\/rooms\/([^/]+)\/blobs$/;
 const DOWNLOAD = /^\/rooms\/([^/]+)\/blobs\/([^/]+)$/;
 const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
+const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
 const STATUS: Record<RoomFailure, number> = {
@@ -119,6 +120,26 @@ const overQuota = (used: number, ceiling: number, bytes: number, origin: string 
 
 export const methodNotAllowed = (allow: string, origin: string | undefined) =>
   new Response("Method not allowed", { status: 405, headers: { allow, ...corsHeaders(origin) } });
+
+/**
+ * The refusal for a JSON write whose declared length rules it out, or `undefined` when its body may be
+ * read. Decided from the Content-Length header, before a byte of the body is parsed: a length that is
+ * present must be a digit string (400), because `Number` would read "garbage" as NaN and "1e3" as 1000
+ * and pass both under the bound, and it may not pass `max` (413). An absent one is a chunked body,
+ * which is allowed; the bound on those is a follow-up, not this check. `what` names the body in the
+ * 413's words ("a preset", "a surface write"). The presets, the surface writes and the handle all
+ * bound their bodies here, each with its own `max`.
+ */
+export function lengthRefusal(request: Request, max: number, what: string, origin: string | undefined): Response | undefined {
+  const length = request.headers.get("content-length");
+  if (length !== null && !/^\d+$/.test(length)) {
+    return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
+  }
+  if (Number(length ?? "0") > max) {
+    return problem(413, "too_large", `${what} is at most ${max} bytes of JSON`, origin);
+  }
+  return undefined;
+}
 
 /**
  * The room routes. `undefined` for a path that is neither `/rooms` (the list)
@@ -175,6 +196,11 @@ export async function roomRoutes(request: Request, deps: RoomRouteDeps): Promise
     if (download) {
       if (request.method !== "GET") return methodNotAllowed("GET", origin);
       return await downloadBlob(request, download[1], download[2], origin, deps);
+    }
+    const byline = BYLINE.exec(path);
+    if (byline) {
+      if (request.method !== "PUT" && request.method !== "DELETE") return methodNotAllowed("PUT, DELETE", origin);
+      return await writeByline(request, byline[1], origin, deps);
     }
     const unpublish = UNPUBLISH.exec(path);
     if (unpublish) {
@@ -528,7 +554,8 @@ const liveRoster = async (store: BellmanStore, session: StoredSession) => {
  * Both envelopes carry `closed_at` and `purge_at` (`retentionOf`, review M8): when the room closed
  * and when it goes, so a member of a closed room can learn how long it has, and null where the
  * record has none. Both carry `mine` too, whether the caller created the room (public rooms plan
- * R3): the creator alone may make a public room private.
+ * R3): the creator alone may make a public room private. And `signed` (bylines spec D6): true only
+ * for the creator of a room they have signed with their handle, false for every other caller.
  */
 async function roomDetail(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
   const who = await deps.caller(request);
@@ -544,6 +571,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
       session_status: sessionStatus(session),
       viewer: "admin",
       mine: session.createdBy === who.identity.userId,
+      signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
       ...retentionOf(session),
       preview: roomPreview(session, null),
       ...await liveRoster(deps.store, session),
@@ -570,6 +598,7 @@ async function roomDetail(request: Request, sessionId: string, origin: string | 
     session_status: sessionStatus(session),
     viewer: "member",
     mine: session.createdBy === who.identity.userId,
+    signed: session.createdBy === who.identity.userId && (await deps.store.bylineFor(who.identity.userId, session.id)) !== undefined,
     ...retentionOf(session),
     preview: roomPreview(session, viewer.roomRole),
     ...roster,
@@ -642,6 +671,32 @@ async function unpublishRoom(request: Request, sessionId: string, origin: string
   }
   await deps.store.unpublishSession(sessionId, Date.now());
   return new Response(null, { status: 204, headers: corsHeaders(origin) });
+}
+
+/**
+ * Sign or unsign a public room with the creator's handle (bylines spec D3, D6). The room is read
+ * for who created it and whether it is public; the signature is written to the registry alone.
+ */
+async function writeByline(request: Request, sessionId: string, origin: string | undefined, deps: RoomRouteDeps): Promise<Response> {
+  const who = await deps.caller(request);
+  if (!who) return problem(401, "unauthorized", "sign in, or send a bearer token", origin);
+  const refusal = csrfRefusal(request, who.via, origin);
+  if (refusal) return refusal;
+  const session = await deps.store.getSession(sessionId);
+  if (!session || (await handlesOf(deps.store, session, who.identity)).length === 0) {
+    return problem(404, "not_found", "no such room, or no member of yours in it", origin);
+  }
+  const userId = who.identity.userId;
+  if (session.createdBy !== userId) return problem(403, "forbidden", "only the room's creator may sign it", origin);
+  if (request.method === "DELETE") {
+    await deps.store.unsignRoom(userId, sessionId);
+    return new Response(null, { status: 204, headers: corsHeaders(origin) });
+  }
+  if (!isPublic(session)) return problem(409, "room_not_public", "only a public room can carry a byline", origin);
+  // One registry call reads the handle and writes the signature, so a release cannot land between them.
+  const handle = await deps.store.signRoom(userId, sessionId, Date.now());
+  if (handle === undefined) return problem(409, "no_handle", "claim a handle in Settings first", origin);
+  return json(200, { handle }, origin);
 }
 
 /** The validator for a surface cursor: the number, quoted, as RFC 9110 wants a strong ETag. */
@@ -782,17 +837,8 @@ async function writeSurfaceRoute(
   if (request.method === "DELETE") {
     payload = { key, remove: true };
   } else {
-    // A length that is present must be a digit string: `Number` would read
-    // "garbage" as NaN and "1e3" as 1000 and pass both under the bound. An
-    // absent one is a chunked body, which is allowed; the bound on those is a
-    // follow-up, not this check.
-    const length = request.headers.get("content-length");
-    if (length !== null && !/^\d+$/.test(length)) {
-      return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
-    }
-    if (Number(length ?? "0") > MAX_SURFACE_WRITE_BYTES) {
-      return problem(413, "too_large", `a surface write is at most ${MAX_SURFACE_WRITE_BYTES} bytes of JSON`, origin);
-    }
+    const refused = lengthRefusal(request, MAX_SURFACE_WRITE_BYTES, "a surface write", origin);
+    if (refused) return refused;
     const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the item, without its key or with the path's", origin);
     let body: unknown;
     try {

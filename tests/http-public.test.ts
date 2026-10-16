@@ -73,8 +73,8 @@ describe("GET /public/rooms/:id", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-credentials")).toBeNull();
     const body = await bodyOf(res);
-    expect(Object.keys(body).sort()).toEqual(["closed_at", "id", "mode", "status", "text"]);
-    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair" });
+    expect(Object.keys(body).sort()).toEqual(["by", "closed_at", "id", "mode", "status", "text"]);
+    expect(body).toMatchObject({ id: PUB, status: "active", closed_at: null, mode: "pair", by: null });
     expect(body.text).toEqual({
       trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" }, data: { room: "Open review", purpose: "Read along" },
     });

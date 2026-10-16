@@ -17,8 +17,8 @@ import {
   isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, seatInOrder, seatVictims, stampSeen,
 } from "./store.js";
 import {
-  BRIEF_PREFIX, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows, putRows,
-  seatRows, seated, userOfKey, userPrefix, USER_PREFIX, type RowReader,
+  BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
+  putRows, seatRows, seated, userOfKey, userPrefix, USER_PREFIX, type RowReader,
 } from "./member-rows.js";
 import { hostWakeIntent, type HostWake } from "./host.js";
 import type { HostDO } from "./host-do.js";
@@ -3398,6 +3398,90 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     if ((await this.getPreset(userId, name)) === undefined) return false;
     return this.ctx.storage.delete(`pr:${userId}:${name}`);
   }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(`uh:${userId}`);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.ctx.storage.get<string>(`hn:${handle}`);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const holder = await txn.get<string>(`hn:${handle}`);
+      if (holder !== undefined) return holder === userId ? "claimed" : "taken";
+      const old = await txn.get<string>(`uh:${userId}`);
+      if (old !== undefined) await txn.delete(`hn:${old}`);
+      await txn.put({ [`hn:${handle}`]: userId, [`uh:${userId}`]: handle });
+      return "claimed";
+    });
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    await this.ctx.storage.transaction((txn) => this.#release(txn, userId));
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const userId = await txn.get<string>(`hn:${handle}`);
+      if (userId !== undefined) await this.#release(txn, userId);
+      return userId;
+    });
+  }
+
+  /** A person's handle and every signature, inside the caller's transaction. */
+  async #release(txn: DurableObjectTransaction, userId: string): Promise<void> {
+    const handle = await txn.get<string>(`uh:${userId}`);
+    const signed = (await this.#signed(txn, userId)).map(([sessionId]) => `hs:${userId}:${sessionId}`);
+    const keys = [`uh:${userId}`, ...signed, ...(handle === undefined ? [] : [`hn:${handle}`])];
+    // A delete takes at most KEYS_PER_CALL keys.
+    for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const handle = await txn.get<string>(`uh:${userId}`);
+      if (handle !== undefined) await txn.put(`hs:${userId}:${sessionId}`, at);
+      return handle;
+    });
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    await this.ctx.storage.delete(`hs:${userId}:${sessionId}`);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return (await this.#signed(this.ctx.storage, userId))
+      .map(([sessionId, signedAt]) => ({ sessionId, signedAt }))
+      .sort((a, b) => b.signedAt - a.signedAt || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+  }
+
+  /**
+   * `hs:<userId>:<sessionId>` — the rooms a person signed (bylines spec D2), as `[sessionId, signedAt]`.
+   * The same shape as `pr:`, so the same collision: an operator-issued user id may hold a colon, and
+   * one person's prefix then covers the rows of someone whose id extends it. A session id is
+   * `qs_<uuid>` and holds none, so a key with a colon past this person's prefix is not theirs. The read
+   * and the release both list through here, so they agree on whose rows these are.
+   */
+  async #signed(
+    storage: { list<T>(options: { prefix: string }): Promise<Map<string, T>> },
+    userId: string,
+  ): Promise<[string, number][]> {
+    const prefix = `hs:${userId}:`;
+    const rows = await storage.list<number>({ prefix });
+    return [...rows]
+      .map(([key, signedAt]): [string, number] => [key.slice(prefix.length), signedAt])
+      .filter(([sessionId]) => !sessionId.includes(":"));
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    const [handle, signed] = await Promise.all([
+      this.ctx.storage.get<string>(`uh:${userId}`),
+      this.ctx.storage.get<number>(`hs:${userId}:${sessionId}`),
+    ]);
+    return handle !== undefined && signed !== undefined ? handle : undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3920,6 +4004,42 @@ export class DurableObjectStore implements BellmanStore {
 
   async deletePreset(userId: string, name: string): Promise<boolean> {
     return this.registry.deletePreset(userId, name);
+  }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.registry.handleOf(userId);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.registry.userOfHandle(handle);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    return this.registry.claimHandle(userId, handle);
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    await this.registry.releaseHandle(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.registry.releaseHandleNamed(handle);
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    return this.registry.signRoom(userId, sessionId, at);
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    await this.registry.unsignRoom(userId, sessionId);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return this.registry.signedRooms(userId);
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    return this.registry.bylineFor(userId, sessionId);
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

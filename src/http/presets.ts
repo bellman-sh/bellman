@@ -7,7 +7,7 @@
 import { allowedOrigin, corsHeaders, csrfRefusal, preflightResponse } from "../oauth/browser.js";
 import { PresetNameShape, builtinPresets } from "../manifest.js";
 import { MAX_PRESETS, checkPreset } from "../presets.js";
-import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
+import { json, lengthRefusal, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type PresetRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins">;
 
@@ -68,14 +68,8 @@ async function writePreset(request: Request, rawName: string, origin: string | u
     return new Response(null, { status: 204, headers: corsHeaders(origin) });
   }
 
-  // The length before the body, as the surface write checks it: a present length must be a digit string.
-  const length = request.headers.get("content-length");
-  if (length !== null && !/^\d+$/.test(length)) {
-    return problem(400, "invalid_request", "Content-Length must be a non-negative integer", origin);
-  }
-  if (Number(length ?? "0") > MAX_PRESET_BYTES) {
-    return problem(413, "too_large", `a preset is at most ${MAX_PRESET_BYTES} bytes of JSON`, origin);
-  }
+  const refused = lengthRefusal(request, MAX_PRESET_BYTES, "a preset", origin);
+  if (refused) return refused;
   const notObject = () => problem(400, "invalid_request", "the body must be a JSON object: the preset", origin);
   let body: unknown;
   try {

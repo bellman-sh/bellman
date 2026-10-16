@@ -1408,6 +1408,33 @@ export interface BellmanStore {
   /** True when there was one to delete. */
   deletePreset(userId: string, name: string): Promise<boolean>;
 
+  /**
+   * A person's public handle (bylines spec D1, D2), and the public rooms they signed with it. The
+   * registry holds both, so claiming, releasing, signing and unsigning are each one transaction
+   * and nothing spans two objects (ADR 0006).
+   */
+  handleOf(userId: string): Promise<string | undefined>;
+  userOfHandle(handle: string): Promise<string | undefined>;
+  /** "taken" when another user holds it. Claiming a new one frees the old; claiming your own is "claimed". */
+  claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
+  /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
+  releaseHandle(userId: string): Promise<void>;
+  /**
+   * The operator's release (ADR 0021): resolves the handle to its holder and releases as `releaseHandle`
+   * does, in the same transaction. The holder's user id, or `undefined` when nobody holds the handle.
+   */
+  releaseHandleNamed(handle: string): Promise<string | undefined>;
+  /**
+   * Signs with the handle the user holds, read in the same operation as the write, so a release cannot
+   * land between them. The handle it signed with, or `undefined`, writing nothing, when they hold none.
+   */
+  signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined>;
+  unsignRoom(userId: string, sessionId: string): Promise<void>;
+  /** Newest signature first. */
+  signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]>;
+  /** The handle, when the user holds one and has signed the room: the public read's one registry call (D4). */
+  bylineFor(userId: string, sessionId: string): Promise<string | undefined>;
+
   /** Plans granted at runtime. The operator's BELLMAN_USERS still outranks these. */
   getGrant(key: string): Promise<PlanGrant | undefined>;
   putGrant(grant: PlanGrant): Promise<void>;
@@ -1492,6 +1519,9 @@ export class MemoryStore implements BellmanStore {
   private creates = new Map<string, number[]>(); // userId -> timestamps
   private hostedOpen = new Map<string, Set<string>>(); // userId -> the hosted rooms holding a slot (I7)
   private presets = new Map<string, Map<string, SavedPreset>>(); // userId -> name -> preset
+  private handles = new Map<string, string>(); // handle -> userId
+  private handleByUser = new Map<string, string>(); // userId -> handle
+  private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
   private audit: AuditEntry[] = [];
   private waiters = new Map<string, Waiter[]>();
@@ -2427,6 +2457,62 @@ export class MemoryStore implements BellmanStore {
 
   async deletePreset(userId: string, name: string): Promise<boolean> {
     return this.presets.get(userId)?.delete(name) ?? false;
+  }
+
+  async handleOf(userId: string): Promise<string | undefined> {
+    return this.handleByUser.get(userId);
+  }
+
+  async userOfHandle(handle: string): Promise<string | undefined> {
+    return this.handles.get(handle);
+  }
+
+  async claimHandle(userId: string, handle: string): Promise<"claimed" | "taken"> {
+    const holder = this.handles.get(handle);
+    if (holder !== undefined) return holder === userId ? "claimed" : "taken";
+    const old = this.handleByUser.get(userId);
+    if (old !== undefined) this.handles.delete(old);
+    this.handles.set(handle, userId);
+    this.handleByUser.set(userId, handle);
+    return "claimed";
+  }
+
+  async releaseHandle(userId: string): Promise<void> {
+    const handle = this.handleByUser.get(userId);
+    if (handle !== undefined) this.handles.delete(handle);
+    this.handleByUser.delete(userId);
+    this.signatures.delete(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    const userId = this.handles.get(handle);
+    // releaseHandle awaits nothing, so it runs to its end before this yields: nothing lands between the read and it.
+    if (userId !== undefined) await this.releaseHandle(userId);
+    return userId;
+  }
+
+  async signRoom(userId: string, sessionId: string, at: number): Promise<string | undefined> {
+    const handle = this.handleByUser.get(userId);
+    if (handle === undefined) return undefined;
+    const mine = this.signatures.get(userId) ?? new Map<string, number>();
+    mine.set(sessionId, at);
+    this.signatures.set(userId, mine);
+    return handle;
+  }
+
+  async unsignRoom(userId: string, sessionId: string): Promise<void> {
+    this.signatures.get(userId)?.delete(sessionId);
+  }
+
+  async signedRooms(userId: string): Promise<{ sessionId: string; signedAt: number }[]> {
+    return [...(this.signatures.get(userId) ?? [])]
+      .map(([sessionId, signedAt]) => ({ sessionId, signedAt }))
+      .sort((a, b) => b.signedAt - a.signedAt || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
+  }
+
+  async bylineFor(userId: string, sessionId: string): Promise<string | undefined> {
+    const handle = this.handleByUser.get(userId);
+    return handle !== undefined && this.signatures.get(userId)?.has(sessionId) ? handle : undefined;
   }
 
   async getGrant(key: string): Promise<PlanGrant | undefined> {

@@ -188,7 +188,7 @@ flowchart TB
 | Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
-| Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
+| Claude Desktop, consumer app | yes | none | manual `bellman_sync`, which the bundle's `BELLMAN_DELIVERY=queue` tells the agent to make when a turn starts; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
 | ChatGPT, Cursor, Gemini, other MCP | yes | none | manual `bellman_sync` |
 
 Two consequences:

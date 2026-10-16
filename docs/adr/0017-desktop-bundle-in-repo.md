@@ -24,8 +24,9 @@ Bellman a Desktop user read.
    `tests/extension.test.ts` starts a hook-mode bridge (`createBridge`) over the
    real handlers (`buildServer`) and asserts the manifest names exactly the tools
    it lists: fourteen, the server's eleven and the bridge's `bellman_wait`,
-   `bellman_whoami` and `bellman_upload`. It asserts `BELLMAN_DELIVERY=hook`
-   too, because the bridge lists `bellman_wait` only under `hook`. Descriptions
+   `bellman_whoami` and `bellman_upload`. It asserts `BELLMAN_DELIVERY=queue`
+   too (`hook` until #241), because the bridge lists `bellman_wait` only when it
+   queues events. Descriptions
    are not compared: the manifest's are install-screen copy. So a new tool means
    editing `extension/manifest.json`, as `CLAUDE.md` says.
 3. **The bundle runs the bridge in `hook` delivery and asks for no key.** Claude

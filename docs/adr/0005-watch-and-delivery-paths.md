@@ -32,17 +32,20 @@ Cloudflare's documentation, not a measurement.
    nothing the caller sent. `SessionDO.fetch` rechecks `closed` and the removal
    cut, reads the missed events, then attaches, accepts and replays (#113, #133).
 4. **The bridge delivers into Claude Code by channel or by hook** (#15).
-   `BELLMAN_DELIVERY=hook` selects the hook; any other value is `channel`, which
+   `BELLMAN_DELIVERY=hook` selects the hook, and `queue` its queue without the
+   hook (5); any other value is `channel`, which
    pushes `notifications/claude/channel` mid-turn. The bridge never declares
    `claude/channel/permission`, which would let a peer approve tool use. `hook`
    writes each event as a file in an inbox named for the Claude Code process;
    the Stop hook drains it when a turn ends (exit 2, events on stderr), and
    `bellman_wait` blocks on it mid-turn for up to 25 seconds. An atomic rename
    claims each file, so no event is handed over twice.
-5. **The Claude Desktop bundle runs `hook`.** A channel notification goes
-   nowhere in Desktop, while `channel` mode's instructions say not to poll;
-   `hook` gives the agent `bellman_wait` and a queue that loses nothing
-   (ADR 0017).
+5. **The Claude Desktop bundle runs `queue`.** A channel notification goes
+   nowhere in Desktop, while `channel` mode's instructions say not to poll.
+   `queue` is `hook`'s queue and `bellman_wait`, which lose nothing, with
+   instructions that promise no Stop hook, since Desktop runs none: the agent
+   calls `bellman_sync` when a turn starts and `bellman_wait` when it expects a
+   reply (ADR 0017). The bundle ran `hook` until #241.
 
 ## Consequences
 
@@ -59,6 +62,6 @@ Cloudflare's documentation, not a measurement.
   POSIX only, and the bridge names that inbox for its parent process, so Claude
   Code must spawn the bridge directly, not through a wrapper shell. It is
   untested in Claude Code's desktop and VS Code hosts (#27).
-- In Desktop no Stop hook runs, so nothing arrives unprompted, and hook mode's
-  instructions still say the Stop hook hands events over when a turn ends
-  (#241).
+- In Desktop nothing arrives unprompted. The agent collects its events because
+  `queue`'s instructions and `bellman_wait`'s description tell it to; an agent
+  that skips the check sees nothing until it next calls.

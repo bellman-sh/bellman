@@ -18,7 +18,7 @@
  */
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { publicRoomUrl } from "../codes.js";
-import { HANDLE_PATTERN } from "../handles.js";
+import { handleFromSegment } from "../handles.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, roomNamed } from "../public-names.js";
@@ -203,13 +203,8 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
  * signatures are looked at, one session read each, and at most `MAX_ROOMS_LISTED` rooms listed.
  */
 async function handlePage(raw: string, deps: PublicRouteDeps): Promise<Response> {
-  let handle: string;
-  try {
-    handle = decodeURIComponent(raw).trim().toLowerCase();
-  } catch {
-    return notFound("no such handle");
-  }
-  if (!HANDLE_PATTERN.test(handle)) return notFound("no such handle");
+  const handle = handleFromSegment(raw);
+  if (handle === undefined) return notFound("no such handle");
   const userId = await deps.store.userOfHandle(handle);
   if (userId === undefined) return notFound("no such handle");
   // The scan's cut is the newest signatures, so the page orders them itself and does not lean on the registry's order.

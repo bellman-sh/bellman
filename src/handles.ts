@@ -10,6 +10,21 @@ export const RESERVED_HANDLES: ReadonlySet<string> = new Set([
   "api", "mcp", "dash", "www", "about", "settings", "null", "undefined", "anthropic", "claude",
 ]);
 
+/**
+ * The handle a path segment names: percent-decoded, trimmed and lowercased, as a claim reads one. `undefined`
+ * for a segment that will not decode or breaks the grammar, which names no one. Only the shape: the reserved
+ * list governs claims, and a name reserved after someone took it is still theirs to read and to lose.
+ */
+export function handleFromSegment(raw: string): string | undefined {
+  let handle: string;
+  try {
+    handle = decodeURIComponent(raw).trim().toLowerCase();
+  } catch {
+    return undefined;
+  }
+  return HANDLE_PATTERN.test(handle) ? handle : undefined;
+}
+
 export type HandleCheck =
   | { ok: true; handle: string }
   | { ok: false; error: "handle_invalid" | "handle_reserved"; description: string };

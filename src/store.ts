@@ -1419,6 +1419,11 @@ export interface BellmanStore {
   claimHandle(userId: string, handle: string): Promise<"claimed" | "taken">;
   /** The handle and every signature, in one transaction: a handle claimed later revives no byline. */
   releaseHandle(userId: string): Promise<void>;
+  /**
+   * The operator's release (ADR 0021): resolves the handle to its holder and releases as `releaseHandle`
+   * does, in the same transaction. The holder's user id, or `undefined` when nobody holds the handle.
+   */
+  releaseHandleNamed(handle: string): Promise<string | undefined>;
   signRoom(userId: string, sessionId: string, at: number): Promise<void>;
   unsignRoom(userId: string, sessionId: string): Promise<void>;
   /** Newest signature first. */
@@ -2473,6 +2478,13 @@ export class MemoryStore implements BellmanStore {
     if (handle !== undefined) this.handles.delete(handle);
     this.handleByUser.delete(userId);
     this.signatures.delete(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    const userId = this.handles.get(handle);
+    // releaseHandle awaits nothing, so it runs to its end before this yields: nothing lands between the read and it.
+    if (userId !== undefined) await this.releaseHandle(userId);
+    return userId;
   }
 
   async signRoom(userId: string, sessionId: string, at: number): Promise<void> {

@@ -4296,6 +4296,38 @@ export function describeStoreContract(
         await store.releaseHandle("u_x");
         expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
       });
+
+      // The operator's release (ADR 0021): the handle names whose record goes.
+      it("releases a handle by its name: answers its holder, and the handle and every signature go", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        await store.signRoom("u_a", "qs_2", 2000);
+        expect(await store.releaseHandleNamed("ada")).toBe("u_a");
+        expect(await store.handleOf("u_a")).toBeUndefined();
+        expect(await store.userOfHandle("ada")).toBeUndefined();
+        expect(await store.signedRooms("u_a")).toEqual([]);
+        await store.claimHandle("u_a", "ada2");
+        expect(await store.bylineFor("u_a", "qs_1")).toBeUndefined();
+        expect(await store.claimHandle("u_b", "ada")).toBe("claimed");
+      });
+
+      it("answers undefined for a handle nobody holds, and releases nothing", async () => {
+        await store.claimHandle("u_a", "ada");
+        await store.signRoom("u_a", "qs_1", 1000);
+        expect(await store.releaseHandleNamed("bob")).toBeUndefined();
+        expect(await store.handleOf("u_a")).toBe("ada");
+        expect(await store.bylineFor("u_a", "qs_1")).toBe("ada");
+      });
+
+      it("releases by name no signature of an id that extends the holder's past a colon", async () => {
+        await store.claimHandle("u_x", "xena");
+        await store.signRoom("u_x", "qs_1", 1000);
+        await store.claimHandle("u_x:y", "yara");
+        await store.signRoom("u_x:y", "qs_1", 1000);
+        expect(await store.releaseHandleNamed("xena")).toBe("u_x");
+        expect(await store.signedRooms("u_x")).toEqual([]);
+        expect(await store.bylineFor("u_x:y", "qs_1")).toBe("yara");
+      });
     });
 
     // ----------------------------------------------------------------- audit

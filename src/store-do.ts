@@ -3419,13 +3419,24 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   }
 
   async releaseHandle(userId: string): Promise<void> {
-    await this.ctx.storage.transaction(async (txn) => {
-      const handle = await txn.get<string>(`uh:${userId}`);
-      const signed = (await this.#signed(txn, userId)).map(([sessionId]) => `hs:${userId}:${sessionId}`);
-      const keys = [`uh:${userId}`, ...signed, ...(handle === undefined ? [] : [`hn:${handle}`])];
-      // A delete takes at most KEYS_PER_CALL keys.
-      for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
+    await this.ctx.storage.transaction((txn) => this.#release(txn, userId));
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const userId = await txn.get<string>(`hn:${handle}`);
+      if (userId !== undefined) await this.#release(txn, userId);
+      return userId;
     });
+  }
+
+  /** A person's handle and every signature, inside the caller's transaction. */
+  async #release(txn: DurableObjectTransaction, userId: string): Promise<void> {
+    const handle = await txn.get<string>(`uh:${userId}`);
+    const signed = (await this.#signed(txn, userId)).map(([sessionId]) => `hs:${userId}:${sessionId}`);
+    const keys = [`uh:${userId}`, ...signed, ...(handle === undefined ? [] : [`hn:${handle}`])];
+    // A delete takes at most KEYS_PER_CALL keys.
+    for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
   }
 
   async signRoom(userId: string, sessionId: string, at: number): Promise<void> {
@@ -4005,6 +4016,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async releaseHandle(userId: string): Promise<void> {
     await this.registry.releaseHandle(userId);
+  }
+
+  async releaseHandleNamed(handle: string): Promise<string | undefined> {
+    return this.registry.releaseHandleNamed(handle);
   }
 
   async signRoom(userId: string, sessionId: string, at: number): Promise<void> {

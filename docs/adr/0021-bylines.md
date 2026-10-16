@@ -44,5 +44,6 @@ reader unable to tell who started a room, or to find that person's other public 
   them up yet.
 - `GET /account/handle` stands in for a field on `GET /account`: the OAuth router serves
   that path and has no store (plan ruling R1).
-- Account deletion is manual, by email to support. Whoever processes a deletion also
-  releases the handle, because the privacy page promises that release.
+- Account deletion is manual, by email to support. The operator then releases the handle,
+  as the privacy page promises, with `DELETE /admin/handles/:handle` on `/admin/grants`'
+  gate. An abusive handle goes the same way, with its signatures.

@@ -8,9 +8,13 @@ import { MemoryBlobStore } from "../src/blobs.js";
 import { MAX_HANDLE_BYTES, handleRoutes } from "../src/http/handles.js";
 import { HANDLE_PAGE_SCAN, publicRoutes } from "../src/http/public.js";
 import { MAX_ROOMS_LISTED, roomRoutes, type RoomCaller, type RoomRouteDeps } from "../src/http/rooms.js";
+import type { OAuthConfig } from "../src/oauth/routes.js";
+import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import { HOST_USER_ID, MemoryStore } from "../src/store.js";
+import type { Identity } from "../src/types.js";
 import { member, roomManifest, session, type SessionSeed } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
+import { COOKIE, IDENTITY, PANEL, panelConfig, routeWith, seedSession } from "./helpers/panel.js";
 
 const ISSUER = "https://mcp.example.test";
 const PUB = "qs_signed";
@@ -470,5 +474,83 @@ describe("GET /public/handles/:handle", () => {
       expect(res.status).toBe(200);
       expect(((await res.json()) as { rooms: { id: string }[] }).rooms.map((r) => r.id)).toEqual([PUB]);
     });
+  });
+});
+
+// The operator's release (ADR 0021), behind /admin/grants' gate: a bearer token and never a cookie, from a team admin
+// the operator made. The handle's holder created PUB and signed it, so a release shows on the room's public read.
+describe("DELETE /admin/handles/:handle", () => {
+  const OPERATOR: Identity = { userId: "u_operator", orgId: "org_ops", plan: "team", role: "admin", label: "ops@example.dev" };
+  let cfg: OAuthConfig;
+  let route: (request: Request) => Promise<Response>;
+
+  beforeEach(async () => {
+    cfg = panelConfig({ plans: store });
+    route = routeWith(cfg);
+    await handleCall(DEV_KEY.jesse, "PUT", { handle: "jesse" });
+    await roomCall(DEV_KEY.jesse, "PUT", `/rooms/${PUB}/byline`);
+  });
+
+  const bearer = async (identity: Identity, planSource: string) => ({
+    authorization: `Bearer ${await signJwt(
+      { iss: ISSUER, sub: identity.userId, aud: cfg.resource, bellman: identity, plan_source: planSource },
+      cfg.secret, ACCESS_TOKEN_TTL_SECONDS,
+    )}`,
+  });
+  const release = (segment: string, headers: Record<string, string>, method = "DELETE") =>
+    route(new Request(`${ISSUER}/admin/handles/${segment}`, { method, headers }));
+
+  it("releases the handle and every signature for the operator: 204, and the byline and the page go", async () => {
+    const res = await release("jesse", await bearer(OPERATOR, "operator"));
+    expect(res.status).toBe(204);
+    expect(await store.handleOf("u_jesse")).toBeUndefined();
+    expect(await store.signedRooms("u_jesse")).toEqual([]);
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: null });
+    expect((await pub("/public/handles/jesse"))!.status).toBe(404);
+  });
+
+  it("reads the segment as the handle page does: percent-decoded, trimmed and lowercased", async () => {
+    expect((await release("%20%4AESSE%20", await bearer(OPERATOR, "operator"))).status).toBe(204);
+    expect(await store.userOfHandle("jesse")).toBeUndefined();
+  });
+
+  it("is 404 for a handle nobody holds, and for a segment that cannot be a handle, and asks the registry nothing for that", async () => {
+    const auth = await bearer(OPERATOR, "operator");
+    expect([(await release("nobody", auth)).status, await store.userOfHandle("jesse")]).toEqual([404, "u_jesse"]);
+    const asked = vi.spyOn(store, "releaseHandleNamed");
+    for (const segment of ["ab", "9lives", "a".repeat(3_000), "%E0%A4%A"]) {
+      const res = await release(segment, auth);
+      expect([segment.slice(0, 12), res.status, await res.json()]).toEqual([segment.slice(0, 12), 404, { error: "not_found", error_description: "no such handle" }]);
+    }
+    expect(asked).not.toHaveBeenCalled();
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+  });
+
+  it("refuses a member, a team admin a purchase made, and no credential, and the handle stays", async () => {
+    for (const [identity, planSource] of [[IDENTITY, "default"], [OPERATOR, "grant"]] as const) {
+      const res = await release("jesse", await bearer(identity, planSource));
+      expect(res.status, planSource).toBe(403);
+      expect(await res.json()).toMatchObject({ error: "insufficient_scope" });
+    }
+    expect((await release("jesse", {})).status).toBe(401);
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+    expect(await bodyOf(await pub(`/public/rooms/${PUB}`))).toMatchObject({ by: { handle: "jesse" } });
+  });
+
+  // The control for this is the first case: the same identity over a bearer token releases.
+  it("refuses the operator's own identity over a cookie, and the handle stays", async () => {
+    const sid = await seedSession(cfg, "ops-sid", { identity: OPERATOR, plan_source: "operator" });
+    const res = await release("jesse", { cookie: `${COOKIE}=${sid}`, origin: PANEL });
+    expect([res.status, await res.json()]).toEqual([401, {
+      error: "invalid_token", error_description: "this endpoint requires a bearer token, not a browser session",
+    }]);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
+  });
+
+  it("takes DELETE alone: a GET answers 405 and releases nothing", async () => {
+    const res = await release("jesse", await bearer(OPERATOR, "operator"), "GET");
+    expect([res.status, res.headers.get("allow")]).toEqual([405, "DELETE"]);
+    expect(await store.userOfHandle("jesse")).toBe("u_jesse");
   });
 });

@@ -124,6 +124,9 @@ the store contract suite covers them.
   reserved checks run in the route, before the store. Claiming the handle you
   already hold answers `claimed` and changes nothing.
 - `releaseHandle(userId): Promise<void>`
+- `releaseHandleNamed(handle): Promise<string | undefined>`. The operator's release
+  (ADR 0021): it resolves the handle and releases its holder as `releaseHandle` does,
+  in the same transaction, and answers the holder's user id.
 - `signRoom(userId, sessionId, at): Promise<void>`
 - `unsignRoom(userId, sessionId): Promise<void>`
 - `signedRooms(userId): Promise<{ sessionId: string; signedAt: number }[]>`
@@ -167,7 +170,8 @@ workerd:**
 - Bylines for any member but the creator.
 - Any tool or manifest change.
 - Search-engine controls. Handle pages follow public room pages, which set none.
-- Verification and moderation. The owner releases an abusive handle by hand.
+- Verification and moderation. The operator releases an abusive handle with
+  `DELETE /admin/handles/:handle` (ADR 0021).
 
 ## Delivery
 

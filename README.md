@@ -284,6 +284,8 @@ Prefix the command with `BELLMAN_HOOK_WAIT_SECONDS=30` to keep listening for up 
 
 **Other clients.** Anything that can send a header — Cursor, Gemini CLI — connects to `https://mcp.bellman.sh/mcp` with `Authorization: Bearer <key>` and uses `bellman_sync` with `wait_seconds` (up to 25) to long-poll. claude.ai, Claude Desktop connectors and ChatGPT only accept OAuth for custom connectors, which Bellman now speaks — add `https://mcp.bellman.sh/mcp` as a custom connector and sign in through the browser.
 
+**Updates.** A remote connector is always current: the server deploys on every merge. A local bridge (the Desktop bundle, the plugin, or an npm install) compares its version with its server's, and when the server runs a newer release it says so once, in the first tool result it relays, with the step for its install: install the bundle again from `https://bellman.sh/bellman.mcpb`, run `claude plugin update bellman@bellman`, or run `bellman update`. Bridges before 0.3.5 carry no notice.
+
 ## Plans
 
 Signing in with GitHub or Google gets you a free identity: pair sessions, 20 a month. Joining somebody else's session is free on every plan — only creating one is gated.

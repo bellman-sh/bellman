@@ -1,0 +1,101 @@
+import type { PeerEvent } from "./inbox.js";
+
+/**
+ * What the bridge's local door says, and the cleaning every peer string gets
+ * before the Claude Code mod draws it. The bridge serves the door and the mod
+ * reads it; both import this file, so the two cannot disagree about a shape.
+ *
+ * Runtime-free on purpose: the Node and Worker programs both type-check it, and
+ * esbuild bundles it into the mod. Its one import is a type.
+ */
+
+/** The door's protocol version, reported as `DoorStatus.version`. */
+export const DOOR_VERSION = 1;
+
+/** An event as the door serves it: the bridge's own `PeerEvent`, unchanged. */
+export type DoorEvent = PeerEvent;
+
+/** A seat the bridge watches: one member in one room, and whether its sync is failing and being retried. */
+export interface DoorSeat {
+  session_id: string;
+  member_id: string;
+  retrying: boolean;
+}
+
+/** One room's events queued in the bridge's inbox, counted and not taken. */
+export interface DoorWaiting {
+  session_id: string;
+  interrupting: number;
+  ambient: number;
+}
+
+/** `GET /status`. `waiting` is empty in channel delivery, which keeps no inbox. */
+export interface DoorStatus {
+  version: 1;
+  delivery: "hook" | "channel";
+  signed_in: boolean;
+  seats: DoorSeat[];
+  waiting: DoorWaiting[];
+  /** The latest events the bridge delivered, newest last, ambient ones included. */
+  recent: DoorEvent[];
+}
+
+/** `GET /rooms/<session_id>/events`: a page of the room's log, and the cursor to pass as `?after=` for what is new. */
+export interface DoorLog {
+  events: DoorEvent[];
+  cursor: number;
+}
+
+// ---------------------------------------------------------------------------
+// Cleaning — a peer controls every string below, and a terminal obeys escapes
+// ---------------------------------------------------------------------------
+
+/** CSI: ESC `[`, parameter bytes, intermediate bytes, one final byte. */
+const CSI = /\u{1b}\[[0-?]*[ -/]*[@-~]/gu;
+/** OSC: ESC `]`, then through BEL or ESC `\` (the string terminator). */
+const OSC = /\u{1b}\][^\u{7}\u{1b}]*(?:\u{7}|\u{1b}\\)/gu;
+
+// With the sequences gone, every C0 and C1 control and DEL goes too, each without a trace. The
+// whitespace ones (tab through carriage return) are the exception in `cleanText`, which folds
+// them to a space instead; `cleanBlock` keeps only the newline.
+// ponytail: controls only. Unicode format characters (bidi overrides, zero-width joiners) pass
+// through; strip them here the day a label is spoofed with one.
+const TEXT_CONTROLS = /[\u{0}-\u{8}\u{e}-\u{1f}\u{7f}-\u{9f}]/gu;
+const BLOCK_CONTROLS = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}]/gu;
+
+function withoutSequences(text: string): string {
+  return text.replace(CSI, "").replace(OSC, "");
+}
+
+/**
+ * At most `max` characters, the last an ellipsis when something was cut.
+ * ponytail: counts UTF-16 units, so a cut can leave half a surrogate pair before the ellipsis;
+ * trim it here if that ever shows.
+ */
+function cut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  // `slice` counts a negative end from the string's end, so a max below one must not reach it.
+  return max < 1 ? "" : text.slice(0, max - 1) + "…";
+}
+
+/** A peer's string as one line of at most `max` characters: for labels, toasts and titles. */
+export function cleanText(text: string, max = 200): string {
+  const plain = withoutSequences(text).replace(TEXT_CONTROLS, "");
+  return cut(plain.replace(/\s+/g, " ").trim(), max);
+}
+
+/**
+ * A peer's Markdown as at most `max` characters, line breaks kept and every other control gone.
+ * A carriage return goes with the rest, so a `\r\n` comes out as the `\n` alone.
+ */
+export function cleanBlock(text: string, max = 8_000): string {
+  return cut(withoutSequences(text).replace(BLOCK_CONTROLS, ""), max);
+}
+
+/** The one line an event reads as: a string payload, a payload's `text`, else the payload as JSON. */
+export function eventLine(e: Pick<DoorEvent, "type" | "payload">): string {
+  const payload = e.payload;
+  if (payload == null) return "";
+  const text = typeof payload === "string" ? payload : (payload as { text?: unknown }).text;
+  return cleanText(typeof text === "string" ? text : JSON.stringify(payload));
+}

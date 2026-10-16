@@ -22,10 +22,11 @@ import { lastReport } from "../../src/heartbeat.js";
 import { ABANDONED_AFTER_MS } from "../../src/presence.js";
 import { surfaceCursor } from "../../src/surface.js";
 import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
-import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
+import type { AuditFacets, AuditPage, AuditQuery } from "../../src/audit.js";
+import type { AuditEntry, SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
-import { brief, member, oneCode, openaiAgent, roomManifest, session, swarmSession } from "./fixtures.js";
+import { brief, jesseActor, member, oneCode, openaiAgent, peerActor, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
 const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
@@ -4356,6 +4357,12 @@ export function describeStoreContract(
       expect((await store.auditForOrg("org_c", 50))).toHaveLength(0);
     });
 
+    // A falsy org is no org (ARCHITECTURE.md section 9, runtime fact 4): no stream named "" is written.
+    it("writes no audit row for an entry whose org is empty", async () => {
+      await store.appendAudit({ at: Date.now(), orgId: "", sessionId: "qs_1", actorUserId: "u_a", action: "session_created", detail: {} });
+      expect(await store.auditForOrg("", 50)).toEqual([]);
+    });
+
     it("returns the most recent audit entries up to the limit", async () => {
       for (let i = 0; i < 10; i++) {
         (await store.appendAudit({
@@ -4366,6 +4373,125 @@ export function describeStoreContract(
       const recent = (await store.auditForOrg("org_a", 3));
       expect(recent).toHaveLength(3);
       expect(recent.map((a) => a.sessionId)).toEqual(["qs_7", "qs_8", "qs_9"]);
+    });
+
+    // ------------------------------------------------------------- the audit query (audit trail spec, D6)
+    describe("the audit query", () => {
+      const day = (d: string) => Date.parse(`2026-03-${d}T00:00:00Z`);
+      const row = (over: Partial<AuditEntry> = {}): AuditEntry => ({
+        at: Date.now(), orgId: "org_a", sessionId: "qs_q3", actorUserId: "u_ana", action: "sent_message", detail: {},
+        actorLabel: "Ana", actorOrgId: "org_a", roomName: "q3-plan", parties: ["org_a"], crossing: "internal", direction: null,
+        ...over,
+      });
+      const legacy = (over: Partial<AuditEntry> = {}): AuditEntry => ({
+        at: Date.now(), orgId: "org_a", sessionId: "qs_old", actorUserId: "u_old", action: "member_left", detail: {}, ...over,
+      });
+      const boInbound = { actorUserId: "u_bo", actorLabel: "Bo", actorOrgId: "org_b", parties: ["org_a", "org_b"], crossing: "cross_org", direction: "inbound" } satisfies Partial<AuditEntry>;
+      /** Six rows in org A's stream, seq 1 to 6, and one in org B's that no read of A's may see. */
+      const fill = async () => {
+        await store.appendAudit(legacy({ at: day("10") }));                                              // 1
+        await store.appendAudit(row({ at: day("11") }));                                                 // 2
+        await store.appendAudit(row({ at: day("12"), ...boInbound }));                                   // 3
+        await store.appendAudit(row({ at: day("13"), sessionId: "qs_other", roomName: "other",
+          parties: ["org_a", "org_c", null], crossing: "cross_org", direction: "outbound" }));           // 4
+        await store.appendAudit(row({ at: day("14"), action: "invite_issued" }));                        // 5
+        await store.appendAudit(row({ at: day("15"), sessionId: "grant:github:1", roomName: null,
+          action: "plan_granted", actorUserId: "stripe", actorLabel: null, actorOrgId: null }));         // 6
+        await store.appendAudit(row({ orgId: "org_b", parties: ["org_a", "org_b"], crossing: "cross_org", direction: "outbound" }));
+      };
+      const q = (over: Partial<AuditQuery> = {}): AuditQuery => ({ limit: 100, ...over });
+      const seqs = (page: AuditPage) => page.entries.map((e) => e.seq);
+      const read = async (over: Partial<AuditQuery>) => seqs(await store.queryAudit("org_a", q(over)));
+
+      it("reads one org's stream newest first, covering it up to its newest row", async () => {
+        await fill();
+        const page = await store.queryAudit("org_a", q());
+        expect(seqs(page)).toEqual([6, 5, 4, 3, 2, 1]);
+        expect(page).toMatchObject({ next: null, through: 6, total: 6, unrecorded: 0 });
+      });
+
+      it("answers an empty stream with nothing, and no seq to pin", async () => {
+        expect(await store.queryAudit("org_none", q())).toEqual({ entries: [], next: null, through: null, total: 0, unrecorded: 0 });
+      });
+
+      it("filters by each field, and combines filters with AND", async () => {
+        await fill();
+        expect(await read({ from: day("12"), to: day("14") })).toEqual([4, 3]);
+        expect(await read({ actor: "u_bo" })).toEqual([3]);
+        expect(await read({ room: "qs_other" })).toEqual([4]);
+        expect(await read({ action: "invite_issued" })).toEqual([5]);
+        expect(await read({ org: "org_c" })).toEqual([4]);
+        expect(await read({ scope: "cross_org" })).toEqual([4, 3]);
+        expect(await read({ scope: "internal" })).toEqual([6, 5, 2]);
+        expect(await read({ scope: "cross_org", room: "qs_q3" })).toEqual([3]);
+        expect(await read({ scope: "internal", from: day("14") })).toEqual([6, 5]);
+      });
+
+      it("counts the rows a scope filter left out because they record no crossing", async () => {
+        await fill();
+        expect((await store.queryAudit("org_a", q({ scope: "cross_org" }))).unrecorded).toBe(1);
+        expect((await store.queryAudit("org_a", q({ scope: "cross_org", from: day("11") }))).unrecorded).toBe(0);
+        expect((await store.queryAudit("org_a", q())).unrecorded).toBe(0);
+      });
+
+      // A row from before D2 names no parties either, so an org filter cannot judge it any more than a scope can.
+      it("counts the rows an org filter left out because they record no crossing", async () => {
+        await fill();
+        expect((await store.queryAudit("org_a", q({ org: "org_c" }))).unrecorded).toBe(1);
+      });
+
+      it("pages with before and through: no row twice, none skipped, and none written after through", async () => {
+        await fill();
+        const first = await store.queryAudit("org_a", q({ limit: 4 }));
+        expect(seqs(first)).toEqual([6, 5, 4, 3]);
+        expect(first).toMatchObject({ next: 3, through: 6, total: 6 });
+        await store.appendAudit(row()); // 7, written after the first page
+        const second = await store.queryAudit("org_a", q({ limit: 4, before: first.next!, through: first.through! }));
+        expect(seqs(second)).toEqual([2, 1]);
+        expect(second).toMatchObject({ next: null, through: 6, total: 6 });
+        expect(await read({ through: 6 })).not.toContain(7);
+      });
+
+      it("hands back a recorded row with its fields, and a row from before them without", async () => {
+        await fill();
+        const entries = (await store.queryAudit("org_a", q())).entries;
+        expect(entries[3]).toEqual({ seq: 3, ...row({ at: day("12"), ...boInbound }) });
+        expect(entries[5]).toEqual({ seq: 1, ...legacy({ at: day("10") }) });
+      });
+
+      it("offers the stream's actors, rooms, other orgs and actions, newest first", async () => {
+        await fill();
+        expect(await store.auditFacets("org_a")).toEqual({
+          actors: [{ id: "stripe", label: null }, { id: "u_ana", label: "Ana" }, { id: "u_bo", label: "Bo" }, { id: "u_old", label: null }],
+          rooms: [{ id: "qs_q3", name: "q3-plan" }, { id: "qs_other", name: "other" }, { id: "qs_old", name: null }],
+          orgs: ["org_c", "org_b"],
+          actions: ["plan_granted", "invite_issued", "sent_message", "member_left"],
+        } satisfies AuditFacets);
+      });
+
+      // Review Focus 1: a value is bound, never spliced, so SQL in it is only text.
+      it("matches a filter value literally, whatever SQL it spells", async () => {
+        await fill();
+        for (const actor of ["' OR 1=1 --", "%", "_", "u_%"]) expect(await read({ actor }), actor).toEqual([]);
+      });
+
+      // Review Focus 2.
+      it("answers a range that holds nothing, or ends before it starts, with an empty page", async () => {
+        await fill();
+        expect(await store.queryAudit("org_a", q({ from: day("14"), to: day("12") })))
+          .toEqual({ entries: [], next: null, through: 6, total: 0, unrecorded: 0 });
+      });
+
+      // Review Focus 3: the outbox can land a row after newer ones.
+      it("filters by when a row happened and pages by when it landed, when the two disagree", async () => {
+        await fill();
+        await store.appendAudit(row({ at: Date.parse("2026-03-11T12:00:00Z"), action: "late" })); // 7
+        const range = { from: day("11"), to: day("12") };
+        expect(await read(range)).toEqual([7, 2]);
+        const first = await store.queryAudit("org_a", q({ ...range, limit: 1 }));
+        expect(seqs(first)).toEqual([7]);
+        expect(await read({ ...range, limit: 1, before: first.next!, through: first.through! })).toEqual([2]);
+      });
     });
 
     // ------------------------------------------------------- abandonment (#18)
@@ -4567,7 +4693,7 @@ export function describeStoreContract(
         expect(await blobs.list(s.id)).toEqual([]);
         const audit = await store.auditForOrg("org_codenerd", 50);
         expect(audit.at(-1)).toMatchObject({ sessionId: s.id, action: "room_purged" });
-        expect(await store.schedulePurge(s.id, Date.now(), "u_jesse"), "a purged room is a room that never was")
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor), "a purged room is a room that never was")
           .toEqual({ ok: false, reason: "missing" });
       });
 
@@ -4598,7 +4724,7 @@ export function describeStoreContract(
 
         const asked = Date.now();
         for (const s of [kept, legacy]) {
-          expect(await store.schedulePurge(s.id, asked, "u_jesse"), s.id).toEqual({ ok: true, purgeAt: asked });
+          expect(await store.schedulePurge(s.id, asked, jesseActor), s.id).toEqual({ ok: true, purgeAt: asked });
         }
         for (const s of [kept, legacy]) await sweepRoom(s.id);
         for (const s of [kept, legacy]) expect(await store.getSession(s.id), s.id).toBeUndefined();
@@ -4607,8 +4733,8 @@ export function describeStoreContract(
       it("refuses to schedule a purge of an open room, and says so for a missing one", async () => {
         const open = session({ id: "qs_open" });
         await store.createSession(open);
-        expect(await store.schedulePurge(open.id, Date.now(), "u_jesse")).toEqual({ ok: false, reason: "open" });
-        expect(await store.schedulePurge("qs_nope", Date.now(), "u_jesse")).toEqual({ ok: false, reason: "missing" });
+        expect(await store.schedulePurge(open.id, Date.now(), jesseActor)).toEqual({ ok: false, reason: "open" });
+        expect(await store.schedulePurge("qs_nope", Date.now(), jesseActor)).toEqual({ ok: false, reason: "missing" });
         // The refusal wrote nothing: the room is still open, and a sweep leaves it alone.
         await sweepRoom(open.id);
         expect((await store.getSession(open.id))?.closed).toBe(false);
@@ -4632,6 +4758,8 @@ export function describeStoreContract(
           expect(filed, org).toEqual([{
             at: expect.any(Number), orgId: org, sessionId: s.id, actorUserId: "system",
             action: "room_purged", detail: { session_id: s.id, room: s.manifest.room },
+            actorLabel: null, actorOrgId: null, roomName: s.manifest.room,
+            parties: ["org_codenerd", "org_other", null], crossing: "cross_org", direction: null,
           }]);
         }
       });
@@ -4642,12 +4770,40 @@ export function describeStoreContract(
         await store.closeSession(s.id);
 
         // A minute out, so the room is still there for the second ask: this is about the record of asking.
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_jesse")).toMatchObject({ ok: true });
-        expect(await store.schedulePurge(s.id, Date.now() + 60_000, "u_peer")).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, jesseActor)).toMatchObject({ ok: true });
+        expect(await store.schedulePurge(s.id, Date.now() + 60_000, peerActor)).toMatchObject({ ok: true });
 
         for (const org of ["org_codenerd", "org_other"]) {
           const asked = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
-          expect(asked, org).toEqual([expect.objectContaining({ action: "room_deleted", actorUserId: "u_jesse" })]);
+          expect(asked, org).toEqual([expect.objectContaining({
+            action: "room_deleted", actorUserId: "u_jesse", actorLabel: "jesse@codenerd", actorOrgId: "org_codenerd",
+            parties: ["org_codenerd", "org_other"], crossing: "cross_org",
+            direction: org === "org_codenerd" ? "outbound" : "inbound",
+          })]);
+        }
+      });
+
+      // The record holds only the members in the room (ADR 0019), and a delete's and a purge's parties are the
+      // roster all the same: a member who left sat in the room, with an org or with none (audit trail spec, D2).
+      it("names the members who left among a delete's and a purge's parties", async () => {
+        const s = session({
+          id: "qs_left", joinCodes: {},
+          members: [member(), peer(), peer({ memberId: "m_solo", userId: "u_solo", orgId: null })],
+        });
+        await store.createSession(s);
+        await store.updateMember(s.id, "m_peer", { leftAt: Date.now() });
+        await store.updateMember(s.id, "m_solo", { leftAt: Date.now() });
+        await store.closeSession(s.id);
+        expect(await store.schedulePurge(s.id, Date.now(), jesseActor)).toMatchObject({ ok: true });
+        await sweepRoom(s.id);
+
+        expect(await store.getSession(s.id)).toBeUndefined();
+        for (const org of ["org_codenerd", "org_other"]) {
+          const filed = (await store.auditForOrg(org, 50)).filter((a) => a.sessionId === s.id);
+          expect(filed.map((a) => [a.action, a.parties]), org).toEqual([
+            ["room_deleted", ["org_codenerd", "org_other", null]],
+            ["room_purged", ["org_codenerd", "org_other", null]],
+          ]);
         }
       });
 
@@ -4660,8 +4816,8 @@ export function describeStoreContract(
         const first = Date.now() + 60_000;
         const second = Date.now() + 120_000;
 
-        expect(await store.schedulePurge(s.id, first, "u_jesse")).toEqual({ ok: true, purgeAt: first });
-        expect(await store.schedulePurge(s.id, second, "u_jesse"), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, first, jesseActor)).toEqual({ ok: true, purgeAt: first });
+        expect(await store.schedulePurge(s.id, second, jesseActor), "the repeat is told the first's time").toEqual({ ok: true, purgeAt: first });
         expect((await store.getSession(s.id))!.purgeAt, "and the record holds it").toBe(first);
       });
 
@@ -5405,12 +5561,11 @@ export function describeStoreContract(
     });
 
     it("removeMember files no row for an org-less entry, in audit or in retire.audit", async () => {
-      // A falsy org names a stream nobody reads. MemoryStore would file the row there
-      // all the same, and a Durable Object namespace takes "" as a name and would
-      // deliver into it, so the entry is dropped before it is queued. Both defences
-      // sit behind this answer in the Durable Object store (the producer's filter and
-      // the outbox's delivery guard), so what this pins there is the result; the
-      // producer's filter alone is what MemoryStore leaves to hold it.
+      // A falsy org names a stream nobody reads. A Durable Object namespace takes "" as
+      // a name and would deliver into it, so the entry is dropped before it is queued.
+      // Both defences sit behind this answer in the Durable Object store (the producer's
+      // filter and the outbox's delivery guard), so what this pins there is the result.
+      // MemoryStore's recordAudit drops such a row as well, behind the producer's filter.
       const s = session({
         joinCodes: oneCode("BELL-LIVE-01"),
         members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer" })],

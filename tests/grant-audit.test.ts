@@ -6,6 +6,12 @@ import type { PlanGrant } from "../src/types.js";
 const NOW = 1_700_000_000_000;
 const admin: AuditIntent = { actorUserId: "u_admin" };
 
+/** What every grant row now says of itself (audit trail spec, D2): an org's own plan, so internal, with no room. */
+const internal = (orgId: string, actor: { label?: string; orgId?: string | null } = {}) => ({
+  actorLabel: actor.label ?? null, actorOrgId: actor.orgId ?? null, roomName: null,
+  parties: [orgId], crossing: "internal", direction: null,
+});
+
 const grant = (over: Partial<PlanGrant> = {}): PlanGrant => ({
   key: "github:4242", plan: "team", role: "admin", orgId: "org_mine",
   source: "operator", grantedAt: NOW, grantedBy: "u_admin", expiresAt: null, ...over,
@@ -20,6 +26,7 @@ describe("grantAuditEntries", () => {
         plan: "team", role: "admin", org_id: "org_mine", source: "operator",
         expires_at: null, key: "github:4242",
       },
+      ...internal("org_mine"),
     }]);
   });
 
@@ -80,6 +87,13 @@ describe("grantAuditEntries", () => {
     expect(entry.detail).toMatchObject({ stripe_customer: "cus_1", source: "purchase" });
     expect(entry.detail.key).toBe("github:4242");
   });
+
+  it("names the admin who granted, and their org, when the intent carries them", () => {
+    const named: AuditIntent = { actorUserId: "u_admin", actorLabel: "admin@mine", actorOrgId: "org_mine" };
+    expect(grantAuditEntries(undefined, grant(), named, NOW)[0]).toMatchObject({
+      actorLabel: "admin@mine", actorOrgId: "org_mine", crossing: "internal", direction: null,
+    });
+  });
 });
 
 describe("revokeAuditEntries", () => {
@@ -89,6 +103,7 @@ describe("revokeAuditEntries", () => {
       at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "stripe",
       action: "plan_revoked",
       detail: { plan: "team", reason: "no longer paying", key: "github:4242" },
+      ...internal("org_mine"),
     }]);
   });
 
@@ -159,6 +174,7 @@ describe("grantAuditEntries, field by field", () => {
         plan: "team", role: "admin", org_id: "org_mine", source: after,
         expires_at: null, replaced_plan: "team", key: "github:4242",
       },
+      ...internal("org_mine"),
     }]);
   });
 
@@ -230,6 +246,7 @@ describe("grantAuditEntries, field by field", () => {
         plan: "team", reason: "moved to another plan", moved_to: null,
         stripe_customer: "cus_1", key: "github:4242",
       },
+      ...internal("org_mine"),
     }]);
   });
 
@@ -262,6 +279,7 @@ describe("grantAuditEntries, field by field", () => {
           plan: "pro", reason: "moved to another plan", moved_to: "org_new",
           stripe_customer: "cus_1", key: "github:4242",
         },
+        ...internal("org_old"),
       },
       {
         at: NOW, orgId: "org_new", sessionId: "grant:github:4242", actorUserId: "stripe",
@@ -270,6 +288,7 @@ describe("grantAuditEntries, field by field", () => {
           plan: "team", role: "admin", org_id: "org_new", source: "purchase",
           expires_at: null, replaced_plan: "pro", stripe_customer: "cus_1", key: "github:4242",
         },
+        ...internal("org_new"),
       },
     ]);
   });
@@ -287,6 +306,7 @@ describe("revokeAuditEntries, field by field", () => {
     expect(revokeAuditEntries(grant(), admin, NOW)).toEqual([{
       at: NOW, orgId: "org_mine", sessionId: "grant:github:4242", actorUserId: "u_admin",
       action: "plan_revoked", detail: { plan: "team", key: "github:4242" },
+      ...internal("org_mine"),
     }]);
   });
 });

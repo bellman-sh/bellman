@@ -14,7 +14,8 @@ import type {
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, seatInOrder, seatVictims, stampSeen,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
+  stampSeen,
 } from "./store.js";
 import {
   BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
@@ -26,6 +27,10 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
+import {
+  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
+  type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
+} from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -80,13 +85,6 @@ function asRows(read: StoredSession, rows: Record<string, unknown>): Record<stri
   const { session, ...rest } = rows;
   return session === undefined ? rest : { ...rest, ...memberRows(read, session as StoredSession) };
 }
-const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
-/**
- * Delivered intent ids, so a redelivered audit entry is applied once.
- * One row per entry that arrives with an id, and nothing prunes them, as
- * nothing prunes the entries.
- */
-const deliveredKey = (intentId: string) => `d:${intentId}`;
 /**
  * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
  * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
@@ -426,10 +424,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * put is atomic as long as every await between them is storage, and nothing in
    * the code says so. The transaction does, and it keeps holding if a later edit
    * puts an await on anything else in between (a fetch, a timer), the one case the
-   * gate does not cover; AuditDO.append gives the same reason. That is a net under a
-   * mistake and not a licence for one: the closure holds every other call to this
-   * object until it commits (docs/ARCHITECTURE.md section 9, runtime fact 2), so
-   * what goes inside it is storage and nothing slower.
+   * gate does not cover. That is a net under a mistake and not a licence for one: the
+   * closure holds every other call to this object until it commits
+   * (docs/ARCHITECTURE.md section 9, runtime fact 2), so what goes inside it is
+   * storage and nothing slower.
    * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
    *
    * Not every mutator has been converted. updateMember and the two stamps (a socket's
@@ -1472,6 +1470,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return departures([...rows.values()], opts);
   }
 
+  /**
+   * Every member the room has seated, in it or gone from it, from their rows: the roster whose
+   * orgs a purge's and a delete's audit rows name as their parties (audit trail spec, D2), as
+   * MemoryStore's record holds it. The record keeps only the members in the room (ADR 0019).
+   * Read through `from`, so a caller inside a transaction reads them in it.
+   */
+  async #everyone(
+    from: { list<T>(options: { prefix: string }): Promise<Map<string, T>> } = this.ctx.storage,
+  ): Promise<Member[]> {
+    // ponytail: lists every member row, as departedMembers does; once per delete and per purge.
+    return [...(await from.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+  }
+
   /** `BellmanStore.publicNumbers`, for this room: each label's number, from its `lb:` row. */
   async publicNumbers(labels: string[]): Promise<Record<string, number>> {
     const unique = [...new Set(labels)];
@@ -1599,16 +1610,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * process that died between the commit and them left an alarm only if there was an
    * entry to queue, and the retry is what points it at the purge.
    */
-  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "missing" };
       if (!s.closed) return { ok: false, reason: "open" };
       if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
-      // Every org that sat in the room, those of members who have left included (ADR 0019).
+      // Every org that sat in the room, those of members who have left included (ADR 0019), and for
+      // the rows' parties the whole roster, which only the member rows still hold (`#everyone`).
+      const parties = rosterParties({ members: await this.#everyone(txn) });
       const rows = await this.driver.enqueue(
-        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
+        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, parties, by, now))),
       );
       await putRows(txn, { ...memberRows(s, { ...s, purgeAt: at }), ...rows });
       return { ok: true, purgeAt: at };
@@ -2671,9 +2684,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await registry.dropMembershipIndex(userId, s.id);
     }
     for (const orgId of s.orgs) await registry.dropOrgIndex(orgId, s.id);
+    const parties = rosterParties({ members: await this.#everyone() });
     for (const orgId of s.orgs) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
-        .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
+        .append(roomPurgedEntry(s, orgId, parties, now), `purge:${s.id}:${orgId}`);
     }
     await this.driver.deliverNow();
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
@@ -3517,47 +3531,171 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 // AuditDO — one per org
 // ---------------------------------------------------------------------------
 
+/** The stream's tables (audit trail spec, D5). `AUTOINCREMENT` never reuses a seq, so a cursor once handed out names one row for good. */
+const AUDIT_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS entries (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    org_id TEXT,
+    session_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_label TEXT,
+    actor_org TEXT,
+    room_name TEXT,
+    parties TEXT,
+    crossing TEXT,
+    direction TEXT,
+    detail TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS entries_at ON entries (at)",
+  "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
+];
+
+/** Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next. */
+function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = null): number {
+  return sql.exec<{ seq: number }>(
+    `INSERT INTO entries (seq, ${AUDIT_COLUMNS.join(", ")}) VALUES (?, ${AUDIT_COLUMNS.map(() => "?").join(", ")}) RETURNING seq`,
+    seq, ...recordOf(e),
+  ).one().seq;
+}
+
+/** How many KV rows the move holds in memory at once, whatever the stream's size. */
+const MOVE_BATCH = 500;
+
+/**
+ * Every KV row under `prefix`, in key order, handed to `move` and deleted, a batch at a time.
+ * Each batch starts after the last key of the one before, so the walk ends however a delete
+ * inside the transaction shows to the next list.
+ */
+function moveKv<T>(storage: DurableObjectStorage, prefix: string, move: (key: string, value: T) => void): void {
+  let after: string | undefined;
+  for (;;) {
+    const batch = [...storage.kv.list<T>({ prefix, startAfter: after, limit: MOVE_BATCH })];
+    if (batch.length === 0) return;
+    for (const [key, value] of batch) {
+      move(key, value);
+      storage.kv.delete(key);
+    }
+    after = batch.at(-1)![0];
+  }
+}
+
+/**
+ * The tables, and a stream written in the KV shape (`a:<seq>` rows, the `seq` counter,
+ * `d:<intent>` markers) moved into them. Run inside one `transactionSync`, so it lands
+ * whole or not at all, however many batches it reads.
+ *
+ * Into an empty table each row keeps the seq its key carries, so every cursor already handed
+ * out still names its row. Once the table holds rows, what is in KV was written there by an
+ * older Worker after a rollback: it read the deleted `seq` counter as 0 and counted again
+ * from 1, so its keys would collide with rows that exist. Those are appended in key order
+ * with the next seqs instead, so nothing collides and nothing is lost, and a stream moved
+ * once and then written to by an older Worker still wakes. Which of the two applies is decided
+ * once, before the first batch: after that batch the table is never empty.
+ * ponytail: memory is flat, MOVE_BATCH rows at a time. Time is the ceiling left: blockConcurrencyWhile
+ * allows 30 s, about two million rows at the 15 µs a row measured locally. Past that, move it across wakes.
+ */
+function migrateAudit(storage: DurableObjectStorage): void {
+  for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
+  const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
+  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
+  // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
+  moveKv<number>(storage, "d:", (key, seq) => {
+    storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
+  });
+  storage.kv.delete("seq");
+}
+
 export class AuditDO extends DurableObject {
-  /**
-   * Append an audit entry, at most once per intent.
-   *
-   * The outbox that feeds this delivers at least once — a row is deleted only
-   * after this call returns, so an acknowledgement lost in flight redelivers.
-   * The `d:` row is what makes that safe. Callers with no intent to redeliver
-   * pass no id and always append.
-   */
-  async append(entry: AuditEntry, intentId?: string): Promise<void> {
-    // The look at the marker and the write that sets it are one transaction, so a
-    // second delivery of the same intent cannot get between them, even if a later
-    // edit puts an await there that opens the input gate (a timer, a call to
-    // another object). Bare, that edit lets both deliveries find no marker, and
-    // both append.
-    await this.ctx.storage.transaction(async (txn) => {
-      if (intentId !== undefined && (await txn.get(deliveredKey(intentId)))) return;
-      const seq = ((await txn.get<number>("seq")) ?? 0) + 1;
-      // Entry, sequence and delivery marker in one write, in this transaction.
-      // Committed apart (in another transaction, or by a write after this one
-      // closes), an interruption between the commits leaves one without the
-      // others: an entry with no sequence is overwritten by the next entry; a
-      // marker with no entry makes the redelivery skip an entry that never
-      // landed; an entry with no marker is appended again by the redelivery. An
-      // audit log that can quietly drop or double the record of a privilege
-      // change is not an audit log.
-      await txn.put<unknown>({
-        [auditKey(seq)]: entry,
-        seq,
-        ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
-      });
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Before any call is let in: the tables, and a stream still in the KV shape moved into them.
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => migrateAudit(this.ctx.storage));
     });
   }
 
-  async recent(limit: number): Promise<AuditEntry[]> {
-    const map = await this.ctx.storage.list<AuditEntry>({
-      prefix: "a:",
-      reverse: true,
-      limit,
+  /**
+   * Append an audit entry, at most once per intent.
+   *
+   * The outbox that feeds this delivers at least once: a row is deleted only after this
+   * call returns, so an acknowledgement lost in flight redelivers. The `delivered` row is
+   * what makes that safe. The look at it, the entry and the marker are one synchronous
+   * transaction, so no second delivery can come between the look and the writes, and a
+   * throw anywhere in it rolls all of it back: an audit log that could drop or double the
+   * record of a privilege change would not be one. Callers with no intent to redeliver pass
+   * no id and always append.
+   */
+  async append(entry: AuditEntry, intentId?: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      if (intentId !== undefined && sql.exec("SELECT 1 FROM delivered WHERE intent_id = ?", intentId).toArray().length > 0) {
+        return;
+      }
+      const seq = insertAuditRow(sql, entry);
+      if (intentId !== undefined) sql.exec("INSERT INTO delivered (intent_id, seq) VALUES (?, ?)", intentId, seq);
     });
-    return [...map.values()].reverse();
+  }
+
+  /** The newest `limit` entries, oldest first: `bellman_audit`'s read. */
+  async recent(limit: number): Promise<AuditEntry[]> {
+    return this.ctx.storage.sql
+      .exec<AuditRecord>("SELECT * FROM entries ORDER BY seq DESC LIMIT ?", limit)
+      .toArray()
+      .reverse()
+      .map(entryOf)
+      .map(({ seq: _seq, ...entry }) => entry);
+  }
+
+  /** One page under the filters, newest first (D6): the same answer `pageOf` gives over memory. */
+  async query(q: AuditQuery): Promise<AuditPage> {
+    const sql = this.ctx.storage.sql;
+    const through = q.through ?? sql.exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM entries").one().seq;
+    const page = auditWhere(q, through, { scope: true, before: true });
+    const rows = sql.exec<AuditRecord>(
+      `SELECT * FROM entries ${page.clause} ORDER BY seq DESC LIMIT ?`, ...page.params, q.limit + 1,
+    ).toArray();
+    const all = auditWhere(q, through, { scope: true, before: false });
+    const total = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM entries ${all.clause}`, ...all.params).one().n;
+    let unrecorded = 0;
+    // A row from before D2 records no crossing and no parties, so neither filter can judge it (D4).
+    if (q.scope !== undefined || q.org !== undefined) {
+      const rest = auditWhere({ ...q, org: undefined }, through, { scope: false, before: false });
+      unrecorded = sql.exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM entries ${rest.clause ? `${rest.clause} AND` : "WHERE"} crossing IS NULL`, ...rest.params,
+      ).one().n;
+    }
+    const entries = rows.slice(0, q.limit).map(entryOf);
+    return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
+  }
+
+  /**
+   * What the filters offer (D6), newest first. A label or a room's name comes from its newest
+   * row: SQLite reads a bare column of a MAX() group from the row that holds the max.
+   * ponytail: `at` is the only index; these and the filters on actor, room and action read the
+   * table by seq, and gain indexes when a stream is large enough to feel the scan.
+   */
+  async facets(): Promise<AuditFacets> {
+    const sql = this.ctx.storage.sql;
+    return {
+      actors: sql.exec<{ id: string; label: string | null; newest: number }>(
+        "SELECT actor_id AS id, actor_label AS label, MAX(seq) AS newest FROM entries GROUP BY actor_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, label }) => ({ id, label })),
+      rooms: sql.exec<{ id: string; name: string | null; newest: number }>(
+        "SELECT session_id AS id, room_name AS name, MAX(seq) AS newest FROM entries WHERE session_id NOT LIKE 'grant:%' GROUP BY session_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, name }) => ({ id, name })),
+      orgs: sql.exec<{ org: string; newest: number }>(
+        "SELECT p.value AS org, MAX(e.seq) AS newest FROM entries e, json_each(e.parties) p WHERE p.value IS NOT NULL AND p.value != e.org_id GROUP BY p.value ORDER BY newest DESC, org ASC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ org }) => org),
+      actions: sql.exec<{ action: string; newest: number }>(
+        "SELECT action, MAX(seq) AS newest FROM entries GROUP BY action ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ action }) => action),
+    };
   }
 }
 
@@ -3829,7 +3967,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
   }
 
@@ -4132,12 +4270,20 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    if (a.orgId === null) return; // no org, no audit stream to write to
+    if (!a.orgId) return; // no org, no audit stream to write to
     await this.audit(a.orgId).append(a);
   }
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return this.audit(orgId).recent(limit);
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return this.audit(orgId).query(query);
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return this.audit(orgId).facets();
   }
 
   /**

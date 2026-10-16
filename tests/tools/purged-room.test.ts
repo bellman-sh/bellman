@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { MemoryStore } from "../../src/store.js";
+import { jesseActor } from "../helpers/fixtures.js";
 import { Harness } from "../helpers/harness.js";
 import { pairUp } from "../helpers/flows.js";
 
@@ -24,7 +25,7 @@ describe("a purged room, through the tools", () => {
     expect((await p.creator.call("bellman_rooms")).data.rooms, "and is listed").toHaveLength(1);
 
     await store.closeSession(p.sessionId);
-    expect(await store.schedulePurge(p.sessionId, Date.now(), "u_jesse")).toMatchObject({ ok: true });
+    expect(await store.schedulePurge(p.sessionId, Date.now(), jesseActor)).toMatchObject({ ok: true });
     await store.sweep(Date.now());
 
     const gone = await poll(p.sessionId);

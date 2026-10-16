@@ -130,21 +130,21 @@ async function holdFirstReadOfTheSession(id: string, hold: Hold): Promise<void> 
 
 /**
  * Take the audit stream down, from the inside: while `how.down` is set, every
- * transaction `AuditDO.append` opens is refused. The state is an object the test holds,
- * so it can change its mind, and the hook lives on that instance, which the abort in
- * afterEach discards. Reads (`recent`) do not open a transaction and keep working.
+ * `AuditDO.append` to it is refused. The state is an object the test holds, so it can
+ * change its mind. An append is one synchronous transaction, which nothing inside it can
+ * refuse, so the hook sits in front of the call. It patches the class's prototype and
+ * undoes it afterwards, as above, but answers only for this instance. Reads (`recent`) are
+ * not appends and keep working.
  */
 const auditDown = (how: { down: boolean }) =>
-  runInDurableObject(env.AUDIT.get(env.AUDIT.idFromName("org_codenerd")), async (_i: AuditDO, ctx) => {
-    type Call = (...args: unknown[]) => Promise<unknown>;
-    const open = (ctx.storage as unknown as { transaction: Call }).transaction.bind(ctx.storage);
-    Object.defineProperty(ctx.storage, "transaction", {
-      configurable: true,
-      value: async (...args: unknown[]) => {
-        if (how.down) throw new Error("audit stream down");
-        return open(...args);
-      },
-    });
+  runInDurableObject<AuditDO, void>(env.AUDIT.get(env.AUDIT.idFromName("org_codenerd")), (self) => {
+    const proto = Object.getPrototypeOf(self) as { append: (...args: unknown[]) => Promise<void> };
+    const append = proto.append;
+    proto.append = async function (this: AuditDO, ...args: unknown[]) {
+      if (this === self && how.down) throw new Error("audit stream down");
+      return append.apply(this, args);
+    };
+    undo.push(() => { proto.append = append; });
   });
 
 // Storage is not isolated between tests in this pool (worker-tests/README.md), and every

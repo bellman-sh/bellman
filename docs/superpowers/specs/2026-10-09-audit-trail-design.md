@@ -342,7 +342,7 @@ TIME          EVENT          ROOM     MEMBER  ORG          DIRECTION
 - **Export:** a `fetch` with credentials, carrying the filters, the format
   and the first page's `through`. It is saved only after `response.blob()`
   resolves, under the server's filename. A refusal or a failed stream shows
-  inline as "Export failed; nothing was saved." A line says the export holds
+  inline as "Export failed; nothing was saved: <reason>." A line says the export holds
   all `total` entries matching the filters as of the page's load, so the file
   can be checked against the count.
 

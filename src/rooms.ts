@@ -333,6 +333,9 @@ export async function readSurface(
  * hosted seat is not a party; it acts for the room. A person with no org is a party with no
  * stream: the room is cross-org for everyone else, and no row is written for them.
  *
+ * `roster` is the room as it stands for this action: the session's members unless a caller holds
+ * a newer roster, and none for an act nobody in the room sees, such as a preview before joining.
+ *
  * It lives here rather than in a transport because a transport that writes its own row is a
  * transport that will one day write it for one org and not the other.
  */
@@ -341,10 +344,11 @@ export function auditEntries(
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): AuditEntry[] {
   const parties = partiesOf([
-    session.orgId, actor.orgId, ...alsoOrgs, ...session.members.filter(isActivePerson).map((m) => m.orgId),
+    session.orgId, actor.orgId, ...alsoOrgs, ...roster.filter(isActivePerson).map((m) => m.orgId),
   ]);
   return auditRows(
     parties,
@@ -363,9 +367,10 @@ export async function audit(
   actor: Identity,
   action: string,
   detail: Record<string, unknown>,
-  alsoOrgs: readonly (string | null)[] = []
+  alsoOrgs: readonly (string | null)[] = [],
+  roster: readonly Member[] = session.members
 ): Promise<void> {
-  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs)) {
+  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs, roster)) {
     await store.appendAudit(entry);
   }
 }

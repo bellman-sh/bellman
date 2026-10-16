@@ -47,7 +47,10 @@ A row goes to every org that is a party to the action:
 - the org of every person still in the room (`isActivePerson`) when the
   action happens.
 
-The hosted seat is not a party: it acts for the room. A person with no org is
+The hosted seat is not a party: it acts for the room. An act nobody in the room
+sees, a preview of the room before joining (`connect_previewed`), has as parties
+only the room's org and the actor's: the people in the room were shown nothing,
+and a previewer who never joins is not named to them. A person with no org is
 a party with no stream: they make a room cross-org for everyone else, and
 receive no row.
 

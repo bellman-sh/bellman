@@ -1652,4 +1652,16 @@ describe("audit", () => {
     expect((await store.auditForOrg("org_a", 10)).map((r) => r.direction)).toEqual(["outbound"]);
     expect((await store.auditForOrg("org_b", 10)).map((r) => [r.crossing, r.direction])).toEqual([["cross_org", "inbound"]]);
   });
+
+  it("keeps a preview between the room's org and the previewer's, since nobody in the room sees it", async () => {
+    const cy: Identity = { userId: "u_cy", orgId: "org_c", plan: "team", role: "member", label: "Cy" };
+    const written = vi.spyOn(store, "appendAudit");
+    await audit(store, inA([anaSeat, boSeat]), cy, "connect_previewed", {}, [], []);
+
+    expect(written.mock.calls.map(([e]) => [e.orgId, e.parties])).toEqual([
+      ["org_a", ["org_a", "org_c"]],
+      ["org_c", ["org_a", "org_c"]],
+    ]);
+    expect(await store.auditForOrg("org_b", 10)).toEqual([]);
+  });
 });

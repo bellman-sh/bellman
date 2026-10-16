@@ -104,7 +104,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the eleven tools work over plain remote MCP. The bridge exists
+use Bellman** — the twelve tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
@@ -240,7 +240,7 @@ finds nothing new costs one record read, because the ETag is
 the record's surface cursor. The `/ws` socket does not admit the panel yet;
 polling with an ETag came first.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back.
 
 ### Two delivery paths
 
@@ -1295,6 +1295,16 @@ conflating them would have produced an outbox where a lock was needed. To tell
 which a change needs, ask what the window costs: a write that never happens, or
 a stale decision overwriting a fresh one.
 
+Public names (public names spec) meet a third shape of the same window. A claim
+lands in the registry before its room's record names the name, and another
+claimer reading in between must not take the record's silence for an abandoned
+claim. Neither a queue nor a lock spans the registry and the room, so the entry
+carries its claim's time: an entry whose room does not name it yet keeps its name
+for a lease (`PUBLIC_NAME_LEASE_MS`), every claim is a compare-and-set on the
+whole entry, a room claiming its own name again refreshes it, and a step that
+refuses after the claim gives it back (`releasePublicName`). The cost is a name
+held for the lease when a claim fails and nothing gives it back.
+
 Within one object the problem is tractable: the guarded grant writes,
 `moveGrant`, `closeSessionIfEmpty`, `seatMember`, `removeMember`, `addMember`, the two
 appends, the abandonment close, and `AuthDO`'s `admitRegistration`, `touchSession` and `replanSession`
@@ -1824,12 +1834,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,271** | every request, whether or not you are in a room |
+| Tool definitions | **~8,697** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~255 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-15 for public names, by the method below: 426 tokens over the 8,271
+that main (`7d4c137`) measures. `bellman_public_name` is new, at 309: its schema, and a
+description saying how a name is checked and set, its rule and its refusals. `bellman_start`
+is up 114, to 2,469, for `public_name` in its schema, Args, Returns and Errors, and
+`bellman_connect` up 3, to 738, for `public_name` in the room block. No other tool changed.
+That is 8,697, over the spec's estimate of 250 to 300, which counted too little for the tool.
 
 Re-measured on 2026-10-12 for permanent codes (ADR 0020), by the method below: 124 tokens
 over the 8,147 that main (`09a9ca7`) measures. `bellman_invite` is up 87, to 815, for

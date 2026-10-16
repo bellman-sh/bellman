@@ -123,6 +123,7 @@ export function session(seed: SessionSeed = {}): SeededSession {
     lastMemberEventAt: null,
     thawedAt: null,
     unpublishedAt: null,
+    publicName: null,
     members,
     creator: members.length > 0
       ? creatorOf(members[0])

@@ -1,5 +1,5 @@
 /**
- * INVARIANT 9: the tool surface stays at 11. Every addition is deliberate: this
+ * INVARIANT 9: the tool surface stays at 12. Every addition is deliberate: this
  *              list is where a new tool has to be noticed, so adding one means
  *              changing it here, and the number below with it, on purpose.
  * INVARIANT 4: tools first — every tool's text result stands alone; one UI
@@ -15,6 +15,7 @@ import { SURFACE_KINDS } from "../../src/surface.js";
 import { APP_MIME_TYPE, APP_RESOURCE_URI } from "../../src/ui/resource.js";
 
 const EXPECTED_TOOLS = [
+  "bellman_public_name",
   "bellman_start",
   "bellman_connect",
   "bellman_confirm",
@@ -47,7 +48,7 @@ describe("tool surface", () => {
     expect(tools.map((t) => t.name).sort()).toEqual(EXPECTED_TOOLS);
     // The invariant's number as an assertion, not prose. This file once said 7
     // over a list of 8 and nothing failed. Keep it equal to the header's.
-    expect(EXPECTED_TOOLS).toHaveLength(11);
+    expect(EXPECTED_TOOLS).toHaveLength(12);
   });
 
   it("gives every tool a description and an input schema", async () => {
@@ -84,10 +85,14 @@ describe("tool surface", () => {
       default_role: "ghost", creator_role: "lead",
     };
 
+    await jesse.call("bellman_start", { brief: brief(), manifest: manifestFixture({ public: true }), public_name: "taken-name" });
     const rejections: [string, Peer, Record<string, unknown>][] = [
       ["invalid manifest — ", jesse, { manifest: dangling }],
       ["swarm mode requires", peer, { manifest: manifestFixture({ preset: "swarm" }) }],
       ["a public room requires", peer, { manifest: manifestFixture({ public: true }) }],
+      ["public_name needs a public room", jesse, { manifest: manifestFixture(), public_name: "bellman-dev" }],
+      ["use 3 to 40 lowercase letters", jesse, { manifest: manifestFixture({ public: true }), public_name: "Bad_Name" }],
+      ["is taken: choose another", jesse, { manifest: manifestFixture({ public: true }), public_name: "taken-name" }],
       ["org_only sessions require", peer, { manifest: manifestFixture(), org_only: true }],
       ["org_only was set but", teamless, { manifest: manifestFixture(), org_only: true }],
       ["monthly session limit", spent, { manifest: manifestFixture() }],

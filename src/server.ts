@@ -13,6 +13,7 @@ import { registerSurface } from "./tools/surface.js";
 import { registerLeave } from "./tools/leave.js";
 import { registerEvict } from "./tools/evict.js";
 import { registerAudit } from "./tools/audit.js";
+import { registerPublicName } from "./tools/public-name.js";
 import { registerAppResource } from "./ui/resource.js";
 
 const SERVER_NAME = "bellman-mcp-server";
@@ -60,6 +61,7 @@ export function buildServer(identity: Identity, s: BellmanStore, blobs: BlobStor
   registerLeave(server, identity, s);
   registerEvict(server, identity, s);
   registerAudit(server, identity, s);
+  registerPublicName(server, identity, s);
 
   // The one UI resource (#28). Hosts that render MCP Apps show bellman_connect,
   // bellman_confirm, bellman_rooms and bellman_surface through it; every other

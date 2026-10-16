@@ -143,6 +143,56 @@ export function describeStoreContract(
       expect(await store.getSession("qs_nope")).toBeUndefined();
     });
 
+    describe("the public name index (public names spec, D5)", () => {
+      it("holds no entry for a name never claimed", async () => {
+        expect(await store.publicNameEntry("bellman-dev")).toBeNull();
+      });
+
+      it("claims a name only while its entry is still what the claimer read, compared whole", async () => {
+        const a = { id: "qs_a", at: 1 };
+        const b = { id: "qs_b", at: 2 };
+        expect(await store.claimPublicName("bellman-dev", a, null)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(a);
+        expect(await store.claimPublicName("bellman-dev", b, null)).toBe(false);
+        // The same room's id from another claim is another entry: the claim it read has been replaced.
+        expect(await store.claimPublicName("bellman-dev", b, { id: "qs_a", at: 9 })).toBe(false);
+        expect(await store.claimPublicName("bellman-dev", b, a)).toBe(true);
+        expect(await store.publicNameEntry("bellman-dev")).toEqual(b);
+      });
+
+      it("lets exactly one of two claims on one name win", async () => {
+        const won = await Promise.all([
+          store.claimPublicName("race", { id: "qs_a", at: 1 }, null),
+          store.claimPublicName("race", { id: "qs_b", at: 1 }, null),
+        ]);
+        expect(won.filter(Boolean)).toHaveLength(1);
+        expect((await store.publicNameEntry("race"))?.id).toBe(won[0] ? "qs_a" : "qs_b");
+      });
+
+      it("gives a claim back only while its entry is still the one given", async () => {
+        const a = { id: "qs_a", at: 1 };
+        await store.claimPublicName("given-back", a, null);
+        expect(await store.releasePublicName("given-back", { id: "qs_a", at: 2 })).toBe(false);
+        expect(await store.publicNameEntry("given-back")).toEqual(a);
+        expect(await store.releasePublicName("given-back", a)).toBe(true);
+        expect(await store.publicNameEntry("given-back")).toBeNull();
+        expect(await store.releasePublicName("given-back", a)).toBe(false);
+      });
+
+      it("writes the name on the room's record, keeps one a room is created with, and leaves a room that is not there not there", async () => {
+        const s = session({ id: "qs_named", manifest: roomManifest({ public: true }) });
+        await store.createSession(s);
+        expect((await store.getSession(s.id))?.publicName).toBeNull();
+        await store.setPublicName(s.id, "bellman-dev");
+        expect((await store.getSession(s.id))?.publicName).toBe("bellman-dev");
+        const born = session({ id: "qs_born_named", manifest: roomManifest({ public: true }), publicName: "born-named" });
+        await store.createSession(born);
+        expect((await store.getSession(born.id))?.publicName).toBe("born-named");
+        await store.setPublicName("qs_nope", "bellman-dev");
+        expect(await store.getSession("qs_nope")).toBeUndefined();
+      });
+    });
+
     it("returns undefined for an unknown session", async () => {
       expect((await store.getSession("qs_nope"))).toBeUndefined();
     });

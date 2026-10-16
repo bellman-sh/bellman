@@ -1,8 +1,8 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
-import { SWEEP_RPC_BUDGET, codeIsLive, isPublic } from "./store.js";
-import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PurgeSchedule, SetJoinCode } from "./store.js";
+import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
+import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
   ArrivingMember, AuditEntry, Brief, Member, NewSession, PendingConnect, PlanGrant, SavedPreset, Session,
   SessionEvent, SurfaceRow,
@@ -1641,6 +1641,15 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     if (dropped) await this.driver.deliverNow();
   }
 
+  /** `BellmanStore.setPublicName`, for this room (public names spec, D5). An empty object is left empty. */
+  async setPublicName(name: string): Promise<void> {
+    await this.ctx.storage.transaction(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return;
+      await putRows(txn, memberRows(s, { ...s, publicName: name }));
+    });
+  }
+
   /**
    * The close-time sweep (#65, D3), run now. `BellmanStore.sweepBlobs` is the contract and
    * this is SessionDO's answer to it; the alarm reaches the same work through #sweepIfDue,
@@ -2807,6 +2816,28 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     await this.ctx.storage.delete(`jc:${code}`);
   }
 
+  async lookupPublicName(name: string): Promise<PublicNameEntry | undefined> {
+    return this.ctx.storage.get<PublicNameEntry>(`pn:${name}`);
+  }
+
+  /** `BellmanStore.claimPublicName`, in one transaction (public names spec, D5). */
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.put(`pn:${name}`, entry);
+      return true;
+    });
+  }
+
+  /** `BellmanStore.releasePublicName`, in one transaction. */
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      if (!sameEntry((await txn.get<PublicNameEntry>(`pn:${name}`)) ?? null, expected)) return false;
+      await txn.delete(`pn:${name}`);
+      return true;
+    });
+  }
+
   async putPendingConnect(p: PendingConnect): Promise<void> {
     await this.ctx.storage.put(`pc:${p.token}`, p);
   }
@@ -3691,6 +3722,22 @@ export class DurableObjectStore implements BellmanStore {
 
   async unpublishSession(sessionId: string, at: number): Promise<void> {
     await this.session(sessionId).unpublishSession(at);
+  }
+
+  async publicNameEntry(name: string): Promise<PublicNameEntry | null> {
+    return (await this.registry.lookupPublicName(name)) ?? null;
+  }
+
+  async claimPublicName(name: string, entry: PublicNameEntry, expected: PublicNameEntry | null): Promise<boolean> {
+    return this.registry.claimPublicName(name, entry, expected);
+  }
+
+  async releasePublicName(name: string, expected: PublicNameEntry): Promise<boolean> {
+    return this.registry.releasePublicName(name, expected);
+  }
+
+  async setPublicName(sessionId: string, name: string): Promise<void> {
+    await this.session(sessionId).setPublicName(name);
   }
 
   async sweepBlobs(sessionId: string): Promise<{ removed: number; credited: number }> {

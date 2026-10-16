@@ -240,6 +240,11 @@ export interface Session {
    */
   unpublishedAt: number | null;
   /**
+   * The public name this room's record gives it (public names spec, D5), or null. It holds the
+   * name only while public and open (`holdsName`). Read as null for a row written before it.
+   */
+  publicName: string | null;
+  /**
    * Set when the plan behind this session lapsed. Frozen is not closed:
    * members stay, history stays readable, and only writes are refused, until
    * the plan is restored. Losing the room would be the wrong punishment for a

@@ -790,7 +790,7 @@ describe("INVARIANT 10 — every room is declared", () => {
     // outside it. The creator's own words come back marked like anyone's.
     const { text: skin, ...spine } = started.data.room as Record<string, unknown>;
     expect(Object.keys(started.data.room as object).sort()).toEqual(
-      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "roles", "text",
+      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "public_name", "roles", "text",
         "your_heartbeat_on", "your_role", "your_verbs"],
     );
     expect((skin as { trust: string }).trust).toBe("untrusted");
@@ -1122,8 +1122,9 @@ describe("INVARIANT 11 — a joiner reads the rules before committing", () => {
     // The two heartbeat keys (#111) are spine: a number or null and a boolean, computed by
     // the server, so there is no authored string in them to leak and the guard below holds.
     // So is `host` (#188): a role key, as creator_role is, and a model from a fixed list.
+    // And `public_name` (public names spec, D7): a name held to a grammar the server checked, like a role key.
     expect(Object.keys(room).sort()).toEqual(
-      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "roles", "text",
+      ["creator_role", "heartbeat_on", "heartbeat_seconds", "host", "housekeeping", "mode", "preset", "public", "public_name", "roles", "text",
         "your_heartbeat_on", "your_role", "your_verbs"],
     );
 

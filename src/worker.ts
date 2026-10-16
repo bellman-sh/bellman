@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
 import { handleRoutes } from "./http/handles.js";
+import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes, type RoomCaller } from "./http/rooms.js";
@@ -218,16 +219,18 @@ export default {
     // The room routes (#183, #184), ahead of the OAuth routes: /rooms/ is that
     // module's prefix, and /rooms with no slash is the list. The fail-closed
     // guard /ws has covers them all — a deploy with neither a key map nor OAuth
-    // serves no room.
+    // serves no room. The bans routes are asked first: they answer the paths
+    // under /rooms/:id/bans, and leave every other path to the room routes.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
-      const handled = await roomRoutes(request, {
+      const deps = {
         store,
         blobs,
-        caller: (req) => roomCaller(req, env, oauth),
+        caller: (req: Request) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],
-      });
+      };
+      const handled = (await moderationRoutes(request, deps)) ?? (await roomRoutes(request, deps));
       if (handled) return handled;
     }
 
@@ -259,6 +262,19 @@ export default {
       const blocked = unconfigured(env, oauth);
       if (blocked) return blocked;
       const handled = await handleRoutes(request, {
+        store,
+        caller: (req) => roomCaller(req, env, oauth),
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // A creator's bans across their rooms (abuse protections spec, section 1): beside the handle, for the
+    // same reason, and behind the same guard.
+    if (url.pathname === "/account/bans" || url.pathname.startsWith("/account/bans/")) {
+      const blocked = unconfigured(env, oauth);
+      if (blocked) return blocked;
+      const handled = await moderationRoutes(request, {
         store,
         caller: (req) => roomCaller(req, env, oauth),
         panelOrigins: oauth?.panelOrigins ?? [],

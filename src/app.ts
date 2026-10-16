@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { resolveIdentity } from "./auth.js";
 import type { BlobStore } from "./blobs.js";
 import { handleRoutes } from "./http/handles.js";
+import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { roomRoutes } from "./http/rooms.js";
@@ -57,9 +58,15 @@ export function createApp(store: BellmanStore, blobs: BlobStore, features: { hos
     const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
     return identity ? { identity, via: "bearer" as const } : null;
   };
-  app.use("/rooms", serve((request) => roomRoutes(request, { store, blobs, caller, panelOrigins: [] })));
+  // The bans routes are asked first: they answer the paths under /rooms/:id/bans, and leave every other
+  // path to the room routes.
+  app.use("/rooms", serve(async (request) => {
+    const deps = { store, blobs, caller, panelOrigins: [] };
+    return (await moderationRoutes(request, deps)) ?? roomRoutes(request, deps);
+  }));
   app.use("/presets", serve((request) => presetRoutes(request, { store, caller, panelOrigins: [] })));
   app.use("/account/handle", serve((request) => handleRoutes(request, { store, caller, panelOrigins: [] })));
+  app.use("/account/bans", serve((request) => moderationRoutes(request, { store, caller, panelOrigins: [] })));
   app.use("/public", serve((request) => publicRoutes(request, { store, blobs })));
 
   app.use(express.json({ limit: "1mb" }));

@@ -1,8 +1,8 @@
 /**
- * A cross-org session writes into BOTH orgs' audit streams, so each side sees
- * the crossings that touched its own boundary and nothing else. Getting that
- * wrong in either direction leaks one org's activity to the other, or leaves a
- * boundary crossing unrecorded.
+ * A cross-org session writes into the audit stream of every org with a person in
+ * the room, so each side sees the crossings that touched its own boundary and
+ * nothing else. Getting that wrong in either direction leaks one org's activity
+ * to the other, or leaves a boundary crossing unrecorded.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Harness, DEV_KEY } from "../helpers/harness.js";

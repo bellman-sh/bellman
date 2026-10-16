@@ -3826,7 +3826,7 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    if (a.orgId === null) return; // no org, no audit stream to write to
+    if (!a.orgId) return; // no org, no audit stream to write to
     await this.audit(a.orgId).append(a);
   }
 

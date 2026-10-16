@@ -1272,7 +1272,7 @@ describe("evictMember", () => {
   // was still in the room: an `invite_revoked` row, beside the member's when there
   // was one. So a query for the doors an eviction shut finds all of them, where a
   // field on the member's row could only describe the ones behind members this call
-  // removed. The row goes to the room's org and the creator's, as revokeInvite's does.
+  // removed. The row goes to the orgs `auditEntries` names, as revokeInvite's does.
   it("audits the door an eviction shut as a row of its own, beside the member's", async () => {
     await store.createSession(peopled());
 
@@ -1587,8 +1587,9 @@ describe("removal as one store operation", () => {
   });
 });
 
-// The helper's org set, driven directly: the room's, the actor's and any extras the
-// caller names, one row per distinct org and none for an org-less one.
+// The helper's org set, driven directly: the room's, the actor's, those of the people
+// in the room and any extras the caller names, one row per distinct org and none for
+// an org-less one.
 describe("audit", () => {
   it("writes one row per distinct org among the room's, the actor's and the extras", async () => {
     const room = session({ orgId: "org_room" });
@@ -1601,8 +1602,8 @@ describe("audit", () => {
       .toEqual(["org_codenerd", "org_other", "org_room"]);
   });
 
-  // What every caller that names no extra org relies on: the room's and the actor's,
-  // exactly as before the parameter existed.
+  // What every caller that names no extra org relies on: the room's, the actor's and
+  // those of the people in the room, who here are the actor alone.
   it("writes only the room's and the actor's rows when no extra org is named", async () => {
     const room = session({ orgId: "org_room" });
     const written = vi.spyOn(store, "appendAudit");

@@ -222,9 +222,9 @@ export async function announceReclaimed(
       },
       refId: null,
     });
-    // `alsoOrgs` for the reason evictMember passes it: the member losing access
-    // may be in neither the room's org nor the joiner's, and that org's admins
-    // are the ones who need to see their engineer leave a room.
+    // `alsoOrgs` for the reason evictMember passes it: the roster may no longer
+    // count the member losing access, and that org's admins are the ones who
+    // need to see their engineer leave a room.
     //
     // `actor` is the joiner that took the seat, because an audit row has to name
     // a real identity — but the action is `member_timed_out`, not
@@ -358,8 +358,8 @@ export function auditEntries(
 }
 
 /**
- * Write what `auditEntries` builds, one row per org, for a caller that has no
- * store operation to commit it with.
+ * Write what `auditEntries` builds, one row per org and all at once, for a caller
+ * that has no store operation to commit it with. Any one failing fails the call.
  */
 export async function audit(
   store: BellmanStore,
@@ -370,9 +370,8 @@ export async function audit(
   alsoOrgs: readonly (string | null)[] = [],
   roster: readonly Member[] = session.members
 ): Promise<void> {
-  for (const entry of auditEntries(session, actor, action, detail, alsoOrgs, roster)) {
-    await store.appendAudit(entry);
-  }
+  const entries = auditEntries(session, actor, action, detail, alsoOrgs, roster);
+  await Promise.all(entries.map((e) => store.appendAudit(e)));
 }
 
 /**
@@ -997,8 +996,8 @@ export async function evictMember(
         // `retire`.
         member_id: targetMemberId, user_id: target.userId, room_role: target.roomRole,
       },
-      // The evicted member's org as well. The actor here is the creator, not the
-      // member, so unless that org is also the room's it would get no row.
+      // The evicted member's org as well. The roster counts them only while they are
+      // still in the room, and a target who has already left still needs this row.
       [target.orgId],
     ),
   });

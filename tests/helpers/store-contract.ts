@@ -3856,6 +3856,12 @@ export function describeStoreContract(
       expect((await store.auditForOrg("org_c", 50))).toHaveLength(0);
     });
 
+    // A falsy org is no org (ARCHITECTURE.md section 9, runtime fact 4): no stream named "" is written.
+    it("writes no audit row for an entry whose org is empty", async () => {
+      await store.appendAudit({ at: Date.now(), orgId: "", sessionId: "qs_1", actorUserId: "u_a", action: "session_created", detail: {} });
+      expect(await store.auditForOrg("", 50)).toEqual([]);
+    });
+
     it("returns the most recent audit entries up to the limit", async () => {
       for (let i = 0; i < 10; i++) {
         (await store.appendAudit({

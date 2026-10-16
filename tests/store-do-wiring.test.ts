@@ -1500,6 +1500,26 @@ describe("fetch: websocket upgrade", () => {
     for (const frame of ctx.sockets[0].sent) expect(frame).not.toContain("fromUserId");
   });
 
+  /**
+   * #208. A socket from far behind is refused rather than handed the log. A client takes 410
+   * as it takes any refusal it does not know: it polls, and bellman_sync pages, until the
+   * socket it keeps retrying is close enough to be replayed.
+   */
+  it("refuses an upgrade that would replay more than REPLAY_LIMIT events, and accepts no socket", async () => {
+    const { doi, ctx } = await world(storeDo.REPLAY_LIMIT + 1);
+    const res = await doi.fetch(upgrade(0));
+    expect(res.status).toBe(410);
+    expect(await res.text()).toContain("bellman_sync");
+    expect(ctx.sockets).toHaveLength(0);
+  });
+
+  it("replays REPLAY_LIMIT events, the most a socket is sent", async () => {
+    const { doi, ctx } = await world(storeDo.REPLAY_LIMIT + 1);
+    const res = await doi.fetch(upgrade(1));
+    expect(res.status).toBe(101);
+    expect(ctx.sockets[0].sent).toHaveLength(storeDo.REPLAY_LIMIT);
+  });
+
   it("replays nothing when the cursor is current", async () => {
     const { doi, ctx } = await world(2);
     await doi.fetch(upgrade(2));

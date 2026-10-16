@@ -145,6 +145,14 @@ const WS_CLOSING = 2;
 const WS_CLOSED = 3;
 
 /**
+ * The most events a socket is replayed when it connects (#208). A client further behind is
+ * refused with 410, which today's bridges take as any refusal they do not know: they poll
+ * `bellman_sync`, which pages, and the socket they keep retrying is accepted once the gap is
+ * under this. A socket never carries the whole log.
+ */
+export const REPLAY_LIMIT = 1_000;
+
+/**
  * Whether a socket the runtime lists is one a peer can still be reached on.
  * Exactly CLOSING and CLOSED are not, so a reading nobody expected counts as
  * open: wake() would rather send to it than go silent, and presence would
@@ -890,7 +898,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
     // The last await, and every one before it is a storage read, so the gate
     // holds from the first recheck to the return. From here nothing yields.
-    const missed = await this.events(cursor);
+    const missed = await this.events(cursor, REPLAY_LIMIT + 1);
+    if (missed.length > REPLAY_LIMIT) {
+      return new Response(
+        `More than ${REPLAY_LIMIT} events since cursor ${cursor}: catch up with bellman_sync, then reconnect`,
+        { status: 410 },
+      );
+    }
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();

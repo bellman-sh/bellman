@@ -110,6 +110,10 @@
     {
       "name": "bellman_audit",
       "description": "Read every crossing that touched your org's boundary."
+    },
+    {
+      "name": "bellman_public_name",
+      "description": "Check or set the name in a public room's link."
     }
   ],
   "compatibility": {

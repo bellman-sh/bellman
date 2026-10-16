@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PUBLIC_NAME, claimName, heldName, holdsName, publicNameRefusal, roomNamed } from "../src/public-names.js";
 import { MemoryStore } from "../src/store.js";
 import { roomPreview } from "../src/projections.js";
-import { DEV_KEY, Harness } from "./helpers/harness.js";
+import { DEV_KEY, Harness, type Peer } from "./helpers/harness.js";
+import { pairUp } from "./helpers/flows.js";
 import { hydrateStoredSession } from "../src/stored-session.js";
 import { brief, roomManifest, session } from "./helpers/fixtures.js";
 
@@ -143,5 +144,78 @@ describe("bellman_start's public_name (D4)", () => {
   it("shows no public_name in the preview of a room that no longer holds its name", () => {
     const closed = session({ manifest: roomManifest({ public: true }), publicName: "bellman-dev", closed: true, closedAt: 1 });
     expect(roomPreview(closed, null).public_name).toBeNull();
+  });
+});
+
+describe("bellman_public_name (D3)", () => {
+  let h: Harness;
+  beforeEach(() => { h = new Harness(); });
+  afterEach(async () => { await h.close(); });
+  const OPEN = { room: "Dev", preset: "pair", public: true };
+  const start = async (peer: Peer, over: Record<string, unknown> = {}) => {
+    const out = await peer.call("bellman_start", { manifest: OPEN, brief: brief(), ...over });
+    expect(out.isError, out.text).toBe(false);
+    return { room: String(out.data.session_id), member: String(out.data.member_id) };
+  };
+
+  it("checks a name without a room, and says a held one is not free", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    expect((await jesse.call("bellman_public_name", { name: "bellman-dev" })).data).toEqual({ name: "bellman-dev", free: true });
+    await start(jesse, { public_name: "bellman-dev" });
+    expect((await jesse.call("bellman_public_name", { name: "bellman-dev" })).data).toEqual({ name: "bellman-dev", free: false });
+  });
+
+  it("refuses a name outside the rule", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const out = await jesse.call("bellman_public_name", { name: "Bellman-Dev" });
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain('public name "Bellman-Dev": use 3 to 40 lowercase letters');
+  });
+
+  it("sets a name for the room's creator, frees the one it held at once, and takes it back by room_id", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const { room } = await start(jesse, { public_name: "first-name" });
+    const set = await jesse.call("bellman_public_name", { name: "second-name", session_id: room });
+    expect(set.data).toEqual({ name: "second-name", public_url: "https://dash.bellman.sh/r/second-name" });
+    expect((await jesse.call("bellman_public_name", { name: "first-name" })).data.free).toBe(true);
+    // Review Focus 2: back to the first name, whose entry still points at the room.
+    expect((await jesse.call("bellman_public_name", { name: "first-name", room_id: room })).isError).toBe(false);
+    expect((await roomNamed(h.store, "first-name"))?.id).toBe(room);
+    expect((await jesse.call("bellman_public_name", { name: "second-name" })).data.free).toBe(true);
+  });
+
+  it("returns the name a room already holds unchanged, and refuses one another room holds", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const { room } = await start(jesse, { public_name: "bellman-dev" });
+    expect((await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: room })).data)
+      .toEqual({ name: "bellman-dev", public_url: "https://dash.bellman.sh/r/bellman-dev" });
+    const other = await start(jesse);
+    expect((await jesse.call("bellman_public_name", { name: "bellman-dev", session_id: other.room })).text)
+      .toContain('public name "bellman-dev" is taken: choose another');
+  });
+
+  it("names a room only for its creator, and only a public one", async () => {
+    const p = await pairUp(h, { manifest: OPEN });
+    expect((await p.joiner.call("bellman_public_name", { name: "bellman-dev", session_id: p.sessionId })).text)
+      .toContain("only the room's creator may name it");
+    const outsider = await h.connect(DEV_KEY.outsider);
+    expect((await outsider.call("bellman_public_name", { name: "bellman-dev", session_id: p.sessionId })).text)
+      .toContain("no such room, or no member of yours in it");
+    const shut = await start(p.creator, { manifest: { room: "Shut", preset: "pair" } });
+    expect((await p.creator.call("bellman_public_name", { name: "bellman-dev", session_id: shut.room })).text)
+      .toContain("only a public room has a public name");
+  });
+
+  // Review Focus 3: closed, the name is free at once, and the room cannot be named again.
+  it("frees a room's name once it closes or is made private, and refuses to name a closed room", async () => {
+    const jesse = await h.connect(DEV_KEY.jesse);
+    const closing = await start(jesse, { public_name: "closing-room" });
+    await jesse.call("bellman_leave", { session_id: closing.room, member_id: closing.member });
+    expect((await jesse.call("bellman_public_name", { name: "closing-room" })).data.free).toBe(true);
+    expect((await jesse.call("bellman_public_name", { name: "closing-room", session_id: closing.room })).text)
+      .toContain("the room is closed");
+    const unpublished = await start(jesse, { public_name: "private-soon" });
+    await h.store.unpublishSession(unpublished.room, Date.now());
+    expect((await jesse.call("bellman_public_name", { name: "private-soon" })).data.free).toBe(true);
   });
 });

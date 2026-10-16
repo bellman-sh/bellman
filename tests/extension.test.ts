@@ -102,9 +102,9 @@ describe("the Claude Desktop bundle manifest", () => {
   });
 
   // The count as an assertion, not prose: tests/tools/surface.test.ts once said 7 over a
-  // list of 8 and nothing failed. Fourteen is the server's eleven plus the bridge's three.
-  it("declares exactly fourteen tools", () => {
-    expect(declared()).toHaveLength(14);
+  // list of 8 and nothing failed. Fifteen is the server's twelve plus the bridge's three.
+  it("declares exactly fifteen tools", () => {
+    expect(declared()).toHaveLength(15);
   });
 
   // Not cosmetic: the expected list above is mode-dependent, so this is what makes the

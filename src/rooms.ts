@@ -16,7 +16,8 @@
  */
 import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
-import { renderJoinCode } from "./codes.js";
+import { publicRoomUrl, renderJoinCode } from "./codes.js";
+import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import {
   JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
@@ -274,6 +275,29 @@ export { isPublic };
 export const handlesOf = (
   store: BellmanStore, session: Pick<StoredSession, "id">, identity: Pick<Identity, "userId">,
 ): Promise<Member[]> => store.membersOfUser(session.id, identity.userId);
+
+/**
+ * `bellman_public_name`'s write (public names spec, D3): the room's creator names their public,
+ * open room. The index first, then the record: a claim whose record write fails names a room that
+ * does not hold it, which is free (D5). The name the room held before is free once the record
+ * names another.
+ */
+export async function namePublicRoom(
+  store: BellmanStore, identity: Pick<Identity, "userId">, sessionId: string, name: string,
+): Promise<RoomResult<{ name: string; publicUrl: string }>> {
+  const session = await store.getSession(sessionId);
+  if (!session || (await handlesOf(store, session, identity)).length === 0) {
+    return refuse("not_found", "no such room, or no member of yours in it");
+  }
+  if (session.createdBy !== identity.userId) return refuse("forbidden", "only the room's creator may name it");
+  if (session.closed) return refuse("closed", "the room is closed, and a closed room holds no name");
+  if (!isPublic(session)) return refuse("invalid", "only a public room has a public name");
+  if (!(await claimName(store, name, session.id))) {
+    return refuse("conflict", `public name "${name}" is taken: choose another`);
+  }
+  if (session.publicName !== name) await store.setPublicName(session.id, name);
+  return succeed({ name, publicUrl: publicRoomUrl({ ...session, publicName: name }) });
+}
 
 /**
  * Where a person's reading stops (#113), if anywhere. Only when every handle

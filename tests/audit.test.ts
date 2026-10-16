@@ -4,7 +4,8 @@
  * whether it crossed and which way.
  */
 import { describe, expect, it } from "vitest";
-import { SYSTEM_ACTOR, auditRow, auditRows, partiesOf } from "../src/audit.js";
+import { AUDIT_COLUMNS, SYSTEM_ACTOR, auditRow, auditRows, entryOf, partiesOf, recordOf, type AuditRecord } from "../src/audit.js";
+import type { AuditEntry } from "../src/types.js";
 
 const facts = { at: 7, sessionId: "qs_q3", action: "sent_message", roomName: "q3-plan", detail: { chars: 5 } };
 const ana = { userId: "u_ana", label: "Ana", orgId: "org_a" };
@@ -51,5 +52,25 @@ describe("auditRows", () => {
 describe("auditRow", () => {
   it("addresses one stream, reading the parties from that stream's side", () => {
     expect(auditRow("org_b", ["org_a", "org_b"], facts, bo).direction).toBe("outbound");
+  });
+});
+
+describe("the entries table's rows", () => {
+  const record = (e: AuditEntry, seq: number): AuditRecord =>
+    Object.fromEntries([["seq", seq], ...AUDIT_COLUMNS.map((c, i) => [c, recordOf(e)[i]])]) as AuditRecord;
+
+  it("hands back a recorded row whole, with its seq", () => {
+    const row = auditRows(["org_a", "org_b"], facts, ana)[0]!;
+    expect(entryOf(record(row, 4))).toEqual({ ...row, seq: 4 });
+  });
+
+  it("hands back a row from before the six fields without them", () => {
+    const old: AuditEntry = { at: 1, orgId: "org_a", sessionId: "qs_old", actorUserId: "u_old", action: "member_left", detail: {} };
+    expect(entryOf(record(old, 1))).toEqual({ ...old, seq: 1 });
+  });
+
+  it("keeps an actor with no org apart from a row that never said", () => {
+    const row = auditRows(["org_a", null], facts, { userId: "u_solo", label: null, orgId: null })[0]!;
+    expect(entryOf(record(row, 2))).toMatchObject({ actorOrgId: null, actorLabel: null, crossing: "cross_org" });
   });
 });

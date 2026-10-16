@@ -59,3 +59,65 @@ export function auditRow(orgId: string, parties: (string | null)[], facts: Audit
 export function auditRows(parties: (string | null)[], facts: AuditFacts, actor: AuditActor): AuditEntry[] {
   return parties.filter((p): p is string => p !== null).map((orgId) => auditRow(orgId, parties, facts, actor));
 }
+
+/** An entry with its place in its org's stream: the cursor `before` and `through` count in (D6). */
+export type SeqEntry = AuditEntry & { seq: number };
+
+/** The `entries` table's columns after `seq`, in the order `recordOf` binds them (D5). */
+export const AUDIT_COLUMNS = [
+  "at", "org_id", "session_id", "action", "actor_id", "actor_label", "actor_org",
+  "room_name", "parties", "crossing", "direction", "detail",
+] as const;
+
+/** One row of the `entries` table, as `sql.exec` hands it back. A type, not an interface: `exec`'s row type must be indexable. */
+export type AuditRecord = {
+  seq: number;
+  at: number;
+  org_id: string | null;
+  session_id: string;
+  action: string;
+  actor_id: string;
+  actor_label: string | null;
+  actor_org: string | null;
+  room_name: string | null;
+  parties: string | null;
+  crossing: string | null;
+  direction: string | null;
+  detail: string;
+};
+
+/**
+ * An entry as the table's columns, in AUDIT_COLUMNS order. A row from before D2 has no
+ * `crossing`, and its five companions are stored null beside it, so it reads back as it was.
+ */
+export function recordOf(e: AuditEntry): (string | number | null)[] {
+  const recorded = e.crossing !== undefined;
+  return [
+    e.at, e.orgId, e.sessionId, e.action, e.actorUserId,
+    recorded ? e.actorLabel ?? null : null,
+    recorded ? e.actorOrgId ?? null : null,
+    recorded ? e.roomName ?? null : null,
+    recorded ? JSON.stringify(e.parties ?? []) : null,
+    e.crossing ?? null,
+    recorded ? e.direction ?? null : null,
+    JSON.stringify(e.detail ?? {}),
+  ];
+}
+
+/** A table row as an entry: with the six fields when it recorded a crossing, without them when it is from before (D4). */
+export function entryOf(r: AuditRecord): SeqEntry {
+  const base: SeqEntry = {
+    seq: r.seq, at: r.at, orgId: r.org_id, sessionId: r.session_id, actorUserId: r.actor_id, action: r.action,
+    detail: JSON.parse(r.detail) as Record<string, unknown>,
+  };
+  if (r.crossing === null) return base;
+  return {
+    ...base,
+    actorLabel: r.actor_label,
+    actorOrgId: r.actor_org,
+    roomName: r.room_name,
+    parties: JSON.parse(r.parties ?? "[]") as (string | null)[],
+    crossing: r.crossing as "internal" | "cross_org",
+    direction: r.direction as "outbound" | "inbound" | null,
+  };
+}

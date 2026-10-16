@@ -315,6 +315,11 @@ export interface Entitlements {
    * D1): null keeps them until a creator or an org admin deletes the room.
    */
   retainAfterCloseMs: number | null;
+  /**
+   * How long an org's audit rows are kept (audit trail spec, D9): null keeps them with no
+   * expiry, which is what happens today. `/account` sends it, and the panel's Audit page says it.
+   */
+  auditRetentionMs: number | null;
 }
 
 // The closed set, and why `audit` and `close_room` are not in it, is written up on VERBS in manifest.ts.

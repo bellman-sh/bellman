@@ -6,7 +6,8 @@ sweeps and tamper evidence stay there. Builds on the per-org `AuditDO`, on
 `auditEntries` in `src/rooms.ts`, and on the reader conditions `bellman_audit`
 and the durable room record (#65, D4) already use.
 
-**Status:** design agreed 2026-10-09; this document is in review.
+**Status:** design agreed 2026-10-09; implemented on the audit-trail branches,
+bellman first.
 
 **Scope:** every audit row records who acted, from which org, in which room,
 and which orgs the room held at that moment. A row reaches every one of those
@@ -88,6 +89,10 @@ Members, as the page shows them, are the actor and, where `detail` names one,
 the subject of an eviction or a timeout. The roster's orgs are recorded; the
 roster's people are not.
 
+A delete names its asker by user id, label and org: `schedulePurge` takes the
+asker, not only an id. An admin's grant intent carries the admin's label and
+org.
+
 ### D3. Crossing and direction belong to the stream
 
 A row's copies differ by stream. In stream X:
@@ -120,6 +125,7 @@ delivery markers. It moves to two tables in the same database:
 CREATE TABLE IF NOT EXISTS entries (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   at INTEGER NOT NULL,
+  org_id TEXT,
   session_id TEXT NOT NULL,
   action TEXT NOT NULL,
   actor_id TEXT NOT NULL,
@@ -136,8 +142,8 @@ CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NO
 ```
 
 `AUTOINCREMENT` never reuses a seq, so a cursor once handed out never names
-another row. The object is one org's stream and stores no org; the store
-facade names the org on the way out.
+another row. Each row keeps its `org_id`, as the entry it was written from
+carries it, so `recent` and the query hand an entry back whole.
 
 **Append** is one `transactionSync`: look up the intent in `delivered`, insert
 the row, record the intent. `sql.exec` and `ctx.storage.kv` are synchronous in
@@ -146,12 +152,16 @@ That is the guarantee the async transaction's comment defends today, now held
 by construction.
 
 **Migration** runs in the constructor, under `blockConcurrencyWhile`, as one
-`transactionSync`. It creates the tables, copies every `a:` row with the seq in
-its key and every `d:` marker, and deletes the `a:`, `d:` and `seq` keys. An
-interruption leaves the KV state or the SQL state, never half of each. Copying
-the seq keeps every cursor already handed out valid. `ponytail:` one
-transaction is fine for thousands of rows. A stream far larger than any team
-holds today would batch it.
+`transactionSync`. It creates the tables, copies every `a:` row and every `d:`
+marker, and deletes the `a:`, `d:` and `seq` keys. An interruption leaves the
+KV state or the SQL state, never half of each. Into an empty table each row
+keeps the seq in its key, which keeps every cursor already handed out valid,
+and that is the only time the key seqs are kept. A later wake can find KV rows
+beside rows already in the table: an older Worker wrote them during a
+rollback, reading the `seq` counter the move deleted as 0 and counting again
+from 1. Those are appended in key order with fresh seqs, so nothing collides
+and the object still wakes. `ponytail:` one transaction is fine for thousands
+of rows. A stream far larger than any team holds today would batch it.
 
 ### D6. One query, in both stores
 
@@ -212,16 +222,18 @@ A new module, `src/http/audit.ts`, mounted in `src/worker.ts` as `/presets` is:
 behind `unconfigured`, with the same caller (cookie or bearer), CORS for the
 panel's origins and the same preflight. It is a read, so it needs no CSRF check.
 
-The gate is `isOrgAdmin` (team plan, admin role, an org), exported from
-`src/http/rooms.ts`. The org is always the caller's own, never a parameter. A
-refusal is a 403 in `bellman_audit`'s words for the first condition that fails:
-the plan, the role or the org.
+The gate is `auditRefusal` in `src/audit.ts` (team plan, admin role, an org),
+which names the condition that failed. `bellman_audit` and the room routes'
+`isOrgAdmin` ask it too, so the three conditions cannot drift apart. The org is
+always the caller's own, never a parameter. A refusal is a 403 in
+`bellman_audit`'s words for the first condition that fails: the plan, the role
+or the org.
 
 Query parameters, all optional, combine with AND:
 
 | Parameter | Value |
 |---|---|
-| `from`, `to` | ISO 8601 instants; `from` inclusive, `to` exclusive |
+| `from`, `to` | ISO 8601 instants; the date must be a real calendar date: 2026-02-30 is refused, not rolled over. `from` inclusive, `to` exclusive |
 | `actor`, `room`, `org`, `action` | an id or action name, 1 to 200 characters |
 | `scope` | `internal` or `cross_org` |
 | `before`, `through` | a seq: a whole number, 0 or more |
@@ -259,12 +271,13 @@ to the newest row when the export starts. The route walks `queryAudit` in
 pages of 500 and streams what it reads, newest first, the order the page
 shows.
 
-- **Headers:** `Content-Disposition: attachment;
-  filename="bellman-audit-<org>-<through>.<csv|json>"`, with any character of
-  the org id outside `[A-Za-z0-9_.-]` written as `_`, so no id can break the
-  header; `Cache-Control: no-store`; and `Access-Control-Expose-Headers:
-  Content-Disposition`, without which the panel's fetch could not read the
-  filename.
+- **Headers:** `Content-Disposition`, written by `attachmentDisposition` in the
+  RFC 8187 form `attachment;
+  filename*=UTF-8''bellman-audit-<org>-<through>.<csv|json>`, with any
+  character of the org id outside `[A-Za-z0-9_.-]` written as `_`, so no id can
+  break the header; `Cache-Control: no-store`; and
+  `Access-Control-Expose-Headers: Content-Disposition`, without which the
+  panel's fetch could not read the filename.
 - **CSV:** one header row, then `seq, at, action, room_id, room_name,
   actor_id, actor_label, actor_org, parties, crossing, direction, detail`.
   `parties` is joined with `;`, with `(no org)` for null. `detail` is its
@@ -371,9 +384,9 @@ already existed. This adds routes.
 
 ## Security
 
-- **Tenant.** The org is the caller's own, from `isOrgAdmin`. The `org`
-  parameter only narrows the caller's own stream, and no parameter reaches
-  another org's object.
+- **Tenant.** The org is the caller's own, from the identity `auditRefusal`
+  admits. The `org` parameter only narrows the caller's own stream, and no
+  parameter reaches another org's object.
 - **What a party learns.** Under D1, B's stream records A's member's actions in
   a room B's member sits in: the actor's id, label and org, the room's id and
   name, the action and `detail`. `detail` holds counts, keys, roles and ids,
@@ -408,7 +421,8 @@ Worker:
 - **Fan-out**, in `tests/rooms.test.ts`: Ana's send in A's room with Bo present
   is `outbound` in A's stream and `inbound` in B's; a person with no org makes
   the room cross-org and receives no row; the hosted seat does not; an
-  eviction reaches the evicted member's org as `inbound`; purge, delete and
+  eviction reaches the evicted member's org as `inbound`; a `connect_previewed`
+  row reaches only the room's org and the previewer's; purge, delete and
   grant rows carry their parties.
 - **`AuditDO`**, in `worker-tests/`: a stream seeded in the KV shape (`a:`,
   `d:`, `seq`) wakes into SQL with its seqs; a redelivered intent that was
@@ -444,15 +458,16 @@ bellman:
 - `src/types.ts`: `AuditEntry`'s fields, `Entitlements.auditRetentionMs`
 - `src/auth.ts`: `auditRetentionMs` on each plan
 - `src/audit.ts` (new): the crossing rule, `AuditQuery`, `AuditPage`,
-  `AuditFacets`, the entry's projection and the CSV and JSON formatting
+  `AuditFacets` and `auditRefusal`, the gate
 - `src/rooms.ts`: `auditEntries`' fan-out and fields
 - `src/store.ts`: `hostSentEntries`' fields; `BellmanStore.queryAudit` and
   `auditFacets`; `MemoryStore`
 - `src/retention.ts`, `src/grant-audit.ts`: their entries' fields
 - `src/store-do.ts`: `AuditDO`'s tables, migration, append, query and facets;
   the facade
-- `src/http/audit.ts` (new); `src/http/rooms.ts` exports `isOrgAdmin`;
-  `src/worker.ts` mounts the module
+- `src/http/audit.ts` (new): the routes, the entry's projection and the CSV
+  and JSON formatting; `src/http/rooms.ts` and `src/tools/audit.ts` ask
+  `auditRefusal`; `src/worker.ts` mounts the module
 - `tests/helpers/store-contract.ts`, `tests/rooms.test.ts`,
   `tests/http-audit.test.ts` (new), `worker-tests/` for `AuditDO`
 - `README.md` (the audit trail and the two routes),

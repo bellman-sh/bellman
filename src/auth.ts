@@ -21,6 +21,8 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     // How long a closed room is kept before the purge (#65, D1): a week, a year, and for
     // max and team until someone with the right to delete it does.
     retainAfterCloseMs: 7 * 24 * 60 * 60 * 1000,
+    // Audit rows are kept with no expiry on every plan (audit trail spec, D9). #58 decides a window and the sweep.
+    auditRetentionMs: null,
   },
   pro: {
     modes: ["pair", "swarm"],
@@ -31,6 +33,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostedRooms: 0,
     hostUnitsPerRoom: 0,
     retainAfterCloseMs: 365 * 24 * 60 * 60 * 1000,
+    auditRetentionMs: null,
   },
   // Max sells the hosted seat: three hosted rooms open at once, 3,000 units each a
   // month (the hosted seat spec, D2 and D3, and ADR 0002), over pro's creates, blob ceiling and how
@@ -47,6 +50,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostedRooms: 3,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
+    auditRetentionMs: null,
   },
   team: {
     modes: ["pair", "swarm"],
@@ -57,6 +61,7 @@ export const ENTITLEMENTS: Record<Plan, Entitlements> = {
     hostedRooms: 5,
     hostUnitsPerRoom: 3000,
     retainAfterCloseMs: null,
+    auditRetentionMs: null,
   },
 };
 

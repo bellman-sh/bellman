@@ -151,6 +151,11 @@ describe("plan entitlements", () => {
     expect(ENTITLEMENTS.team.retainAfterCloseMs).toBeNull();
   });
 
+  /** Audit rows are kept with no expiry on every plan (audit trail spec, D9); #58 decides a window. */
+  it("keeps audit rows with no expiry on every plan", () => {
+    for (const plan of plans) expect(ENTITLEMENTS[plan].auditRetentionMs, plan).toBeNull();
+  });
+
   /**
    * Max is coming soon (#45, #18). With no room lifetime and no member cap, it
    * differs from pro by creates, the blob ceiling, how long a closed room is kept
@@ -205,13 +210,14 @@ describe("plan entitlements", () => {
    * appearing here would mean being invited into a room had started to depend
    * on what you pay — this test is the tripwire. `blobBytesPerRoom` (#183)
    * bounds what a room stores, and `retainAfterCloseMs` (#65) how long a closed
-   * room is kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
+   * room is kept; `auditRetentionMs` (audit trail spec, D9) how long an org's audit
+   * rows are kept; `hostedRooms` and `hostUnitsPerRoom` (#188) bound how many
    * hosted rooms a person holds open and what each spends. None says who may join it.
    */
   it("describes creation limits only — no join-side gating exists", () => {
     const creationOnlyFields = [
       "modes", "monthlyCreates", "orgScoping", "audit", "blobBytesPerRoom", "retainAfterCloseMs",
-      "hostedRooms", "hostUnitsPerRoom",
+      "auditRetentionMs", "hostedRooms", "hostUnitsPerRoom",
     ].sort();
 
     for (const plan of plans) {

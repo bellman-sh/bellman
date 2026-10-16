@@ -14,19 +14,20 @@ import type { Identity } from "../types.js";
 import { json, methodNotAllowed, problem, type RoomRouteDeps } from "./rooms.js";
 
 export type StatsRouteDeps = Pick<RoomRouteDeps, "store" | "caller" | "panelOrigins"> & {
-  /** The user ids BELLMAN_OPERATORS names. Absent or empty admits nobody. */
-  operators?: ReadonlySet<string>;
+  /** The user ids BELLMAN_OPERATORS names. Undefined or empty admits nobody. */
+  operators: ReadonlySet<string> | undefined;
   /**
    * BELLMAN_USERS as `parseOverrides` returns it: identity key to identity. Only the
-   * plan is read. Absent or empty adds no one.
+   * plan is read. Undefined or empty adds no one.
    */
-  overrides?: Readonly<Record<string, Identity>>;
+  overrides: Readonly<Record<string, Identity>> | undefined;
   /**
-   * `honourPurchases` as the OAuth config carries it: whether a grant billing wrote counts,
-   * which is BELLMAN_BILLING being `on`. False leaves purchase grants out, as sign-in does.
-   * Absent counts them, as sign-in reads an absent switch (`!== false`).
+   * `honourPurchases` as the OAuth config carries it, which is `billingSettings(env).applyPlans`:
+   * whether a grant billing wrote counts. True only for BELLMAN_BILLING `on` with both Stripe
+   * secrets set. False leaves purchase grants out, as sign-in does. Undefined counts them, as
+   * sign-in reads it (`!== false`).
    */
-  honourPurchases?: boolean;
+  honourPurchases: boolean | undefined;
 };
 
 /**
@@ -110,9 +111,10 @@ export async function statsRoutes(request: Request, deps: StatsRouteDeps): Promi
       // people is worse than a floor.
       free: Math.max(0, accounts - paid),
       paid,
-      // The scan's bound, not the paid count (ruling R1): free grants come out of
-      // `paid`, so it can sit below the limit on a scan that reached it, and
-      // overrides add to it, so it can sit above the limit on one that did not.
+      // The scan's bound, not the paid count (ruling R1): free grants, and purchase grants
+      // the switch leaves out, come out of `paid`, so it can sit below the limit on a scan
+      // that reached it, and overrides add to it, so it can sit above the limit on one that
+      // did not.
       paidCapped: grants.length === MAX_GRANTS_COUNTED,
     };
     return json(200, stats, origin);

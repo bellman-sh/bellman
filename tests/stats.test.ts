@@ -28,7 +28,11 @@ const caller = async (request: Request): Promise<RoomCaller | null> => {
 beforeEach(() => {
   store = new MemoryStore();
   // u_jesse is DEV_KEY.jesse's userId; u_peer is DEV_KEY.peer's.
-  deps = { store, caller, panelOrigins: [PANEL], operators: new Set(["u_jesse"]) };
+  deps = {
+    store, caller, panelOrigins: [PANEL], operators: new Set(["u_jesse"]),
+    // What the Worker hands over with OAuth on, billing on and nothing in BELLMAN_USERS.
+    overrides: {}, honourPurchases: true,
+  };
 });
 
 interface CallOptions { method?: string; cookie?: string; origin?: string }
@@ -91,7 +95,7 @@ describe("GET /operator/stats", () => {
     expect(JSON.stringify(body)).not.toMatch(/BELLMAN_OPERATORS|operator/i);
   });
 
-  it("admits nobody when the operators set is absent or empty", async () => {
+  it("admits nobody when the operators set is undefined or empty", async () => {
     deps = { ...deps, operators: undefined };
     expect((await call(DEV_KEY.jesse))!.status).toBe(403);
     deps = { ...deps, operators: new Set() };
@@ -220,6 +224,17 @@ describe("GET /operator/stats", () => {
     expect(await bodyOf(res)).toMatchObject({ accounts: 1, free: 1, paid: 0 });
   });
 
+  // `oauth?.overrides` is undefined when the Worker has no OAuth config, so the route has to read undefined as none.
+  it("counts no overrides when the key holds undefined", async () => {
+    await store.recordSignIn("u_a", Date.now());
+    await store.putGrant(grant({ key: "github:1", plan: "pro" }));
+    deps = { ...deps, overrides: undefined };
+
+    const res = await call(DEV_KEY.jesse);
+    expect(res!.status).toBe(200);
+    expect(await bodyOf(res)).toMatchObject({ accounts: 1, free: 0, paid: 1 });
+  });
+
   // listGrants(limit, null) keeps only the grants with no org, and a team seat has one.
   it("counts a grant that belongs to an org", async () => {
     await store.putGrant(grant({ key: "github:1", plan: "team", orgId: "org_x" }));
@@ -228,7 +243,7 @@ describe("GET /operator/stats", () => {
   });
 
   // firstGrant leaves a purchase grant out unless the OAuth config's honourPurchases is on,
-  // and reads an absent switch as on. The count follows, so a grant sign-in would not honour
+  // and reads an undefined switch as on. The count follows, so a grant sign-in would not honour
   // does not make an account paid. A grant anyone but billing wrote is no purchase, and the
   // switch has no say over it.
   it.each([

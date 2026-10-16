@@ -1,8 +1,9 @@
 /**
  * The Worker mounts the operator's stats over the real registry (operator stats spec D1). The route's rules are
- * pinned in tests/stats.test.ts; this is the wiring. A mount that leaves `operators` off refuses everyone, and the
- * refusals below would notice. One that leaves `overrides` or `honourPurchases` off gives a wrong `paid` and no
- * error, so the count is read through each of them here, set the only way the Worker takes them: its env.
+ * pinned in tests/stats.test.ts; this is the wiring. The route requires its three config keys, so a mount cannot
+ * forget one. The value is what the type cannot check. A wrong `operators` fails the 200 assertions below; the 401
+ * and 403 assertions pass on it, since everyone is refused. A wrong `overrides` or `honourPurchases` gives a wrong
+ * `paid` and no error, so the count is read through each of them here, set the only way the Worker takes them: its env.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";

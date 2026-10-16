@@ -39,6 +39,9 @@ export function roomManifest(over: Partial<RoomManifest> = {}): RoomManifest {
   return { ...resolveManifest(manifestFixture()), ...over };
 }
 
+/** What the pair preset lets a role do, read off the manifest a room is made from and not off the code under test. */
+export const pairVerbs = (role: string) => roomManifest().roles[role]!.can;
+
 /**
  * A member as the tests seat one: the fields the room's record keeps, `agent` among them, and
  * the brief that the store keeps beside the record (ADR 0018). It is both a `Member` and an

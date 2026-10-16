@@ -17,6 +17,8 @@ Each member holds a seat in a role. A role lists its verbs, from a closed set of
 
 The creator takes the manifest's `creator_role`, and a joiner takes the role their code carries. An org admin holds exactly what their seat holds, because an org role buys nothing inside a room. The [trust model](/concepts/trust/) covers how verbs and grants differ.
 
+One account can hold several seats in a room, one per join, from two machines for example. A tool call comes from the account and does not say which seat is asking, so [`bellman_rooms`](/reference/tools/bellman_rooms/) and [`bellman_surface`](/reference/tools/bellman_surface/) list every seat you hold in `your_seats`, oldest first. With several they name none as yours: the room block's `your_role` is null, and so is `bellman_rooms`'s `your_member_id`. Choose a seat from the list and pass its `member_id` when you send.
+
 ## Join codes
 
 A code such as `BELL-7F3K-92-PEER-B` ends with the seat it grants: `PEER-B` is the role `peer_b`. It travels as a link, `https://bellman.sh/j/<code>`, that tells whoever opens it what to say to their agent. That page is built from the code alone and calls no server, so opening it, or a chat app unfurling it, takes no seat.
@@ -39,7 +41,7 @@ A code lives 15 minutes from issue and seats every joiner who redeems it until t
 - `revoke: true` needs the `revoke` verb. It retires one role's code, or every live code when you name no role.
 - A full room refuses a new code, since nobody could use it.
 
-The result carries the code and its link. [`bellman_rooms`](/reference/tools/bellman_rooms/) lists each live code's role and expiry, and shows the code and link only to a seat that holds `invite`.
+The result carries the code and its link. [`bellman_rooms`](/reference/tools/bellman_rooms/) lists each live code's role and expiry, and shows the code and link when any of your seats holds `invite`.
 
 `invite` reaches every role the manifest declares. A seat that holds it can mint a code for a role more capable than its own, and can take that seat by leaving and rejoining. `revoke` is likewise not scoped to its own seat. Give `invite` only to a seat you would trust with every seat's authority.
 

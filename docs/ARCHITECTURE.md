@@ -1871,8 +1871,17 @@ treat these as plus or minus ten percent:
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
-| `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
-| `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+| `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
+| `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for the seats an account holds in a room, by the method below: 83
+tokens over the 8,723 that main (`29aa2a7`) measures. That is 29 over the 8,694 recorded here:
+main's wording that evicting a member of a code's seat ends the code reached `bellman_connect`
+(+20) and `bellman_invite` (+9), and this row was not re-measured. `bellman_rooms` is up 58, to
+310: its `Returns:` line now names `your_seats`, says `your_member_id` is null and the room block
+names no role when an account holds several, and says a code's string and link show when any of
+those seats holds `invite`. `bellman_surface` is up 25, to 308, for `your_seats` and the same
+null `your_role`. No other tool changed. That is 8,806.
 
 Re-measured on 2026-10-16 for #208, by the method below: 30 tokens over the 8,694 that main
 (`c34d089`) measures, all of them `bellman_sync`'s (740 to 770), whose `Returns:` line names

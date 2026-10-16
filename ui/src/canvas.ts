@@ -5,7 +5,7 @@
  */
 import { artifactFrame } from "./artifact.js";
 import { centerOf, fit, layout, zoomAbout, type Box, type Line, type Transform } from "./canvas-layout.js";
-import { el, relative, text } from "./shared.js";
+import { el, relative, seatsLine, text } from "./shared.js";
 import type { SurfaceItemWire, SurfaceResult, Untrusted } from "./types.js";
 
 export const DASH_ORIGIN = "https://dash.bellman.sh";
@@ -194,10 +194,15 @@ export function createCanvas(first: SurfaceResult, deps: CanvasDeps, now = Date.
     const items = Array.isArray(r.surface?.items) ? r.surface.items : [];
     const n = items.length;
     status.textContent = `${n} item${n === 1 ? "" : "s"} · read at ${new Date(at).toLocaleTimeString()} · ${deps.nested ? "artifacts render here" : "artifacts open in dash"}`;
+    const seats = r.your_seats ?? [];
     title.replaceChildren(
       text(r.room?.text?.data?.room),
-      el("span", { class: "chip" }, text(r.room?.your_role)),
-      el("span", { class: "muted" }, ` ${(r.room?.your_verbs ?? []).join(", ") || "read only"}`),
+      ...(seats.length > 1
+        ? [el("span", { class: "muted" }, ` ${seatsLine(seats)}`)]
+        : [
+          el("span", { class: "chip" }, text(r.room?.your_role)),
+          el("span", { class: "muted" }, ` ${(r.room?.your_verbs ?? []).join(", ") || "read only"}`),
+        ]),
     );
     const cursor = typeof r.surface?.cursor === "number" ? r.surface.cursor : null;
     if (cursor !== null && cursor === drawn) return;

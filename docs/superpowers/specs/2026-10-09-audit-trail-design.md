@@ -345,9 +345,9 @@ TIME          EVENT          ROOM     MEMBER  ORG          DIRECTION
 - **Export:** a `fetch` with credentials, carrying the filters, the format
   and the first page's `through`. It is saved only after `response.blob()`
   resolves, under the server's filename. A refusal or a failed stream shows
-  inline as "Export failed; nothing was saved: <reason>." A line says the export holds
-  all `total` entries matching the filters as of the page's load, so the file
-  can be checked against the count.
+  inline as "Export failed; nothing was saved: `<reason>`." A line says the
+  export holds all `total` entries matching the filters as of the page's load,
+  so the file can be checked against the count.
 
 ### D11. A reader the log does not admit sees why, never a 403 screen
 
@@ -393,8 +393,11 @@ already existed. This adds routes.
 - **What a party learns.** Under D1, B's stream records A's member's actions in
   a room B's member sits in: the actor's id, label and org, the room's id and
   name, the action and `detail`. `detail` holds counts, keys, roles and ids,
-  never message content, and B's member could already see each of these in
-  the room. The README's promise holds: each side sees the crossings that
+  never message content. B's member could already see each of these in the
+  room, with one exception: B's stream also names A's members by their stable
+  user id, as the actor and in `detail`, which the room itself does not show
+  peers. The room's org already received its guests' ids, and D1 makes that
+  symmetric. The README's promise holds: each side sees the crossings that
   touched its own boundary and nothing else.
 - **SQL.** Every value is a bound parameter. The `WHERE` clause is assembled
   from fixed fragments only.
@@ -406,9 +409,10 @@ already existed. This adds routes.
 ## Errors
 
 - **Worker:** 401 without a caller; 403 naming the failed condition; 400
-  naming the bad parameter; 405 for another method; 500 in the module's usual
-  words. A migration that throws leaves the KV state, and the next wake runs it
-  again. A failure that does not pass, such as a stream too large to move in
+  naming the bad parameter; 404 for a path under `/audit/` other than
+  `/audit/export`; 405 for another method; 500 in the module's usual words. A
+  migration that throws leaves the KV state, and the next wake runs it again.
+  A failure that does not pass, such as a stream too large to move in
   `blockConcurrencyWhile`'s 30 s, recurs on every wake, so that org's stream,
   and every audited action that writes to it, fails until it is fixed.
 - **Panel:** a 401 from a loader goes to sign-in; anything else from the loader
@@ -466,6 +470,9 @@ bellman:
 - `src/audit.ts` (new): the crossing rule, `AuditQuery`, `AuditPage`,
   `AuditFacets` and `auditRefusal`, the gate
 - `src/rooms.ts`: `auditEntries`' fan-out and fields
+- `src/tools/confirm.ts`, `src/tools/connect.ts`: the roster each hands
+  `audit`, the room after the seat for a join and none for a preview (D1)
+- `src/oauth/routes.ts`: the admin's label and org on a grant intent (D2)
 - `src/store.ts`: `hostSentEntries`' fields; `BellmanStore.queryAudit` and
   `auditFacets`; `MemoryStore`
 - `src/retention.ts`, `src/grant-audit.ts`: their entries' fields

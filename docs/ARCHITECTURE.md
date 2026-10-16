@@ -1710,6 +1710,16 @@ abandonment time. A build older than #18 does not know that name: for a row #18
 rewrote, its `reArm()` calls `setAlarm(undefined)`, which workerd rejects, so
 rolling back past #18 is not supported (ADR 0001).
 
+Rolling back past the move of `AuditDO` into SQL (dash#11) loses no row, but a
+build older than the move reads and writes only the KV rows. It cannot see the
+SQL stream, so `bellman_audit` there shows only what that build wrote itself.
+It cannot see the delivery marks in `delivered` either, so an intent delivered
+before the rollback and redelivered after it lands twice: a double, never a
+drop. Rolling forward again moves what the older build wrote into the table,
+appended after the rows already there with fresh seqs, so the object still
+wakes ([audit trail spec](superpowers/specs/2026-10-09-audit-trail-design.md),
+D5).
+
 **Where it is not applied.** `DurableObjectStore.createSession` writes two
 registry indexes after the session commits, both outside the outbox and both
 through `writeIndex`, which logs a failure instead of throwing: `us:` so a

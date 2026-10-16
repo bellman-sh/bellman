@@ -1,6 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 import { DurableObject } from "cloudflare:workers";
 import { allKeysFor, grantKey, orgIndexKey, orgIndexPrefix, staleIndexKeys } from "./grant-index.js";
+import { newBanId, oldestFirst, type Ban } from "./bans.js";
 import { SWEEP_RPC_BUDGET, codeIsLive, isPublic, sameEntry } from "./store.js";
 import type { BlobCharge, GrantDelete, GrantWrite, HostAppend, HostedSlot, PublicNameEntry, PurgeSchedule, SetJoinCode } from "./store.js";
 import type {
@@ -71,6 +72,14 @@ const eventKey = (cursor: number) => `e:${String(cursor).padStart(CURSOR_PAD, "0
 /** One row per surface item (#129). The key is a slug, so the prefix is injective. */
 const surfaceKey = (key: string) => `sf:${key}`;
 const SURFACE_PREFIX = "sf:";
+/**
+ * One row per ban, `bn:<banId>` (abuse protections spec, section 1), and a row from the person to
+ * their ban's id, `bu:<user>`, so a seating asks one `get` and not a listing. The user segment is
+ * percent-encoded, for the reason `userPrefix` gives.
+ */
+const BAN_PREFIX = "bn:";
+const banKey = (banId: string) => `${BAN_PREFIX}${banId}`;
+const banUserKey = (userId: string) => `bu:${encodeURIComponent(userId)}`;
 /**
  * `rows` with the `session` draft it may carry written as the record and the member rows that
  * draft owes (ADR 0019, D4): every write of the session goes through `memberRows`, and an append
@@ -1230,6 +1239,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s) return { refused: "not_found" as const, ...no };
       if (s.closed) return { refused: "closed" as const, ...no };
       if (s.frozenAt !== null) return { refused: "frozen" as const, ...no };
+      // Read in this transaction and before any seat is counted: a ban landing between a caller's
+      // read and this write cannot be missed, and a banned account is never told the room is full.
+      if ((await txn.get<string>(banUserKey(member.userId))) !== undefined) {
+        return { refused: "banned" as const, ...no };
+      }
 
       // The sockets as they are now, read here and not passed in. They are read
       // inside the transaction, and the one await in it is a storage read of the
@@ -1332,13 +1346,20 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
         : null;
 
+      // The ban this call owes: asked for, and not yet on the room. One ban per account, so a repeat
+      // keeps the first and owes nothing. Decided before the member's state is looked at, for the
+      // door's reason: a ban is owed to one who is already out as much as to one who is not.
+      const banning: Ban | null = req.ban !== undefined && (await txn.get<string>(banUserKey(m.userId))) === undefined
+        ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
+        : null;
+
       // Already out: the idempotent path. The departure is not said again, and
       // queueing nothing for it is the half an idempotency key could not cover. A
-      // live door behind them is a different matter: it was never shut, so shutting
-      // it is a write that has not happened yet and not a duplicate. With neither
-      // owed, nothing is written and nothing is queued.
+      // live door behind them, or a ban not yet on the room, is a different matter:
+      // it was never done, so doing it is a write that has not happened yet and not a
+      // duplicate. With none owed, nothing is written and nothing is queued.
       const leaving = isActiveMember(m);
-      if (!leaving && !retiring) return { refused: null, ...no };
+      if (!leaving && !retiring && !banning) return { refused: null, ...no };
 
       const joinCodes = { ...s.joinCodes };
       if (retiring) delete joinCodes[retiring.role];
@@ -1406,8 +1427,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         ...memberRows(s, kept),
         ...Object.fromEntries(written.map((e) => [eventKey(e.cursor), e])),
         // The cursor row ends at the LAST event written, or the next append takes
-        // that event's cursor and overwrites it (#120).
-        cursor: written[written.length - 1].cursor,
+        // that event's cursor and overwrites it (#120). A ban on a member who was already out,
+        // behind no live door, writes no event: the row stays where it is, because the last
+        // of no events does not exist to read, and any other value would move the cursor.
+        ...(written.length > 0 ? { cursor: written[written.length - 1].cursor } : {}),
+        // The ban's two rows commit with whatever else this removal wrote, or not at all.
+        ...(banning ? { [banKey(banning.banId)]: banning, [banUserKey(banning.userId)]: banning.banId } : {}),
         ...rows,
       });
       return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null, written };
@@ -1416,9 +1441,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     const { written, ...result } = outcome;
     // After the commit, never inside the closure: everything awaited in there
     // holds every other call to this object until it commits, and reArm() reads
-    // stored(). `written` is empty exactly when nothing was done: a refusal, or a
-    // member who was already out behind no live door. A door shut on its own
-    // queues rows that want delivering, and moves nothing else.
+    // stored(). `written` is empty when no event was written: a refusal, or a
+    // member who was already out behind no live door, with a ban to record or none.
+    // A door shut on its own queues rows that want delivering, and moves nothing else.
     for (const e of written) this.#wake(e);
     // After the wake, as appendEvent does it: the member removed is sent the
     // frame announcing it before their socket goes, so the notice is the last
@@ -1431,6 +1456,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // tick may have moved.
     if (result.removed) await this.driver.reArm();
     return result;
+  }
+
+  /** The bans on this room, oldest first (spec section 1). An object with no ban rows lists none, an unknown room's included. */
+  async roomBans(): Promise<Ban[]> {
+    const rows = await this.ctx.storage.list<Ban>({ prefix: BAN_PREFIX });
+    return [...rows.values()].sort(oldestFirst);
+  }
+
+  /** Both of a ban's rows go in one transaction, and the answer is whether there was a ban to lift. */
+  async liftRoomBan(banId: string): Promise<boolean> {
+    return this.ctx.storage.transaction(async (txn) => {
+      const ban = await txn.get<Ban>(banKey(banId));
+      if (ban === undefined) return false;
+      await txn.delete([banKey(banId), banUserKey(ban.userId)]);
+      return true;
+    });
   }
 
   /**
@@ -3764,6 +3805,14 @@ export class DurableObjectStore implements BellmanStore {
     req: RemovalRequest,
   ): Promise<RemovalOutcome> {
     return this.session(sessionId).removeMember(memberId, req);
+  }
+
+  async roomBans(sessionId: string): Promise<Ban[]> {
+    return this.session(sessionId).roomBans();
+  }
+
+  async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
+    return this.session(sessionId).liftRoomBan(banId);
   }
 
   async connectedMembers(sessionId: string): Promise<ReadonlySet<string>> {

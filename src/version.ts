@@ -36,3 +36,24 @@ export const VERSION =
   typeof BELLMAN_BUNDLE_VERSION === "string"
     ? BELLMAN_BUNDLE_VERSION
     : readVersion(new URL("../package.json", import.meta.url));
+
+/** "0.4.0-rc.1" is [0, 4, 0]: a prerelease or build suffix is dropped. Null for anything that is not dotted numbers. */
+function numbers(version: string): number[] | null {
+  const match = /^(\d+(?:\.\d+)*)(?:[-+].*)?$/.exec(version.trim());
+  return match?.[1] ? match[1].split(".").map(Number) : null;
+}
+
+/**
+ * Negative when `a` is older than `b`, positive when newer, 0 when equal. Number by number, so 0.10.0 is
+ * newer than 0.9.9; where one has more numbers than the other and they agree as far as both go, the longer
+ * is newer (0.3.1.1 over 0.3.1). Throws for text that is not a version: ordering it would be a guess.
+ */
+export function compareVersions(a: string, b: string): number {
+  const left = numbers(a);
+  const right = numbers(b);
+  if (!left || !right) throw new Error(`not a version: ${JSON.stringify(left ? b : a)}`);
+  for (let i = 0; i < Math.min(left.length, right.length); i++) {
+    if (left[i] !== right[i]) return left[i] < right[i] ? -1 : 1;
+  }
+  return Math.sign(left.length - right.length);
+}

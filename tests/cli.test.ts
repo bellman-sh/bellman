@@ -18,9 +18,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createBridge } from "../src/bridge.js";
 import {
-  browserOpener, compareVersions, featureRequestUrl, installKind, run, type CliDeps, type Launch,
+  browserOpener, featureRequestUrl, installKind, run, type CliDeps, type Launch,
 } from "../src/cli.js";
-import { VERSION, readVersion } from "../src/version.js";
+import { VERSION, compareVersions, readVersion } from "../src/version.js";
 
 const pkg: { version: string; bin: Record<string, string> } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),

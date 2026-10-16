@@ -17,7 +17,12 @@ import { registerPublicName } from "./tools/public-name.js";
 import { registerAppResource } from "./ui/resource.js";
 
 const SERVER_NAME = "bellman-mcp-server";
-const SERVER_VERSION = "0.1.0";
+/**
+ * The version every client reads in serverInfo. The Worker cannot read package.json, so it is written here, and
+ * tests/bridge.test.ts pins it to the package: a release PR that bumps one and not the other fails there (#222).
+ * A bridge compares it with its own to tell its user an update is out.
+ */
+const SERVER_VERSION = "0.3.4";
 
 /**
  * One `McpServer` per request, bound to a caller identity.

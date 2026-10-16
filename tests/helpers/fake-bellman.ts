@@ -55,6 +55,8 @@ export interface FakeBellman {
   config: OAuthConfig;
   /** Every /register body the client sent — length is the registration count. */
   registrations: unknown[];
+  /** Every initialize request's params, in order: what each connecting client said it was. */
+  initializes: unknown[];
   /** The room routes' store and blob store, so a test can seed a room and read what an upload left. */
   store: MemoryStore;
   blobs: MemoryBlobStore;
@@ -100,6 +102,7 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
     fetchImpl: upstream,
   };
   const registrations: unknown[] = [];
+  const initializes: unknown[] = [];
   const store = new MemoryStore();
   const blobs = new MemoryBlobStore();
 
@@ -145,8 +148,9 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
       return new Response("unauthorized", { status: 401, headers: unauthorizedHeaders(config) });
     }
 
-    const body = (await request.json()) as { method?: string; id?: unknown };
+    const body = (await request.json()) as { method?: string; id?: unknown; params?: unknown };
     if (body.id === undefined) return new Response(null, { status: 202 }); // a notification
+    if (body.method === "initialize") initializes.push(body.params);
 
     const result =
       body.method === "initialize"
@@ -175,6 +179,7 @@ export function fakeBellman({ overrides = {}, keys = {}, origin = ISSUER }: Fake
     fetch: serve,
     config,
     registrations,
+    initializes,
     store,
     blobs,
     /**

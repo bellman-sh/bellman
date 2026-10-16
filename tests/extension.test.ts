@@ -25,7 +25,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { resolveIdentity } from "../src/auth.js";
-import { createBridge, deliveryOf, type Remote } from "../src/bridge.js";
+import { createBridge, deliveryOf, installOf, type Remote } from "../src/bridge.js";
 import { buildServer } from "../src/server.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
@@ -112,6 +112,11 @@ describe("the Claude Desktop bundle manifest", () => {
   // Not cosmetic: the expected list above is mode-dependent, so this is what makes the
   // comparison meaningful rather than circular. Queue, not hook: hook delivery tells the
   // agent a Stop hook hands its events over, and Desktop runs no Stop hook (#241).
+  // A bundle is updated by installing the new one, which is the step the update notice names for it.
+  it("tells the bridge it runs from the bundle, so an update notice names a reinstall", () => {
+    expect(installOf(manifest.server.mcp_config.env.BELLMAN_INSTALL)).toBe("bundle");
+  });
+
   it("launches the bridge in queue delivery, which is the mode that surface assumes", () => {
     expect(delivery).toBe("queue");
     expect(manifest.server.entry_point).toBe("server/channel.js");

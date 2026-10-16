@@ -35,7 +35,8 @@
       "env": {
         "BELLMAN_URL": "${user_config.bellman_url}",
         "BELLMAN_UPLOAD_ROOT": "${user_config.upload_root}",
-        "BELLMAN_DELIVERY": "queue"
+        "BELLMAN_DELIVERY": "queue",
+        "BELLMAN_INSTALL": "bundle"
       }
     }
   },

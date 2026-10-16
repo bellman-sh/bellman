@@ -52,6 +52,7 @@ Args:
   - key: the surface key to place it under; an item already there is replaced  
   - kind: "file" | "image" | "html". Default: image when the file's type is image/png, image/jpeg, image/gif or image/webp, else file, so a .html file is placed as a file unless kind: "html" is asked for; an html item needs a file the server stores as text/html (a .html or .htm file)  
   - title?, placement? ({ x, y, w?, h? }): as on bellman_send type "surface"  
+
 The type is taken from the file's extension. The server checks an image's bytes against that claim and stores a mismatch as application/octet-stream. A placement the server refuses — an image over a mismatched type, an html item over a type that is not text/html, a key it does not accept, a surface that is full — is reported with the blob's id, bytes and stored type, so you can place it again with bellman_send, without uploading again.  
 
 Returns: { blob_id, bytes, type, kind, cursor, room_members } — type is what the server stored, kind is what was placed, cursor is the surface event's, room_members is bellman_send's (not a read receipt).  

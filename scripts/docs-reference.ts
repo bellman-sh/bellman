@@ -73,11 +73,19 @@ function titleOf(tool: Tool): string {
   return title;
 }
 
-/** Two trailing spaces end a Markdown line without ending its paragraph, so a description keeps its lines. */
+/**
+ * Two trailing spaces end a Markdown line without ending its paragraph, so a description keeps its lines.
+ * An unindented line straight after an indented list gets a blank line first, or Markdown reads it as part
+ * of the list's last bullet.
+ */
 function keepLines(text: string): string[] {
-  return escapeProse(text)
-    .split("\n")
-    .map((line) => (line.trim() ? line.trimEnd() + "  " : ""));
+  const lines = escapeProse(text).split("\n");
+  const afterList = (i: number) => /^\s+\S/.test(lines[i - 1] ?? "") && !/^\s/.test(lines[i]);
+  return lines.flatMap((line, i) => {
+    if (!line.trim()) return [""];
+    const kept = line.trimEnd() + "  ";
+    return afterList(i) ? ["", kept] : [kept];
+  });
 }
 
 /** One row per parameter, depth first in listed order, a nested object's own parameters after it as `parent.child`. */

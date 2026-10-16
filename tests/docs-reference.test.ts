@@ -16,7 +16,7 @@ import { listServerTools } from "./helpers/tool-lists.js";
 const fixture: Tool = {
   name: "bellman_example",
   title: 'Try the "example": a fixture',
-  description: "Do one thing <safely> & well.\n\nArgs:\n  - mode: `<mode>` picks it\n    and this line continues it",
+  description: "Do one thing <safely> & well.\n\nArgs:\n  - mode: `<mode>` picks it\n    and this line continues it\nErrors: it can fail\nor it can hang",
   inputSchema: {
     type: "object",
     properties: {
@@ -91,6 +91,9 @@ describe("a parameter's type", () => {
 
 describe("a tool page", () => {
   // Review Focus 2 and 4: the description keeps its lines, and a pipe or newline in a cell keeps its row.
+  // An unindented line straight after an indented list starts a paragraph of its own: without the blank
+  // line before "Errors:", Markdown reads it as part of the last bullet. "or it can hang" follows an
+  // unindented line, so it stays in that paragraph.
   it("is frontmatter, the label, the description with its lines kept, and a parameters table", () => {
     expect(toolPage(fixture)).toBe([
       "---",
@@ -107,6 +110,9 @@ describe("a tool page", () => {
       "Args:  ",
       "  - mode: `<mode>` picks it  ",
       "    and this line continues it  ",
+      "",
+      "Errors: it can fail  ",
+      "or it can hang  ",
       "",
       "## Parameters",
       "",

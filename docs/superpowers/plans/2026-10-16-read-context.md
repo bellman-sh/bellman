@@ -24,7 +24,7 @@
 
 ## Review Focus
 
-1. **A hosted room's joiner.** Expect the hosted seat in the roster, and its brief no longer among `bellman_confirm`'s `briefs`: its row grants `receive_messages` only (R4). Pinned in Task 3.
+1. **A hosted room's joiner.** Expect the hosted seat's brief among `bellman_confirm`'s `briefs`, because a new seat grants `read_context` (R4). A seat started before this ships keeps its old row, and its brief stops reaching joiners. Pinned in Task 3.
 2. **An org admin reading a closed room's Log** (#65). Expect a reader like any other: no private brief. Pinned in Task 4.
 3. **A socket reconnecting from a cursor before a dropped update.** Expect no frame for it, and the socket's attachment at the last event read, so the next frame does not resend it. Pinned in Task 5.
 4. **One account with two handles, one granting and one not.** Expect each handle's own row to decide the events it wrote. Pinned in Task 1.
@@ -37,7 +37,7 @@ Where the spec was silent or the code disagreed with it. Each is a decision this
 - **R1. "Their own sync" is another handle of the author's account.** `bellman_sync` leaves out the caller's own events by member id, as it always has, so the handle that wrote an update never reads it back there. Task 2's test seats the author twice. A one-handle author reads it back in the dash's Log, which includes the caller's own events (D4).
 - **R2. The room socket reads as no one, on both of its arms.** The Worker's `/ws` route admits one identity's handles, but `SessionDO.#wake` builds one frame and sends it to every socket in the room (spec §2, D5). The replay `SessionDO.fetch` sends on connect follows the same rule, so a reconnect is shown what a live socket was. The author's own socket does not carry their private brief; their sync on another handle does.
 - **R3. The hosted seat's transcript reads no brief, so the plan adds no rule call there.** `decide` keeps message and progress replies to the open question, and `answerPrompt` holds only those, so no brief reaches the model, granted or not. Task 6 pins it. The check its test is seen to fail without is `decide`'s type filter.
-- **R4. The hosted seat's own row grants `receive_messages` only** (`hostMember`), so D2 hides its brief: `bellman_confirm` stops handing it to joiners. The plan follows the row and leaves `hostMember` alone; Task 3 pins the change. Keeping the seat's brief visible would mean granting `read_context` in `hostMember`, and seats made before would keep the old row.
+- **R4. A new hosted seat grants `read_context`, the owner's choice.** `hostMember` granted `receive_messages` only, so D2 would have hidden the seat's brief from every joiner. It now grants `read_context` beside `receive_messages`, and joiners keep reading the seat's brief (Task 3, Steps 5 to 8). Seats already running keep their old row: `hostMember`'s one caller is `bellman_start`, and nothing rewrites a stored member, so in a hosted room started before this ships the seat's brief stops reaching joiners.
 - **R5. `bellman_rooms` is a delivery path.** The predicate finds it (`recentEvents`): its `last_event` names a private update's type and time. It reads as the caller's account.
 - **R6. D3 holds for the direct reads too.** `bellman_confirm` hands a joiner the briefs of their own account's other handles, and a creator previewing their own room reads their own brief.
 - **R7. `bellman_confirm` leaves out private briefs before it takes the 25 most recently heard,** so a private brief does not take one of the 25 places. `briefs_omitted` counts it, as it counts any brief not handed; the roster already shows each member's capabilities, so the count tells a joiner nothing new.
@@ -94,6 +94,7 @@ Beside them: `src/room-socket.ts` is the bridge's half of the room socket. It pa
 | `src/tools/sync.ts`, `src/tools/rooms.ts` | 2 | events through `eventsFor` |
 | `src/tools/confirm.ts`, `src/tools/connect.ts`, `src/tools/start.ts` | 3 | briefs through `seesBrief`; the sentence |
 | `ui/src/types.ts`, `ui/src/join.ts` | 3 | a null creator brief |
+| `src/host.ts` | 3 | `hostMember` grants `read_context` (R4) |
 | `src/http/rooms.ts` | 4 | `readEventsRoute` through `eventsFor` |
 | `src/store-do.ts` | 5 | `SessionDO.fetch`, `#wake`, `appendEvent`, `appendEventOnce` |
 | `docs/adr/00NN-read-context.md`, `README.md`, `docs/ARCHITECTURE.md` | 7 | docs |
@@ -432,14 +433,14 @@ describe("the event paths a tool serves (read_context spec, section 3)", () => {
 ### Task 3: The briefs read directly, and the words
 
 **Files:**
-- Modify: `src/tools/confirm.ts`, `src/tools/connect.ts`, `src/tools/start.ts`, `ui/src/types.ts`, `ui/src/join.ts` (`renderJoin`)
+- Modify: `src/tools/confirm.ts`, `src/tools/connect.ts`, `src/tools/start.ts`, `ui/src/types.ts`, `ui/src/join.ts` (`renderJoin`), `src/host.ts` (`hostMember`)
 - Test: `tests/tools/read-context.test.ts`, `ui/test/render.test.ts`
 
 **Interfaces:**
 - Consumes: `seesBrief` (Task 1); `room`, `KEEPS` and `GRANTS` in the test file (Task 2).
-- Produces: `ConnectResult.creator_brief: Untrusted<Brief | null>` in `ui/src/types.ts`, documented as null when the creator does not grant read_context.
+- Produces: `ConnectResult.creator_brief: Untrusted<Brief | null>` in `ui/src/types.ts`, documented as null when the creator does not grant read_context. `hostMember(manifest, now).capabilities` is `["read_context", "receive_messages"]` (R4).
 
-- [ ] **Step 1: Write the failing tests.** In `tests/tools/read-context.test.ts`, add `import { HOST_MEMBER_ID } from "../../src/host.js";` and append:
+- [ ] **Step 1: Write the failing tests.** In `tests/tools/read-context.test.ts`, append:
 
 ```ts
 describe("the briefs read directly (read_context spec, section 1)", () => {
@@ -479,23 +480,6 @@ describe("the briefs read directly (read_context spec, section 1)", () => {
   });
 });
 
-/** Review Focus 1, and ruling R4: the hosted seat's row grants receive_messages only. */
-describe("a hosted room", () => {
-  it("leaves the hosted seat's brief out of a joiner's briefs, and the seat in the roster", async () => {
-    const creator = await h.connectAs({ userId: "u_max", orgId: null, plan: "max", role: "member", label: "max" });
-    const started = await creator.call("bellman_start", {
-      manifest: { room: "the square", purpose: "what people build", preset: "social" }, brief: brief({ goal: "the creator's" }),
-    });
-    expect(started.isError, started.text).toBe(false);
-    const joiner = await h.connect(DEV_KEY.peer);
-    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
-    const joined = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
-    expect(joined.isError, joined.text).toBe(false);
-    expect(envelopes(joined.data.briefs).map((b) => b.origin.memberId)).toEqual([String(started.data.member_id)]);
-    expect((joined.data.members as { member_id: string }[]).map((m) => m.member_id)).toContain(HOST_MEMBER_ID);
-  });
-});
-
 describe("the tool text (read_context spec, section 2)", () => {
   it("says on bellman_start and bellman_confirm what read_context does", async () => {
     const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
@@ -522,12 +506,11 @@ In `ui/test/render.test.ts`, inside `describe("renderJoin")`, before `it("render
 
 In that next case, change `r.creator_brief.data.goal = HOSTILE;` to `r.creator_brief.data!.goal = HOSTILE;`, which the type of Step 3 needs.
 
-- [ ] **Step 2: Run to see them fail.** `npx vitest run tests/tools/read-context.test.ts -t "read directly|hosted room|tool text"`. Expected: `4 failed | 1 passed`:
+- [ ] **Step 2: Run to see them fail.** `npx vitest run tests/tools/read-context.test.ts -t "read directly|tool text"`. Expected: `3 failed | 1 passed`:
   - `expected [ 'm_…', 'm_…' ] to deeply equal [ 'm_…' ]` (confirm)
   - `expected { trust: 'untrusted', …(2) } to match object { trust: 'untrusted', …(2) }` (connect)
-  - `expected [ 'm_…', 'm_host' ] to deeply equal [ 'm_…' ]` (the hosted seat)
   - `bellman_start: expected 'Create a collaboration room and get a…' to contain 'read_context lets peers read your bri…'`
-  - The creator who left passes before and after; Step 5 is its control.
+  - The creator who left passes before and after; Step 9 is its control.
 
   Then `npx vitest run ui/test/render.test.ts -t "keeps their brief private"`. Expected: FAIL, `TypeError: Cannot read properties of null (reading 'goal')`.
 
@@ -539,11 +522,39 @@ In that next case, change `r.creator_brief.data.goal = HOSTILE;` to `r.creator_b
 
 - [ ] **Step 4: Run to see them pass.** `npx vitest run tests/tools/read-context.test.ts tests/tools/join-briefs.test.ts tests/tools/handshake.test.ts ui/test/render.test.ts`, then `npm run typecheck:ui`. Expected: PASS, and no type errors.
 
-- [ ] **Step 5: See the creator-left case fail without the row.** With Edit, make `bellman_connect` read the creator as `session.members.find((m) => m.memberId === creator.memberId)` instead of by `getMember`. Run `npx vitest run tests/tools/read-context.test.ts -t "last grant after they leave, so"`. Expected: FAIL, `expected undefined to be` the creator's goal. Put `getMember` back with Edit and run it again. Expected: PASS.
+- [ ] **Step 5: Write the failing test for the hosted seat (R4).** In `tests/tools/read-context.test.ts`, add `import { HOST_MEMBER_ID } from "../../src/host.js";` and, before `describe("the tool text (read_context spec, section 2)")`:
 
-- [ ] **Step 6: Measure the tool listing after** with Setup 4's command. Expected: `bellman_start` and `bellman_confirm` each 23 over Setup 4's figures, nothing else moved, and the total 46 over. At main `1aad606` that read 2,469 to 2,492, 804 to 827, and 8,697 to 8,743. Keep the output for Task 7.
+```ts
+/** Review Focus 1, and ruling R4: a new hosted seat grants read_context (the owner's choice). */
+describe("a hosted room", () => {
+  it("hands a joiner the hosted seat's brief, because the seat grants read_context", async () => {
+    const creator = await h.connectAs({ userId: "u_max", orgId: null, plan: "max", role: "member", label: "max" });
+    const started = await creator.call("bellman_start", {
+      manifest: { room: "the square", purpose: "what people build", preset: "social" }, brief: brief({ goal: "the creator's" }),
+    });
+    expect(started.isError, started.text).toBe(false);
+    const sessionId = String(started.data.session_id);
+    const joiner = await h.connect(DEV_KEY.peer);
+    const preview = await joiner.call("bellman_connect", { join_code: String(started.data.join_code) });
+    const joined = await joiner.call("bellman_confirm", { connect_token: String(preview.data.connect_token), brief: brief() });
+    expect(joined.isError, joined.text).toBe(false);
+    expect(envelopes(joined.data.briefs).map((b) => b.origin.memberId)).toContain(HOST_MEMBER_ID);
+    expect((await h.store.getMember(sessionId, HOST_MEMBER_ID))?.capabilities).toEqual(["read_context", "receive_messages"]);
+  });
+});
+```
 
-- [ ] **Step 7: Commit.** `jj commit -m "bellman_confirm and bellman_connect hand out a brief only when its author grants read_context, and the tools say what the grant does"`
+- [ ] **Step 6: Run it to see it fail.** `npx vitest run tests/tools/read-context.test.ts -t "hosted room"`. Expected: FAIL, `expected [ 'm_…' ] to include 'm_host'`: Step 3's `bellman_confirm` now hands a brief only when its author grants `read_context`, and the seat does not yet.
+
+- [ ] **Step 7: Make the seat grant it.** In `hostMember` (`src/host.ts`), `capabilities` becomes `["read_context", "receive_messages"]`. Nothing else changes: `hostMember`'s one caller is `bellman_start`, so only a room started from now on seats the new row. Seats already running keep their old row and grant `receive_messages` only, so their brief stops reaching joiners (R4); no step rewrites them.
+
+- [ ] **Step 8: Run to see it pass.** `npx vitest run tests/tools/read-context.test.ts tests/host.test.ts tests/tools/host-start.test.ts tests/tools/host-switch.test.ts tests/hosted-seat-wiring.test.ts tests/host-memory.test.ts`. Expected: PASS. No existing test names the seat's capabilities.
+
+- [ ] **Step 9: See the creator-left case fail without the row.** With Edit, make `bellman_connect` read the creator as `session.members.find((m) => m.memberId === creator.memberId)` instead of by `getMember`. Run `npx vitest run tests/tools/read-context.test.ts -t "last grant after they leave, so"`. Expected: FAIL, `expected undefined to be` the creator's goal. Put `getMember` back with Edit and run it again. Expected: PASS.
+
+- [ ] **Step 10: Measure the tool listing after** with Setup 4's command. Expected: `bellman_start` and `bellman_confirm` each 23 over Setup 4's figures, nothing else moved, and the total 46 over. At main `1aad606` that read 2,469 to 2,492, 804 to 827, and 8,697 to 8,743. Keep the output for Task 7.
+
+- [ ] **Step 11: Commit.** `jj commit -m "bellman_confirm and bellman_connect hand out a brief only when its author grants read_context; the tools say what the grant does, and a new hosted seat grants it"`
 
 ### Task 4: The dash's Log route
 
@@ -839,7 +850,7 @@ No test of its own: its checks are the grep in Step 5 and `npm run verify`.
 
 - [ ] **Step 1: Write the ADR** in the shape of ADR 0021: Date, Status accepted, Spec, Plan, Context, Decision, Consequences. Context is the spec's Goal. Decision, one line each, with where it lives: D1 to D5; the rule (`readableEvent`, `seesBrief`) and who reads as whom (this plan's delivery-path table); R2, R3, R4, R9, R12 and R14. Consequences:
   - A room where every member grants `read_context`, as the default does, sees no change.
-  - A hosted room's joiners no longer read the hosted seat's brief (R4).
+  - A hosted seat started after this grants `read_context`, so joiners read its brief; a seat already running keeps its old row, and its brief stops reaching joiners (R4).
   - A member reads their own private update back on another handle or in the dash's Log, never on the handle that wrote it, and never on their own room socket (R1, R2).
   - A socket upgrade lists every member row of its room (R12).
   - A new path that reads events or briefs is listed in `tests/delivery-paths.test.ts` before it ships.
@@ -872,7 +883,7 @@ Each hands a brief only to a reader its author's `read_context` allows (§7).
   `tests/delivery-paths.test.ts` lists every module that reads events or briefs.
 ```
 
-  - §11: the `Tool definitions` row takes Task 3 Step 6's total, and above the newest "Re-measured" paragraph, with Setup 4's and Task 3 Step 6's numbers filled in:
+  - §11: the `Tool definitions` row takes Task 3 Step 10's total, and above the newest "Re-measured" paragraph, with Setup 4's and Task 3 Step 10's numbers filled in:
 
 ```markdown
 Re-measured on <date> for read_context, by the method below: 46 tokens over the <before>

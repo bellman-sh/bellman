@@ -94,9 +94,9 @@ export interface Member {
   /**
    * How this seat was taken: through a public room's permanent code (abuse protections spec, section 2);
    * absent for every other seat, the creator's included. A member who has it is a stranger, and the send limit
-   * counts fewer sends a minute for one (`sendLimitFor`). Given at confirm from the pending connect, which took
-   * it at the preview, and never changed after. Absent on rows stored before the field existed, which read as
-   * not a stranger.
+   * counts fewer sends a minute for one (`sendLimitFor`), under the account and not the seat (`sendKeyFor`).
+   * Given at confirm from the pending connect, which took it at the preview, and never changed after. Absent
+   * on rows stored before the field existed, which read as not a stranger.
    */
   via?: "permanent";
 }

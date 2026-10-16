@@ -20,7 +20,7 @@ import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
-import { sendLimitFor } from "./send-limit.js";
+import { sendKeyFor, sendLimitFor } from "./send-limit.js";
 import {
   JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isPublic, isRemovedMember,
   type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
@@ -757,8 +757,12 @@ export async function revokeInvite(
 }
 
 /**
- * Count one bellman_send against its member's minute (spec D5), or refuse it. Called after every check
+ * Count one bellman_send against its sender's minute (spec D5), or refuse it. Called after every check
  * that can refuse the send and before its append.
+ *
+ * Whose minute is `sendKeyFor`'s: a stranger's belongs to the account within this room, so a second handle
+ * taken through the permanent code, or a leave and a rejoin, does not start it again; anyone else's belongs
+ * to the seat.
  *
  * Last of the checks and ahead of the first write, so a send refused for its verb, its payload or a frozen
  * room spends no place, and a refusal here leaves the log as it was. Once the count says yes the place is
@@ -776,7 +780,7 @@ export async function admitSend(
   now: number = Date.now(),
 ): Promise<RoomResult<null>> {
   const limit = sendLimitFor(member);
-  const admission = await store.admitSend(sessionId, member.memberId, limit, now);
+  const admission = await store.admitSend(sessionId, sendKeyFor(member), limit, now);
   if (admission.ok) return succeed(null);
   const retryAfter = Math.ceil(admission.retryAfterMs / 1000);
   return refuse(

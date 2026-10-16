@@ -1401,10 +1401,11 @@ export interface BellmanStore {
     extras?: AppendExtras
   ): Promise<EventWrite>;
   /**
-   * Count one send by this member in this room against `limit` over the rolling minute (abuse protections
-   * spec D5), and say whether it is admitted. The caller passes `sendLimitFor(member)` and appends only
-   * when admitted; a refusal carries how long until the member's oldest send in the window leaves it, and
-   * writes nothing to the log.
+   * Count one send under `key` in this room against `limit` over the rolling minute (abuse protections
+   * spec D5), and say whether it is admitted. The caller passes `sendKeyFor(member)` and `sendLimitFor(member)`,
+   * so a stranger's count is their account's and anyone else's is the seat's; the store counts under whatever key
+   * it is given. The caller appends only when admitted; a refusal carries how long until the oldest send under
+   * the key leaves the window, and writes nothing to the log.
    *
    * A call of its own, made after a send's checks and before its append (ADR 0022), so both append methods
    * keep their return types. A send that fails after it was admitted, such as one with a key conflict or one
@@ -1415,7 +1416,7 @@ export interface BellmanStore {
    * drops them with it at the purge. The hosted seat is exempt by never being asked: its writes go through
    * `appendHostEvent` alone.
    */
-  admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission>;
+  admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission>;
   /**
    * The events after `cursor`, in cursor order: at most `limit` of them, the earliest,
    * when a limit is given. The hosted seat's read (I4) and a public room's events route
@@ -1662,7 +1663,7 @@ export class MemoryStore implements BellmanStore {
   private creatorBanned = new Map<string, CreatorBan[]>();
   /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
   private suspensions = new Map<string, Suspension>();
-  /** Each member's recent sends, by session then by member (spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
+  /** Recent sends, by session then by count key (`sendKeyFor`, spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
   private sends = new Map<string, Map<string, number[]>>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
@@ -2502,10 +2503,10 @@ export class MemoryStore implements BellmanStore {
     return { outcome: "appended", event: detach(event) };
   }
 
-  async admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission> {
+  async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
     const room = this.sends.get(sessionId) ?? new Map<string, number[]>();
-    const counted = admitAt(room.get(memberId) ?? [], limit, now);
-    room.set(memberId, counted.times);
+    const counted = admitAt(room.get(key) ?? [], limit, now);
+    room.set(key, counted.times);
     this.sends.set(sessionId, room);
     return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
   }

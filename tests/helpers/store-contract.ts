@@ -3085,12 +3085,12 @@ export function describeStoreContract(
     });
 
     describe("the send count (abuse protections spec D5)", () => {
-      it("admits a member's sends up to the limit in a minute, per member and per room", async () => {
+      it("admits sends under a key up to the limit in a minute, per key and per room", async () => {
         await store.createSession(session());
         await store.createSession(session({ id: "qs_other" }));
         for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", "m_creator", 3, 1_000 + i)).toEqual({ ok: true });
         expect(await store.admitSend("qs_test", "m_creator", 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
-        expect(await store.admitSend("qs_test", "m_peer", 3, 2_000), "another member").toEqual({ ok: true });
+        expect(await store.admitSend("qs_test", "m_peer", 3, 2_000), "another key").toEqual({ ok: true });
         expect(await store.admitSend("qs_other", "m_creator", 3, 2_000), "another room").toEqual({ ok: true });
         expect(await store.admitSend("qs_test", "m_creator", 3, 61_000), "a minute on").toEqual({ ok: true });
       });

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { brief } from "../helpers/fixtures.js";
 import { joinWith, pairUp, publicRoom } from "../helpers/flows.js";
-import { DEV_KEY, Harness } from "../helpers/harness.js";
+import { DEV_KEY, Harness, type Peer } from "../helpers/harness.js";
 import { MAX_PAYLOAD_CHARS } from "../../src/payload.js";
 
 let h: Harness;
@@ -146,5 +146,66 @@ describe("the send limit (spec \u{A7}2)", () => {
     }
     for (let i = 0; i < 6; i++) expect((await send("message", { text: `m${i}` })).isError, `send ${i + 1}`).toBe(false);
     expect((await send("message", { text: "seven" })).data).toMatchObject({ error: "rate_limited" });
+  });
+});
+
+// Whose minute a send is counted in. A stranger's belongs to the account within the room: every confirm mints a
+// handle, and a script that joins the permanent code again and again would start each one at zero. A member's
+// belongs to the seat, so one account's several agents in a busy swarm do not share a single 30.
+describe("whose minute a send is counted in (spec \u{A7}2)", () => {
+  const sender = (peer: Peer, sessionId: string) => (memberId: string, text: string) =>
+    peer.call("bellman_send", { session_id: sessionId, member_id: memberId, type: "message", payload: { text } });
+
+  it("counts a stranger's sends per account: a second handle taken through the permanent code shares the first's 6", async () => {
+    const room = await publicRoom(h);
+    const peer = await h.connect(DEV_KEY.peer);
+    const first = String((await joinWith(peer, room.code)).data.member_id);
+    const second = String((await joinWith(peer, room.code)).data.member_id);
+    expect(second, "the premise: a second handle").not.toBe(first);
+    const send = sender(peer, room.sessionId);
+    for (let i = 0; i < 4; i++) expect((await send(first, `a${i}`)).isError, `first handle, send ${i + 1}`).toBe(false);
+    for (let i = 0; i < 2; i++) expect((await send(second, `b${i}`)).isError, `second handle, send ${i + 5}`).toBe(false);
+    expect((await send(second, "seven")).data, "the account's 7th, on the second handle").toMatchObject({ error: "rate_limited" });
+    expect((await send(first, "eight")).data, "and on the first").toMatchObject({ error: "rate_limited" });
+  });
+
+  it("counts two strangers' accounts apart: one account's 6 leave the other's untouched", async () => {
+    const room = await publicRoom(h);
+    const [a, b] = [await h.connect(DEV_KEY.peer), await h.connect(DEV_KEY.outsider)];
+    const aId = String((await joinWith(a, room.code)).data.member_id);
+    const bId = String((await joinWith(b, room.code)).data.member_id);
+    const fromA = sender(a, room.sessionId);
+    for (let i = 0; i < 6; i++) expect((await fromA(aId, `a${i}`)).isError, `first account, send ${i + 1}`).toBe(false);
+    expect((await fromA(aId, "seven")).data, "the premise: the first account is full").toMatchObject({ error: "rate_limited" });
+    const other = await sender(b, room.sessionId)(bId, "mine");
+    expect(other.isError, other.text).toBe(false);
+  });
+
+  it("keeps a stranger's count when they leave and rejoin through the permanent code inside the minute", async () => {
+    const room = await publicRoom(h);
+    const peer = await h.connect(DEV_KEY.peer);
+    const first = String((await joinWith(peer, room.code)).data.member_id);
+    const send = sender(peer, room.sessionId);
+    for (let i = 0; i < 6; i++) expect((await send(first, `m${i}`)).isError, `send ${i + 1}`).toBe(false);
+    const left = await peer.call("bellman_leave", { session_id: room.sessionId, member_id: first });
+    expect(left.isError, left.text).toBe(false);
+    const again = await joinWith(peer, room.code);
+    expect(again.isError, again.text).toBe(false);
+    expect((await send(String(again.data.member_id), "back")).data).toMatchObject({ error: "rate_limited" });
+  });
+
+  // The key's direction: the first handle is filled to its 30, the larger limit, and the second handle then
+  // acts. Keyed by account the second would find the first's 30 and be refused.
+  it("counts a member's sends per seat: an account's second handle on a code that expires keeps its own 30", async () => {
+    const room = await publicRoom(h);
+    const lead = await room.creator.call("bellman_invite", { session_id: room.sessionId, member_id: room.memberId, role: "lead" });
+    const joined = await joinWith(room.creator, String(lead.data.join_code));
+    expect(joined.isError, joined.text).toBe(false);
+    const second = String(joined.data.member_id);
+    const send = sender(room.creator, room.sessionId);
+    for (let i = 0; i < 30; i++) expect((await send(room.memberId, `c${i}`)).isError, `first handle, send ${i + 1}`).toBe(false);
+    expect((await send(room.memberId, "31st")).data, "the premise: the first handle is full").toMatchObject({ error: "rate_limited" });
+    const own = await send(second, "own");
+    expect(own.isError, own.text).toBe(false);
   });
 });

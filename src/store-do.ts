@@ -314,11 +314,11 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   private waiters: Waiter[] = [];
 
   /**
-   * Each member's recent sends for the send limit (abuse protections spec D5): member id to the times of its
+   * Recent sends for the send limit (abuse protections spec D5): count key (`sendKeyFor`) to the times of the
    * sends still inside the minute. In the instance and never in storage, so an object that sleeps forgets them,
    * which a one-minute window can afford and which keeps a write off every send. One instance serves the room,
-   * as it does for `waiters`, so this is the room's one count. A member's entry stays until the instance goes
-   * and holds no more times than the limit allows.
+   * as it does for `waiters`, so this is the room's one count. An entry stays until the instance goes and holds
+   * no more times than the limit allows.
    */
   #sends = new Map<string, number[]>();
 
@@ -2051,12 +2051,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * `BellmanStore.admitSend`'s count, in `#sends`. No await and no storage, so the read of a member's times
+   * `BellmanStore.admitSend`'s count, in `#sends`. No await and no storage, so the read of a key's times
    * and the write of them back are one turn and two sends landing together are counted one after the other.
    */
-  async admitSend(memberId: string, limit: number, now: number): Promise<SendAdmission> {
-    const counted = admitAt(this.#sends.get(memberId) ?? [], limit, now);
-    this.#sends.set(memberId, counted.times);
+  async admitSend(key: string, limit: number, now: number): Promise<SendAdmission> {
+    const counted = admitAt(this.#sends.get(key) ?? [], limit, now);
+    this.#sends.set(key, counted.times);
     return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };
   }
 
@@ -4150,8 +4150,8 @@ export class DurableObjectStore implements BellmanStore {
     return this.session(sessionId).appendEventOnce(e, key, extras);
   }
 
-  async admitSend(sessionId: string, memberId: string, limit: number, now: number): Promise<SendAdmission> {
-    return this.session(sessionId).admitSend(memberId, limit, now);
+  async admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission> {
+    return this.session(sessionId).admitSend(key, limit, now);
   }
 
   async eventsAfter(sessionId: string, cursor: number, limit?: number): Promise<SessionEvent[]> {

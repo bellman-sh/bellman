@@ -41,7 +41,7 @@ import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
 import { applySurfaceWrite } from "./surface.js";
 import { presetInNewWords } from "./presets.js";
-import { admitAt, type SendAdmission } from "./send-limit.js";
+import { admitAt, isStrangerKey, type SendAdmission } from "./send-limit.js";
 
 /**
  * Durable Objects implementation of BellmanStore.
@@ -83,6 +83,13 @@ const SURFACE_PREFIX = "sf:";
 const BAN_PREFIX = "bn:";
 const banKey = (banId: string) => `${BAN_PREFIX}${banId}`;
 const banUserKey = (userId: string) => `bu:${encodeURIComponent(userId)}`;
+/**
+ * A stranger's recent sends (abuse protections spec D5, amended): one row per count key, `sn:<key>`, holding the
+ * times still inside the minute, so the count outlives an idle object's eviction. A member's are not rows (see
+ * `SessionDO.#sends`). The key is `sendKeyFor`'s whole answer and nothing lists by this prefix, so the mapping
+ * is injective as it stands.
+ */
+const sendCountKey = (key: string) => `sn:${key}`;
 /**
  * `rows` with the `session` draft it may carry written as the record and the member rows that
  * draft owes (ADR 0019, D4): every write of the session goes through `memberRows`, and an append
@@ -314,11 +321,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   private waiters: Waiter[] = [];
 
   /**
-   * Recent sends for the send limit (abuse protections spec D5): count key (`sendKeyFor`) to the times of the
-   * sends still inside the minute. In the instance and never in storage, so an object that sleeps forgets them,
-   * which a one-minute window can afford and which keeps a write off every send. One instance serves the room,
-   * as it does for `waiters`, so this is the room's one count. An entry stays until the instance goes and holds
-   * no more times than the limit allows.
+   * A member's recent sends for the send limit (abuse protections spec D5): count key (`sendKeyFor`, the seat's)
+   * to the times of the sends still inside the minute. In the instance and never in storage, so an object that
+   * sleeps forgets them, which keeps a write off every send of the busiest senders and costs a member at most a
+   * second 30 in a minute across an eviction. A stranger's are rows instead (`sendCountKey`), where the same
+   * trade would let a script send 6, pause, and send 6 more. One instance serves the room, as it does for
+   * `waiters`, so this is the room's one count of members. An entry stays until the instance goes and holds no
+   * more times than the limit allows.
    */
   #sends = new Map<string, number[]>();
 
@@ -2051,10 +2060,22 @@ export class SessionDO extends DurableObject<BellmanEnv> {
   }
 
   /**
-   * `BellmanStore.admitSend`'s count, in `#sends`. No await and no storage, so the read of a key's times
-   * and the write of them back are one turn and two sends landing together are counted one after the other.
+   * `BellmanStore.admitSend`'s count. A stranger's key is a row, read and written in one transaction so two
+   * sends landing together are counted one after the other. Only an admission writes, and what it writes is the
+   * times still inside the minute plus this one, so a row never holds more than the limit and a script held at
+   * the limit costs no write at all: at most 6 small writes a minute per stranger. Any other key is in
+   * `#sends`: no await and no storage, so the read of a key's times and the write of them back are one turn.
    */
   async admitSend(key: string, limit: number, now: number): Promise<SendAdmission> {
+    if (isStrangerKey(key)) {
+      return this.ctx.storage.transaction(async (txn) => {
+        const row = sendCountKey(key);
+        const counted = admitAt((await txn.get<number[]>(row)) ?? [], limit, now);
+        if (counted.retryAfterMs !== null) return { ok: false, retryAfterMs: counted.retryAfterMs };
+        await txn.put(row, counted.times);
+        return { ok: true };
+      });
+    }
     const counted = admitAt(this.#sends.get(key) ?? [], limit, now);
     this.#sends.set(key, counted.times);
     return counted.retryAfterMs === null ? { ok: true } : { ok: false, retryAfterMs: counted.retryAfterMs };

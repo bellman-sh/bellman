@@ -1411,10 +1411,14 @@ export interface BellmanStore {
    * keep their return types. A send that fails after it was admitted, such as one with a key conflict or one
    * to a room that froze in the gap, still used its place.
    *
-   * Memory only: `SessionDO` keeps the counts in the instance and writes no storage, so a room object that
-   * sleeps forgets them, which a one-minute window can afford. `MemoryStore` keeps them beside the room and
-   * drops them with it at the purge. The hosted seat is exempt by never being asked: its writes go through
-   * `appendHostEvent` alone.
+   * A stranger's count (a key `isStrangerKey` names) is stored, so it survives the room object leaving memory:
+   * an idle object is evicted after about 30 seconds, and a count kept only in memory would let a script send 6,
+   * pause, and send 6 more. `SessionDO` writes one row per stranger on each admission, holding the times still
+   * inside the minute, which is at most 6 small writes a minute per stranger and never more times than the
+   * limit. Every other key is memory only: `SessionDO` keeps those in the instance, so a room object that sleeps
+   * forgets them, which keeps a write off the busiest senders and costs a member at most a second 30 across an
+   * eviction. `MemoryStore` keeps both beside the room and drops them with it at the purge. The hosted seat is
+   * exempt by never being asked: its writes go through `appendHostEvent` alone.
    */
   admitSend(sessionId: string, key: string, limit: number, now: number): Promise<SendAdmission>;
   /**

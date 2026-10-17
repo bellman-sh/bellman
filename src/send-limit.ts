@@ -7,8 +7,8 @@ import type { Member } from "./types.js";
  * `appendHostEvent` and never reach the count.
  *
  * Constants in one module, and a room cannot set its own yet. The count itself is the room object's
- * (`BellmanStore.admitSend`), under the key `sendKeyFor` names. This module imports no runtime, so both stores
- * and the tests share it.
+ * (`BellmanStore.admitSend`), under the key `sendKeyFor` names: a stranger's is stored, a member's is in memory.
+ * This module imports no runtime, so both stores and the tests share it.
  */
 export const SEND_LIMIT = 30;
 export const STRANGER_SEND_LIMIT = 6;
@@ -34,6 +34,13 @@ export const STRANGER_KEY_PREFIX = "user:";
  */
 export const sendKeyFor = (m: Pick<Member, "via" | "userId" | "memberId">): string =>
   m.via === "permanent" ? `${STRANGER_KEY_PREFIX}${m.userId}` : m.memberId;
+
+/**
+ * Whether a count key is a stranger's. A store with storage keeps those where they survive the room object
+ * leaving memory, which is the point of counting a stranger at all: an idle object is evicted after about 30
+ * seconds, and a count kept only in memory would let a script send 6, pause, and send 6 more.
+ */
+export const isStrangerKey = (key: string): boolean => key.startsWith(STRANGER_KEY_PREFIX);
 
 /**
  * The rolling minute (spec D5), pure so both stores count alike: the times still inside the window, this one

@@ -25,6 +25,7 @@ import { blobBytesUsed, type BlobStore } from "../../src/blobs.js";
 import type { SavedPreset, Session, SessionEvent, SurfaceItem } from "../../src/types.js";
 import { HOST_MEMBER_ID, HOST_USER_ID, WAKES_PER_HOUR, hostMember } from "../../src/host.js";
 import { monthKey } from "../../src/stored-session.js";
+import { sendKeyFor } from "../../src/send-limit.js";
 import { brief, member, oneCode, openaiAgent, roomManifest, session, swarmSession } from "./fixtures.js";
 
 /** A swarm room with a hosted seat (hosted seat spec, D1): a lead role, and the host's role holding `send` alone. */
@@ -81,6 +82,12 @@ export interface StoreContractHarness {
    * alarm, so its caller runs the alarm here.
    */
   advance?: (sessionId: string) => Promise<void>;
+  /**
+   * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
+   * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
+   * nothing that can leave memory passes none, and the case that calls it then pins the count alone.
+   */
+  forgetMemory?: () => Promise<void>;
 }
 
 export function describeStoreContract(
@@ -3085,14 +3092,33 @@ export function describeStoreContract(
     });
 
     describe("the send count (abuse protections spec D5)", () => {
-      it("admits sends under a key up to the limit in a minute, per key and per room", async () => {
+      // A stranger's key is kept apart from a member's by a store that has storage to keep it in, so the same
+      // count is asked of both kinds of key.
+      const strangerKey = (userId: string) => sendKeyFor({ via: "permanent", userId, memberId: `m_${userId}` });
+      for (const [whose, one, another] of [
+        ["a member's", "m_creator", "m_peer"],
+        ["a stranger's", strangerKey("u_creator"), strangerKey("u_peer")],
+      ] as const) {
+        it(`admits sends under ${whose} key up to the limit in a minute, per key and per room`, async () => {
+          await store.createSession(session());
+          await store.createSession(session({ id: "qs_other" }));
+          for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", one, 3, 1_000 + i)).toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
+          expect(await store.admitSend("qs_test", another, 3, 2_000), "another key").toEqual({ ok: true });
+          expect(await store.admitSend("qs_other", one, 3, 2_000), "another room").toEqual({ ok: true });
+          expect(await store.admitSend("qs_test", one, 3, 61_000), "a minute on").toEqual({ ok: true });
+        });
+      }
+
+      // Spec D5, amended for strangers: their count is stored, so a script cannot send 6, pause until the idle
+      // room object is evicted, and send 6 more.
+      it("keeps a stranger's count when the room object loses its memory", async () => {
         await store.createSession(session());
-        await store.createSession(session({ id: "qs_other" }));
-        for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", "m_creator", 3, 1_000 + i)).toEqual({ ok: true });
-        expect(await store.admitSend("qs_test", "m_creator", 3, 2_000)).toEqual({ ok: false, retryAfterMs: 59_000 });
-        expect(await store.admitSend("qs_test", "m_peer", 3, 2_000), "another key").toEqual({ ok: true });
-        expect(await store.admitSend("qs_other", "m_creator", 3, 2_000), "another room").toEqual({ ok: true });
-        expect(await store.admitSend("qs_test", "m_creator", 3, 61_000), "a minute on").toEqual({ ok: true });
+        const stranger = strangerKey("u_peer");
+        for (let i = 0; i < 3; i++) expect(await store.admitSend("qs_test", stranger, 3, 1_000 + i)).toEqual({ ok: true });
+        await harness.forgetMemory?.();
+        expect(await store.admitSend("qs_test", stranger, 3, 2_000), "the count outlived the memory").toEqual({ ok: false, retryAfterMs: 59_000 });
+        expect(await store.admitSend("qs_test", stranger, 3, 61_000), "a minute on").toEqual({ ok: true });
       });
 
       // The count's limit is read from this field, so a store that dropped it would limit nobody as a stranger.

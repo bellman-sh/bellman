@@ -47,4 +47,7 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   blobsFor: () => new R2BlobStore((env as unknown as { BLOBS: R2Bucket }).BLOBS),
   advance: (id) =>
     runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), (instance: SessionDO) => instance.alarm()),
+  // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
+  // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
+  forgetMemory: () => abortAllDurableObjects(),
 });

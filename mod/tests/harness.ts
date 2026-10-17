@@ -162,6 +162,12 @@ export type World = {
   panes: UiPane[];
   /** Every `$.mcp.call`, in order: the mod's own are `bellman_whoami` alone (the harness fails any other). */
   calls: { server: string; tool: string; args: Readonly<Record<string, unknown>> }[];
+  /** While true every `prompt.submit` rejects once the world has recorded it, as a submit the engine cannot take does. */
+  submitFails: boolean;
+  /** While true every `prompt.submit` resolves with a `drop` once the world has recorded it, as one a hook refuses does. */
+  submitDrops: boolean;
+  /** While true a hook refuses every append of a plugin's own: the call resolves with a `deny`, and nothing is stored. */
+  appendRefused: boolean;
   /** The text of every prompt submitted. */
   submitted: string[];
   /** Where each of them came from, in the same order: the person's composer, a plugin, a peer. */
@@ -232,6 +238,9 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     surfacesDown: false,
     panes: [],
     calls: [],
+    submitFails: false,
+    submitDrops: false,
+    appendRefused: false,
     submitted: [],
     origins: [],
     toasts: [],
@@ -364,8 +373,14 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
   on("prompt.submit", ($, e) => {
     w.submitted.push(e.text);
     w.origins.push(e.origin);
+    // A hook that throws is skipped, and the call is left with no implementation: it rejects.
+    if (w.submitFails) throw new Error("prompt.submit is down");
+    if (w.submitDrops) return { drop: "a hook refused the prompt" };
     return { text: e.text, origin: e.origin };
   });
+  // Above the kit's own store of the conversation, which keeps every row that reaches it: a refused append never does.
+  // The kit's store holds the one hook without a matcher, so this one names the door a plugin's own row comes in by.
+  on("session.append", { door: "note" }, ($, e, next) => (w.appendRefused ? { deny: "a hook refused the row" } : next(e)));
   // A turn the test starts and ends, as the engine raises them: a hook that answers `{ turnId }` and `{ text }`.
   on("turn.start", ($, e) => ({ turnId: e.turnId }));
   on("turn.complete", () => ({ text: "" }));

@@ -590,17 +590,39 @@ function declinedText(sessionId, cursor) {
   return `Your human declined Bellman action request ${cursor} in room ${sessionId}, and the room has been answered. Do not carry it out.`;
 }
 var message2 = (error) => error instanceof Error ? error.message : String(error);
+var keyOf = (r) => approvalKey(r.session_id, String(r.cursor));
+var awaitingPerson = (list, given) => list.filter((r) => !given.includes(keyOf(r)));
+var throwIfRefused = (result) => {
+  const reason = result.deny ?? result.drop;
+  if (reason !== void 0) throw new Error(reason);
+};
 async function approve($, r) {
   const text = approvedText(r.session_id, r.cursor);
-  const key = approvalKey(r.session_id, String(r.cursor));
-  await update3($, approved, (keys) => keys.includes(key) ? keys : [...keys, key]);
-  if (isTurnRunning()) {
-    await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
-    return;
-  }
-  $.prompt.submit({ text }).catch((error) => {
-    $.ui.log(`bellman-mod: the approval was not submitted: ${message2(error)}`, { to: "debug" });
+  const key = keyOf(r);
+  let first = false;
+  await update3($, approved, (keys) => {
+    first = !keys.includes(key);
+    return first ? [...keys, key] : keys;
   });
+  if (!first) return;
+  const takeBack = async (error) => {
+    $.ui.log(`bellman-mod: the approval was not told to Claude: ${message2(error)}`, { to: "debug" });
+    try {
+      await update3($, approved, (keys) => keys.filter((k) => k !== key));
+      $.ui.toast("Bellman: the approval did not reach Claude, so the request still waits.");
+    } catch (again) {
+      $.ui.log(`bellman-mod: the approval was not taken back: ${message2(again)}`, { to: "debug" });
+    }
+  };
+  try {
+    if (isTurnRunning()) {
+      throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
+    } else {
+      $.prompt.submit({ text }).then(throwIfRefused).catch(takeBack);
+    }
+  } catch (error) {
+    await takeBack(error);
+  }
 }
 async function deny($, r) {
   const text = declinedText(r.session_id, r.cursor);
@@ -692,11 +714,12 @@ async function drawPane($, ui, site, s, p) {
   const { Box, Button, Text } = ui;
   const shown = await read4($, tab);
   const waiting = (await read4($, pending))[s.picked] ?? [];
+  const given = await read4($, approved);
   const act = (work) => () => {
     personActed();
     work().catch((error) => $.ui.log(`bellman-mod: ${message2(error)}`, { to: "debug" }));
   };
-  const answers = (r) => [
+  const answers = (r) => given.includes(keyOf(r)) ? [/* @__PURE__ */ h(Text, { dimColor: true }, "approved \xB7 waiting for Claude")] : [
     /* @__PURE__ */ h(Button, { key: `approve-${r.cursor}`, label: "Approve", variant: "primary", onPress: act(() => approve($, r)) }),
     /* @__PURE__ */ h(Button, { key: `deny-${r.cursor}`, label: "Deny", onPress: act(() => deny($, r)) })
   ];
@@ -704,7 +727,7 @@ async function drawPane($, ui, site, s, p) {
     ["log", "Log"],
     ["canvas", "Canvas"],
     ["members", "Members"],
-    ["approve", `Approve ${waiting.length}`]
+    ["approve", `Approve ${awaitingPerson(waiting, given).length}`]
   ];
   let body;
   if (shown === "log") {
@@ -815,7 +838,7 @@ async function shownOf($, list, seats) {
       list.flatMap((d) => d.status?.recent ?? []),
       { sessionId: picked, seatMemberId: mine[0].member_id, openedThrough: (await read5($, openedThrough))[picked] ?? -1 }
     ),
-    approve: (await read5($, pending))[picked]?.length ?? 0,
+    approve: awaitingPerson((await read5($, pending))[picked] ?? [], await read5($, approved)).length,
     paused: (await read5($, wake)).paused
   };
 }

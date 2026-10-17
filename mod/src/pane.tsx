@@ -1,7 +1,8 @@
 /**
  * The room pane at full width (spec D5): a header, four tabs, and the tab shown. Log is the room's history, newest
  * last; Canvas its surface, drawn by kind; Members each member with role, presence and beat; Approve the action
- * requests waiting on the person, each with Approve and Deny, which the Log's rows carry too.
+ * requests waiting on the person, each with Approve and Deny, which the Log's rows carry too. A request the person
+ * approved keeps its place, and reads that it waits on Claude where the buttons were.
  *
  * Every string a peer controls reaches the screen cleaned: through `cleanText` or `cleanBlock`, through what
  * `pendingRequests` and `roomLabel` (src/mod/view.ts) cleaned already, and a canvas text's Markdown through
@@ -44,22 +45,57 @@ export function declinedText(sessionId: string, cursor: number): string {
 
 export const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
+/** The key a request is approved under: the room, and the request's cursor as the `ref_id` an answer carries. */
+const keyOf = (r: PendingRequest): string => approvalKey(r.session_id, String(r.cursor));
+
 /**
- * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told: by a
- * row in the turn that is running, or else by a prompt of the mod's own that starts one.
+ * The requests of `list` that wait on the person: those whose key is not in `given`, the keys approved. An approved
+ * request waits on Claude, and the Approve count (the tab's, the band's and the sidebar's) does not count it.
+ */
+export const awaitingPerson = (list: readonly PendingRequest[], given: readonly string[]): PendingRequest[] =>
+  list.filter((r) => !given.includes(keyOf(r)));
+
+/** A hook's refusal does not reject: an append it refuses resolves with a `deny`, a prompt it drops with a `drop`, and Claude was not told. */
+const throwIfRefused = (result: { deny?: string; drop?: string }): void => {
+  const reason = result.deny ?? result.drop;
+  if (reason !== undefined) throw new Error(reason);
+};
+
+/**
+ * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told once: by
+ * a row in the turn that is running, or else by a prompt of the mod's own that starts one. An action request is not
+ * idempotent, so a press on one already approved tells Claude nothing more. When Claude cannot be told, the approval
+ * is taken back: the request draws its buttons again, and the gate stays shut for it.
  */
 async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = approvedText(r.session_id, r.cursor);
-  const key = approvalKey(r.session_id, String(r.cursor));
-  await update($, approved, (keys) => (keys.includes(key) ? keys : [...keys, key]));
-  if (isTurnRunning()) {
-    await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } });
-    return;
-  }
-  // Not awaited: it resolves when the turn it queues starts. The framing is the plugin's own, never `asUser`.
-  $.prompt.submit({ text }).catch((error: unknown) => {
-    $.ui.log(`bellman-mod: the approval was not submitted: ${message(error)}`, { to: "debug" });
+  const key = keyOf(r);
+  // `update` runs again on a lost race, so `first` is what the write that landed saw: of presses made before a redraw, one.
+  let first = false;
+  await update($, approved, (keys) => {
+    first = !keys.includes(key);
+    return first ? [...keys, key] : keys;
   });
+  if (!first) return;
+  const takeBack = async (error: unknown): Promise<void> => {
+    $.ui.log(`bellman-mod: the approval was not told to Claude: ${message(error)}`, { to: "debug" });
+    try {
+      await update($, approved, (keys) => keys.filter((k) => k !== key));
+      $.ui.toast("Bellman: the approval did not reach Claude, so the request still waits.");
+    } catch (again) {
+      $.ui.log(`bellman-mod: the approval was not taken back: ${message(again)}`, { to: "debug" });
+    }
+  };
+  try {
+    if (isTurnRunning()) {
+      throwIfRefused(await $.session.append({ message: { type: "user", content: [{ type: "text", text }] } }));
+    } else {
+      // Not awaited: it resolves when the turn it queues starts. The framing is the plugin's own, never `asUser`.
+      $.prompt.submit({ text }).then(throwIfRefused).catch(takeBack);
+    }
+  } catch (error) {
+    await takeBack(error);
+  }
 }
 
 /**
@@ -209,19 +245,24 @@ export async function drawPane(
   const { Box, Button, Text } = ui;
   const shown = await read($, tab);
   const waiting = (await read($, pending))[s.picked] ?? [];
+  const given = await read($, approved);
   const act = (work: () => Promise<unknown>) => () => {
     personActed();
     work().catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
   };
-  const answers = (r: PendingRequest) => [
-    <Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />,
-    <Button key={`deny-${r.cursor}`} label="Deny" onPress={act(() => deny($, r))} />,
-  ];
+  // A request the person approved waits on Claude, and has no buttons to press again.
+  const answers = (r: PendingRequest) =>
+    given.includes(keyOf(r))
+      ? [<Text dimColor>approved · waiting for Claude</Text>]
+      : [
+          <Button key={`approve-${r.cursor}`} label="Approve" variant="primary" onPress={act(() => approve($, r))} />,
+          <Button key={`deny-${r.cursor}`} label="Deny" onPress={act(() => deny($, r))} />,
+        ];
   const tabs: [Tab, string][] = [
     ["log", "Log"],
     ["canvas", "Canvas"],
     ["members", "Members"],
-    ["approve", `Approve ${waiting.length}`],
+    ["approve", `Approve ${awaitingPerson(waiting, given).length}`],
   ];
 
   let body: RenderElement[];

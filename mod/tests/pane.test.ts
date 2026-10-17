@@ -1,6 +1,6 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
-import { GATE_REASON, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvedText, declinedText } from "../hooks/register.mjs";
+import { GATE_REASON, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvalKey, approvedText, declinedText } from "../hooks/register.mjs";
 import type { RoomMember } from "../types";
 import { NOW, PANE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, roomsTick, shown, tick, world } from "./harness";
 import type { World } from "./harness";
@@ -18,6 +18,8 @@ const LOG = { events: [peerEvent({ cursor: 4, at: TWO_MINUTES_AGO, payload: { te
 /** What a `bellman_send` that ran answers beneath the mod (the harness's own success). */
 const RAN = { result: { structuredContent: { cursor: 99 } } };
 const REFUSED = { deny: GATE_REASON };
+/** What the person reads when Claude could not be told of an approval. */
+const NOT_TOLD = "Bellman: the approval did not reach Claude, so the request still waits.";
 
 /** Claude's answer to request 5 through the bridge's own tool, approving it unless `over` says otherwise. */
 const answer = ($: Engine, over: Record<string, unknown> = {}) =>
@@ -118,6 +120,101 @@ test("Approve while a turn runs appends the approval instead", async ($, on) => 
   expect(w.rows[0]?.message.content).toHaveLength(1);
   expect(w.submitted).toEqual([]);
   expect(await answer($)).toMatchObject(RAN);
+});
+
+test("a second Approve tells Claude nothing more, and the request reads approved", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  // Two presses before the pane draws again: pressed after, the buttons are gone and there is nothing to press.
+  await Promise.all([room.press({ key: "approve-5" }), room.press({ key: "approve-5" })]);
+  expect(w.submitted).toEqual([approvedText("qs_room1", 5)]);
+  // The Log's row reads approved where the buttons were, and the tab's count leaves it out.
+  expect(await room.find({ key: "approve-5" })).toBeUndefined();
+  expect(await room.find({ key: "deny-5" })).toBeUndefined();
+  expect(await shown(room)).toContain("approved · waiting for Claude");
+  expect((await room.find({ key: "tab-approve" }))?.props.label).toBe("Approve 0");
+  // The Approve tab still lists it, read the same way.
+  await room.press({ key: "tab-approve" });
+  expect(await room.find({ key: "approve-5" })).toBeUndefined();
+  expect(await room.find({ key: "deny-5" })).toBeUndefined();
+  expect(await shown(room)).toMatch(/ada asks: run the migration.*approved · waiting for Claude/);
+  expect(await answer($)).toMatchObject(RAN);
+});
+
+test("a second Approve while a turn runs appends nothing more", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  await $.turn.start({ text: "x", turnId: "t1" });
+  await Promise.all([room.press({ key: "approve-5" }), room.press({ key: "approve-5" })]);
+  expect(w.rows).toHaveLength(1);
+  expect(w.submitted).toEqual([]);
+});
+
+/** Request 5 was approved and Claude could not be told: the approval is out again, the person was told, and the gate stays shut for it. */
+async function expectTakenBack($: Engine, w: World, room: Awaited<ReturnType<typeof opened>>): Promise<void> {
+  expect(w.state.approved).not.toContain(approvalKey("qs_room1", "5"));
+  expect(w.toasts.at(-1)).toBe(NOT_TOLD);
+  expect(await room.find({ key: "approve-5" })).toBeDefined();
+  expect(await answer($)).toEqual(REFUSED);
+}
+
+test("an approval that does not reach Claude is taken back", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  w.submitFails = true;
+  await room.press({ key: "approve-5" });
+  await expectTakenBack($, w, room);
+  // The request waits on the person again: a press that can tell Claude goes through.
+  w.submitFails = false;
+  await room.press({ key: "approve-5" });
+  expect(w.submitted).toEqual([approvedText("qs_room1", 5), approvedText("qs_room1", 5)]);
+  expect(await answer($)).toMatchObject(RAN);
+});
+
+test("an approval whose prompt a hook drops is taken back: the submit resolves, and Claude was not told", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  w.submitDrops = true;
+  await room.press({ key: "approve-5" });
+  await expectTakenBack($, w, room);
+});
+
+test("an approval whose appended row a hook refuses is taken back: the append resolves, and nothing is stored", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  await $.turn.start({ text: "x", turnId: "t1" });
+  w.appendRefused = true;
+  await room.press({ key: "approve-5" });
+  expect(w.rows).toEqual([]);
+  await expectTakenBack($, w, room);
+});
+
+test("the Approve count leaves out what the person approved: the band's, the sidebar's and the tab's", async ($, on) => {
+  const w = await world($, on);
+  w.log.qs_room1 = structuredClone(LOG);
+  await tick(w);
+  const sidebar = await pane($, SIDEBAR_COLUMNS);
+  expect((await (await band($)).find({ key: "open-approve" }))?.props.label).toBe("Approve 1");
+  expect((await sidebar.find({ key: "open-approve" }))?.props.label).toBe("Approve 1");
+  expect(await shown(sidebar)).toContain("1 to approve");
+  await sidebar.unmount();
+
+  const room = await pane($, PANE_COLUMNS);
+  expect((await room.find({ key: "tab-approve" }))?.props.label).toBe("Approve 1");
+  await room.press({ key: "approve-5" });
+  expect((await room.find({ key: "tab-approve" }))?.props.label).toBe("Approve 0");
+  await room.unmount();
+
+  // Nothing waits on the person now, though the request stays pending until Claude answers it.
+  expect(await (await band($)).find({ key: "open-approve" })).toBeUndefined();
+  const docked = await pane($, SIDEBAR_COLUMNS);
+  expect(await docked.find({ key: "open-approve" })).toBeUndefined();
+  expect(await shown(docked)).not.toContain("to approve");
 });
 
 test("Deny answers the room through the door, with no tool call and no turn, and tells Claude it was declined", async ($, on) => {

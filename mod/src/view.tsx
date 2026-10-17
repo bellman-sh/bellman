@@ -29,9 +29,9 @@ import {
 import type { DoorSeat, DoorView, RoomView, Tab } from "../types";
 import { readCanvas } from "./doors";
 import { markDrawn, markPaneWide, shownTab } from "./drawn";
-import { drawPane, message } from "./pane";
+import { awaitingPerson, drawPane, message } from "./pane";
 import { personActed } from "./person";
-import { doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
+import { approved, doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
 
 /** Whether the terminal docks a pane, as the band last drawn saw it (`RenderViewport.isFullscreen`). */
 let isFullscreen: boolean | undefined;
@@ -133,6 +133,7 @@ export type Shown = {
   about: string;
   peers: string[];
   unread: number;
+  /** The action requests waiting on the person: the pending ones they have not approved. */
   approve: number;
   paused: boolean;
 };
@@ -157,7 +158,7 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
       list.flatMap((d) => d.status?.recent ?? []),
       { sessionId: picked, seatMemberId: mine[0]!.member_id, openedThrough: (await read($, openedThrough))[picked] ?? -1 },
     ),
-    approve: (await read($, pending))[picked]?.length ?? 0,
+    approve: awaitingPerson((await read($, pending))[picked] ?? [], await read($, approved)).length,
     paused: (await read($, wake)).paused,
   };
 }

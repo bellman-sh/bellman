@@ -1899,19 +1899,12 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,959** | every request, whether or not you are in a room |
+| Tool definitions | **~8,940** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
-
-Re-measured on 2026-10-16 for the send limit's review fixes, by the method below: 19 tokens
-over the 8,940 the send limit measured before them, which the script reproduced on the tip
-before the edit. `bellman_send` is up 19, to 1,444, all of it two parentheticals in the same
-`Errors:` sentence: a member's 30 are "counted per seat, in memory", and a stranger's 6
-"counted per account in the room, and stored". No other tool changed and none was added.
-That is 8,959.
 
 Re-measured on 2026-10-16 for the send limit, by the method below: 46 tokens over the
 8,894 the branch measured before it, which is main's 8,694 and bans' 200. `bellman_send`

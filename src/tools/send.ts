@@ -40,7 +40,7 @@ Args:
 Returns: { room_members, cursor, replayed? }
   - room_members: the OTHER active members this call saw just before appending — your own seat is not in it, and on a replayed send it is who was there at the retry rather than at the original append. It is NOT a read receipt. It does not mean a peer's session has seen this (that happens on its next bellman_sync), that its model acted on it, or — for action_request — that any human has approved it. The store is truth; the channel is transport.
   - replayed: true means this key had already been used and nothing new was sent.
-Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke. A member sends at most ${SEND_LIMIT} times a minute (counted per seat, in memory), and one who joined through a public room's permanent code ${STRANGER_SEND_LIMIT} (counted per account in the room, and stored); past that the send is refused as rate_limited with retry_after in seconds, and nothing is sent.`,
+Errors: a verb your role does not hold is refused by name, and nothing is delivered. Capability errors name the member lacking the grant. A surface write names the field or the rule it broke. A member sends at most ${SEND_LIMIT} times a minute, and one who joined through a public room's permanent code ${STRANGER_SEND_LIMIT}; past that the send is refused as rate_limited with retry_after in seconds, and nothing is sent.`,
       inputSchema: {
         ...RoomRefShape,
         member_id: z.string().min(4),

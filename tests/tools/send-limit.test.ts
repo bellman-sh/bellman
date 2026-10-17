@@ -184,13 +184,15 @@ describe("whose minute a send is counted in (spec \u{A7}2)", () => {
     expect((await send(first, "eight")).data, "and on the first").toMatchObject({ error: "rate_limited" });
   });
 
-  // What the agent is told is the artifact: a stranger's agent that reads "6 a minute" and takes another handle
-  // would spend its minute finding out the count is the account's.
-  it("tells the agent whose minute a send is counted in, and where the count is kept", async () => {
+  // What the agent is told is the artifact: the two limits and what a refusal is. How the count is kept, in memory
+  // or stored, is nothing an agent acts on, and every word of the description costs tokens on every request.
+  it("tells the agent the two limits and the refusal, and not how the count is kept", async () => {
     const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
     const doc = tools.find((t) => t.name === "bellman_send")!.description!;
-    expect(doc).toContain("(counted per seat, in memory)");
-    expect(doc).toContain("(counted per account in the room, and stored)");
+    const limits = doc.slice(doc.indexOf("A member sends at most"));
+    expect(limits).toContain("A member sends at most 30 times a minute, and one who joined through a public room's permanent code 6;");
+    expect(limits).toContain("past that the send is refused as rate_limited with retry_after in seconds, and nothing is sent.");
+    expect(limits).not.toMatch(/in memory|stored|counted per/);
   });
 
   it("counts two strangers' accounts apart: one account's 6 leave the other's untouched", async () => {

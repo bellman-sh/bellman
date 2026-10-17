@@ -7,11 +7,11 @@ description: "Report a room, a member or a message"
 
 **Writes**
 
-Report a room, a member or a message to Bellman's operators. Give member_id (theirs) to report a member, cursor to report a message, or neither to report the room. A report about a member or a message also reaches the room's creator, who never sees who filed it. The person reported is not told.  
+Report the room, or with member_id (theirs) a member, or with cursor a message, to Bellman's operators. The room's creator also sees a report about a member or a message, never who filed it. The person reported is not told.  
 
-Args: session_id, member_id or cursor, reason (spam, harassment, impersonation, illegal, other), note (optional, at most 500 characters)  
+Args: session_id, member_id or cursor, reason, note  
 Returns: { report_id, folded } — folded: true when you reported this already and it is still open; nothing new was filed.  
-Errors: an account files at most 10 reports a day (rate_limited, with retry_after); you must hold or have held a seat in the room, unless it is public.  
+Errors: rate_limited (retry_after) past 10 reports a day; refused without a seat held now or before, unless the room is public.  
 
 ## Parameters
 

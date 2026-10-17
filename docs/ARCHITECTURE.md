@@ -486,7 +486,18 @@ Why the split is shaped that way:
 - **`RegistryDO` is a singleton** because some lookups need a global namespace: a
   join code must resolve without knowing the room, a plan grant must resolve
   from an identity key, and a public handle must resolve to the one person who
-  holds it.
+  holds it. The report queue is there for the same reason: an operator reads every
+  room's reports in one listing, and an account's 10 a day count across rooms. Its
+  rows are `rp:<id>`, the report, whose id sorts in filing order so a listing of
+  the prefix is the queue; `rf:`, the open report an account filed about a target,
+  which a repeat folds into; `rl:`, the times of an account's filings still inside
+  the day; `rc:`, a report about a member or a message under its creator and room,
+  so a creator's view of one room is a prefix listing; and `rr:<purgeAt>:<id>`, a
+  resolved report dated for its deletion. The registry's one alarm carries a second
+  handler beside the outbox's, `report_purge`: its `due:report_purge` row holds the
+  earliest of those dates, and a firing deletes each resolved report 180 days after
+  it was resolved, with its `rc:` and `rr:` rows, and an account's `rl:` row once
+  its newest filing has left the day.
 - **`AuditDO` is per org** because an action in a room that holds more than one org is written
   to every one of their streams (`auditEntries`, `src/rooms.ts`), and each side must see only
   the crossings that touched its own boundary. Its rows are a SQL table (`entries`, with the
@@ -1256,6 +1267,17 @@ loud:
   group drag writes one PUT per card and would pass 30. The gap that leaves: a stranger
   whose seat holds `write_surface` could write through a route uncounted, and no
   built-in preset gives a default seat that verb.
+- **A report's note is untrusted text, and its subject is built from closed sets**
+  (ADR 0022). A note of up to 500 characters is written by whoever may report the
+  room, which for a public room is anyone signed in, so it is handled as a peer's
+  content is. The dash shows it as text, never as markup, and
+  the email to support@ carries it as plain text, in the body once and as written.
+  The email's subject is built from the report's id, its reason and the kind of
+  target, which the server made or a closed set holds, so a note or a label that
+  carries CR/LF or a `Subject:` line cannot reach a header. What a room's creator
+  reads of a report is built field by field (`creatorReportView`) and never names
+  who filed it, so a field added to a report reaches no creator until that function
+  names it.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -1923,12 +1945,23 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,112** | every request, whether or not you are in a room |
+| Tool definitions | **~9,433** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for reports, by the method below: 321 tokens over the 9,112 that
+main (`144f0327`) measures, all of them `bellman_report`'s, which is new. That is 9,433. The
+tool first measured 363 (9,475 in all), 63 over the plan's 300 for it, and its description
+was cut: the reason values and the 500-character bound, which its schema already carries,
+and the sentences that repeated the schema and each other. Every rule stayed: who may
+report, the three targets, that a creator never sees who filed a report and the person
+reported is not told, the limit of 10 a day with `rate_limited` and `retry_after`, and what
+`folded` means. 321 is 21 over the 300: the entry's name, title, schema and annotations are
+188 of those tokens, which leaves 133 for a description that keeps every rule in the `Args:`,
+`Returns:` and `Errors:` form the sibling tools use. No other tool changed.
 
 Re-measured on 2026-10-16 for the bans branch merged into the send limit, by the method below:
 9,112, which is the 9,066 the bans branch measures over main at `1e8bf54` (below) and the send

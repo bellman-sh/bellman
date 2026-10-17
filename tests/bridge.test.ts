@@ -28,6 +28,7 @@ import { fakeBellman, RESOURCE } from "./helpers/fake-bellman.js";
 import { brief, manifestFixture, openaiAgent } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
+import { SYNC_PAGE } from "../src/tools/sync.js";
 
 /**
  * The bridge against the real Bellman tool handlers. Each "remote" is an
@@ -341,6 +342,53 @@ describe("channel delivery", () => {
     // test), but only the event carries what the human needs to read.
     await until(() => channelEvents(b).some((e) => e.meta.type === "member_evicted"));
     await until(() => b.bridge.watching().length === 0);
+  });
+
+  /**
+   * #208. `bellman_sync` answers a page at a time, and this watcher stops at `removed` or `closed`
+   * without reading `more`, as every released bridge does. So neither may ride a page with more
+   * behind it, or the human is handed one page and never the rest, the eviction notice included.
+   *
+   * The watcher's polls are parked until the feed has ended, so its first poll reads a member
+   * already cut, or a room already closed, from a cursor more than a page behind.
+   */
+  describe("a watcher far behind when its feed ends (#208)", () => {
+    /** A room `b` has joined through a bridge whose watcher has not polled yet, and the room's backlog. */
+    async function behind() {
+      const a = await open(DEV_KEY.jesse);
+      const polls = parkedPolls(DEV_KEY.peer);
+      const b = await open(DEV_KEY.peer, "channel", { remote: polls.remote });
+      const room = await pair(a, b);
+      for (let i = 0; i < SYNC_PAGE + 50; i++) {
+        await store.appendEvent(room.sessionId, {
+          type: "message", fromMemberId: room.creatorMember, fromUserId: "u_jesse", fromLabel: "jesse", payload: { text: `m${i}` }, refId: null,
+        });
+      }
+      return { b, release: polls.release, ...room };
+    }
+
+    it("delivers everything up to an eviction more than a page behind, the notice last, then stops", async () => {
+      const { b, release, sessionId, joinerMember } = await behind();
+      await store.appendEvent(sessionId, {
+        type: "member_evicted", fromMemberId: "system", fromUserId: "system", fromLabel: "bellman",
+        payload: { member_id: joinerMember }, refId: null,
+      }, { markRemoved: joinerMember });
+      release();
+
+      await until(() => b.bridge.watching().length === 0);
+      const got = channelEvents(b);
+      expect(got.filter((e) => e.meta.type === "message")).toHaveLength(SYNC_PAGE + 50);
+      expect(got.at(-1)!.meta.type).toBe("member_evicted");
+    });
+
+    it("delivers everything a room said before it closed, however far behind, then stops", async () => {
+      const { b, release, sessionId } = await behind();
+      await store.closeSession(sessionId);
+      release();
+
+      await until(() => b.bridge.watching().length === 0);
+      expect(channelEvents(b).filter((e) => e.meta.type === "message")).toHaveLength(SYNC_PAGE + 50);
+    });
   });
 
   /**

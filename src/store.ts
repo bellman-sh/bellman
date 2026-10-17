@@ -20,6 +20,9 @@ import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 import type { Suspension } from "./suspension.js";
+import {
+  auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
+} from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
 
 const JOIN_CODE_TTL_MS = 15 * 60 * 1000;
@@ -172,6 +175,16 @@ export function departures(
     : [...gone].sort((a, b) => b.leftAt! - a.leftAt! || b.seq - a.seq).slice(0, Math.max(0, limit));
   return { members: [...shown].sort((a, b) => a.seq - b.seq), omitted: gone.length - shown.length };
 }
+
+/**
+ * Everyone a room ever seated, the hosted seat left out, as an audit row's parties (audit trail
+ * spec, D2): what a purge's and a delete's rows say the room held. The roster keeps a member who
+ * left, as the record's `orgs` does, because their org sat in the room. So `members` is every
+ * member seated, not a read room's: MemoryStore's record holds them all, and the Durable Objects
+ * store reads them from their rows, since its record holds only those in the room (ADR 0019).
+ */
+export const rosterParties = (s: Pick<StoredSession, "members">): (string | null)[] =>
+  partiesOf(s.members.filter((m) => !isHostMember(m)).map((m) => m.orgId));
 
 /**
  * Whether the room's hosted seat is still in it (C1). Evicting the host is the
@@ -791,16 +804,25 @@ export function decideHostCharge(
 }
 
 /**
- * The audit row a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for
- * a member, so a team org's stream sees the host as it sees members. The host belongs to
- * no org, so only the room's own gets it. Both stores queue it in the send's own write.
+ * The audit rows a host's send owes (C1): the `sent_<type>` row `bellman_send` writes for a
+ * member, so a team org's stream sees the host as it sees members. The host belongs to no org
+ * and acts for the room, so the parties are the room's org and the orgs of the people in it
+ * (audit trail spec, D1), and the row says the room's org acted. Both stores queue them in the
+ * send's own write.
  */
-export function hostSentEntries(s: Pick<StoredSession, "id" | "orgId">, e: Omit<SessionEvent, "cursor" | "at">, now: number): AuditEntry[] {
-  if (!s.orgId) return [];
-  return [{
-    at: now, orgId: s.orgId, sessionId: s.id, actorUserId: e.fromUserId, action: `sent_${e.type}`,
-    detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
-  }];
+export function hostSentEntries(
+  s: Pick<StoredSession, "id" | "orgId" | "members" | "manifest">,
+  e: Omit<SessionEvent, "cursor" | "at">,
+  now: number,
+): AuditEntry[] {
+  return auditRows(
+    partiesOf([s.orgId, ...s.members.filter(isActivePerson).map((m) => m.orgId)]),
+    {
+      at: now, sessionId: s.id, action: `sent_${e.type}`, roomName: s.manifest.room,
+      detail: { chars: JSON.stringify(e.payload).length, ...(e.refId ? { ref_id: e.refId } : {}) },
+    },
+    { userId: e.fromUserId, label: e.fromLabel, orgId: s.orgId },
+  );
 }
 
 /**
@@ -1225,10 +1247,11 @@ export interface BellmanStore {
    * retries a delete it never heard the answer to is the case, and the audit log owes one
    * `room_deleted` for each org on the roster, naming who asked, however often it was asked.
    * `purgeAt` says the same of the time: it is the one the room is stored with, the first
-   * request's, and a repeat is told that and not the `at` it asked for. `by` is null when the
-   * caller is not a person.
+   * request's, and a repeat is told that and not the `at` it asked for. `by` is who asked, named
+   * as an audit row names an actor so each org's row can say whether the delete was its own or
+   * another's, and null when the caller is not a person.
    */
-  schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule>;
+  schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule>;
   /**
    * Make a public room private for good (public rooms spec D2): set `unpublishedAt` to `at`, once.
    * The first time stands, so a retry changes nothing, and a room that is not there is left not
@@ -1424,7 +1447,12 @@ export interface BellmanStore {
    * the whole array, so the memory store has to say so itself.
    */
   recentEvents(sessionId: string, limit: number): Promise<SessionEvent[]>;
-  waitForEvents(sessionId: string, cursor: number, waitMs: number): Promise<SessionEvent[]>;
+  /**
+   * The events after `cursor`, or the first to arrive within `waitMs`: at most `limit`, the
+   * earliest, when a limit is given. `bellman_sync` passes its page (#208), so a member far
+   * behind reads a page per poll and never the whole log at once.
+   */
+  waitForEvents(sessionId: string, cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]>;
   /**
    * Every surface row of this room, sorted by key, as detached copies. An
    * unknown session answers none. One hop: the Durable Objects store reads the
@@ -1583,7 +1611,12 @@ export interface BellmanStore {
   listGrants(limit: number, orgId?: string | null): Promise<PlanGrant[]>;
 
   appendAudit(a: AuditEntry): Promise<void>;
+  /** The newest `limit` rows of an org's stream, oldest first: `bellman_audit`'s read, and the tests'. */
   auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]>;
+  /** One page of an org's stream under the filters, newest first (audit trail spec, D6). */
+  queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage>;
+  /** What the panel's filters offer: the stream's actors, rooms, other orgs and actions, newest first (D6). */
+  auditFacets(orgId: string): Promise<AuditFacets>;
 
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
@@ -1621,7 +1654,9 @@ export class MemoryStore implements BellmanStore {
   private signatures = new Map<string, Map<string, number>>(); // userId -> sessionId -> signedAt
   private grants = new Map<string, PlanGrant>();
   private users = new Map<string, UserRecord>();
-  private audit: AuditEntry[] = [];
+  /** Each org's stream, with each row's seq: one counter per org, as each AuditDO keeps its own. */
+  private audit: { seq: number; entry: AuditEntry }[] = [];
+  private auditSeq = new Map<string, number>();
   private waiters = new Map<string, Waiter[]>();
   /**
    * Idempotency keys, by session. Beside `waiters` rather than on the Session
@@ -2212,14 +2247,14 @@ export class MemoryStore implements BellmanStore {
     }
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const s = this.sessions.get(sessionId);
     if (!s) return { ok: false, reason: "missing" };
     if (!s.closed) return { ok: false, reason: "open" };
     // Asked already: the first request stands, is on the record once, and is the time the answer gives.
     if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
     s.purgeAt = at;
-    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, by, Date.now())));
+    this.recordAudit(s.orgs.map((orgId) => roomDeletedEntry(s, orgId, rosterParties(s), by, Date.now())));
     return { ok: true, purgeAt: at };
   }
 
@@ -2552,10 +2587,11 @@ export class MemoryStore implements BellmanStore {
   waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
     const s = this.sessions.get(sessionId);
-    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor)) : [];
+    const immediate = s ? detach(s.events.filter((e) => e.cursor > cursor).slice(0, limit)) : [];
     if (immediate.length > 0 || waitMs <= 0) return Promise.resolve(immediate);
     return new Promise((resolve) => {
       const w: Waiter = { after: cursor, resolve };
@@ -2754,7 +2790,13 @@ export class MemoryStore implements BellmanStore {
    * contract suite checks.
    */
   private recordAudit(entries: AuditEntry[]): void {
-    for (const entry of entries) this.audit.push(detach(entry));
+    for (const entry of entries) {
+      // No org, no stream: DurableObjectStore drops it too (ARCHITECTURE.md section 9, runtime fact 4).
+      if (!entry.orgId) continue;
+      const seq = (this.auditSeq.get(entry.orgId) ?? 0) + 1;
+      this.auditSeq.set(entry.orgId, seq);
+      this.audit.push({ seq, entry: detach(entry) });
+    }
   }
 
   async putGrantIfOwned(
@@ -2834,11 +2876,23 @@ export class MemoryStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    this.audit.push(detach(a));
+    this.recordAudit([a]);
   }
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
-    return detach(this.audit.filter((a) => a.orgId === orgId).slice(-limit));
+    return detach(this.audit.filter((r) => r.entry.orgId === orgId).slice(-limit).map((r) => r.entry));
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return detach(pageOf(this.streamOf(orgId), query));
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return detach(facetsOf(this.streamOf(orgId), orgId));
+  }
+
+  private streamOf(orgId: string): SeqEntry[] {
+    return this.audit.filter((r) => r.entry.orgId === orgId).map((r) => ({ ...r.entry, seq: r.seq }));
   }
 
   async sweep(now: number): Promise<void> {
@@ -2941,7 +2995,7 @@ export class MemoryStore implements BellmanStore {
     for (const m of s.members) this.byMember.get(m.userId)?.delete(s.id);
     for (const orgId of s.orgs) this.byOrg.get(orgId)?.delete(s.id);
     for (const rec of Object.values(s.joinCodes)) this.byJoinCode.delete(rec.code);
-    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, now)));
+    this.recordAudit(s.orgs.map((orgId) => roomPurgedEntry(s, orgId, rosterParties(s), now)));
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);

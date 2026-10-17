@@ -241,24 +241,55 @@ export function beatOf(s: StoredSession, m: Member, now: number, latest: Session
 }
 
 /**
- * One room as `bellman_rooms` returns it, from the caller's seat (#28).
+ * Every seat one account holds in a room, oldest first, as the tools an account calls name them
+ * (`bellman_rooms`, `bellman_surface`). A call comes from the account and nothing in it says which
+ * seat is asking, so these tools list all of them and name none as the asker's. Oldest is join order
+ * (`seq`) and not the clock: two seats can join in one millisecond and cannot share a place in line.
+ */
+export function yourSeats(s: Pick<StoredSession, "manifest">, mine: readonly Member[]) {
+  return [...mine]
+    .sort((a, b) => a.seq - b.seq)
+    .map((m) => ({ member_id: m.memberId, role: m.roomRole, verbs: verbsOfRole(s.manifest, m.roomRole) }));
+}
+
+/**
+ * The seat a room block may speak from: the account's one, when it holds one. With several there is
+ * no seat to prefer, and a guess names one of them as the asker, so the block takes `roomPreview`'s
+ * form for a viewer with no seat.
+ */
+export const soleSeat = (mine: readonly Member[]): Member | undefined => (mine.length === 1 ? mine[0] : undefined);
+
+/**
+ * One room as `bellman_rooms` returns it, for the account that asked (#28).
  *
- * `room` is roomPreview from that seat, so your role and verbs come through the
- * accessors the server enforces with. `members` are the live roster (a member
- * who left is not "in" the room, which is the question a monitor asks). A join
- * code's string and link appear only when the caller's seat holds `invite`
- * (D7): `bellman_invite` hands a code only to such a seat, and this must not be
- * a cheaper route to the same authority. `tail` is the newest events in cursor
- * order, from `recentEvents`; the latest `progress` per member is read off it.
+ * `mine` is every live seat the account holds in the room. The tool is called
+ * by the account and nothing in the call says which seat is asking, so
+ * `your_seats` lists them all, oldest first, and the fields that say "your
+ * seat" speak only when one seat can speak for the account. With one,
+ * `your_member_id` is its id and `room` is roomPreview from it, so your role
+ * and verbs come through the accessors the server enforces with. With several,
+ * `your_member_id` is null and `room` is roomPreview's form for a viewer with
+ * no seat, because naming the newest told every other seat of the account that
+ * it was that one. `members` are the live roster (a member who left is not "in"
+ * the room, which is the question a monitor asks).
+ *
+ * A join code's string and link appear when any of the caller's seats holds
+ * `invite` (D7): `bellman_invite` hands a code to such a seat, and the account
+ * that holds one can ask it for a code already, so this is no cheaper route to
+ * the same authority. A seat that cannot invite takes nothing from the ones
+ * that can. `tail` is the newest events in cursor order, from `recentEvents`;
+ * the latest `progress` per member is read off it.
  */
 export function roomSummary(
   s: StoredSession,
-  me: Member,
+  mine: readonly Member[],
   connected: ReadonlySet<string>,
   tail: SessionEvent[],
   now: number,
 ) {
-  const canInvite = verbsOfRole(s.manifest, me.roomRole).includes("invite");
+  const seats = yourSeats(s, mine);
+  const only = soleSeat(mine);
+  const canInvite = seats.some((seat) => seat.verbs.includes("invite"));
   const latestNote = new Map<string, SessionEvent>();
   for (let i = tail.length - 1; i >= 0; i--) {
     const e = tail[i];
@@ -271,8 +302,9 @@ export function roomSummary(
     status: sessionStatus(s),
     max_members: capacityOf(s.manifest),
     active_members: activeMembers(s).length,
-    your_member_id: me.memberId,
-    room: roomPreview(s, me.roomRole),
+    your_seats: seats,
+    your_member_id: only?.memberId ?? null,
+    room: roomPreview(s, only?.roomRole ?? null),
     members: s.members.filter(isActiveMember).map((m) => ({
       ...publicMember(m, connected),
       beat: beatOf(s, m, now, latestNote.get(m.memberId)),

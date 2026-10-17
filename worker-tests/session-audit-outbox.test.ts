@@ -79,7 +79,7 @@ describe("SessionDO delivers audit intents", () => {
    * One case per shape of "no org", because each shape reaches a different stream
    * and a row that cannot reach a stream is no control for it. Without a row that
    * can reach "undefined" and "", the checks on those two cannot fail, and a guard
-   * reduced to `entry.orgId === null` (the form appendAudit uses) goes unnoticed.
+   * reduced to `entry.orgId === null` goes unnoticed.
    */
   it.each(NO_ORG)("delivers nothing for an entry whose org is $shape, and clears the row", async ({ session, payload }) => {
     const id = env.SESSION.idFromName(session);

@@ -2,6 +2,7 @@
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { resolveIdentity } from "./auth.js";
 import { R2BlobStore } from "./blobs-r2.js";
+import { auditRoutes } from "./http/audit.js";
 import { handleRoutes } from "./http/handles.js";
 import { moderationRoutes } from "./http/moderation.js";
 import { presetRoutes } from "./http/presets.js";
@@ -280,6 +281,18 @@ export default {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
       const handled = await presetRoutes(request, {
+        store,
+        caller: who,
+        panelOrigins: oauth?.panelOrigins ?? [],
+      });
+      if (handled) return handled;
+    }
+
+    // The org's audit stream (audit trail spec, D7 and D8), on the room routes' rules and behind the same guard.
+    if (url.pathname === "/audit" || url.pathname.startsWith("/audit/")) {
+      const blocked = unconfigured(env, oauth) ?? (await routeGate());
+      if (blocked) return blocked;
+      const handled = await auditRoutes(request, {
         store,
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],

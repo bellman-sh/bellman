@@ -207,6 +207,18 @@ describe("the moderation routes through the Worker", () => {
     expect((await as("u_wire_stats_control")).status, "the control").toBe(200);
   });
 
+  // /audit reads an org's stream as its caller, so R8 gates it too. Both accounts are admins of one team org here, so with
+  // no gate the suspended one would read the org's stream; the control is the other admin, served it.
+  it("refuses a suspended org admin at /audit with the one message, and serves another admin of the org", async () => {
+    const as = async (userId: string) => worker.fetch(new Request(`${ORIGIN}/audit`, {
+      headers: { authorization: `Bearer ${await tokenFor({ userId, orgId: "org_wire", plan: "team", role: "admin", label: `${userId}@example.dev` })}` },
+    }), oauthEnv(), ctx);
+    await store().suspend("u_wire_audit", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const refused = await as("u_wire_audit");
+    expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: "This account is suspended." }]);
+    expect((await as("u_wire_audit_control")).status, "the control").toBe(200);
+  });
+
   // The dash comes with its cookie, which `roomCaller` resolves through the authorization server's `caller`. The
   // refusal carries CORS, so the panel can read why. The route reuses the gate's answer, so a request touches its
   // session once rather than once for the gate and again for the route.

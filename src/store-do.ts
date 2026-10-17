@@ -16,7 +16,8 @@ import type {
 import {
   ABANDONED_AFTER_MS, HOST_MEMBER_ID, abandonedAt, capacityOf, connectedAmong, creatorOf, creditReport,
   decideBlobCharge, decideHostCharge, departures, hostSeated, hostSentEntries, isAbandoned, isActiveMember,
-  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, seatInOrder, seatVictims, stampSeen,
+  isActivePerson, isRemovedMember, isReplyToHost, markRemoved, noteAppend, rosterParties, seatInOrder, seatVictims,
+  stampSeen,
 } from "./store.js";
 import {
   BRIEF_PREFIX, KEYS_PER_CALL, MEMBER_PREFIX, briefKey, getRows, labelKey, legacyRows, loadPresent, memberKey, memberRows,
@@ -28,6 +29,10 @@ import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempoten
 import { hydrateStoredSession, type StoredSession } from "./stored-session.js";
 import { publicEvent } from "./public-event.js";
 import { PING, PONG } from "./keepalive.js";
+import {
+  AUDIT_COLUMNS, FACET_LIMIT, auditWhere, entryOf, recordOf,
+  type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type AuditRecord,
+} from "./audit.js";
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -35,7 +40,7 @@ import {
   PURGE_HANDLER, SWEEP_HANDLER, creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry,
   sweepDueAt, unnamedObjects,
 } from "./retention.js";
-import { clearSilence, nextTickAt, snapshotOf, tickPlan } from "./heartbeat.js";
+import { clearSilence, nextTickAt, snapshotOf, tickBroughtForward, tickPlan } from "./heartbeat.js";
 import { HOUSEKEEP_HANDLER, bringsForward, clearedKeys, dueFindings, nextHousekeepAt } from "./housekeeping.js";
 import { UPGRADE_REQUIRED, wantsWebSocket } from "./upgrade.js";
 import { reviving } from "./rpc-error.js";
@@ -90,13 +95,6 @@ function asRows(read: StoredSession, rows: Record<string, unknown>): Record<stri
   const { session, ...rest } = rows;
   return session === undefined ? rest : { ...rest, ...memberRows(read, session as StoredSession) };
 }
-const auditKey = (seq: number) => `a:${String(seq).padStart(CURSOR_PAD, "0")}`;
-/**
- * Delivered intent ids, so a redelivered audit entry is applied once.
- * One row per entry that arrives with an id, and nothing prunes them, as
- * nothing prunes the entries.
- */
-const deliveredKey = (intentId: string) => `d:${intentId}`;
 /**
  * The org index's prefix, `uo:<org>:` (#65, D5). The org segment is percent-encoded, so an org id
  * that spells the separator cannot make one org's prefix reach another's rows. Org ids are
@@ -153,6 +151,14 @@ type SocketAttachment = { memberIds: string[]; cursor: number };
  */
 const WS_CLOSING = 2;
 const WS_CLOSED = 3;
+
+/**
+ * The most events a socket is replayed when it connects (#208). A client further behind is
+ * refused with 410, which today's bridges take as any refusal they do not know: they poll
+ * `bellman_sync`, which pages, and the socket they keep retrying is accepted once the gap is
+ * under this. A socket never carries the whole log.
+ */
+export const REPLAY_LIMIT = 1_000;
 
 /**
  * Whether a socket the runtime lists is one a peer can still be reached on.
@@ -446,10 +452,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * put is atomic as long as every await between them is storage, and nothing in
    * the code says so. The transaction does, and it keeps holding if a later edit
    * puts an await on anything else in between (a fetch, a timer), the one case the
-   * gate does not cover; AuditDO.append gives the same reason. That is a net under a
-   * mistake and not a licence for one: the closure holds every other call to this
-   * object until it commits (docs/ARCHITECTURE.md section 9, runtime fact 2), so
-   * what goes inside it is storage and nothing slower.
+   * gate does not cover. That is a net under a mistake and not a licence for one: the
+   * closure holds every other call to this object until it commits
+   * (docs/ARCHITECTURE.md section 9, runtime fact 2), so what goes inside it is
+   * storage and nothing slower.
    * worker-tests/session-close-join-race.test.ts holds a call at exactly that point.
    *
    * Not every mutator has been converted. updateMember and the two stamps (a socket's
@@ -578,8 +584,9 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * tick's clock, which a books row built from `s` alone would overwrite. Nothing is added
    * to the put when the room keeps no books, or the event moves none.
    *
-   * **It answers whether the write brought housekeeping's soonest time forward** (I1): the
-   * record it put against the record the caller read, by `bringsForward`. The two public
+   * **It answers whether the write brought housekeeping's soonest time or the next tick
+   * forward** (I1, #208): the record it put against the record the caller read, by
+   * `bringsForward` and `tickBroughtForward`. The two public
    * member appends re-arm the alarm after their commit when it is true, so the rule is
    * "the soonest time moved earlier" and not a list of the event kinds that can do it. The
    * hosted seat's append and the alarm's own writers ignore it: the books do nothing for the
@@ -607,7 +614,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // A removed surface row (#129), in the same transaction as the event that
     // removed it. After the put: a key is never both put and deleted here.
     for (const key of deletes) await txn.delete(key);
-    return kept !== s && bringsForward(s, kept, e.at);
+    return kept !== s && (bringsForward(s, kept, e.at) || tickBroughtForward(s, kept));
   }
 
   async createSession(s: NewSession): Promise<void> {
@@ -909,7 +916,13 @@ export class SessionDO extends DurableObject<BellmanEnv> {
 
     // The last await, and every one before it is a storage read, so the gate
     // holds from the first recheck to the return. From here nothing yields.
-    const missed = await this.events(cursor);
+    const missed = await this.events(cursor, REPLAY_LIMIT + 1);
+    if (missed.length > REPLAY_LIMIT) {
+      return new Response(
+        `More than ${REPLAY_LIMIT} events since cursor ${cursor}: catch up with bellman_sync, then reconnect`,
+        { status: 410 },
+      );
+    }
     const frames = missed.map((e) => JSON.stringify(publicEvent(e)));
 
     const pair = new WebSocketPair();
@@ -1163,13 +1176,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * once: a write that can flip `nextTickAt` from null to non-null must `reArm()`
    * once it has committed.**
    *
-   * `nextTickAt` returns null for four reasons — no cadence, the room is closed,
-   * the room is frozen, or no active member holds a reporting seat. While it is
+   * `nextTickAt` returns null for five reasons — no cadence, the room is closed,
+   * the room is frozen, no active member holds a reporting seat, or every member
+   * that holds one has gone `ASKS` cadences without reporting (#208). While it is
    * null nothing is armed for the tick, so there is no firing left to notice the
    * state that made it non-null: the answer cannot correct itself. Adding a member
-   * is one such write (this and `seatMember`), and so is clearing `frozenAt`
-   * (`freezeSession`). The other direction needs nothing: the armed alarm fires
-   * once, finds nobody due, and the reArm() that ends `alarm()` drops the tick.
+   * is one such write (this and `seatMember`), so is clearing `frozenAt`
+   * (`freezeSession`), and so is a report from a member the room had stopped asking,
+   * which the appends re-arm for by `tickBroughtForward`. The other direction needs
+   * nothing: the armed alarm fires once, finds nobody due, and the reArm() that ends
+   * `alarm()` drops the tick.
    *
    * After the transaction has COMMITTED, never inside its closure.
    * ARCHITECTURE.md §9: everything awaited in a closure holds every other call to
@@ -1553,6 +1569,19 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     return departures([...rows.values()], opts);
   }
 
+  /**
+   * Every member the room has seated, in it or gone from it, from their rows: the roster whose
+   * orgs a purge's and a delete's audit rows name as their parties (audit trail spec, D2), as
+   * MemoryStore's record holds it. The record keeps only the members in the room (ADR 0019).
+   * Read through `from`, so a caller inside a transaction reads them in it.
+   */
+  async #everyone(
+    from: { list<T>(options: { prefix: string }): Promise<Map<string, T>> } = this.ctx.storage,
+  ): Promise<Member[]> {
+    // ponytail: lists every member row, as departedMembers does; once per delete and per purge.
+    return [...(await from.list<Member>({ prefix: MEMBER_PREFIX })).values()];
+  }
+
   /** `BellmanStore.publicNumbers`, for this room: each label's number, from its `lb:` row. */
   async publicNumbers(labels: string[]): Promise<Record<string, number>> {
     const unique = [...new Set(labels)];
@@ -1585,8 +1614,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       ...memberRows(s, { ...s, members }),
       ...(patch.brief !== undefined ? { [briefKey(memberId)]: patch.brief } : {}),
     });
-    // addMember's rule, and `leftAt` is the only field in MemberPatch that can
-    // flip nextTickAt off null: clearing it returns a departed member to the
+    // addMember's rule. `leftAt` can flip nextTickAt off null, and so can
+    // `lastReportAt` (below): clearing `leftAt` returns a departed member to the
     // roster. Nothing calls it that way today — every caller sets a time — but
     // MemberPatch permits it, and the predicate is about what a write CAN do.
     //
@@ -1594,15 +1623,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     // hot path. Every bellman_sync and every send stamps `lastSeenAt` through
     // here, and that one reaches nextTickAt not at all.
     //
-    // `lastReportAt` DOES reach it, since each member's deadline is its own
-    // report plus the cadence — and it still needs no reArm, because a fresh
-    // stamp only ever moves that deadline LATER. The armed alarm is then early:
-    // it fires, finds nobody due, advances `lastTickAt`, and the closing reArm()
-    // points it at the right time. One wake spent, and the tick that comes out of
-    // it is correct — the same self-healing path a member leaving takes. Arming
-    // here would save that wake and cost a storage read on every sync, which is
-    // a trade about cost and not about correctness.
-    if (patch.leftAt === null) await this.driver.reArm();
+    // `lastReportAt` reaches it too, since each member's deadline is its own report
+    // plus the cadence, and for a member the room has stopped asking (`ASKS`, #208)
+    // a fresh stamp brings a deadline back where there was none. No caller patches
+    // it today; reports ride the append, which re-arms by `tickBroughtForward`. It
+    // is not the hot path, so it re-arms unconditionally.
+    if (patch.leftAt === null || patch.lastReportAt !== undefined) await this.driver.reArm();
   }
 
   async closeSession(): Promise<void> {
@@ -1680,16 +1706,18 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * process that died between the commit and them left an alarm only if there was an
    * entry to queue, and the retry is what points it at the purge.
    */
-  async schedulePurge(at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     const outcome = await this.ctx.storage.transaction(async (txn): Promise<PurgeSchedule> => {
       const s = await this.stored(txn);
       if (!s) return { ok: false, reason: "missing" };
       if (!s.closed) return { ok: false, reason: "open" };
       if (s.purgeAt !== null) return { ok: true, purgeAt: s.purgeAt };
       const now = Date.now();
-      // Every org that sat in the room, those of members who have left included (ADR 0019).
+      // Every org that sat in the room, those of members who have left included (ADR 0019), and for
+      // the rows' parties the whole roster, which only the member rows still hold (`#everyone`).
+      const parties = rosterParties({ members: await this.#everyone(txn) });
       const rows = await this.driver.enqueue(
-        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, by, now))),
+        txn, s.orgs.map((orgId) => auditIntent(roomDeletedEntry(s, orgId, parties, by, now))),
       );
       await putRows(txn, { ...memberRows(s, { ...s, purgeAt: at }), ...rows });
       return { ok: true, purgeAt: at };
@@ -1827,15 +1855,16 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * the wake, so the member removed is sent the frame announcing it before the
    * socket goes and the notice is the last thing they receive.
    *
-   * No `reArm()`, for `updateMember`'s reason: a credit is monotonic, so it only
-   * ever moves a member's deadline LATER, and a removal only takes a member off
-   * the roster, which cannot bring the soonest one forward either. An alarm
-   * already armed is then early — it fires, finds nobody due, advances
-   * `lastTickAt`, and the closing `reArm()` points it at the right time. One wake
-   * spent, and the tick it produces is correct.
+   * No `reArm()` as a rule: a credit to a member the room still asks only moves its
+   * deadline LATER, and a removal only takes a member off the roster, which cannot
+   * bring the soonest one forward either. An alarm already armed is then early — it
+   * fires, finds nobody due, advances `lastTickAt`, and the closing `reArm()` points it
+   * at the right time. One wake spent, and the tick it produces is correct.
    *
-   * **One exception, and it is a rule and not a list of event kinds (#66, I1): an append
-   * that brings housekeeping's soonest time forward re-arms after its commit.**
+   * **The exception is a rule and not a list of event kinds (#66, I1; #208): an append
+   * that brings housekeeping's soonest time or the next tick forward re-arms after its
+   * commit.** The tick comes forward when a member the room had stopped asking (`ASKS`)
+   * reports, since it armed nothing until then (`tickBroughtForward`).
    * `#writeEvent` compares that time for the record it wrote against the record this
    * transaction read (`bringsForward`), and a null before counts as later. An
    * `action_request` in a room that declares `answer_within` adds an anchor, the
@@ -1957,9 +1986,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * reliable there. The wake comes after the commit, so nobody hears of an event that
    * did not land.
    *
-   * An append that brings housekeeping's soonest time forward re-arms after the commit, as
-   * `appendEvent`'s docblock says, when it is appended. A replay appended nothing, so it
-   * brings nothing forward and asks for no re-arm.
+   * An append that brings housekeeping's soonest time or the next tick forward re-arms after
+   * the commit, as `appendEvent`'s docblock says, when it is appended. A replay appended
+   * nothing and re-runs no books, so it brings housekeeping nothing; it re-arms only when the
+   * credit it re-asserts brings the next tick forward (#208), as the report's own would have.
    */
   async appendEventOnce(
     e: Omit<SessionEvent, "cursor" | "at">,
@@ -2001,8 +2031,12 @@ export class SessionDO extends DurableObject<BellmanEnv> {
         // carries a higher cursor. A removal leaves no tombstone, so re-applying
         // the original write would read no row to compare against and could only
         // put back what was removed. It also means a replay deletes nothing.
-        const owed = asRows(s, (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts);
+        const repair = (await extraRows(txn, s, original, { ...extras, surface: undefined })).puts;
+        const owed = asRows(s, repair);
         if (Object.keys(owed).length > 0) await putRows(txn, owed);
+        // A stamp repaired here is the report's, late, and brings the next tick forward as the
+        // first attempt's would have (#208). Only the tick: the books are not re-run on a replay.
+        broughtForward = repair.session !== undefined && tickBroughtForward(s, repair.session as StoredSession);
         return { outcome: "replayed", event: original };
       }
 
@@ -2033,7 +2067,7 @@ export class SessionDO extends DurableObject<BellmanEnv> {
     ) {
       await this.#closeCutSockets();
     }
-    if (result.outcome === "appended" && broughtForward) await this.driver.reArm();
+    if (broughtForward) await this.driver.reArm();
     // Last, as in appendEvent: nobody woken above waits on the host's delivery.
     if (wakesHost) await this.driver.deliverNow();
     return result;
@@ -2118,8 +2152,8 @@ export class SessionDO extends DurableObject<BellmanEnv> {
    * own timeout. Storage is async here, so the read is awaited FIRST and the
    * registration then runs synchronously — no await between check and push.
    */
-  async waitForEvents(cursor: number, waitMs: number): Promise<SessionEvent[]> {
-    const immediate = await this.events(cursor);
+  async waitForEvents(cursor: number, waitMs: number, limit?: number): Promise<SessionEvent[]> {
+    const immediate = await this.events(cursor, limit);
     if (immediate.length > 0 || waitMs <= 0) return immediate;
 
     return new Promise<SessionEvent[]>((resolve) => {
@@ -2755,9 +2789,10 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       await registry.dropMembershipIndex(userId, s.id);
     }
     for (const orgId of s.orgs) await registry.dropOrgIndex(orgId, s.id);
+    const parties = rosterParties({ members: await this.#everyone() });
     for (const orgId of s.orgs) {
       await this.env.AUDIT.get(this.env.AUDIT.idFromName(orgId))
-        .append(roomPurgedEntry(s, orgId, now), `purge:${s.id}:${orgId}`);
+        .append(roomPurgedEntry(s, orgId, parties, now), `purge:${s.id}:${orgId}`);
     }
     await this.driver.deliverNow();
     if ((await this.ctx.storage.list({ prefix: OUTBOX_PREFIX, limit: 1 })).size > 0) {
@@ -3661,47 +3696,171 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 // AuditDO — one per org
 // ---------------------------------------------------------------------------
 
+/** The stream's tables (audit trail spec, D5). `AUTOINCREMENT` never reuses a seq, so a cursor once handed out names one row for good. */
+const AUDIT_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS entries (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    org_id TEXT,
+    session_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    actor_id TEXT NOT NULL,
+    actor_label TEXT,
+    actor_org TEXT,
+    room_name TEXT,
+    parties TEXT,
+    crossing TEXT,
+    direction TEXT,
+    detail TEXT NOT NULL
+  )`,
+  "CREATE INDEX IF NOT EXISTS entries_at ON entries (at)",
+  "CREATE TABLE IF NOT EXISTS delivered (intent_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)",
+];
+
+/** Insert one entry and return its seq: the one given, for a row moved from the KV shape, or the next. */
+function insertAuditRow(sql: SqlStorage, e: AuditEntry, seq: number | null = null): number {
+  return sql.exec<{ seq: number }>(
+    `INSERT INTO entries (seq, ${AUDIT_COLUMNS.join(", ")}) VALUES (?, ${AUDIT_COLUMNS.map(() => "?").join(", ")}) RETURNING seq`,
+    seq, ...recordOf(e),
+  ).one().seq;
+}
+
+/** How many KV rows the move holds in memory at once, whatever the stream's size. */
+const MOVE_BATCH = 500;
+
+/**
+ * Every KV row under `prefix`, in key order, handed to `move` and deleted, a batch at a time.
+ * Each batch starts after the last key of the one before, so the walk ends however a delete
+ * inside the transaction shows to the next list.
+ */
+function moveKv<T>(storage: DurableObjectStorage, prefix: string, move: (key: string, value: T) => void): void {
+  let after: string | undefined;
+  for (;;) {
+    const batch = [...storage.kv.list<T>({ prefix, startAfter: after, limit: MOVE_BATCH })];
+    if (batch.length === 0) return;
+    for (const [key, value] of batch) {
+      move(key, value);
+      storage.kv.delete(key);
+    }
+    after = batch.at(-1)![0];
+  }
+}
+
+/**
+ * The tables, and a stream written in the KV shape (`a:<seq>` rows, the `seq` counter,
+ * `d:<intent>` markers) moved into them. Run inside one `transactionSync`, so it lands
+ * whole or not at all, however many batches it reads.
+ *
+ * Into an empty table each row keeps the seq its key carries, so every cursor already handed
+ * out still names its row. Once the table holds rows, what is in KV was written there by an
+ * older Worker after a rollback: it read the deleted `seq` counter as 0 and counted again
+ * from 1, so its keys would collide with rows that exist. Those are appended in key order
+ * with the next seqs instead, so nothing collides and nothing is lost, and a stream moved
+ * once and then written to by an older Worker still wakes. Which of the two applies is decided
+ * once, before the first batch: after that batch the table is never empty.
+ * ponytail: memory is flat, MOVE_BATCH rows at a time. Time is the ceiling left: blockConcurrencyWhile
+ * allows 30 s, about two million rows at the 15 µs a row measured locally. Past that, move it across wakes.
+ */
+function migrateAudit(storage: DurableObjectStorage): void {
+  for (const ddl of AUDIT_SCHEMA) storage.sql.exec(ddl);
+  const keepKeySeqs = storage.sql.exec("SELECT 1 FROM entries LIMIT 1").toArray().length === 0;
+  moveKv<AuditEntry>(storage, "a:", (key, entry) => insertAuditRow(storage.sql, entry, keepKeySeqs ? Number(key.slice(2)) : null));
+  // After a rollback a mark keeps the older build's KV seq, not its row's: informational, dedupe reads intent_id.
+  moveKv<number>(storage, "d:", (key, seq) => {
+    storage.sql.exec("INSERT OR IGNORE INTO delivered (intent_id, seq) VALUES (?, ?)", key.slice(2), seq);
+  });
+  storage.kv.delete("seq");
+}
+
 export class AuditDO extends DurableObject {
-  /**
-   * Append an audit entry, at most once per intent.
-   *
-   * The outbox that feeds this delivers at least once — a row is deleted only
-   * after this call returns, so an acknowledgement lost in flight redelivers.
-   * The `d:` row is what makes that safe. Callers with no intent to redeliver
-   * pass no id and always append.
-   */
-  async append(entry: AuditEntry, intentId?: string): Promise<void> {
-    // The look at the marker and the write that sets it are one transaction, so a
-    // second delivery of the same intent cannot get between them, even if a later
-    // edit puts an await there that opens the input gate (a timer, a call to
-    // another object). Bare, that edit lets both deliveries find no marker, and
-    // both append.
-    await this.ctx.storage.transaction(async (txn) => {
-      if (intentId !== undefined && (await txn.get(deliveredKey(intentId)))) return;
-      const seq = ((await txn.get<number>("seq")) ?? 0) + 1;
-      // Entry, sequence and delivery marker in one write, in this transaction.
-      // Committed apart (in another transaction, or by a write after this one
-      // closes), an interruption between the commits leaves one without the
-      // others: an entry with no sequence is overwritten by the next entry; a
-      // marker with no entry makes the redelivery skip an entry that never
-      // landed; an entry with no marker is appended again by the redelivery. An
-      // audit log that can quietly drop or double the record of a privilege
-      // change is not an audit log.
-      await txn.put<unknown>({
-        [auditKey(seq)]: entry,
-        seq,
-        ...(intentId !== undefined ? { [deliveredKey(intentId)]: seq } : {}),
-      });
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    // Before any call is let in: the tables, and a stream still in the KV shape moved into them.
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.transactionSync(() => migrateAudit(this.ctx.storage));
     });
   }
 
-  async recent(limit: number): Promise<AuditEntry[]> {
-    const map = await this.ctx.storage.list<AuditEntry>({
-      prefix: "a:",
-      reverse: true,
-      limit,
+  /**
+   * Append an audit entry, at most once per intent.
+   *
+   * The outbox that feeds this delivers at least once: a row is deleted only after this
+   * call returns, so an acknowledgement lost in flight redelivers. The `delivered` row is
+   * what makes that safe. The look at it, the entry and the marker are one synchronous
+   * transaction, so no second delivery can come between the look and the writes, and a
+   * throw anywhere in it rolls all of it back: an audit log that could drop or double the
+   * record of a privilege change would not be one. Callers with no intent to redeliver pass
+   * no id and always append.
+   */
+  async append(entry: AuditEntry, intentId?: string): Promise<void> {
+    this.ctx.storage.transactionSync(() => {
+      const sql = this.ctx.storage.sql;
+      if (intentId !== undefined && sql.exec("SELECT 1 FROM delivered WHERE intent_id = ?", intentId).toArray().length > 0) {
+        return;
+      }
+      const seq = insertAuditRow(sql, entry);
+      if (intentId !== undefined) sql.exec("INSERT INTO delivered (intent_id, seq) VALUES (?, ?)", intentId, seq);
     });
-    return [...map.values()].reverse();
+  }
+
+  /** The newest `limit` entries, oldest first: `bellman_audit`'s read. */
+  async recent(limit: number): Promise<AuditEntry[]> {
+    return this.ctx.storage.sql
+      .exec<AuditRecord>("SELECT * FROM entries ORDER BY seq DESC LIMIT ?", limit)
+      .toArray()
+      .reverse()
+      .map(entryOf)
+      .map(({ seq: _seq, ...entry }) => entry);
+  }
+
+  /** One page under the filters, newest first (D6): the same answer `pageOf` gives over memory. */
+  async query(q: AuditQuery): Promise<AuditPage> {
+    const sql = this.ctx.storage.sql;
+    const through = q.through ?? sql.exec<{ seq: number | null }>("SELECT MAX(seq) AS seq FROM entries").one().seq;
+    const page = auditWhere(q, through, { scope: true, before: true });
+    const rows = sql.exec<AuditRecord>(
+      `SELECT * FROM entries ${page.clause} ORDER BY seq DESC LIMIT ?`, ...page.params, q.limit + 1,
+    ).toArray();
+    const all = auditWhere(q, through, { scope: true, before: false });
+    const total = sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM entries ${all.clause}`, ...all.params).one().n;
+    let unrecorded = 0;
+    // A row from before D2 records no crossing and no parties, so neither filter can judge it (D4).
+    if (q.scope !== undefined || q.org !== undefined) {
+      const rest = auditWhere({ ...q, org: undefined }, through, { scope: false, before: false });
+      unrecorded = sql.exec<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM entries ${rest.clause ? `${rest.clause} AND` : "WHERE"} crossing IS NULL`, ...rest.params,
+      ).one().n;
+    }
+    const entries = rows.slice(0, q.limit).map(entryOf);
+    return { entries, next: rows.length > q.limit ? entries.at(-1)!.seq : null, through, total, unrecorded };
+  }
+
+  /**
+   * What the filters offer (D6), newest first. A label or a room's name comes from its newest
+   * row: SQLite reads a bare column of a MAX() group from the row that holds the max.
+   * ponytail: `at` is the only index; these and the filters on actor, room and action read the
+   * table by seq, and gain indexes when a stream is large enough to feel the scan.
+   */
+  async facets(): Promise<AuditFacets> {
+    const sql = this.ctx.storage.sql;
+    return {
+      actors: sql.exec<{ id: string; label: string | null; newest: number }>(
+        "SELECT actor_id AS id, actor_label AS label, MAX(seq) AS newest FROM entries GROUP BY actor_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, label }) => ({ id, label })),
+      rooms: sql.exec<{ id: string; name: string | null; newest: number }>(
+        "SELECT session_id AS id, room_name AS name, MAX(seq) AS newest FROM entries WHERE session_id NOT LIKE 'grant:%' GROUP BY session_id ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ id, name }) => ({ id, name })),
+      orgs: sql.exec<{ org: string; newest: number }>(
+        "SELECT p.value AS org, MAX(e.seq) AS newest FROM entries e, json_each(e.parties) p WHERE p.value IS NOT NULL AND p.value != e.org_id GROUP BY p.value ORDER BY newest DESC, org ASC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ org }) => org),
+      actions: sql.exec<{ action: string; newest: number }>(
+        "SELECT action, MAX(seq) AS newest FROM entries GROUP BY action ORDER BY newest DESC LIMIT ?",
+        FACET_LIMIT,
+      ).toArray().map(({ action }) => action),
+    };
   }
 }
 
@@ -4009,7 +4168,7 @@ export class DurableObjectStore implements BellmanStore {
     await this.session(sessionId).freezeSession(frozenAt);
   }
 
-  async schedulePurge(sessionId: string, at: number, by: string | null): Promise<PurgeSchedule> {
+  async schedulePurge(sessionId: string, at: number, by: AuditActor | null): Promise<PurgeSchedule> {
     return this.session(sessionId).schedulePurge(at, by);
   }
 
@@ -4170,9 +4329,10 @@ export class DurableObjectStore implements BellmanStore {
   async waitForEvents(
     sessionId: string,
     cursor: number,
-    waitMs: number
+    waitMs: number,
+    limit?: number
   ): Promise<SessionEvent[]> {
-    return this.session(sessionId).waitForEvents(cursor, waitMs);
+    return this.session(sessionId).waitForEvents(cursor, waitMs, limit);
   }
 
   async putPendingConnect(p: PendingConnect): Promise<void> {
@@ -4312,12 +4472,20 @@ export class DurableObjectStore implements BellmanStore {
   }
 
   async appendAudit(a: AuditEntry): Promise<void> {
-    if (a.orgId === null) return; // no org, no audit stream to write to
+    if (!a.orgId) return; // no org, no audit stream to write to
     await this.audit(a.orgId).append(a);
   }
 
   async auditForOrg(orgId: string, limit: number): Promise<AuditEntry[]> {
     return this.audit(orgId).recent(limit);
+  }
+
+  async queryAudit(orgId: string, query: AuditQuery): Promise<AuditPage> {
+    return this.audit(orgId).query(query);
+  }
+
+  async auditFacets(orgId: string): Promise<AuditFacets> {
+    return this.audit(orgId).facets();
   }
 
   /**

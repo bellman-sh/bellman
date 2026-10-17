@@ -105,7 +105,9 @@ Errors: "join code not found or expired" — a code lives 15 minutes from issue 
         createdAt: Date.now(),
         expiresAt: Date.now() + CONNECT_TOKEN_TTL,
       });
-      await audit(s, session, identity, "connect_previewed", {});
+      // Nobody in the room sees a preview, so its parties are the room's org and the
+      // previewer's (audit trail spec, D1): no roster.
+      await audit(s, session, identity, "connect_previewed", {}, [], []);
 
       // The index, not the items (#129, D7/D9): a code holder who never joins
       // is shown that the room keeps a plan and a diagram, not their contents —

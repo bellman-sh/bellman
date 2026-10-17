@@ -1,3 +1,4 @@
+import { SYSTEM_ACTOR, auditRow, type AuditActor } from "./audit.js";
 import type { StoredSession } from "./stored-session.js";
 import type { AuditEntry, SurfaceRow } from "./types.js";
 
@@ -62,14 +63,18 @@ export function orgsOnRoster(s: { members: readonly { orgId: string | null }[] }
 
 type Room = Pick<StoredSession, "id" | "manifest">;
 
-/** The window ran out (#65, D2): nobody asked, so the system is the actor. */
-export const roomPurgedEntry = (s: Room, orgId: string, at: number): AuditEntry => ({
-  at, orgId, sessionId: s.id, actorUserId: "system", action: "room_purged",
-  detail: { session_id: s.id, room: s.manifest.room },
-});
+/** The window ran out (#65, D2): nobody asked, so the system is the actor. `parties` is the room's roster (`rosterParties`). */
+export const roomPurgedEntry = (s: Room, orgId: string, parties: (string | null)[], at: number): AuditEntry =>
+  auditRow(orgId, parties, {
+    at, sessionId: s.id, action: "room_purged", roomName: s.manifest.room,
+    detail: { session_id: s.id, room: s.manifest.room },
+  }, SYSTEM_ACTOR);
 
-/** A delete asked for the purge (#65, D6): `by` is who, or null when the caller was not a person. */
-export const roomDeletedEntry = (s: Room, orgId: string, by: string | null, at: number): AuditEntry => ({
-  at, orgId, sessionId: s.id, actorUserId: by ?? "system", action: "room_deleted",
-  detail: { session_id: s.id, room: s.manifest.room },
-});
+/** A delete asked for the purge (#65, D6): `by` is who asked, or null when the caller was not a person. */
+export const roomDeletedEntry = (
+  s: Room, orgId: string, parties: (string | null)[], by: AuditActor | null, at: number,
+): AuditEntry =>
+  auditRow(orgId, parties, {
+    at, sessionId: s.id, action: "room_deleted", roomName: s.manifest.room,
+    detail: { session_id: s.id, room: s.manifest.room },
+  }, by ?? SYSTEM_ACTOR);

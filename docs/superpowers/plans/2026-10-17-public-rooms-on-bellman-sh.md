@@ -2,70 +2,76 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A public room's page is served at `bellman.sh/r/{room}` with a head that link previews and crawlers read, links already posted at `dash.bellman.sh/r/{room}` answer 301 there, and every public read names a member by the handle their account claimed, else "member N", with no message ever shown under a name another account now holds.
+**Goal:** A public room's page is served at `bellman.sh/r/{room}` with a head that link previews and crawlers read, and links already posted at `dash.bellman.sh/r/{room}` answer 301 there. Thirty days after handle holders are told, every public read names a member by the handle their account claimed, else "member N", and no message ever shows under a name another account now holds.
 
 **Architecture:**
 - A route sends `bellman.sh/r/*` to the dash's Worker, which until now served assets alone. A script in front of the assets answers `/r/*` and nothing else: on `dash.bellman.sh` a 301 to `bellman.sh`; elsewhere the built panel, with the room's head and a plain summary written in by `HTMLRewriter`. The build names `https://dash.bellman.sh/` as Vite's `base`, so every asset URL in that page is the dash's, and `/assets/*` answer CORS for `https://bellman.sh`.
-- The server's public projection (`src/http/public.ts`) names each label it rewrites by the claimed handle of the one account the room seated under that label, else by the label's number. Handles come from the registry through `handlesOf`, behind an hour's per-isolate `HandleCache` in the Worker. A name freed by a release, a change or the operator is held from every account for 65 minutes, longer than any cache can show it. `PUBLIC_ROOM_URL_BASE` moves to `https://bellman.sh/r/`, and `https://bellman.sh` joins `BELLMAN_PANEL_ORIGINS`.
-- Four PRs in three repos, in this order: the dash (Part 1, then a sandbox deploy), bellman (Part 2), then the dash's and the site's text (Part 3).
+- The move (2a): `PUBLIC_ROOM_URL_BASE` becomes `https://bellman.sh/r/`, the room read carries its own `public_url`, and a separate origin list, `BELLMAN_PUBLIC_PAGE_ORIGINS`, lets bellman.sh make one signed-in write, a report, and receive the sign-in return.
+- The names (2b), 30 days after the notice: the public projection names each label by the claimed handle of the one account the room seated under it, else by its number, through an hour's per-isolate `HandleCache` in front of `handlesOf`. A freed name is held from every account for 65 minutes.
+- Seven PRs in three repos, in four steps: the page (Part 1, the dash); the move (2a, bellman; 3a, the site); the notice (3b, the site; 1b, the dash; the owner's email); the names, on or after the effective date (2b, bellman; 3c, the site).
 
 **Tech Stack:** TypeScript. Cloudflare Workers: the assets binding, `HTMLRewriter`, the Cache API, Durable Objects. The dash is Vite 8 and React 19 with TanStack Router; vitest 5 in each repo, and vitest 4 with `@cloudflare/vitest-pool-workers` for the workerd tests. The site is static HTML, a small Worker and Python tools.
 
-**Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` (approved; D5 added by the owner's ruling, 2026-10-17). It amends `2026-10-09-public-rooms-design.md` and `2026-10-15-public-names-design.md`.
+**Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` (approved; D5, D6 and D7 by the owner's rulings, 2026-10-17). It amends `2026-10-09-public-rooms-design.md` and `2026-10-15-public-names-design.md`.
 
 ## Global Constraints
 
 - **Hosts.** The page is `https://bellman.sh/r/<room>`, the panel `https://dash.bellman.sh`, the API `https://mcp.bellman.sh`. In the dash they are `PUBLIC_ORIGIN`, `DASH_ORIGIN` and `PUBLIC_ROOM_BASE` in `src/lib/hosts.ts` (Task 1); `API_ORIGIN` in `src/lib/api.ts` stays as it is.
 - **The server's link base:** `PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/"`.
-- **Panel origins:** `BELLMAN_PANEL_ORIGINS = "https://dash.bellman.sh, https://bellman.sh"`, the dash first, because `panelDestination` falls back to the first entry.
+- **Origins:** `BELLMAN_PANEL_ORIGINS` stays `"https://dash.bellman.sh"`. `BELLMAN_PUBLIC_PAGE_ORIGINS = "https://bellman.sh"` is honoured by `POST /rooms/:id/reports` and its preflight (CORS and the CSRF check) and by the sign-in return, and by nothing else.
 - **Old links:** every `/r/` path on `dash.bellman.sh` answers 301 to the same path and query on `https://bellman.sh`.
-- **The head of a public room's page:** `<title>` is the room's name, a space, U+00B7 (written `\u{B7}` in TypeScript), a space, `Bellman`; `description` and `og:description` are the room's purpose, or `A public Bellman room.` when it has none; `og:title` is the room's name; `og:url` and the canonical link are `https://bellman.sh/r/<key>`, the key as requested; `og:site_name` is `Bellman`; `og:image` is `https://bellman.sh/og.png`; `twitter:card` is `summary`.
+- **The head of a public room's page:** `<title>` is the room's name, a space, U+00B7 (written `\u{B7}` in TypeScript), a space, `Bellman`; `description` and `og:description` are the room's purpose, or `A public Bellman room.` when it has none; `og:title` is the room's name; `og:site_name` is `Bellman`; `og:image` is `https://bellman.sh/og.png`; `twitter:card` is `summary`. The canonical link and `og:url` are one per room: the room read's `public_url` (its public name's link while it holds one, its id's otherwise), or, from a server without that field, `https://bellman.sh/r/<key>` with the key as requested.
 - **No room, or not public:** 404, the template's head untouched, no summary.
 - **The dash's preview cache:** the dash's Worker keeps each public read it makes, a 200 or a 404, at most a minute (`CACHE_SECONDS = 60`).
 - **CORS:** `/assets/*` answer `Access-Control-Allow-Origin: https://bellman.sh`.
-- **Names:** `@<handle>` or `member <N>`. The hosted seat keeps its label. One account's seats share a name. A label two accounts were seated under is `member <N>`. A claimed, changed or released handle reaches public pages within the hour.
-- **The handle cache:** `HANDLE_CACHE_MS = 60 * 60_000` in `src/handles.ts`, the one constant. `HandleCache` keeps each account's handle, or that it has none, per isolate and by user id, in front of `handlesOf` in the public read path only. `handlesOf`, `MemoryStore` and the store contract stay exact.
-- **The hold:** `HANDLE_HOLD_MS = HANDLE_CACHE_MS + 5 * 60_000`, 65 minutes. A name freed by any path that deletes its `hn:` row (`releaseHandle`, the operator's `releaseHandleNamed`, and `claimHandle` moving to another name; the same three in `MemoryStore`) answers "taken" to every account, its last holder included, while `at < freedAt + HANDLE_HOLD_MS`. At exactly `freedAt + HANDLE_HOLD_MS` it can be claimed.
+- **Names (2b):** `@<handle>` or `member <N>`. The hosted seat keeps its label, and the summary lists it. One account's seats share a name. A label two accounts were seated under is `member <N>`. A claimed, changed or released handle reaches public pages within the hour.
+- **The handle cache (2b):** `HANDLE_CACHE_MS = 60 * 60_000` in `src/handles.ts`, the one constant. `HandleCache` keeps each account's handle, or that it has none, per isolate and by user id, in front of `handlesOf` in the public read path only. `handlesOf`, `MemoryStore` and the store contract stay exact.
+- **The hold (2b):** `HANDLE_HOLD_MS = HANDLE_CACHE_MS + 5 * 60_000`, 65 minutes. A name freed by any path that deletes its `hn:` row (`releaseHandle`, the operator's `releaseHandleNamed`, and `claimHandle` moving to another name; the same three in `MemoryStore`) answers "taken" to every account, its last holder included, while `at < freedAt + HANDLE_HOLD_MS`. At exactly `freedAt + HANDLE_HOLD_MS` it can be claimed.
+- **The notice:** `<NOTICE_DATE>` is the day 3b is posted and the email goes; `<EFFECTIVE_DATE>` is 30 days after it. The owner picks both (owner action 3), written as the site writes dates, `18 November 2026`. 2b and 3c merge on the effective date.
 - **Untrusted text stays text.** A room's name and purpose and members' names reach HTML only through `HTMLRewriter`: `setInnerContent(…)` or `append(…, { html: false })` for text, `setAttribute` for attribute values. Only constant markup goes in with `{ html: true }`.
 - **Non-ASCII in TypeScript** is a braced escape such as `\u{B7}`, never a four-digit one.
 - **Store methods:** every `BellmanStore` method is async, and a new one goes into both stores and `tests/helpers/store-contract.ts`.
 - **Repos:** bellman is jj (`jj commit`); the dash and the site are git, on a branch from `origin/main`. Every commit is signed. Nothing reaches `main` but through a PR.
 - **Writing:** a room holds many members. Never "two sessions" or "the other session". No phrase from `~/.claude/projects/-Users-mcfearsome-src-github-com-bellman-sh-bellman/memory/banned-phrases.md`.
-- **Rollout:** (1) the dash PR, after the sandbox is deployed and the deploy token can add the route; (2) the bellman PR; (3) the dash's text PR and the site's PR. If the CI token cannot add a route on the `bellman.sh` zone, the dash's first deploy is the owner's.
-- **Reviews:** one whole-branch review per part, at the end of that part, before its PRs. No task has a review step.
+- **Order:** Part 1; then 2a and 3a, once Part 1 is deployed and the abuse protections' section 1C (the report route) has merged; then the notice, 3b and 1b, with the owner's email; then 2b and 3c on the effective date. If the CI token cannot add a route on the `bellman.sh` zone, the dash's first deploy is the owner's.
+- **Reviews:** one whole-branch review per PR, before it opens. No task has a review step.
 
 ## Rulings on the spec
 
 Every place the spec is silent or the code disagrees with it, and what this plan does.
 
-- **R1. The site's `/docs` page needs nothing.** It names neither `dash.bellman.sh/r` nor how members are named, on `origin/main` or on any branch. What the names change and the hold make false on the site is `privacy.html` (two items of "Who else sees it" and the "Public handles" item of how long things are kept) and `terms.html` (one sentence of section 4), and Part 3 changes those. *Cost if wrong:* `/docs` could name the page's host in one more sentence.
-- **R2. The sandbox frame takes bellman.sh as a parent.** Its `frame-ancestors` and `mountFrame`'s `ev.origin` check name `https://dash.bellman.sh` alone, so every diagram and HTML item on the bellman.sh page would be a refused frame. Task 2 makes both a list, `SANDBOX_PANEL_ORIGINS`, the dash and bellman.sh by default. CI deploys the panel only, so the sandbox goes out with `npm run deploy:sandbox`, by hand, before the dash PR merges: the new frame accepts both parents, so it is safe early.
-- **R3. The build writes the asset links, not the Worker.** The spec has the script point the page's script and style links at the dash. The public route is a lazy chunk, and with `base: "/"` Vite's preload helper is `` function(e){return`/`+e} `` (seen in a build of the dash's `origin/main`), which resolves against bellman.sh. So `base` is `https://dash.bellman.sh/`: the tags, the preload helper and the CSS's font URLs all name the dash (seen in the same build), and the Worker rewrites no link. Vite ignores the origin part in `npm run dev`.
-- **R4. The Worker sets the page's headers itself.** The assets binding's answer carries `public/_headers` (seen in workerd), and that policy's `script-src 'self'` would refuse the dash's scripts on bellman.sh. `worker/policy.ts` holds the page's policy, the panel's with `'self'` replaced by the dash's origin, and `src/lib/csp.test.ts` holds the two together.
-- **R5. `run_worker_first = ["/r/*"]` is required.** With compatibility date 2026-09-01 the asset layer answers a browser's navigation to a path no file matches with `index.html` and never runs the Worker, so the 301 would reach crawlers only. The Workers vitest pool runs the Worker for a navigation either way (removing the setting left the 301 in place, in a scratch copy), so `src/wrangler.test.ts` pins the line and the dash's CI checks the live redirect after each deploy.
-- **R6. The route runs in front of the site's Custom Domain.** The spec says the more specific route wins, but the site holds `bellman.sh` as a Custom Domain, not a route. Cloudflare treats a Custom Domain's Worker as an origin and runs a route on the zone before it, so the outcome is the one the spec wants.
-- **R7. The summary's members come from the room's newest events.** The public room read carries no roster. The Worker also reads `/public/rooms/<id>/events` and lists the distinct names of its senders, `system` left out, in the order they first appear, at most 20.
-- **R8. The dash keeps its relabel of a signed creator.** The dash ships before the server, so dropping `relabel` would show the creator's number until Part 2 deploys. After that it still matters: during the cache's hour after a change, `by.as` can be the creator's cached old name, and `relabel` shows the byline's current handle there (R23).
-- **R9. A name is decided per label.** The projection rewrites `label` properties, and a label is how someone signed in, not an account: two accounts can share one (a GitHub and a Google sign-in with one email). The accounts come from the room's members now (`session.members`) and `getMembers` for the departed member ids the page carries. A label the room seated exactly one account under, which holds a handle, is `@handle`; any other is `member N`. The hosted seat has no number, so it is never renamed.
-- **R10. Names go through an hour's cache, per the owner's ruling (spec D5).** `HandleCache` in `src/handles.ts`, per isolate and keyed by user id, sits in front of `handlesOf`, which stays one exact batched read of the registry, so `MemoryStore` and the contract stay exact. It keeps an account with no handle too, so a page reads the registry only for accounts no entry covers. Each entry's time is taken before its registry read, so an answer read just before a release expires within the hour after it, inside the hold. A page naming nobody reads nothing.
-- **R11. `by: { handle, as }` stays,** and `as` is the creator's public name, `@handle` when they hold one. The dash reads it.
-- **R12. The panel origins and the sign-in return list are one list.** `BELLMAN_PANEL_ORIGINS` feeds both `allowedOrigin` (CORS and the CSRF check) and `panelDestination` (the sign-in return), so the change is one var. It lets every page on bellman.sh, the static site's included, make a cookie-authenticated write, and `csrfRefusal`'s comment names a marketing-site XSS as what the check stops. Task 12 rewrites that comment, and the PR says so.
-- **R13. The dash has no Report form yet,** so "Sign in to report" has no dash code in this plan. The server's tests cover the origin check and a sign-in that returns to `https://bellman.sh/r/<room>`.
-- **R14. More tool texts change than the two the spec names.** `bellman_start` and `bellman_connect` say members are named by number; both now say by the public handle their account claimed, or by number, and `bellman_connect` says "you included", since a joiner's claimed handle shows. ARCHITECTURE §11's tool-definitions row is re-measured, as every tool-text change has been.
-- **R15. More docs change than the spec lists:** ARCHITECTURE's public room paragraph and its panel-cookie invariant, the room-manifest skill, and a new ADR 0023, with ADR 0011's status line naming decisions 3 and 5 and ADR 0021's naming decisions 2 and 4 as amended by it. ADRs are not rewritten.
-- **R16. The page's details.** Canonical and `og:url` use the key as requested, a name or an id, since the room read carries no public name. Only `/r/<one segment>` names a room; `/r/` and `/r/a/b` are the 404 and ask the API nothing. A host other than `dash.bellman.sh` gets the page, so a local `wrangler dev` does. An API failure, an unreachable API or an answer of the wrong shape gets the app with the template's head and a 200, and nothing is cached: the app reads the room itself.
+- **R1. The site's `/docs` page needs nothing.** It names neither `dash.bellman.sh/r` nor how members are named, on `origin/main` or any branch. What the names and the hold make false on the site is `privacy.html` (two items of "Who else sees it" and the "Public handles" item of how long things are kept) and `terms.html` (one sentence of section 4): 3b posts their new versions, and 3c makes them current.
+- **R2. The sandbox frame takes bellman.sh as a parent.** Its `frame-ancestors` and `mountFrame`'s `ev.origin` check name `https://dash.bellman.sh` alone, so every diagram and HTML item on the bellman.sh page would be a refused frame. Task 2 makes both a list, `SANDBOX_PANEL_ORIGINS`, the dash and bellman.sh by default. CI deploys the panel only, so the owner runs `npm run deploy:sandbox` before the dash PR merges; the new frame accepts both parents, so it is safe early.
+- **R3. The build writes the asset links, not the Worker.** The public route is a lazy chunk, and with `base: "/"` Vite's preload helper is `` function(e){return`/`+e} `` (seen in a build of the dash's `origin/main`), which resolves against bellman.sh. So `base` is `https://dash.bellman.sh/`: the tags, the preload helper and the CSS's font URLs all name the dash (seen in the same build), and the Worker rewrites no link. Vite ignores the origin part in `npm run dev`.
+- **R4. The Worker sets the page's headers itself.** The assets binding's answer carries `public/_headers` (seen in workerd), whose `script-src 'self'` would refuse the dash's scripts on bellman.sh. `worker/policy.ts` holds the page's policy, the panel's with `'self'` replaced by the dash's origin, and `src/lib/csp.test.ts` holds the two together.
+- **R5. `run_worker_first = ["/r/*"]` is required.** With compatibility date 2026-09-01 the asset layer answers a browser's navigation to a path no file matches with `index.html` and never runs the Worker, so the 301 would reach crawlers only. The vitest pool runs the Worker for a navigation either way (removing the setting left the 301 in place, in a scratch copy), so `src/wrangler.test.ts` pins the line and the dash's CI checks the live redirect after each deploy.
+- **R6. The route runs in front of the site's Custom Domain.** The site holds `bellman.sh` as a Custom Domain, not a route. Cloudflare treats a Custom Domain's Worker as an origin and runs a route on the zone before it, so the spec's outcome holds.
+- **R7. The summary's members come from the room's newest events.** The public room read carries no roster. The Worker also reads `/public/rooms/<id>/events` and lists the distinct names of its senders, `system` left out, in the order they first appear, at most 20. The hosted seat's `host@bellman` stays in it, as the page shows it.
+- **R8. The dash keeps its relabel of a signed creator,** until 2b by the spec, and after it too: for the cache's hour after a change, `by.as` can be the creator's cached old name, and `relabel` shows the byline's current handle there (R23).
+- **R9. A name is decided per label.** A label is how someone signed in, not an account: two accounts can share one. The accounts come from `session.members` and `getMembers` for the departed member ids the page carries. A label the room seated exactly one account under, which holds a handle, is `@handle`; any other is `member N`. The hosted seat has no number, so it is never renamed.
+- **R10. Names go through an hour's cache (spec D5).** `HandleCache`, per isolate and keyed by user id, sits in front of the exact batched `handlesOf`. It keeps an account with no handle too. Each entry's time is taken before its registry read, so an answer read just before a release expires within the hour after it, inside the hold. A page naming nobody reads nothing.
+- **R11. `by: { handle, as }` stays,** and `as` is the creator's public name. The dash reads it.
+- **R12. One signed-in write for bellman.sh (spec D7).** `BELLMAN_PUBLIC_PAGE_ORIGINS` is parsed as `BELLMAN_PANEL_ORIGINS` is. `moderationRoutes` takes it, beside the panel's, for `POST` and `OPTIONS` on `/rooms/:id/reports` alone; a `GET` there, the creator's list, stays the panel's. `panelDestination` admits it for the sign-in return, and still falls back to the panel's first origin. The Worker passes it to both; the Node server passes none. `csrfRefusal`'s comment says what the list grants, and the PR says out loud that bellman.sh gains that one write.
+- **R13. The report route is abuse Task 11's (section 1C), and the Report form abuse Task D4's.** 2a starts after 1C merges. Its tests file a report from bellman.sh with a cookie and refuse bellman.sh a ban, the creator's report list and a handle; a sign-in started on a room's page returns to it.
+- **R14. The tool texts change in two steps.** 2a's (Task 11) are the two that name the page's host; 2b's (Task 19) are `bellman_start`'s and `bellman_connect`'s "members named by number", now by the public handle their account claimed, or by number, with `bellman_connect`'s "you included". ARCHITECTURE section 11's tool-definitions row is re-measured in each.
+- **R15. Two ADRs, one per server PR.** ADR 0023 (2a) records the move, ADR 0024 (2b) the names, the cache, the hold and the notice. ADR 0011's status line names decision 3 as amended by ADR 0023 in 2a and decision 5 by ADR 0024 in 2b; ADR 0021's names decisions 2 and 4 as amended by ADR 0024. ADRs are not rewritten.
+- **R16. One canonical per room (your ruling).** The room read gains `public_url`, from `publicRoomUrl`, in 2a. The Worker writes it as the canonical link and `og:url` when it starts with `PUBLIC_ROOM_BASE`, and the key as requested otherwise, which is the case from today's server until 2a. Only `/r/<one segment>` names a room; `/r/` and `/r/a/b` are the 404 and ask the API nothing. A host other than `dash.bellman.sh` gets the page. An API failure, an unreachable API or an answer of the wrong shape gets the app with the template's head and a 200, and nothing is cached.
 - **R17. The dash's Worker tests are a package of their own**, `worker-tests/`, as bellman's are: `@cloudflare/vitest-pool-workers` 0.23.0 still peers on vitest 4, and the dash runs vitest 5. Its `overrides` pin `miniflare` and `workerd` to what the dash's own wrangler resolves, because the pool's workerd refuses compatibility date 2026-09-01 (it stops at 2026-08-22, seen).
 - **R18. The site's deploy checks that `bellman.sh/r/*` still reaches the dash,** for the spec's risk of two Workers on one host.
-- **R19. The hold takes the caller's clock.** `claimHandle`, `releaseHandle` and `releaseHandleNamed` gain a required `at`, as `signRoom` has one, so the contract sets the time for both stores without a fake clock. `npm run typecheck` then lists every caller in `src/` and `tests/`; `worker-tests/` is in no typecheck program, so Task 9 names its three calls.
-- **R20. The hold is a row of its own:** `hh:<handle>`, the time the name was freed, written in the transaction that deletes the `hn:` row (`#release`, and `claimHandle` moving to another name) and deleted when the name is claimed again. `MemoryStore` keeps a map. It names no account, so the privacy page's "releasing it deletes both at once" stays true of the handle and its signatures. ponytail: a held name nobody claims again keeps its row.
+- **R19. The hold takes the caller's clock.** `claimHandle`, `releaseHandle` and `releaseHandleNamed` gain a required `at`, as `signRoom` has one, so the contract sets the time for both stores without a fake clock. `npm run typecheck` then lists every caller in `src/` and `tests/`; `worker-tests/` is in no typecheck program, so Task 16 names its three calls.
+- **R20. The hold is a row of its own:** `hh:<handle>`, the time the name was freed, written in the transaction that deletes the `hn:` row and deleted when the name is claimed again. `MemoryStore` keeps a map. It names no account. ponytail: a held name nobody claims again keeps its row.
 - **R21. Nothing but `claimHandle` answers "free" for a handle.** No route checks one, the dash learns "taken" from the PUT's 409, and the handle page's 404 during the hold says nobody holds the name, which is true.
-- **R22. The 409's description changes.** `<handle> belongs to someone else` is false for a last holder during the hold, and the dash shows the description as it comes. It becomes `<handle> is taken. A handle that was released or changed away from is held for 65 minutes before anyone can claim it.`
-- **R23. The byline stays an exact read** (`bylineFor`, ADR 0021 decision 4); only names are cached. After a change, `by.handle` is the new handle at once and `as` can be the cached old name for the hour, which the dash's relabel shows as `by.handle`. After a release, `by` is null at once and the names go within the hour.
-- **R24. Only the Worker caches.** `handles` is optional in `PublicRouteDeps`: absent, a read is exact, which the Node server (local only) and the tests that are not about the cache keep. The Worker passes one per isolate, as it does `SuspensionCache`, and a worker test with a user of its own shows it does: a handle released after a read still shows on the next.
-- **R25. The dash's Settings copy is false twice after Part 2:** "with your own messages in it under that name" holds for signed rooms only, and "frees it for anyone at once" ignores the hold. It changes in a dash PR of its own, in Part 3, after Part 2 deploys, since before that it would describe a hold the server does not keep.
-- **R26. Two polls, every 4 seconds each.** D5's "public pages poll every 4 seconds" is each of the page's two polls, the log and the surface (`POLL_MS` in `src/lib/use-events.ts` and `src/lib/use-surface.ts`), so without the cache one viewer could reach the registry every 2 seconds. ADR 0023 says both.
-- **R27. Four existing tests reclaim a freed name at once, which the hold refuses:** the contract's "frees the old handle when one changes", `tests/http-bylines.test.ts`' "free the old handle on a change, and release it on DELETE" and "lists none of an old owner's rooms under a freed handle someone else claimed", and `worker-tests/handle-routes.test.ts`' "read, claim, refuse a held one, free the old on a change, release, and refuse the rest". Task 9 makes each expect "taken", then claim after the hold with a later `at`.
-- **R28. `worker-tests/public-routes.test.ts`' handle-page case no longer asserts `as`:** its earlier cases leave the Worker's cache holding that user's answer for the hour. The cache's own cases run in Node with a fake clock, and its wiring in a worker test with a user of its own.
+- **R22. The 409's description changes,** from `<handle> belongs to someone else`, false for a last holder during the hold and shown by the dash as it comes, to `<handle> is taken. A handle that was released or changed away from is held for 65 minutes before anyone can claim it.`
+- **R23. The byline stays an exact read** (`bylineFor`); only names are cached. After a change, `by.handle` is new at once and `as` can be the cached old name for the hour, which the dash's relabel shows as `by.handle`. After a release, `by` is null at once.
+- **R24. Only the Worker caches,** per isolate, as it does `SuspensionCache`. `handles` is optional in `PublicRouteDeps`: absent, a read is exact, which the Node server and the tests not about the cache keep. A worker test with a user of its own shows the Worker passes it.
+- **R25. The dash's Settings copy is false twice once 2b ships** ("with your own messages in it under that name", and "frees it for anyone at once"). 1b rewrites it on the notice day with sentences dated from the effective date, which stay true after it, and which tell anyone who claims a handle during the 30 days.
+- **R26. Two polls, every 4 seconds each.** D5's "poll every 4 seconds" is each of the page's two polls, the log and the surface (`POLL_MS` in `src/lib/use-events.ts` and `src/lib/use-surface.ts`), so without the cache one viewer could reach the registry every 2 seconds. ADR 0024 says both.
+- **R27. Four existing tests reclaim a freed name at once, which the hold refuses:** the contract's "frees the old handle when one changes", `tests/http-bylines.test.ts`' "free the old handle on a change, and release it on DELETE" and "lists none of an old owner's rooms under a freed handle someone else claimed", and `worker-tests/handle-routes.test.ts`' "read, claim, refuse a held one, free the old on a change, release, and refuse the rest". Task 16 makes each expect "taken", then claim after the hold with a later `at`.
+- **R28. `worker-tests/public-routes.test.ts`' handle-page case stops asserting `as`:** its earlier cases leave the Worker's cache holding that user's answer for the hour.
+- **R29. The recipient list is an operator route, `GET /admin/handles`, in 2a,** since the notice goes out before 2b. It lists every account holding a handle, with the sign-in label of one room it sat in (`sessionsJoinedBy`, then `membersOfUser`), which for most accounts is their email address. An account in no room gets `label: null`; the change shows its handle nowhere, so it needs no notice.
+- **R30. The upcoming versions are pages of their own.** 3b adds `privacy-next.html` and `terms-next.html`, each the full new text under `Effective <EFFECTIVE_DATE>`, and the current pages link them under their own effective line. 3c, on the effective date, makes them current and has the site's Worker answer `/privacy-next` and `/terms-next` with a 301 to the current pages, since the email links one.
+- **R31. The email goes to every holder.** The terms promise notice of a material change to paid users; the privacy policy promises it to everyone, and this change is one to how holders' data is used.
+- **R32. 2b and 3c merge on the effective date, not after it:** 1b's Settings copy dates the hold and the names from it.
 
 ## Review Focus
 
@@ -73,9 +79,10 @@ Every place the spec is silent or the code disagrees with it, and what this plan
 2. **A diagram or an HTML item on the bellman.sh page.** The sandbox refuses a parent it was not built for (R2). Task 2 tests a message from the public page's origin and the resize back to it.
 3. **The public route's own chunk on bellman.sh.** Its preloads and the fonts load from wherever the build says (R3). Task 1 tests the built HTML, the preload helper's base and the font URLs; Task 4 tests an asset's CORS header.
 4. **The API failing, or unreachable, while someone opens a room.** They should get the app, which reads the room again, not a 500, and the failure must not be kept as a 404 for a minute (R16). Task 5 tests both.
-5. **A member named by label alone, or one who has left.** A payload can carry a label with no member id beside it, and a departed member is not in `session.members` (R9). Task 11 tests both.
-6. **The hold's boundary.** A claim a millisecond before `freedAt + HANDLE_HOLD_MS` is "taken", for another account and for the last holder, and one at exactly that time is "claimed", for each of the three paths that free a name (R19, R20). Task 9 tests it in both stores.
-7. **A handle read just before its release.** The registry answers before the release lands and the answer reaches the cache after it; the entry's time is the read's start, so it is gone within the hour after the release, before the hold ends (R10). Task 11 tests it with the read held while the clock moves six minutes.
+5. **A member named by label alone, or one who has left.** A payload can carry a label with no member id beside it, and a departed member is not in `session.members` (R9). Task 18 tests both.
+6. **The hold's boundary.** A claim a millisecond before `freedAt + HANDLE_HOLD_MS` is "taken", for another account and for the last holder, and one at exactly that time is "claimed", for each of the three paths that free a name (R19, R20). Task 16 tests it in both stores.
+7. **A handle read just before its release.** The registry answers before the release lands and the answer reaches the cache after it; the entry's time is the read's start, so it is gone within the hour after the release, before the hold ends (R10). Task 18 tests it with the read held while the clock moves six minutes.
+8. **A signed-in call from bellman.sh to anything but a report.** The new list must not leak into another route: the creator's report list, a ban and a handle each refuse bellman.sh, while the panel's origin is still served (R12). Task 9 tests both sides.
 
 ## Every place that writes `dash.bellman.sh/r`
 
@@ -93,17 +100,40 @@ git -C ~/src/github.com/bellman-sh/site grep -n -E -e 'dash\.bellman\.sh(/|</cod
 What it found, and the task that changes each:
 
 - **bellman, the producer:** `PUBLIC_ROOM_URL_BASE` in `src/codes.ts`. Every `public_url` comes from it, through `publicRoomUrl` (Task 8).
-- **bellman, text:** `bellman_public_name`'s description (`src/tools/public-name.ts`), `bellman_start`'s `public_name` line (`src/tools/start.ts`) and their generated pages under `docs-site/src/content/docs/reference/tools/` (Task 13); `README.md`'s public rooms item, `docs-site/src/content/docs/guides/public-rooms.md` in four places, and ARCHITECTURE's "Dash renders it at `/r/<id>`" (Task 14).
+- **bellman, text:** `bellman_public_name`'s description (`src/tools/public-name.ts`), `bellman_start`'s `public_name` line (`src/tools/start.ts`) and their generated pages under `docs-site/src/content/docs/reference/tools/` (Task 11); `README.md`'s public rooms item, `docs-site/src/content/docs/guides/public-rooms.md` in four places, and ARCHITECTURE's "Dash renders it at `/r/<id>`" (Task 12).
 - **bellman, tests that assert it:** `tests/public-names.test.ts` (5), `tests/public-rooms.test.ts` (2), `tests/http-bylines.test.ts` (3), `worker-tests/public-routes.test.ts` (1), and a fixture in `ui/test/render.test.ts` (2) (Task 8).
-- **bellman, kept as a record:** decision 3 of `docs/adr/0011-public-rooms.md`; ADR 0023 amends it (Task 14).
+- **bellman, kept as a record:** decision 3 of `docs/adr/0011-public-rooms.md`; ADR 0023 amends it (Task 12).
 - **the dash, composed:** `PublicControls`' copy link, `` `${window.location.origin}/r/…` `` in `src/components/canvas/public-controls.tsx`, and `HandleRooms`' room links, a relative `/r/…` on `dash.bellman.sh/u/<handle>`, in `src/routes/public-handle.tsx`. Their tests: `src/components/canvas/canvas.test.tsx` (2), `src/routes/public-handle.test.tsx` (2), `src/router.test.tsx` (2) (Task 3).
 - **the dash, literal:** the header comment of `src/routes/public-room.tsx`, and a `public_url` fixture in each of `src/router.test.tsx` and `src/routes/public-handle.test.tsx` (Task 3).
 - **not writers:** the route's own path (`src/router.tsx`), the public page's tab links, `boot("/r/…")` in `src/router.test.tsx` and the `Link` stand-in in `src/routes/public-room.test.tsx`. They are paths inside the app, so on bellman.sh they stay on bellman.sh.
 - **the site:** nothing. Its illustrations already say `bellman.sh/r/…`.
 
+## Owner actions, in order
+
+1. **Before the dash PR merges:** give the dash repo's `CLOUDFLARE_API_TOKEN` Zone > Workers Routes > Edit on `bellman.sh`, or attach `bellman.sh/r/*` to `bellman-dash` by hand. wrangler 4.148 makes the new script live before it attaches routes, with no rollback, so a deploy without the route sends every old link to the site's 404.
+2. **Before the dash PR merges:** `npm run deploy:sandbox` from the PR's branch.
+3. **Before the notice:** approve 3b's copy (Task 14) and 1b's (Task 15), and pick `<NOTICE_DATE>` and `<EFFECTIVE_DATE>`, 30 days apart.
+4. **On the notice day, once 3b and 1b are live:** send the notice (below) to every address `GET /admin/handles` lists, from the owner's mailbox.
+
+The recipients: `curl -s -H "authorization: Bearer <an operator's access token>" https://mcp.bellman.sh/admin/handles` answers `{ holders: [{ handle, user_id, label }] }`. A `label` is the sign-in label of a room the account sat in, which for most accounts is their email address; one written `<login>@github` is a GitHub account with no email it shared, and `user_id`'s `u_github_<id>` names it. A `null` label is an account in no room, which the change does not reach.
+
+The notice, for the owner to send:
+
+> **Subject:** From `<EFFECTIVE_DATE>`, Bellman's public rooms will show your handle
+>
+> You hold the handle @`<handle>` on Bellman.
+>
+> From `<EFFECTIVE_DATE>`, every public room you are in, or were in, will show @`<handle>` beside your messages there, past rooms included. Until then, those rooms show you by number, except rooms you signed.
+>
+> If you would rather they did not, release your handle before `<EFFECTIVE_DATE>` in Settings: https://dash.bellman.sh/settings. Public rooms then show you by number.
+>
+> The updated privacy policy takes effect the same day: https://bellman.sh/privacy-next
+>
+> Reply to this email with any question.
+
 ---
 
-# Part 1 — the dash (one PR, first)
+# Part 1 — the dash: the page (one PR, first)
 
 The checkout is `~/src/github.com/bellman-sh/dash`: `git fetch origin`, then `git switch -c mcfearsome/public-on-bellman-sh origin/main`, or a worktree from `origin/main`. It needs its own `npm ci`; never symlink `node_modules`. Unit tests: `npm test`. Lint: `npm run lint`. The build, which typechecks: `npm run build`.
 
@@ -568,14 +598,16 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 type Origin = { memberId: string; label: string };
+type Over = { id?: string; room?: string; purpose?: string | null; by?: { handle: string; as: string } | null; log?: Origin[]; publicUrl?: string };
 
 /** A public room under `key`, answered as GET /public/rooms/:key and /public/rooms/:id/events answer. Its id. */
-function stubRoom(key: string, over: { id?: string; room?: string; purpose?: string | null; by?: { handle: string; as: string } | null; log?: Origin[] } = {}) {
+function stubRoom(key: string, over: Over = {}) {
   const id = over.id ?? `qs_${key.replaceAll("-", "_")}`;
   answers[`${API}/public/rooms/${key}`] = {
     status: 200,
     body: {
       id, status: "active", closed_at: null, mode: "swarm", by: over.by ?? null,
+      ...(over.publicUrl === undefined ? {} : { public_url: over.publicUrl }),
       text: {
         trust: "untrusted", origin: { memberId: "m_creator", label: "member 1" },
         data: { room: over.room ?? "Open review", purpose: over.purpose === undefined ? "Read along" : over.purpose },
@@ -710,7 +742,7 @@ git commit -m "bellman.sh/r/<room> is the dash's app under its own policy, 404 f
 
 **Interfaces:**
 - Consumes: `apiRead` (Task 5), `PUBLIC_ROOM_BASE` (Task 1).
-- Produces: in `worker/index.ts`, a local `interface PublicRoom { id: string; text: { data: { room: string; purpose: string | null } }; by: { handle: string; as: string } | null }`, mirroring `GET /public/rooms/:id`; `SUMMARY_NAMES = 20`; `HEAD_TAGS: string`; `namesIn(log: unknown, by: PublicRoom["by"]): string[]`; `written(page: Response, room: PublicRoom, key: string, names: string[]): Response`.
+- Produces: in `worker/index.ts`, a local `interface PublicRoom { id: string; public_url?: string; text: { data: { room: string; purpose: string | null } }; by: { handle: string; as: string } | null }`, mirroring `GET /public/rooms/:id` (`public_url` arrives with 2a); `SUMMARY_NAMES = 20`; `HEAD_TAGS: string`; `namesIn(log: unknown, by: PublicRoom["by"]): string[]`; `canonicalOf(room: PublicRoom, key: string): string`; `written(page: Response, room: PublicRoom, key: string, names: string[]): Response`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -731,6 +763,17 @@ describe("the room written into its page", () => {
     expect(await content('meta[property="og:image"]')).toEqual(["https://bellman.sh/og.png"]);
     expect(await content('meta[name="twitter:card"]')).toEqual(["summary"]);
     expect(await attrs(html, 'link[rel="canonical"]', "href")).toEqual(["https://bellman.sh/r/open-review"]);
+  });
+
+  // R16: one canonical per room, its public name's link while it holds one, from the room's own read.
+  it("names the room's own public link as canonical, a name it holds when read by its id, and ignores a link off bellman.sh/r/", async () => {
+    stubRoom("qs_named", { id: "qs_named", publicUrl: "https://bellman.sh/r/named-room" });
+    const named = await (await open("/r/qs_named")).text();
+    expect(await attrs(named, 'link[rel="canonical"]', "href")).toEqual(["https://bellman.sh/r/named-room"]);
+    expect(await attrs(named, 'meta[property="og:url"]', "content")).toEqual(["https://bellman.sh/r/named-room"]);
+    stubRoom("qs_elsewhere", { id: "qs_elsewhere", publicUrl: "https://elsewhere.example/r/x" });
+    const elsewhere = await (await open("/r/qs_elsewhere")).text();
+    expect(await attrs(elsewhere, 'link[rel="canonical"]', "href")).toEqual(["https://bellman.sh/r/qs_elsewhere"]);
   });
 
   it("writes a summary a crawler can read, which the app replaces: the room's name, its byline, its purpose, its members' names", async () => {
@@ -794,6 +837,7 @@ Expected: the new cases FAIL: the title is `Bellman dash`, no `og:` tag and no s
 
 - The log: for a 200 room read, `apiRead(`/public/rooms/${encodeURIComponent(room.id)}/events`)`; a 200 gives `namesIn(body, room.by)`, anything else no names.
 - `namesIn`: each event's `origin.label`, skipping origins whose `memberId` is `"system"`, with `by.as` shown as `` `@${by.handle}` `` (the dash's `nameFor`, R8), distinct, in order of first appearance, the first `SUMMARY_NAMES`.
+- `canonicalOf`: `room.public_url` when it is a string that starts with `PUBLIC_ROOM_BASE`, else `` `${PUBLIC_ROOM_BASE}${key}` `` (R16).
 - `HEAD_TAGS`, constant markup appended to `<head>`, the values the second pass sets left empty:
 
 ```ts
@@ -805,7 +849,7 @@ const HEAD_TAGS =
 
 - `written` runs two `HTMLRewriter` passes, the second over the first's output: an element the first pass appends is not matched by the same pass, and `setAttribute` is the only way to an escaped attribute value.
   - The first pass: `title` gets `setInnerContent(`${room.text.data.room} \u{B7} Bellman`)`; `head` gets `append(HEAD_TAGS, { html: true })`; `div#root` gets the summary, each tag appended with `{ html: true }` and each value with `{ html: false }`: `<main data-room-summary>`, then `<h1>` and the name, then `<p>` and `` `by @${room.by.handle}` `` when there is a byline, `<p>` and the purpose when there is one, `<p>` and `` `Members: ${names.join(", ")}` `` when there are names, then `</main>`.
-  - The second pass sets `content` on `meta[name="description"]` and `meta[property="og:description"]` to the purpose, or `A public Bellman room.` when it is null or empty; on `meta[property="og:title"]` to the room's name; on `meta[property="og:url"]`, and `href` on `link[rel="canonical"]`, to `` `${PUBLIC_ROOM_BASE}${key}` ``.
+  - The second pass sets `content` on `meta[name="description"]` and `meta[property="og:description"]` to the purpose, or `A public Bellman room.` when it is null or empty; on `meta[property="og:title"]` to the room's name; on `meta[property="og:url"]`, and `href` on `link[rel="canonical"]`, to `canonicalOf(room, key)`.
 
 - [ ] **Step 4: Run them and watch them pass**
 
@@ -885,57 +929,557 @@ git commit -m "The dash's Worker takes bellman.sh/r/*, and each deploy checks th
 ### Part 1's review and PR
 
 - [ ] **The whole-branch review:** one reviewer over `git diff origin/main...HEAD`, with this plan and the spec. Fix what it finds, with tests, before the PR.
-- [ ] **The PR.** Read `git diff --stat origin/main...HEAD` against the files these tasks list, then push and open it. The body says what changes; that it ships before the server's PR; that the sandbox is deployed from the branch before the merge (`npm run deploy:sandbox`, by hand); that the route needs Workers Routes on the `bellman.sh` zone, granted to the CI token or attached by hand before the merge, or the old links go to the site's 404; and that CI now checks the redirect live.
-- [ ] **Before the merge:** the sandbox is deployed, and the token holds the route permission or the route is attached by hand.
+- [ ] **The PR.** Read `git diff --stat origin/main...HEAD` against the files these tasks list, then push and open it. The body says what changes; that it ships before the server's PRs; that owner actions 1 and 2 come before its merge; and that CI now checks the redirect live.
+- [ ] **Before the merge:** owner actions 1 and 2 are done.
 - [ ] **After the merge:** read the deploy job and the new check, not only the merge. Open `https://bellman.sh/r/<a public room>`: the canvas draws, a diagram renders, the log tab reads. Paste the link into Slack and see it unfurl.
 
 ---
 
-# Part 2 — bellman (one PR, after Part 1 is deployed)
+# Part 2a — bellman: the move (one PR, after Part 1 is deployed and abuse 1C has merged)
 
-The workspace is `/Users/mcfearsome/.worktrees/bellman-public-host`, a jj workspace on the bookmark `mcfearsome/public-on-bellman-sh`. It has no `.git`, so git commands fail there: use `jj`, and `jj -R ~/src/github.com/bellman-sh/bellman git fetch` to fetch. `npm ci` has been run. Unit tests: `npx vitest run <file>`. The workerd suite: `npm run test:worker`. Everything: `npm run verify`.
+The workspace is `/Users/mcfearsome/.worktrees/bellman-public-host`, a jj workspace on the bookmark `mcfearsome/public-on-bellman-sh`. It has no `.git`, so git commands fail there: use `jj`, and `jj -R ~/src/github.com/bellman-sh/bellman git fetch` to fetch. Rebase onto `trunk()` once the abuse protections' section 1C is on main (`POST /rooms/:id/reports` in `src/http/moderation.ts`), then `npm ci`. Unit tests: `npx vitest run <file>`. The workerd suite: `npm run test:worker`. Everything: `npm run verify`.
 
-### Task 8: Public links start `https://bellman.sh/r/`
+### Task 8: Public links start `https://bellman.sh/r/`, and a room's read names its own
 
 **Files:**
-- Modify: `src/codes.ts`
-- Test: `tests/public-names.test.ts`, `tests/public-rooms.test.ts`, `tests/http-bylines.test.ts`, `worker-tests/public-routes.test.ts`, `ui/test/render.test.ts`
+- Modify: `src/codes.ts`, `src/http/public.ts` (the room read)
+- Test: `tests/public-names.test.ts`, `tests/public-rooms.test.ts`, `tests/http-bylines.test.ts`, `tests/http-public.test.ts`, `worker-tests/public-routes.test.ts`, `ui/test/render.test.ts`
 
 **Interfaces:**
-- Produces: `PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/"`; `publicRoomUrl` is unchanged.
+- Produces: `PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/"`; `GET /public/rooms/:id` gains `public_url`, `publicRoomUrl(session)`: its name's link while it holds one, its id's otherwise. The dash's Worker writes it as the canonical link (Task 6).
 
 - [ ] **Step 1: Write the failing tests**
 
-In each of the five files, replace `https://dash.bellman.sh/r/` with `https://bellman.sh/r/`: 5, 2, 3, 1 and 2 places. Then `rg -n 'dash\.bellman\.sh/r' tests worker-tests ui/test` prints nothing.
+- In `tests/public-names.test.ts`, `tests/public-rooms.test.ts`, `tests/http-bylines.test.ts`, `worker-tests/public-routes.test.ts` and `ui/test/render.test.ts`, replace `https://dash.bellman.sh/r/` with `https://bellman.sh/r/`: 5, 2, 3, 1 and 2 places. Then `rg -n 'dash\.bellman\.sh/r' tests worker-tests ui/test` prints nothing.
+- In `tests/http-public.test.ts`, "answers a public room to anyone with no credential, every origin and no credentials grant" expects the keys `["by", "closed_at", "id", "mode", "public_url", "status", "text"]` and `public_url: "https://bellman.sh/r/qs_public"` in its `toMatchObject`; "reads the room, its surface and its log by its name as by its session id" adds, after naming the room, `expect((await bodyOf(await read(`/public/rooms/${PUB}`))).public_url).toBe("https://bellman.sh/r/open-review");`.
 
 - [ ] **Step 2: Run them and watch them fail**
 
-Run: `npx vitest run tests/public-names.test.ts tests/public-rooms.test.ts tests/http-bylines.test.ts ui/test/render.test.ts`
-Expected: FAIL in the first three, each `expected 'https://dash.bellman.sh/r/…' to be 'https://bellman.sh/r/…'`. `ui/test/render.test.ts` PASSES: its fixture is input, which the card prints as given.
+Run: `npx vitest run tests/public-names.test.ts tests/public-rooms.test.ts tests/http-bylines.test.ts tests/http-public.test.ts ui/test/render.test.ts`
+Expected: FAIL in the first four: `expected 'https://dash.bellman.sh/r/…' to be 'https://bellman.sh/r/…'`, and the room read has no `public_url`. `ui/test/render.test.ts` PASSES: its fixture is input, which the card prints as given.
 
 - [ ] **Step 3: Implement**
 
-`PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/"`. Its comment: the page a public room is read at (public rooms on bellman.sh spec, D1) is `bellman.sh/r/`, which the dash's Worker serves, by the room's name while it holds one (public names spec, D7) and by its id otherwise.
+- `PUBLIC_ROOM_URL_BASE = "https://bellman.sh/r/"`. Its comment: the page a public room is read at (public rooms on bellman.sh spec, D1) is `bellman.sh/r/`, which the dash's Worker serves, by the room's name while it holds one (public names spec, D7) and by its id otherwise.
+- The room read's object gains `public_url: publicRoomUrl(session)`, with a comment: the dash's Worker writes it as the room's one canonical link.
 
 - [ ] **Step 4: Run them and watch them pass**
 
-Run: `npx vitest run tests/public-names.test.ts tests/public-rooms.test.ts tests/http-bylines.test.ts ui/test/render.test.ts && npm run test:worker`
+Run: `npx vitest run tests/public-names.test.ts tests/public-rooms.test.ts tests/http-bylines.test.ts tests/http-public.test.ts ui/test/render.test.ts && npm run test:worker`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-jj commit -m "Public room links start https://bellman.sh/r/, where the dash's Worker serves the page"
+jj commit -m "Public room links start https://bellman.sh/r/, and a public room's read names its own link"
 ```
 
-### Task 9: A freed handle is held for 65 minutes
+### Task 9: One signed-in write for bellman.sh
+
+**Files:**
+- Modify: `wrangler.toml`, `src/worker.ts` (`WorkerEnv`, `oauthConfig`, the moderation routes' deps), `src/app.ts`, `src/oauth/routes.ts` (`OAuthConfig`, `panelDestination` and its two callers), `src/http/moderation.ts`, `src/oauth/browser.ts` (`csrfRefusal`'s comment), `tests/helpers/panel.ts`
+- Create: `tests/public-page-origin.test.ts`
+- Test: `tests/browser-safety.test.ts`, `tests/panel-session.test.ts`, `worker-tests/panel-wiring.test.ts`
+
+**Interfaces:**
+- Produces: `BELLMAN_PUBLIC_PAGE_ORIGINS` in `WorkerEnv` and `wrangler.toml`; `OAuthConfig.publicPageOrigins?: string[]`, read by the sign-in return alone; `ModerationDeps.publicPageOrigins: readonly string[]`; `panelDestination(returnTo: string | undefined, panelOrigins: string[], publicPageOrigins: readonly string[]): string`; `productionVar(name: string): string` in `tests/helpers/panel.ts`, the var as `wrangler.toml` sets it, matched by `` new RegExp(`^${name} = "([^"]*)"$`, "m") ``, throwing when the line is missing.
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/public-page-origin.test.ts`:
+
+```ts
+/**
+ * Public rooms on bellman.sh, D7: a reader on bellman.sh files a report with their cookie, and makes no other signed-in
+ * call. A cookie caller here is the bearer caller marked `via: "cookie"`, as tests/http-bylines.test.ts makes one, so
+ * the CSRF check runs as it does for a browser.
+ */
+import { beforeEach, describe, expect, it } from "vitest";
+import { resolveIdentity } from "../src/auth.js";
+import { handleRoutes } from "../src/http/handles.js";
+import { moderationRoutes, type ModerationDeps } from "../src/http/moderation.js";
+import type { RoomCaller } from "../src/http/rooms.js";
+import { MemoryStore } from "../src/store.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
+import { DEV_KEY } from "./helpers/harness.js";
+
+const ISSUER = "https://mcp.example.test";
+const PANEL = "https://dash.example.test";
+const PAGE = "https://bellman.sh";
+const ROOM = "qs_page_origin";
+
+let store: MemoryStore;
+let deps: ModerationDeps;
+const viaCookie = async (request: Request): Promise<RoomCaller | null> => {
+  const identity = resolveIdentity(request.headers.get("authorization") ?? undefined);
+  return identity ? { identity, via: "cookie" } : null;
+};
+
+beforeEach(async () => {
+  store = new MemoryStore();
+  deps = { store, caller: viaCookie, panelOrigins: [PANEL], publicPageOrigins: [PAGE], mailReport: async () => {} };
+  await store.createSession(session({ id: ROOM, manifest: roomManifest({ public: true }), members: [member()] }));
+});
+
+const send = (route: (r: Request) => Promise<Response | undefined>, method: string, path: string, origin: string, body?: unknown, key = DEV_KEY.outsider) =>
+  route(new Request(`${ISSUER}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${key}`, origin, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }));
+const moderation = (r: Request) => moderationRoutes(r, deps);
+const handles = (r: Request) => handleRoutes(r, { store, caller: viaCookie, panelOrigins: [PANEL] });
+
+describe("bellman.sh's one signed-in write (public rooms on bellman.sh spec, D7)", () => {
+  it("files a report a reader on bellman.sh posts with their cookie, and grants its preflight", async () => {
+    const pre = (await moderation(new Request(`${ISSUER}/rooms/${ROOM}/reports`, { method: "OPTIONS", headers: { origin: PAGE, "access-control-request-method": "POST" } })))!;
+    expect([pre.status, pre.headers.get("access-control-allow-origin"), pre.headers.get("access-control-allow-credentials")]).toEqual([204, PAGE, "true"]);
+    const filed = (await send(moderation, "POST", `/rooms/${ROOM}/reports`, PAGE, { reason: "harassment" }))!;
+    expect([filed.status, filed.headers.get("access-control-allow-origin")]).toEqual([201, PAGE]);
+  });
+
+  // Review Focus 8.
+  it("refuses bellman.sh every other signed-in call: the creator's list of reports, a ban, a handle", async () => {
+    const listed = (await send(moderation, "GET", `/rooms/${ROOM}/reports`, PAGE, undefined, DEV_KEY.jesse))!;
+    expect(listed.headers.get("access-control-allow-origin")).toBeNull();
+    expect((await send(moderation, "POST", `/rooms/${ROOM}/bans`, PAGE, { user_id: "u_peer" }, DEV_KEY.jesse))!.status).toBe(403);
+    expect((await send(handles, "PUT", "/account/handle", PAGE, { handle: "page-write" }, DEV_KEY.jesse))!.status).toBe(403);
+    expect(await store.handleOf("u_jesse")).toBeUndefined();
+  });
+
+  // The control for the refusals above: the same calls from the panel pass the origin check.
+  it("still serves the panel those calls", async () => {
+    const listed = (await send(moderation, "GET", `/rooms/${ROOM}/reports`, PANEL, undefined, DEV_KEY.jesse))!;
+    expect(listed.headers.get("access-control-allow-origin")).toBe(PANEL);
+    expect((await send(moderation, "POST", `/rooms/${ROOM}/bans`, PANEL, { user_id: "u_peer" }, DEV_KEY.jesse))!.status).not.toBe(403);
+    expect((await send(handles, "PUT", "/account/handle", PANEL, { handle: "panel-write" }, DEV_KEY.jesse))!.status).toBe(200);
+  });
+});
+```
+
+`tests/browser-safety.test.ts`, in `describe("parsing BELLMAN_PANELS")`, with `productionVar` added to the file's import from `./helpers/panel.js`:
+
+```ts
+  // Public rooms on bellman.sh, D7: bellman.sh is not a panel origin, and the list it is on holds it alone.
+  it("deploys the dash alone as the panel, and bellman.sh alone as the public room page's origin", () => {
+    expect(parsePanelOrigins(productionVar("BELLMAN_PANEL_ORIGINS"))).toEqual(["https://dash.bellman.sh"]);
+    expect(parsePanelOrigins(productionVar("BELLMAN_PUBLIC_PAGE_ORIGINS"))).toEqual(["https://bellman.sh"]);
+  });
+```
+
+`tests/panel-session.test.ts`, in `describe("signing in to the panel")`:
+
+```ts
+  // Public rooms on bellman.sh, D7: "Sign in to report" on a room's page comes back to the room.
+  it("returns a sign-in started on a public room's page to the room, and nowhere but the panel without the list", async () => {
+    cfg.publicPageOrigins = ["https://bellman.sh"];
+    expect((await signIn("https://bellman.sh/r/open-review")).headers.get("location")).toBe("https://bellman.sh/r/open-review");
+    expect((await signIn()).headers.get("location")).toBe(PANEL);
+    cfg.publicPageOrigins = [];
+    expect((await signIn("https://bellman.sh/r/open-review")).headers.get("location")).toBe(PANEL);
+  });
+```
+
+`worker-tests/panel-wiring.test.ts`, the Worker reading the var:
+
+```ts
+  // Public rooms on bellman.sh, D7: the Worker hands BELLMAN_PUBLIC_PAGE_ORIGINS to the report route and the sign-in.
+  it("grants bellman.sh the report route's preflight and seals a sign-in's return to it, while the var names it", async () => {
+    const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+    const preflight = (env: ReturnType<typeof withPanel>) => worker.fetch(new Request(`${ISSUER}/rooms/qs_any/reports`, {
+      method: "OPTIONS", headers: { origin: "https://bellman.sh", "access-control-request-method": "POST" },
+    }), env, ctx);
+    const withPage = { ...withPanel(PANEL), BELLMAN_PUBLIC_PAGE_ORIGINS: "https://bellman.sh" } as ReturnType<typeof withPanel>;
+    expect((await preflight(withPage)).headers.get("access-control-allow-origin")).toBe("https://bellman.sh");
+    expect((await preflight(withPanel(PANEL))).headers.get("access-control-allow-origin")).toBeNull();
+    const chooser = await worker.fetch(new Request(`${ISSUER}/auth/signin?return_to=${encodeURIComponent("https://bellman.sh/r/open-review")}`), withPage, ctx);
+    const state = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]).split(".")[1];
+    const payload = JSON.parse(atob(state.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(state.length / 4) * 4, "=")));
+    expect(payload.bellman.return_to).toBe("https://bellman.sh/r/open-review");
+  });
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npx vitest run tests/public-page-origin.test.ts tests/browser-safety.test.ts tests/panel-session.test.ts; npm run test:worker`
+Expected: FAIL. The report's preflight and its post from bellman.sh carry no grant; `productionVar("BELLMAN_PUBLIC_PAGE_ORIGINS")` throws; the sign-in returns to the panel; in workerd the preflight carries no grant and the sealed return is the panel. The panel's control case PASSES.
+
+- [ ] **Step 3: Implement**
+
+- `wrangler.toml`: `BELLMAN_PUBLIC_PAGE_ORIGINS = "https://bellman.sh"` after `BELLMAN_PANEL_ORIGINS`, which stays `"https://dash.bellman.sh"`, with a comment: the origins public room pages are served from (the dash's Worker, at `bellman.sh/r/*`); honoured by `POST /rooms/:id/reports` and the sign-in return, and by nothing else; parsed as `BELLMAN_PANEL_ORIGINS` is.
+- `src/worker.ts`: `WorkerEnv.BELLMAN_PUBLIC_PAGE_ORIGINS?: string`, its doc saying the same; `oauthConfig` adds `publicPageOrigins: parsePanelOrigins(env.BELLMAN_PUBLIC_PAGE_ORIGINS)`; the moderation routes get `publicPageOrigins: oauth?.publicPageOrigins ?? []`.
+- `src/app.ts`: the moderation routes get `publicPageOrigins: []`.
+- `src/oauth/routes.ts`: `OAuthConfig.publicPageOrigins?: string[]`, its doc naming the sign-in return as its one reader; `panelDestination` admits `returnTo` when its origin is in either list, and still falls back to `panelOrigins[0]`; both callers pass `config.publicPageOrigins ?? []`.
+- `src/http/moderation.ts`: `ModerationDeps` gains `publicPageOrigins: readonly string[]`. The origin is `allowedOrigin(request, reportWrite ? [...deps.panelOrigins, ...deps.publicPageOrigins] : deps.panelOrigins)`, where `reportWrite` is the path `/rooms/:id/reports` with the method `POST` or `OPTIONS`. The header comment says a report is the one write the public room page's origin may make.
+- `src/oauth/browser.ts`, the paragraph of `csrfRefusal`'s comment that begins "SameSite=Lax is not sufficient on its own" becomes:
+
+```
+ * SameSite=Lax is not sufficient on its own, which is why this exists: SameSite
+ * is evaluated on the registrable domain, so every bellman.sh host is same-site
+ * with mcp.bellman.sh, and Lax lets a POST from any of them carry the session
+ * cookie. This admits only the origins its caller passes: the panel's for every
+ * write, and, for a report alone, the public room page's (BELLMAN_PUBLIC_PAGE_ORIGINS,
+ * https://bellman.sh). A script on a bellman.sh page can therefore file a report
+ * as its reader, and pass this check for nothing else.
+```
+
+- `tests/helpers/panel.ts`: `productionVar`.
+
+- [ ] **Step 4: Run them and watch them pass**
+
+Run: `npx vitest run tests/public-page-origin.test.ts tests/browser-safety.test.ts tests/panel-session.test.ts tests/http-moderation.test.ts && npm run typecheck && npm run typecheck:worker && npm run test:worker && npx wrangler deploy --dry-run --outdir "$(mktemp -d)"`
+Expected: PASS; the dry run lists `BELLMAN_PANEL_ORIGINS` as the dash and `BELLMAN_PUBLIC_PAGE_ORIGINS` as bellman.sh.
+
+- [ ] **Step 5: Commit**
+
+```bash
+jj commit -m "bellman.sh may file a report with its reader's cookie and receive the sign-in return, and make no other signed-in call"
+```
+
+### Task 10: The operator's list of handle holders, for the notice
+
+**Files:**
+- Modify: `src/store.ts` (the `BellmanStore` interface, `MemoryStore`), `src/store-do.ts` (`RegistryDO`, `DurableObjectStore`), `src/oauth/routes.ts` (`PlanStore`, a `GET /admin/handles` branch beside `/admin/handles/:handle`)
+- Test: `tests/helpers/store-contract.ts`, `tests/http-bylines.test.ts`
+
+**Interfaces:**
+- Produces: `handleHolders(): Promise<{ userId: string; handle: string }[]>` on `BellmanStore`, after `userOfHandle`: every account holding a handle, by user id. ponytail: the whole list in one answer; a page when holders reach thousands. `PlanStore` gains `"handleHolders" | "sessionsJoinedBy" | "membersOfUser"`. `GET /admin/handles`, through `operatorGate`, answers `{ holders: [{ handle, user_id, label }] }`, where `label` is the label of the account's seat in the first room `sessionsJoinedBy(userId, 1)` names, through `membersOfUser`, or `null` when there is none (R29).
+
+- [ ] **Step 1: Write the failing tests**
+
+In `describe("handles and bylines")` of `tests/helpers/store-contract.ts`:
+
+```ts
+      it("lists every account holding a handle, by user id, and none that released one", async () => {
+        await store.claimHandle("u_b", "grace");
+        await store.claimHandle("u_a", "ada");
+        await store.claimHandle("u_c", "cleo");
+        await store.releaseHandle("u_c");
+        expect(await store.handleHolders()).toEqual([{ userId: "u_a", handle: "ada" }, { userId: "u_b", handle: "grace" }]);
+      });
+```
+
+In `tests/http-bylines.test.ts`, `describe("DELETE /admin/handles/:handle")` becomes `describe("the operator's /admin/handles routes")`, and gains:
+
+```ts
+  const holders = async (headers: Record<string, string>, method = "GET") =>
+    route(new Request(`${ISSUER}/admin/handles`, { method, headers }));
+
+  // Public rooms on bellman.sh, D6: the notice's recipients, each with the sign-in label of a room they sat in.
+  it("lists every holder for an operator, with the label of a room each sat in, and null for one in no room", async () => {
+    await store.claimHandle("u_nowhere", "nowhere");
+    const res = await holders(await bearer(OPERATOR, "default"));
+    expect([res.status, await res.json()]).toEqual([200, { holders: [
+      { handle: "jesse", user_id: "u_jesse", label: "jesse@codenerd" },
+      { handle: "nowhere", user_id: "u_nowhere", label: null },
+    ] }]);
+  });
+
+  it("lists nothing for a user id the list does not name or for no credential, and takes GET alone", async () => {
+    expect((await holders(await bearer(TEAM_ADMIN, "operator"))).status).toBe(403);
+    expect((await holders({})).status).toBe(401);
+    expect((await holders(await bearer(OPERATOR, "default"), "POST")).status).toBe(405);
+  });
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `npx vitest run tests/store.test.ts tests/http-bylines.test.ts`
+Expected: FAIL. `store.handleHolders is not a function`; `/admin/handles` is not a route, so its answer is not the list.
+
+- [ ] **Step 3: Implement**
+
+- The interface method, its doc comment naming the notice (public rooms on bellman.sh spec, D6) as its reason.
+- `MemoryStore`: from `handleByUser`, sorted by user id.
+- `RegistryDO.handleHolders()`: one `list` of the `uh:` prefix, each key with `uh:` cut off; `DurableObjectStore` calls it.
+- `src/oauth/routes.ts`: `path === "/admin/handles"` gates through `operatorGate(request, config, "listing handle holders")`, answers 405 with `allow: GET` to any other method, then for each holder reads `sessionsJoinedBy(userId, 1)` and `membersOfUser` for the label. Its comment says what the label is for most accounts (an email address) and that an account in no room needs no notice.
+
+- [ ] **Step 4: Run them and watch them pass**
+
+Run: `npx vitest run tests/store.test.ts tests/http-bylines.test.ts && npm run typecheck && npm run test:worker`
+Expected: PASS in both programs.
+
+- [ ] **Step 5: Commit**
+
+```bash
+jj commit -m "An operator lists every account holding a handle, with the sign-in label of a room it sat in"
+```
+
+### Task 11: The tool texts that name the page's host
+
+**Files:**
+- Modify: `src/tools/start.ts`, `src/tools/public-name.ts`
+- Generated: `docs-site/src/content/docs/reference/tools/bellman_start.md` and `bellman_public_name.md`, by `npm run docs:gen`
+- Test: `tests/public-rooms.test.ts`
+
+**Interfaces:**
+- Produces: in `tests/public-rooms.test.ts`, `describe("the tools' words for a public room")` with a `texts()` helper, which Task 19 adds a case to.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+describe("the tools' words for a public room", () => {
+  /** Every tool's description, by name, as a connected client lists them. */
+  const texts = async () => {
+    const h = new Harness();
+    try {
+      const jesse = await h.connect(DEV_KEY.jesse);
+      return Object.fromEntries((await jesse.listTools()).tools.map((t) => [t.name, t.description ?? ""]));
+    } finally {
+      await h.close();
+    }
+  };
+
+  it("put the page on bellman.sh (public rooms on bellman.sh spec, section 1)", async () => {
+    const text = await texts();
+    expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
+    expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
+    expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r/);
+  });
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Run: `npx vitest run tests/public-rooms.test.ts -t "the tools' words"`
+Expected: FAIL on the first `toContain`.
+
+- [ ] **Step 3: Implement**
+
+- `src/tools/public-name.ts`: the description's first sentence becomes `Check or set the name in a public room's link, bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.`
+- `src/tools/start.ts`: in the `public_name` line, `dash.bellman.sh/r/<public_name>` becomes `bellman.sh/r/<public_name>`.
+- Run `npm run docs:gen`.
+
+- [ ] **Step 4: Run them and watch them pass**
+
+Run: `npx vitest run tests/public-rooms.test.ts tests/docs-reference.test.ts tests/extension.test.ts`
+Expected: PASS. `tests/docs-reference.test.ts` fails until `docs:gen` has run.
+
+- [ ] **Step 5: Commit**
+
+```bash
+jj commit -m "The tool texts put a public room's page on bellman.sh"
+```
+
+### Task 12: The move's docs, ADR 0023, and the whole suite
+
+**Files:**
+- Create: `docs/adr/0023-public-rooms-on-bellman-sh.md`
+- Modify: `docs/adr/0011-public-rooms.md` (its status line), `README.md`, `docs-site/src/content/docs/guides/public-rooms.md`, `docs/ARCHITECTURE.md`
+
+- [ ] **Step 1: ADR 0023**
+
+```markdown
+# ADR 0023 — Public rooms are read at bellman.sh
+
+**Date:** 2026-10-17 · **Status:** accepted · **Amends:** ADR 0011, decision 3 · **Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` · **Plan:** `docs/superpowers/plans/2026-10-17-public-rooms-on-bellman-sh.md`
+
+## Context
+
+A public room's page was `dash.bellman.sh/r/<room>`, a single-page app with one head for every room, so a pasted link previewed as "Bellman dash" and a crawler that runs no script read nothing.
+
+## Decision
+
+1. **The page is `bellman.sh/r/<room>`, served by the dash's Worker** (spec D1). A route on the `bellman.sh` zone runs before the site's Worker, which holds `bellman.sh` as a Custom Domain. `PUBLIC_ROOM_URL_BASE` is `https://bellman.sh/r/`, and `dash.bellman.sh/r/*` answers 301 to the same path there.
+2. **The Worker writes each room's head and a summary** (D2, D4): the title, the description, Open Graph tags and a summary card, the room read's `public_url` as its one canonical link, and in the body the room's name, byline, purpose and the names in its newest events, through `HTMLRewriter` as text and attribute values. It keeps the public reads it makes at most a minute.
+3. **One signed-in write for bellman.sh** (D7). `BELLMAN_PUBLIC_PAGE_ORIGINS` holds `https://bellman.sh`, apart from `BELLMAN_PANEL_ORIGINS`, and only `POST /rooms/:id/reports` and the sign-in return honour it.
+
+## Consequences
+
+- A script on any bellman.sh page, the static site's included, can file a report as its reader, and passes the CSRF check for nothing else.
+- The sandbox frame names the dash and bellman.sh as its parents, and is deployed by hand (`npm run deploy:sandbox` in the dash).
+- A link at `dash.bellman.sh/r/<room>` keeps working while the 301 does, and `run_worker_first` is what keeps it for a browser's navigation.
+- How a public read names members is unchanged here; ADR 0024 changes it.
+```
+
+ADR 0011's status becomes `accepted; decision 3 amended by ADR 0023`.
+
+- [ ] **Step 2: README and the docs site**
+
+- `README.md`, the public rooms item: "Readers open it at `dash.bellman.sh/r/<id>`." becomes "Readers open it at `bellman.sh/r/<id>`, which the dash's Worker serves with the room's name and purpose in the page's head for link previews; a link at `dash.bellman.sh/r/<id>` answers 301 there."; "makes its link `dash.bellman.sh/r/<name>`" becomes "makes its link `bellman.sh/r/<name>`".
+- `docs-site/src/content/docs/guides/public-rooms.md`: in "What a reader sees", `dash.bellman.sh/r/<id>` becomes `bellman.sh/r/<id>`; the paragraph that begins "A closed public room keeps reading" becomes "A closed public room keeps reading at `bellman.sh/r/<id>` until it is deleted. A link pasted into Slack or X shows the room's name and purpose. A link from before the page moved, `dash.bellman.sh/r/<id>`, redirects to the same room on `bellman.sh`."; in "A public name", both `dash.bellman.sh/r/` in its first paragraph become `bellman.sh/r/`, as does the one in its last.
+
+- [ ] **Step 3: ARCHITECTURE**
+
+- The "**A public room**" paragraph: "Dash renders it at `/r/<id>`, outside sign-in." becomes "The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, with the room read's `public_url` as its one canonical link, and answers `dash.bellman.sh/r/*` with a 301 there."
+- The invariant "**The control panel holds a cookie, not a token**" gains a last sentence: "Its origins are `BELLMAN_PANEL_ORIGINS`, the dash's. `BELLMAN_PUBLIC_PAGE_ORIGINS` adds `https://bellman.sh` for one write, a report (`POST /rooms/:id/reports`), and for the sign-in return, so a script on a bellman.sh page can file a report as its reader and do nothing else signed in (ADR 0023)."
+- Section 11, "What connecting costs": re-measure the tool definitions, put the total in the row, and add a paragraph above the newest "Re-measured" one: "Re-measured on <date> for public rooms on bellman.sh, by the method below: <n> tokens against the <m> that main (`<commit>`) measures. `bellman_start` is <a> to <b> and `bellman_public_name` <c> to <d>, for the page's host. No other tool changed. That is <total>." The figures come from the measurement. The method, which nothing in the repo runs: in a scratch directory with `node_modules` symlinked to a checkout's, a `.mts` script run with that checkout's `node_modules/.bin/tsx` imports its `src/auth.ts`, `src/server.ts`, `src/store.ts` and `src/blobs.ts`, builds the server for `qk_dev_jesse` with `hostedSeat: true` as `tests/helpers/harness.ts` does, lists the tools over `InMemoryTransport` and prints them; `python3.13` with tiktoken's `cl100k_base` counts `json.dumps(entry, separators=(",", ":"))` for each and sums them. Measure `main` first as the control, and compare with its own figure, not the row's.
+
+- [ ] **Step 4: The predicate, and everything**
+
+Run:
+```bash
+rg -n --hidden -g '!node_modules' -g '!.jj' -g '!docs/superpowers/**' 'dash\.bellman\.sh(/|</code>/)r\b' .
+npm run verify
+npx wrangler deploy --dry-run --outdir "$(mktemp -d)"
+```
+Expected: the predicate prints only the 301 sentences in `README.md`, `docs-site/src/content/docs/guides/public-rooms.md`, `docs/ARCHITECTURE.md` and `docs/adr/0023-public-rooms-on-bellman-sh.md`, and decision 3 of `docs/adr/0011-public-rooms.md`; `verify` passes; the dry run passes.
+
+- [ ] **Step 5: Commit**
+
+```bash
+jj commit -m "ADR 0023, and the README, the docs site and ARCHITECTURE put public rooms on bellman.sh"
+```
+
+### Part 2a's review and PR
+
+- [ ] **The whole-branch review:** one reviewer over the branch's diff from `trunk()`, with this plan and the spec. Fix what it finds, with tests, before the PR.
+- [ ] **The PR.** Read the diff's stat against the files these tasks list, set the bookmark, push and open it. The body says, out loud, that bellman.sh gains one signed-in write, a report, and the sign-in return, and nothing else; that every public link now starts `https://bellman.sh/r/`; and that `GET /admin/handles` is the notice's recipient list.
+- [ ] **After the merge:** read the deploy job. `bellman_start` with `public: true` returns a `public_url` on `https://bellman.sh/r/`, and `GET /public/rooms/<a named room>` carries the name's link as `public_url`.
+
+---
+
+# Part 3a — the site: the move (one PR, with 2a)
+
+The checkout is `~/src/github.com/bellman-sh/site`, on a branch or a worktree from `origin/main`. Its checks are `node --test tools/worker.test.mjs` and `python3.13 -m unittest discover -s tools -p 'test_*.py'`; the default `python3` here is 3.11, which the tools refuse. Regenerating the generated pages must change nothing: `for t in build-pricing build-compare build-stories; do python3.13 tools/$t.py; done; python3.13 tools/sitenav.py; git status --porcelain`.
+
+### Task 13: The site leaves `/r/*` to the dash
+
+**Files:**
+- Modify: `README.md`, `.github/workflows/deploy.yml`
+
+- [ ] **Step 1: The README.** After the paragraph that ends "this deployment serves `bellman.sh`.", add: "Except `bellman.sh/r/*`: a route on the zone sends it to the dash's Worker (`bellman-sh/dash`), which serves the public room pages there. A route runs before a Custom Domain's Worker, which this one is, so nothing here sees `/r/`. A change to this Worker's routing must leave `/r/*` to the dash, and the deploy checks that it does."
+
+- [ ] **Step 2: The deploy's check.** In "Smoke test the live site", before `exit $fail`:
+
+```bash
+          # bellman.sh/r/* is the dash's Worker's, by a route that runs before this one: its page carries the dash's policy.
+          check "bellman.sh/r/ is the dash's" \
+            "$(curl -sI --max-time 30 https://bellman.sh/r/no-such-room | tr -d '\r' | grep -ci '^content-security-policy:.*script-src https://dash.bellman.sh;')" \
+            "1"
+```
+
+- [ ] **Step 3: Run it by hand against the live site.** Run the `curl` in Step 2 on its own. Expected: `1`, Part 1 being deployed.
+
+- [ ] **Step 4: Commit, review, PR.**
+
+```bash
+git add README.md .github/workflows/deploy.yml
+git commit -m "The site's README says bellman.sh/r/* is the dash's, and each deploy checks it still is"
+```
+
+One reviewer over `git diff origin/main...HEAD`; read the diff's stat; open the PR. After the merge, read the deploy job's smoke test.
+
+---
+
+# The notice: Part 3b (the site) and Part 1b (the dash), two PRs on `<NOTICE_DATE>`
+
+Both go live the day the owner sends the email (owner action 4), once the owner has approved their copy and the dates (owner action 3). Neither changes what the server does.
+
+### Task 14: The site posts the upcoming privacy policy and terms
+
+The site's checkout as in Part 3a, on a new branch.
+
+**Files:**
+- Create: `public/privacy-next.html`, `public/terms-next.html`
+- Modify: `public/privacy.html`, `public/terms.html`
+
+- [ ] **Step 1: The upcoming privacy policy.** `public/privacy-next.html` is a copy of `public/privacy.html`, its header and footer included (`tools/test_sitenav.py` holds every page to them), with `<p class="updated">Effective <EFFECTIVE_DATE></p>` and, under it, `<p class="updated">This version takes effect on <EFFECTIVE_DATE>. Until then, <a href="/privacy">the current policy</a> applies.</p>`. In "Who else sees it", its two items on public rooms and bylines become:
+
+```html
+  <li><strong>Anyone with a public room's link</strong>, when the room's creator made it
+      public: its canvas and its log, with each member shown by the handle they claimed, or
+      by number if they have none. Briefs and the label you sign in with, usually your email
+      address, are never shown. A creator can make a public room private, and it cannot be
+      made public again.</li>
+  <li><strong>Anyone</strong>, for a handle you choose to claim. Once you claim one, every
+      public room you are in, or were in, names you by it. If you also sign a public room
+      you created, the room shows "by @yourhandle", and a page at your handle lists the
+      public rooms you signed and when you signed each. Unsign a room and its byline is
+      gone. Release your handle in Settings, or change it, and within an hour public rooms
+      stop showing it; the old handle is then held for 65 minutes, from everyone, you
+      included, before anyone can claim it.</li>
+```
+
+and its "Public handles" item, under how long things are kept, becomes:
+
+```html
+  <li><strong>Public handles.</strong> A handle and its signatures are kept until you
+      release the handle in Settings, and releasing it deletes both at once. The name
+      itself is then held for 65 minutes, linked to no account, before anyone can claim
+      it. When we delete your account, your handle goes with it.</li>
+```
+
+- [ ] **Step 2: The upcoming terms.** `public/terms-next.html` is a copy of `public/terms.html` with the same two `updated` lines, and the paragraph of section 4 on public rooms becomes:
+
+```html
+<p>A room&rsquo;s creator on a paid plan can make the room public. Anyone with its link can then
+read its canvas and its log without signing in, with each member shown by the handle they
+claimed, or by number if they have none. A creator can also sign a public room with their
+handle, and the room then names them as its author. Do not put anything in a public room you
+would not publish.</p>
+```
+
+  It describes no release, so it states no hold.
+
+- [ ] **Step 3: The current pages say a new version is coming.** Under `<p class="updated">Effective 12 October 2026</p>` on `public/privacy.html`: `<p class="updated">An updated version takes effect on <EFFECTIVE_DATE>: <a href="/privacy-next">read it</a>.</p>`. The same on `public/terms.html`, linking `/terms-next`. Nothing else on them changes: they stay in force until the effective date.
+
+- [ ] **Step 4: Run the site's checks.** Expected: the tests pass, the regenerated pages change nothing, and `git status --porcelain` lists the four files alone.
+
+- [ ] **Step 5: Commit, review, PR.**
+
+```bash
+git add public/privacy-next.html public/terms-next.html public/privacy.html public/terms.html
+git commit -m "The site posts the privacy policy and terms that take effect on <EFFECTIVE_DATE>, and the current ones say so"
+```
+
+One reviewer over the diff, with this plan and the spec; read the diff's stat; open the PR; merge it on `<NOTICE_DATE>`, before the email goes.
+
+### Task 15: The dash's Settings say what changes on the effective date
+
+The dash's checkout as in Part 1, on a new branch from `origin/main`.
+
+**Files:**
+- Modify: `src/components/settings/handle-section.tsx`
+- Test: `src/components/settings/handle-section.test.tsx`
+
+**Interfaces:**
+- Produces: `NAMES_FROM = "<EFFECTIVE_DATE>"` in `handle-section.tsx`, the date the copy names. Its sentences stay true after the date (R25), so nothing removes them.
+
+- [ ] **Step 1: Write the failing tests**
+
+- "says what the public page lists and what a change frees, naming the page as it is when %s", renamed "says what a handle names from the effective date, what the public page lists, and how a freed handle is held, naming the page as it is when %s", expects:
+
+```ts
+    expect(description).toHaveTextContent(`From ${NAMES_FROM}, a handle also names you beside your messages in every public room you are in or were in, past rooms included.`);
+    expect(description).toHaveTextContent(
+      `A page at ${page} lists the rooms you signed. Releasing a handle unsigns every room. Until ${NAMES_FROM}, changing or releasing a handle frees it for anyone at once; from then, a handle you release or change is held for 65 minutes, from everyone, you included.`,
+    );
+```
+
+- The release question's case expects `screen.getByText(`Every room you signed is unsigned. From ${NAMES_FROM}, @ada is held for 65 minutes before anyone can claim it.`)`.
+
+  Both import `NAMES_FROM` from the component.
+
+- [ ] **Step 2: Run them and watch them fail.** Run: `npx vitest run src/components/settings/handle-section.test.tsx`. Expected: FAIL on both texts, and on the missing export.
+
+- [ ] **Step 3: Implement.** The paragraph under "Public handle": "Sign a public room you created and it shows "by @handle", with your own messages in it under that name. From {NAMES_FROM}, a handle also names you beside your messages in every public room you are in or were in, past rooms included. Your sign-in label is never shown. A page at {page} lists the rooms you signed. Releasing a handle unsigns every room. Until {NAMES_FROM}, changing or releasing a handle frees it for anyone at once; from then, a handle you release or change is held for 65 minutes, from everyone, you included." The release question: "Every room you signed is unsigned. From {NAMES_FROM}, @{handle} is held for 65 minutes before anyone can claim it." The header comment: claiming a handle names the person by it in every public room they are or were in, from `NAMES_FROM` (public rooms on bellman.sh spec, D3, D6).
+
+- [ ] **Step 4: Run them and watch them pass.** Run: `npm test && npm run lint`. Expected: PASS.
+
+- [ ] **Step 5: Commit, review, PR.**
+
+```bash
+git add src/components/settings/handle-section.tsx src/components/settings/handle-section.test.tsx
+git commit -m "Settings say that from <EFFECTIVE_DATE> a handle names you in every public room you are in, and a freed one is held"
+```
+
+One reviewer over the diff; read the stat; open the PR; merge it on `<NOTICE_DATE>`.
+
+---
+
+# Part 2b — bellman: the names (one PR, merged on `<EFFECTIVE_DATE>`)
+
+The workspace as in Part 2a, on a new change from `trunk()` with 2a merged. The branch can be built and reviewed during the 30 days; it merges on the effective date, with 3c.
+
+### Task 16: A freed handle is held for 65 minutes
 
 **Files:**
 - Modify: `src/handles.ts`; `src/store.ts` (the `BellmanStore` interface's `claimHandle`, `releaseHandle` and `releaseHandleNamed`, and `MemoryStore`'s); `src/store-do.ts` (`RegistryDO.claimHandle`, `releaseHandle`, `releaseHandleNamed` and `#release`, and `DurableObjectStore`'s three); `src/http/handles.ts`; `src/oauth/routes.ts` (the `/admin/handles/:handle` branch)
 - Test: `tests/handles.test.ts`, `tests/helpers/store-contract.ts`, `tests/http-bylines.test.ts`, `worker-tests/handle-routes.test.ts`
 
 **Interfaces:**
-- Produces: in `src/handles.ts`, `HANDLE_CACHE_MS = 60 * 60_000` and `HANDLE_HOLD_MS = HANDLE_CACHE_MS + 5 * 60_000`. On `BellmanStore`: `claimHandle(userId: string, handle: string, at: number): Promise<"claimed" | "taken">`, `releaseHandle(userId: string, at: number): Promise<void>`, `releaseHandleNamed(handle: string, at: number): Promise<string | undefined>`, where `at` is the caller's clock in milliseconds; `claimHandle` answers "taken" while `at < freedAt + HANDLE_HOLD_MS` for a held name.
+- Produces: in `src/handles.ts`, `HANDLE_CACHE_MS = 60 * 60_000` and `HANDLE_HOLD_MS = HANDLE_CACHE_MS + 5 * 60_000`. On `BellmanStore`: `claimHandle(userId: string, handle: string, at: number): Promise<"claimed" | "taken">`, `releaseHandle(userId: string, at: number): Promise<void>`, `releaseHandleNamed(handle: string, at: number): Promise<string | undefined>`, `at` the caller's clock in milliseconds; `claimHandle` answers "taken" while `at < freedAt + HANDLE_HOLD_MS` for a held name.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -950,7 +1494,7 @@ describe("the hold on a freed handle (public rooms on bellman.sh spec, D5)", () 
 });
 ```
 
-`tests/helpers/store-contract.ts`, in `describe("handles and bylines")`: `const T = 1_800_000_000_000;` at its top, and every `claimHandle`, `releaseHandle` and `releaseHandleNamed` call in the block gains `T` as its time. "frees the old handle when one changes" becomes:
+`tests/helpers/store-contract.ts`, in `describe("handles and bylines")`: `const T = 1_800_000_000_000;` at its top, and every `claimHandle`, `releaseHandle` and `releaseHandleNamed` call in the block, Task 10's case included, gains `T` as its time. "frees the old handle when one changes" becomes:
 
 ```ts
       it("moves a handle on a change, and holds the old one from everyone", async () => {
@@ -1017,9 +1561,7 @@ and the block gains, with `HANDLE_HOLD_MS` imported from `../../src/handles.js`:
 
 - "lists none of an old owner's rooms under a freed handle someone else claimed": the peer's `PUT` of `jesse` becomes `await store.claimHandle("u_peer", "jesse", Date.now() + HANDLE_HOLD_MS);`.
 
-`worker-tests/handle-routes.test.ts`, which no typecheck program reads, so its three calls by hand, with `HANDLE_HOLD_MS` imported from `../src/handles.js`:
-- `registry.claimHandle("u_someone_else", "held-by-other", Date.now())` and `registry.claimHandle("u_someone", "wire-held", Date.now())`;
-- the change case becomes:
+`worker-tests/handle-routes.test.ts`, which no typecheck program reads, so its three calls by hand, with `HANDLE_HOLD_MS` imported from `../src/handles.js`: `registry.claimHandle("u_someone_else", "held-by-other", Date.now())`, `registry.claimHandle("u_someone", "wire-held", Date.now())`, and the change case:
 
 ```ts
     // A change holds the old handle from everyone for HANDLE_HOLD_MS, and frees it after.
@@ -1028,35 +1570,21 @@ and the block gains, with `HANDLE_HOLD_MS` imported from `../../src/handles.js`:
     expect(await registry.claimHandle("u_someone_else", "wire-do", Date.now() + HANDLE_HOLD_MS)).toBe("claimed");
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `npx vitest run tests/handles.test.ts tests/store.test.ts tests/http-bylines.test.ts`
-Expected: FAIL. The constants are not exported; every hold case and the changed contract case see "claimed" where they expect "taken"; the 409's description is `first belongs to someone else`.
+- [ ] **Step 2: Run them and watch them fail.** Run: `npx vitest run tests/handles.test.ts tests/store.test.ts tests/http-bylines.test.ts`. Expected: FAIL. The constants are not exported; every hold case and the changed contract case see "claimed" where they expect "taken"; the 409's description is `first belongs to someone else`.
 
 - [ ] **Step 3: Implement**
 
 - `src/handles.ts`: the two constants, `HANDLE_HOLD_MS`'s comment saying it must outlast the hour a name can sit in a server's cache (`HANDLE_CACHE_MS`) plus the minute it can sit in the dash's preview cache, so no page shows a name under an account after another account claims it.
 - The interface's three methods take `at`, their doc comments saying a freed name is held from every account for `HANDLE_HOLD_MS`, its last holder too.
-- `RegistryDO`, each in the transaction it already runs:
-  - `claimHandle`: after the holder check, a `hh:<handle>` row with `at < freedAt + HANDLE_HOLD_MS` answers "taken"; moving from an old name deletes `hn:<old>` and puts `hh:<old>` = `at`; the claim deletes `hh:<handle>`.
-  - `#release(txn, userId, at)`: deletes the rows it deletes now and puts `hh:<handle>` = `at` when there was a handle. `releaseHandle` and `releaseHandleNamed` pass `at` to it.
-- `MemoryStore`: a `Map` of held names to their freeing time, kept the same way.
-- `DurableObjectStore`: passes `at` through.
-- `src/http/handles.ts`: `releaseHandle(userId, Date.now())` and `claimHandle(userId, check.handle, Date.now())`; the 409's description is `` `${check.handle} is taken. A handle that was released or changed away from is held for 65 minutes before anyone can claim it.` ``
-- `src/oauth/routes.ts`: `releaseHandleNamed(handle, Date.now())`.
+- `RegistryDO`, each in the transaction it already runs: `claimHandle`, after the holder check, answers "taken" for a `hh:<handle>` row with `at < freedAt + HANDLE_HOLD_MS`, deletes `hn:<old>` and puts `hh:<old>` = `at` when moving from an old name, and deletes `hh:<handle>` when it claims; `#release(txn, userId, at)` deletes the rows it deletes now and puts `hh:<handle>` = `at` when there was a handle, `releaseHandle` and `releaseHandleNamed` passing `at`.
+- `MemoryStore`: a `Map` of held names to their freeing time, kept the same way. `DurableObjectStore`: passes `at` through.
+- `src/http/handles.ts`: `releaseHandle(userId, Date.now())` and `claimHandle(userId, check.handle, Date.now())`; the 409's description is `` `${check.handle} is taken. A handle that was released or changed away from is held for 65 minutes before anyone can claim it.` `` `src/oauth/routes.ts`: `releaseHandleNamed(handle, Date.now())`.
 
-- [ ] **Step 4: Run them and watch them pass**
+- [ ] **Step 4: Run them and watch them pass.** Run: `npx vitest run tests/handles.test.ts tests/store.test.ts tests/http-bylines.test.ts && npm run typecheck && npm run test:worker`. Expected: PASS; `npm run typecheck` names no call left without `at`.
 
-Run: `npx vitest run tests/handles.test.ts tests/store.test.ts tests/http-bylines.test.ts && npm run typecheck && npm run test:worker`
-Expected: PASS; `npm run typecheck` names no call left without `at`.
+- [ ] **Step 5: Commit.** `jj commit -m "A handle released, changed away from or released by the operator is held from every account for 65 minutes"`
 
-- [ ] **Step 5: Commit**
-
-```bash
-jj commit -m "A handle released, changed away from or released by the operator is held from every account for 65 minutes"
-```
-
-### Task 10: Many users' handles in one registry read
+### Task 17: Many users' handles in one registry read
 
 **Files:**
 - Modify: `src/store.ts` (the `BellmanStore` interface, `MemoryStore`), `src/store-do.ts` (`RegistryDO`, `DurableObjectStore`)
@@ -1065,9 +1593,7 @@ jj commit -m "A handle released, changed away from or released by the operator i
 **Interfaces:**
 - Produces: `handlesOf(userIds: readonly string[]): Promise<Record<string, string>>` on `BellmanStore`, after `userOfHandle`: the handle each of these users holds, by user id, in one read of the registry; a user who holds none is left out.
 
-- [ ] **Step 1: Write the failing test**
-
-In `describe("handles and bylines")` of `tests/helpers/store-contract.ts`:
+- [ ] **Step 1: Write the failing test.** In `describe("handles and bylines")`:
 
 ```ts
       // More users than one storage read takes (128), so the read must batch them.
@@ -1082,30 +1608,15 @@ In `describe("handles and bylines")` of `tests/helpers/store-contract.ts`:
       });
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [ ] **Step 2: Run it and watch it fail.** Run: `npx vitest run tests/store.test.ts -t "many users' handles"`. Expected: FAIL, `store.handlesOf is not a function`.
 
-Run: `npx vitest run tests/store.test.ts -t "many users' handles"`
-Expected: FAIL, `store.handlesOf is not a function`.
+- [ ] **Step 3: Implement.** The interface method, its doc comment naming the public reads as its caller and saying it is exact (the public read path caches in front of it, Task 18). `MemoryStore`: from `handleByUser`. `RegistryDO.handlesOf(userIds: string[])`: `getRows<string>(this.ctx.storage, [...new Set(userIds)].map((u) => `uh:${u}`))`, each key with `uh:` cut off. `DurableObjectStore.handlesOf`: `{}` for no ids without a call; otherwise one call, `this.registry.handlesOf([...new Set(userIds)])`.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 4: Run it and watch it pass.** Run: `npx vitest run tests/store.test.ts && npm run test:worker`. Expected: PASS in both programs.
 
-- The interface method, its doc comment naming the public reads as its caller (public rooms on bellman.sh spec, section 3) and saying it is exact: the public read path caches in front of it (Task 11).
-- `MemoryStore`: from `handleByUser`.
-- `RegistryDO.handlesOf(userIds: string[])`: `getRows<string>(this.ctx.storage, [...new Set(userIds)].map((u) => `uh:${u}`))`, each key with `uh:` cut off.
-- `DurableObjectStore.handlesOf`: `{}` for no ids without a call; otherwise one call, `this.registry.handlesOf([...new Set(userIds)])`.
+- [ ] **Step 5: Commit.** `jj commit -m "handlesOf reads many users' handles from the registry in one call"`
 
-- [ ] **Step 4: Run it and watch it pass**
-
-Run: `npx vitest run tests/store.test.ts && npm run test:worker`
-Expected: PASS in both programs.
-
-- [ ] **Step 5: Commit**
-
-```bash
-jj commit -m "handlesOf reads many users' handles from the registry in one call"
-```
-
-### Task 11: Public reads name members by the handle their account claimed, kept an hour
+### Task 18: Public reads name members by the handle their account claimed, kept an hour
 
 **Files:**
 - Modify: `src/handles.ts` (`HandleCache`), `src/http/public.ts`, `src/worker.ts`
@@ -1113,7 +1624,7 @@ jj commit -m "handlesOf reads many users' handles from the registry in one call"
 - Test: `tests/handles.test.ts`, `tests/http-public.test.ts`, `tests/http-bylines.test.ts`, `worker-tests/public-routes.test.ts`, `worker-tests/public-names.test.ts`
 
 **Interfaces:**
-- Consumes: `handlesOf` (Task 10); `HANDLE_CACHE_MS` (Task 9); `getMembers` and `publicNumbers`, as they are.
+- Consumes: `handlesOf` (Task 17); `HANDLE_CACHE_MS` (Task 16); `getMembers` and `publicNumbers`, as they are.
 - Produces:
   - `class HandleCache` in `src/handles.ts`: `constructor(ttlMs = HANDLE_CACHE_MS, max = 10_000)` and `handlesOf(userIds: readonly string[], read: (userIds: string[]) => Promise<Record<string, string>>, now = Date.now()): Promise<Record<string, string>>`, which keeps each account's answer, a handle or none, until `now + ttlMs`, `now` taken before `read` is called, and calls `read` once with only the accounts it keeps no answer for. ponytail: cleared whole past `max`, as `SuspensionCache` is.
   - `PublicRouteDeps` gains `handles?: HandleCache`.
@@ -1323,11 +1834,10 @@ describe("members' public names (public rooms on bellman.sh spec, section 3)", (
 
 `tests/http-bylines.test.ts`, `describe("the byline on the public reads")` and the reserved-handle case, where the creator now holds a handle (its deps carry no cache, so its reads are exact):
 - "is null until the creator signs, then names the handle and the creator's public number", renamed "… then names the handle, and the creator by it": `by: { handle: "jesse", as: "@jesse" }`.
-- "names the creator in the log by the same number the byline gives", renamed "… by the same name the byline gives": unchanged otherwise.
+- "names the creator in the log by the same number the byline gives", renamed "… by the same name the byline gives".
 - "carries the handle and the number and nothing more", renamed "carries the handle and the creator's name and nothing more": `{ handle: "jesse", as: "@jesse" }`.
 - "names the creator's seat after the creator has left the room": `label: "@jesse"` and `as: "@jesse"`.
-- "names the creator on a read by the room's public name, as on a read by its id": `as: "@jesse"`.
-- "still names the creator on a closed room's read, until its purge": `as: "@jesse"`.
+- "names the creator on a read by the room's public name, as on a read by its id" and "still names the creator on a closed room's read, until its purge": `as: "@jesse"`.
 - "reads a handle that is reserved but well-formed and held, and the byline on its room says the same": `as: "@admin"`.
 
 `worker-tests/public-routes.test.ts`, the handle page case: `toMatchObject({ by: { handle: "ws-jesse" } })`, with a comment: `as` is whatever the Worker's cache holds for this user, and an earlier case in this file read it (R28).
@@ -1377,10 +1887,7 @@ describe("public names through the Worker", () => {
 });
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `npx vitest run tests/handles.test.ts tests/http-public.test.ts tests/http-bylines.test.ts; npm run test:worker`
-Expected: FAIL. `HandleCache` is not exported; each new case that claims a handle sees `member N`; the byline cases see `as: "member 1"`; the no-label case passes its label check and FAILS its control (`@jesse`, `@gone`); in workerd, `public-names.test.ts` sees `member 1`. "asks the registry nothing" PASSES already; its control is in Step 4.
+- [ ] **Step 2: Run them and watch them fail.** Run: `npx vitest run tests/handles.test.ts tests/http-public.test.ts tests/http-bylines.test.ts; npm run test:worker`. Expected: FAIL. `HandleCache` is not exported; each new case that claims a handle sees `member N`; the byline cases see `as: "member 1"`; the no-label case passes its label check and FAILS its control (`@jesse`, `@gone`); in workerd, `public-names.test.ts` sees `member 1`. "asks the registry nothing" PASSES already; its control is in Step 4.
 
 - [ ] **Step 3: Implement**
 
@@ -1412,360 +1919,129 @@ async function publicNames(deps: PublicRouteDeps, session: StoredSession, page: 
 }
 ```
 
-  Add a `ponytail:` line to that comment: a departed member the page names only by label, and a label shared with a departed account the page does not name by id, are decided from the members the call can see; reading every member row per read would close both. The room read passes its deps and the session it read, and the byline's comment says `as` is the creator's name (ADR 0023), which can be the cached one for the hour after a change, so the page's relabel shows `by.handle` there. The module's header comment says members are named by the handle their account claimed, kept an hour where the Worker serves the read, or by number, never by label.
+  Add a `ponytail:` line to that comment: a departed member the page names only by label, and a label shared with a departed account the page does not name by id, are decided from the members the call can see; reading every member row per read would close both. The room read passes its deps and the session it read, and the byline's comment says `as` is the creator's name (ADR 0024), which can be the cached one for the hour after a change, so the page's relabel shows `by.handle` there. The module's header comment says members are named by the handle their account claimed, kept an hour where the Worker serves the read, or by number, never by label.
 - `src/worker.ts`: a module-level `const handleNames = new HandleCache();` beside `suspensions`, with a comment (per isolate, spec D5), passed as `publicRoutes(request, { store, blobs, handles: handleNames })`. The Node app passes none (R24).
 
-- [ ] **Step 4: Run them and watch them pass**
+- [ ] **Step 4: Run them and watch them pass.** Run: `npx vitest run tests/handles.test.ts tests/http-public.test.ts tests/http-bylines.test.ts && npm run test:worker`. Expected: PASS. For the control of "asks the registry nothing", add `await sends(PUB, member())` before its read, see it fail, then take the line out. For the race case's control, give `HandleCache` the time after `read` returns instead, see the case fail at `T0 + HANDLE_CACHE_MS`, then put it back.
 
-Run: `npx vitest run tests/handles.test.ts tests/http-public.test.ts tests/http-bylines.test.ts && npm run test:worker`
-Expected: PASS. For the control of "asks the registry nothing", add `await sends(PUB, member())` before its read, see it fail, then take the line out. For the race case's control, give `HandleCache` the time after `read` returns instead, see the case fail at `T0 + HANDLE_CACHE_MS`, then put it back.
+- [ ] **Step 5: Commit.** `jj commit -m "Public reads name each member by the handle their account claimed, kept an hour per isolate, else by number"`
 
-- [ ] **Step 5: Commit**
-
-```bash
-jj commit -m "Public reads name each member by the handle their account claimed, kept an hour per isolate, else by number"
-```
-
-### Task 12: bellman.sh is a panel origin
+### Task 19: The tool texts that say how members are named
 
 **Files:**
-- Modify: `wrangler.toml` (`BELLMAN_PANEL_ORIGINS` and its comment), `src/oauth/browser.ts` (the comment on `csrfRefusal`), `tests/helpers/panel.ts`
-- Test: `tests/browser-safety.test.ts`, `tests/panel-session.test.ts`
-
-**Interfaces:**
-- Produces: `productionPanelOrigins(): string[]` in `tests/helpers/panel.ts`: `BELLMAN_PANEL_ORIGINS` as `wrangler.toml` sets it, matched by `/^BELLMAN_PANEL_ORIGINS = "([^"]*)"$/m`, through `parsePanelOrigins`, throwing when the line is missing.
-
-- [ ] **Step 1: Write the failing tests**
-
-`tests/browser-safety.test.ts`, in `describe("parsing BELLMAN_PANELS")`, with `productionPanelOrigins` added to the file's import from `./helpers/panel.js`:
-
-```ts
-  // Public rooms on bellman.sh (spec section 1): the page there posts with the cookie. The dash stays first: it is where
-  // a sign-in with nowhere usable to return to lands.
-  it("admits the dash and bellman.sh as wrangler.toml deploys them, the dash first", () => {
-    const origins = productionPanelOrigins();
-    expect(origins).toEqual(["https://dash.bellman.sh", "https://bellman.sh"]);
-    const post = from("https://bellman.sh", "POST");
-    expect(allowedOrigin(post, origins)).toBe("https://bellman.sh");
-    expect(csrfRefusal(post, "cookie", allowedOrigin(post, origins))).toBeUndefined();
-  });
-```
-
-`tests/panel-session.test.ts`, in `describe("signing in to the panel")`, with `productionPanelOrigins` imported from `./helpers/panel.js`:
-
-```ts
-  // Public rooms on bellman.sh (spec section 1): "Sign in to report" on a room's page comes back to the room.
-  it("returns a sign-in started on a public room's page to the room, with the origins wrangler.toml deploys", async () => {
-    cfg.panelOrigins = productionPanelOrigins();
-    expect((await signIn("https://bellman.sh/r/open-review")).headers.get("location")).toBe("https://bellman.sh/r/open-review");
-    expect((await signIn()).headers.get("location")).toBe("https://dash.bellman.sh");
-  });
-```
-
-- [ ] **Step 2: Run them and watch them fail**
-
-Run: `npx vitest run tests/browser-safety.test.ts tests/panel-session.test.ts`
-Expected: FAIL. The origins are `["https://dash.bellman.sh"]`, and the sign-in returns to `https://dash.bellman.sh`.
-
-- [ ] **Step 3: Implement**
-
-- `wrangler.toml`: `BELLMAN_PANEL_ORIGINS = "https://dash.bellman.sh, https://bellman.sh"`. The comment above it gains: bellman.sh is where the dash's Worker serves the public room pages, which post with the session cookie and to which a sign-in started there returns; the dash stays first, the destination of a sign-in with nowhere usable to return to.
-- `src/oauth/browser.ts`, the paragraph of `csrfRefusal`'s comment that begins "SameSite=Lax is not sufficient on its own" becomes:
-
-```
- * SameSite=Lax is not sufficient on its own, which is why this exists: SameSite
- * is evaluated on the registrable domain, so every bellman.sh host is same-site
- * with mcp.bellman.sh, and Lax lets a POST from any of them carry the session
- * cookie. This admits only the listed origins. https://bellman.sh is one of
- * them, for the public room pages the dash's Worker serves there, so a script
- * on any bellman.sh page, the static site's included, passes this check: no
- * page there may run a script its repo did not ship.
-```
-
-- [ ] **Step 4: Run them and watch them pass**
-
-Run: `npx vitest run tests/browser-safety.test.ts tests/panel-session.test.ts && npm run typecheck:worker && npx wrangler deploy --dry-run --outdir "$(mktemp -d)"`
-Expected: PASS, and the dry run lists `BELLMAN_PANEL_ORIGINS` with both origins.
-
-- [ ] **Step 5: Commit**
-
-```bash
-jj commit -m "bellman.sh is a panel origin, for the public room pages there: their signed-in posts and their sign-in return"
-```
-
-### Task 13: The tool texts
-
-**Files:**
-- Modify: `src/tools/start.ts`, `src/tools/public-name.ts`, `src/tools/connect.ts`
-- Generated: `docs-site/src/content/docs/reference/tools/bellman_start.md`, `bellman_public_name.md`, `bellman_connect.md`, by `npm run docs:gen`
+- Modify: `src/tools/start.ts`, `src/tools/connect.ts`
+- Generated: `docs-site/src/content/docs/reference/tools/bellman_start.md` and `bellman_connect.md`, by `npm run docs:gen`
 - Test: `tests/public-rooms.test.ts`
 
-- [ ] **Step 1: Write the failing test**
-
-In `tests/public-rooms.test.ts`:
+- [ ] **Step 1: Write the failing test.** In `describe("the tools' words for a public room")` (Task 11):
 
 ```ts
-describe("the tools' words for a public room (public rooms on bellman.sh spec)", () => {
-  it("put the page on bellman.sh, and name members by the public handle their account claimed, or by number", async () => {
-    const h = new Harness();
-    try {
-      const jesse = await h.connect(DEV_KEY.jesse);
-      const text = Object.fromEntries((await jesse.listTools()).tools.map((t) => [t.name, t.description ?? ""]));
-      expect(text.bellman_public_name).toContain("bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.");
-      expect(text.bellman_start).toContain("- public_name: a public room's name in its link, bellman.sh/r/<public_name> (needs public: true).");
-      expect(text.bellman_start).toContain("with each member named by the public handle their account claimed, or by number;");
-      expect(text.bellman_connect).toContain("with each member, you included, named by the public handle their account claimed, or by number, and never a brief");
-      expect(Object.values(text).join("\n")).not.toMatch(/dash\.bellman\.sh\/r|named by number/);
-    } finally {
-      await h.close();
-    }
+  it("name a public room's members by the public handle their account claimed, or by number (spec section 3)", async () => {
+    const text = await texts();
+    expect(text.bellman_start).toContain("with each member named by the public handle their account claimed, or by number;");
+    expect(text.bellman_connect).toContain("with each member, you included, named by the public handle their account claimed, or by number, and never a brief");
+    expect(Object.values(text).join("\n")).not.toMatch(/named by number/);
   });
-});
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [ ] **Step 2: Run it and watch it fail.** Run: `npx vitest run tests/public-rooms.test.ts -t "the tools' words"`. Expected: FAIL on the first `toContain`.
 
-Run: `npx vitest run tests/public-rooms.test.ts -t "the tools' words"`
-Expected: FAIL on the first `toContain`.
+- [ ] **Step 3: Implement.** `src/tools/start.ts`, in the `public: true` paragraph: `with members named by number;` becomes `with each member named by the public handle their account claimed, or by number;`. `src/tools/connect.ts`: `with members named by number and never a brief` becomes `with each member, you included, named by the public handle their account claimed, or by number, and never a brief`. Run `npm run docs:gen`.
 
-- [ ] **Step 3: Implement**
+- [ ] **Step 4: Run them and watch them pass.** Run: `npx vitest run tests/public-rooms.test.ts tests/docs-reference.test.ts tests/extension.test.ts`. Expected: PASS.
 
-- `src/tools/public-name.ts`: the description's first sentence becomes `Check or set the name in a public room's link, bellman.sh/r/<name>, which until then is bellman.sh/r/<session_id>.`
-- `src/tools/start.ts`: in the `public_name` line, `dash.bellman.sh/r/<public_name>` becomes `bellman.sh/r/<public_name>`; in the `public: true` paragraph, `with members named by number;` becomes `with each member named by the public handle their account claimed, or by number;`.
-- `src/tools/connect.ts`: `with members named by number and never a brief` becomes `with each member, you included, named by the public handle their account claimed, or by number, and never a brief`.
-- Run `npm run docs:gen`.
+- [ ] **Step 5: Commit.** `jj commit -m "The tool texts name a public room's members by their public handle, or by number"`
 
-- [ ] **Step 4: Run them and watch them pass**
-
-Run: `npx vitest run tests/public-rooms.test.ts tests/docs-reference.test.ts tests/extension.test.ts`
-Expected: PASS. `tests/docs-reference.test.ts` fails until `docs:gen` has run; `extension/manifest.json` names tools, not their texts, and no tool was added.
-
-- [ ] **Step 5: Commit**
-
-```bash
-jj commit -m "The tool texts put a public room's page on bellman.sh, and name its members by their public handle, or by number"
-```
-
-### Task 14: The docs, ADR 0023, and the whole suite
+### Task 20: The names' docs, ADR 0024, and the whole suite
 
 **Files:**
-- Create: `docs/adr/0023-public-rooms-on-bellman-sh.md`
+- Create: `docs/adr/0024-public-rooms-name-members-by-handle.md`
 - Modify: `docs/adr/0011-public-rooms.md`, `docs/adr/0021-bylines.md` (status lines), `README.md`, `docs-site/src/content/docs/guides/public-rooms.md`, `plugin/skills/room-manifest/SKILL.md`, `docs/ARCHITECTURE.md`
 
-- [ ] **Step 1: ADR 0023**
+- [ ] **Step 1: ADR 0024**
 
 ```markdown
-# ADR 0023 — Public rooms are read at bellman.sh, and name members by their handle
+# ADR 0024 — Public rooms name members by their handle
 
-**Date:** 2026-10-17 · **Status:** accepted · **Amends:** ADR 0011, decisions 3 and 5; ADR 0021, decisions 2 and 4 · **Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` · **Plan:** `docs/superpowers/plans/2026-10-17-public-rooms-on-bellman-sh.md`
+**Date:** <the day 2b merges> · **Status:** accepted · **Amends:** ADR 0011, decision 5; ADR 0021, decisions 2 and 4 · **Spec:** `docs/superpowers/specs/2026-10-17-public-rooms-on-bellman-sh-design.md` · **Plan:** `docs/superpowers/plans/2026-10-17-public-rooms-on-bellman-sh.md`
 
 ## Context
 
-A public room's page was `dash.bellman.sh/r/<room>`, a single-page app with one head for every room, so a pasted link previewed as "Bellman dash" and a crawler that runs no script read nothing. Members were named by number (ADR 0011), and a signed room's creator by a handle (ADR 0021), so a handle someone claimed named them in the rooms they signed and nowhere else, and a changed or released handle was free for anyone at once.
+Members were named by number (ADR 0011), and a signed room's creator by a handle (ADR 0021), so a handle named its holder in the rooms they signed and nowhere else, and a changed or released handle was free for anyone at once.
 
 ## Decision
 
-1. **The page is `bellman.sh/r/<room>`, served by the dash's Worker** (spec D1). A route on the `bellman.sh` zone runs before the site's Worker, which holds `bellman.sh` as a Custom Domain. `PUBLIC_ROOM_URL_BASE` is `https://bellman.sh/r/`, and `dash.bellman.sh/r/*` answers 301 to the same path there.
-2. **The Worker writes each room's head and a summary** (D2, D4): the title, the description, Open Graph tags and a summary card, a canonical link, and in the body the room's name, byline, purpose and the names in its newest events, through `HTMLRewriter` as text and attribute values. It keeps the public reads it makes at most a minute.
-3. **A member is named by the handle their account claimed, else by number** (D3). `publicNames` in `src/http/public.ts` resolves each label to the accounts the room seated under it, and one account holding a handle is `@handle`. `by.as` is the creator's name.
-4. **Names are kept an hour, and a freed name is held 65 minutes** (D5, the owner's choice over a one-minute cache and over storing handles in each room). A viewer's page polls the log and the surface, each every 4 seconds, so a registry read per page would put up to one read every 2 seconds per viewer on `RegistryDO`, which ADR 0021's decision 4 kept polls off. The Worker keeps each account's handle, or that it has none, for `HANDLE_CACHE_MS`, an hour, per isolate, in front of the exact `handlesOf`. Without a hold, a page could show the old holder's messages under a name another account had just claimed. So a name freed by a release, a change or the operator's release is held for `HANDLE_HOLD_MS`, the hour plus five minutes, from every account, its last holder included: longer than the hour plus the minute the dash's preview cache adds.
-5. **`https://bellman.sh` is a panel origin,** for the page's signed-in posts and its sign-in return.
+1. **A member is named by the handle their account claimed, else by number** (spec D3). `publicNames` in `src/http/public.ts` resolves each label to the accounts the room seated under it, and one account holding a handle is `@handle`. `by.as` is the creator's name.
+2. **Names are kept an hour, and a freed name is held 65 minutes** (D5, the owner's choice over a one-minute cache and over storing handles in each room). A viewer's page polls the log and the surface, each every 4 seconds, so a registry read per page would put up to one read every 2 seconds per viewer on `RegistryDO`, which ADR 0021's decision 4 kept polls off. The Worker keeps each account's handle, or that it has none, for `HANDLE_CACHE_MS`, an hour, per isolate, in front of the exact `handlesOf`. Without a hold, a page could show the old holder's messages under a name another account had just claimed, so a name freed by a release, a change or the operator's release is held for `HANDLE_HOLD_MS`, the hour plus five minutes, from every account, its last holder included: longer than the hour plus the minute the dash's preview cache adds.
+3. **It shipped 30 days after notice** (D6). On `<NOTICE_DATE>` the site posted the new privacy policy and terms, the dash's Settings said what would change, and the owner emailed every account holding a handle, from the list `GET /admin/handles` gives.
 
 ## Consequences
 
-- A claimed handle names its holder in every public room they are or were in, not only the ones they signed.
+- A claimed handle names its holder in every public room they are or were in, past rooms included.
 - A new handle can take an hour to appear on public pages, and a released one an hour to go.
-- A released name can't be claimed by anyone for 65 minutes, so someone whose handle an operator took back from an impersonator waits that long to claim it, and a holder cannot undo an operator's release.
-- Every page on bellman.sh, the static site's included, can make a cookie-authenticated write to the API.
+- A released name can't be claimed by anyone for 65 minutes, so someone whose handle an operator took back from an impersonator waits that long, and a holder cannot undo an operator's release.
 - A label two accounts were seated under stays a number, whatever either claimed.
-- The sandbox frame names the dash and bellman.sh as its parents, and is deployed by hand (`npm run deploy:sandbox` in the dash).
-- A link at `dash.bellman.sh/r/<room>` keeps working while the 301 does, and `run_worker_first` is what keeps it for a browser's navigation.
 ```
 
-ADR 0011's status becomes `accepted; decisions 3 and 5 amended by ADR 0023`; ADR 0021's `accepted; decisions 2 and 4 amended by ADR 0023`.
+ADR 0011's status becomes `accepted; decision 3 amended by ADR 0023, decision 5 by ADR 0024`; ADR 0021's `accepted; decisions 2 and 4 amended by ADR 0024`.
 
 - [ ] **Step 2: README, the docs site and the skill**
 
-- `README.md`, the public rooms item:
-  - "Members are named there by number, `member 1` and on, never by the label they signed in with, which for most is an email address." becomes "A member whose account has claimed a handle is named there by it, `@handle`, and every other member by number, `member 1` and on; never by the label they signed in with, which for most is an email address. A new or released handle reaches those pages within the hour, and a released or changed-away handle is held 65 minutes from every account before anyone can claim it."
-  - "Readers open it at `dash.bellman.sh/r/<id>`." becomes "Readers open it at `bellman.sh/r/<id>`, which the dash's Worker serves with the room's name and purpose in the page's head for link previews; a link at `dash.bellman.sh/r/<id>` answers 301 there."
-  - "makes its link `dash.bellman.sh/r/<name>`" becomes "makes its link `bellman.sh/r/<name>`".
-- `docs-site/src/content/docs/guides/public-rooms.md`:
-  - In "What a reader sees", `dash.bellman.sh/r/<id>` becomes `bellman.sh/r/<id>`, and "a join shows only the joiner's member id, number and seat" becomes "a join shows only the joiner's member id, public name and seat".
-  - The paragraph that begins "Members are named by number" becomes: "Each member is named by the handle their account claimed, `@handle`, and a member with no handle by number, `member 1` and on, in the order they joined. Nobody is named by the label they signed in with, which for most people is an email address. One person's seats share a name. Claiming a handle names you by it in every public room you are in or were in, not only in the rooms you signed. A new or released handle can take up to an hour to show on public pages. A handle you release or change away from is held for 65 minutes, from everyone, you included, and then anyone can claim it."
-  - The paragraph after it becomes: "A closed public room keeps reading at `bellman.sh/r/<id>` until it is deleted. A link pasted into Slack or X shows the room's name and purpose. A link from before the page moved, `dash.bellman.sh/r/<id>`, redirects to the same room on `bellman.sh`."
-  - In "A public name", both `dash.bellman.sh/r/` in its first paragraph become `bellman.sh/r/`, as does the one in its last.
+- `README.md`, the public rooms item: "Members are named there by number, `member 1` and on, never by the label they signed in with, which for most is an email address." becomes "A member whose account has claimed a handle is named there by it, `@handle`, and every other member by number, `member 1` and on; never by the label they signed in with, which for most is an email address. A new or released handle reaches those pages within the hour, and a released or changed-away handle is held 65 minutes from every account before anyone can claim it."
+- `docs-site/src/content/docs/guides/public-rooms.md`: "a join shows only the joiner's member id, number and seat" becomes "a join shows only the joiner's member id, public name and seat"; the paragraph that begins "Members are named by number" becomes: "Each member is named by the handle their account claimed, `@handle`, and a member with no handle by number, `member 1` and on, in the order they joined. Nobody is named by the label they signed in with, which for most people is an email address. One person's seats share a name. Claiming a handle names you by it in every public room you are in or were in, not only in the rooms you signed. A new or released handle can take up to an hour to show on public pages. A handle you release or change away from is held for 65 minutes, from everyone, you included, and then anyone can claim it."
 - `plugin/skills/room-manifest/SKILL.md`, "A public room": "Readers see members by number, not by how they signed in." becomes "Readers see each member by the handle their account claimed, or by number, never by how they signed in.", wrapped as the file wraps.
 
 - [ ] **Step 3: ARCHITECTURE**
 
-- The "**A public room**" paragraph: "every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs" becomes "every public read then names each member wherever a `label` holds theirs: by the handle their account claimed (`@handle`, from one `handlesOf` read of the registry's `uh:` rows behind the Worker's per-isolate `HandleCache`, which keeps each account's answer an hour), or by number (`member 1` and on). A name freed by a release, a change or the operator's release is held 65 minutes from every account (`hh:` rows, `HANDLE_HOLD_MS`), longer than any page can still show it under its old holder (ADR 0023)"; "Dash renders it at `/r/<id>`, outside sign-in." becomes "The dash's Worker serves the page at `bellman.sh/r/<id>`, by a route that runs before the site's Worker, writing the room's head and a plain summary for link previews and crawlers, and answers `dash.bellman.sh/r/*` with a 301 there."; "where `as` is the creator's number, which the page swaps for `@handle`" becomes "where `as` is the creator's name, `@handle` since ADR 0023, or the cached one for the hour after a change, which the page shows as `by.handle`".
-- The invariant "**The control panel holds a cookie, not a token**" gains a last sentence: "Its origins are `BELLMAN_PANEL_ORIGINS`: the dash, and `https://bellman.sh`, where the dash's Worker serves the public room pages, so a script on any bellman.sh page, the static site's included, can make a cookie-authenticated write (ADR 0023)."
-- §11, "What connecting costs": re-measure the tool definitions, then put the total in the row and a paragraph above the newest "Re-measured" one, saying what changed: "Re-measured on <date> for public rooms on bellman.sh, by the method below: <n> tokens over the <m> that main (`<commit>`) measures. `bellman_start` is <a> to <b>, `bellman_connect` <c> to <d> and `bellman_public_name` <e> to <f>, for the page's host and for members named by their public handle. No other tool changed. That is <total>." The figures come from the measurement. The method, which nothing in the repo runs: in a scratch directory with `node_modules` symlinked to a checkout's, a `.mts` script run with that checkout's `node_modules/.bin/tsx` imports its `src/auth.ts`, `src/server.ts`, `src/store.ts` and `src/blobs.ts`, builds the server for `qk_dev_jesse` with `hostedSeat: true` as `tests/helpers/harness.ts` does, lists the tools over `InMemoryTransport` and prints them; `python3.13` with tiktoken's `cl100k_base` counts `json.dumps(entry, separators=(",", ":"))` for each and sums them. Measure `main` first as the control, and compare with its own figure, not the row's.
+- The "**A public room**" paragraph: "every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs" becomes "every public read then names each member wherever a `label` holds theirs: by the handle their account claimed (`@handle`, from one `handlesOf` read of the registry's `uh:` rows behind the Worker's per-isolate `HandleCache`, which keeps each account's answer an hour), or by number (`member 1` and on). A name freed by a release, a change or the operator's release is held 65 minutes from every account (`hh:` rows, `HANDLE_HOLD_MS`), longer than any page can still show it under its old holder (ADR 0024)"; "where `as` is the creator's number, which the page swaps for `@handle`" becomes "where `as` is the creator's name, or the cached one for the hour after a change, which the page shows as `by.handle`".
+- Section 11: re-measure as Task 12 says, the paragraph naming `bellman_start` and `bellman_connect`, "for members named by their public handle".
 
-- [ ] **Step 4: The predicate, and everything**
+- [ ] **Step 4: Everything.** Run: `npm run verify && npx wrangler deploy --dry-run --outdir "$(mktemp -d)"`. Expected: PASS.
 
-Run:
-```bash
-rg -n --hidden -g '!node_modules' -g '!.jj' -g '!docs/superpowers/**' 'dash\.bellman\.sh(/|</code>/)r\b' .
-npm run verify
-npx wrangler deploy --dry-run --outdir "$(mktemp -d)"
-```
-Expected: the predicate prints only the 301 sentences in `README.md`, `docs-site/src/content/docs/guides/public-rooms.md`, `docs/ARCHITECTURE.md` and `docs/adr/0023-public-rooms-on-bellman-sh.md`, and decision 3 of `docs/adr/0011-public-rooms.md`; `verify` passes; the dry run passes.
+- [ ] **Step 5: Commit.** `jj commit -m "ADR 0024, and the README, the docs site, the skill and ARCHITECTURE name public rooms' members by handle"`
 
-- [ ] **Step 5: Commit**
+### Part 2b's review and PR
 
-```bash
-jj commit -m "ADR 0023, and the README, the docs site, the skill and ARCHITECTURE put public rooms on bellman.sh and name members by handle"
-```
-
-### Part 2's review and PR
-
-- [ ] **The whole-branch review:** one reviewer over the branch's diff from `trunk()`, with this plan and the spec. Fix what it finds, with tests, before the PR.
-- [ ] **The PR.** Read the diff's stat against the files these tasks list, set the bookmark, push and open it. The body says, out loud: `https://bellman.sh` joins the panel origins, so every page on bellman.sh, the static site's included, can make a cookie-authenticated write; a handle reaches public pages within the hour; and a released or changed-away handle is held from every account, its last holder too, for 65 minutes, which an operator's release also starts.
-- [ ] **After the merge:** read the deploy job. Then `curl -s https://mcp.bellman.sh/public/rooms/<a public room>/events` names a member who holds a handle by it, `bellman_start` with `public: true` returns a `public_url` on `https://bellman.sh/r/`, and a PUT of a handle just released answers 409 with the hold's words.
+- [ ] **The whole-branch review:** one reviewer over the branch's diff from `trunk()`, with this plan and the spec, during the 30 days. Fix what it finds, with tests.
+- [ ] **The PR,** opened during the 30 days and merged on `<EFFECTIVE_DATE>`, with 3c. Read the diff's stat first. The body says, out loud: a handle reaches public pages within the hour; a released or changed-away handle is held from every account, its last holder too, for 65 minutes, which an operator's release also starts; and every public page that names a member now reads `RegistryDO`, through an hour's cache.
+- [ ] **After the merge:** read the deploy job. `curl -s https://mcp.bellman.sh/public/rooms/<a public room>/events` names a member who holds a handle by it, and a PUT of a handle just released answers 409 with the hold's words.
 
 ---
 
-# Part 3 — the dash's and the site's text (two PRs, after Part 2 is deployed)
+# Part 3c — the site: the effective date (one PR, merged on `<EFFECTIVE_DATE>`, with 2b)
 
-Both say what Part 2 made true, so neither lands before it deploys.
+### Task 21: The upcoming versions become the ones in force
 
-### Task 15: The dash's Settings say what a handle names, and how long a freed one is held
-
-The dash checkout as in Part 1, on a new branch from `origin/main`.
+The site's checkout as in Part 3a, on a new branch.
 
 **Files:**
-- Modify: `src/components/settings/handle-section.tsx`
-- Test: `src/components/settings/handle-section.test.tsx`
+- Modify: `public/privacy.html`, `public/terms.html`, `worker.js`
+- Delete: `public/privacy-next.html`, `public/terms-next.html`
+- Test: `tools/worker.test.mjs`
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test.** In `tools/worker.test.mjs`, with the file's stand-in for the assets binding:
 
-- "says what the public page lists and what a change frees, naming the page as it is when %s", renamed "says what a handle names, what the public page lists, and how long a freed handle is held, naming the page as it is when %s", expects:
-
-```ts
-    expect(description).toHaveTextContent("Claim a handle and every public room you are in, or were in, shows your messages under it, never your sign-in label.");
-    expect(description).toHaveTextContent(
-      `A page at ${page} lists the rooms you signed. Releasing a handle unsigns every room. A handle you release or change is held for 65 minutes, from everyone, you included, before anyone can claim it, and public pages can take up to an hour to show a change.`,
-    );
+```js
+test("the upcoming versions' links go to the versions now in force", async () => {
+  for (const [from, to] of [["/privacy-next", "/privacy"], ["/terms-next", "/terms"]]) {
+    const res = await worker.fetch(new Request(`https://bellman.sh${from}`), env);
+    assert.equal(res.status, 301, from);
+    assert.equal(res.headers.get("location"), `https://bellman.sh${to}`, from);
+  }
+});
 ```
 
-- The release question's case expects `screen.getByText("Every room you signed is unsigned, and @ada is held for 65 minutes before anyone can claim it.")`.
+- [ ] **Step 2: Run it and watch it fail.** Run: `node --test tools/worker.test.mjs`. Expected: FAIL, the asset server's answer for the page.
 
-- [ ] **Step 2: Run them and watch them fail**
+- [ ] **Step 3: Implement.** `public/privacy.html` and `public/terms.html` take the bodies of their `-next` pages, under `<p class="updated">Effective <EFFECTIVE_DATE></p>` alone, without the line on when the version takes effect, and the `-next` pages go. `worker.js`, beside the `/stories` redirect: `/privacy-next` and `/terms-next` answer 301 to the page without `-next`, with a comment: the notice email linked the upcoming version.
 
-Run: `npx vitest run src/components/settings/handle-section.test.tsx`
-Expected: FAIL on both texts.
+- [ ] **Step 4: Run the site's checks.** Expected: the tests pass, the regenerated pages change nothing, and `git status --porcelain` lists the five files alone.
 
-- [ ] **Step 3: Implement**
-
-- The paragraph under "Public handle": "Claim a handle and every public room you are in, or were in, shows your messages under it, never your sign-in label. Sign a public room you created and it also shows "by @handle". A page at {page} lists the rooms you signed. Releasing a handle unsigns every room. A handle you release or change is held for 65 minutes, from everyone, you included, before anyone can claim it, and public pages can take up to an hour to show a change."
-- The release question: "Every room you signed is unsigned, and @{handle} is held for 65 minutes before anyone can claim it."
-- The header comment: claiming a handle names the person by it in every public room they are or were in (public rooms on bellman.sh spec, D3). The comment on asking twice: a freed handle is held 65 minutes and then anyone can claim it, so it cannot be taken back.
-
-- [ ] **Step 4: Run them and watch them pass**
-
-Run: `npm test && npm run lint`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit, review, PR.**
 
 ```bash
-git add src/components/settings/handle-section.tsx src/components/settings/handle-section.test.tsx
-git commit -m "Settings say a handle names you in every public room you are in, and that a freed one is held 65 minutes"
+git add -A public/privacy.html public/terms.html public/privacy-next.html public/terms-next.html worker.js tools/worker.test.mjs
+git commit -m "The privacy policy and terms of <EFFECTIVE_DATE> are in force, and their upcoming pages' links go to them"
 ```
 
-### Task 16: The privacy policy and the terms name members by handle, and state the hold
-
-The site's checkout is `~/src/github.com/bellman-sh/site`, on a branch or a worktree from `origin/main`. Its checks are `node --test tools/worker.test.mjs` and `python3.13 -m unittest discover -s tools -p 'test_*.py'`; the default `python3` here is 3.11, which the tools refuse. Regenerating the generated pages must change nothing: `for t in build-pricing build-compare build-stories; do python3.13 tools/$t.py; done; python3.13 tools/sitenav.py; git status --porcelain`.
-
-**Files:**
-- Modify: `public/privacy.html`, `public/terms.html`
-
-- [ ] **Step 1: Read what each page says now**
-
-Run: `rg -n 'by number|byline|handle' public/privacy.html public/terms.html`
-Expected: `privacy.html`'s "Anyone with a public room's link" and "Anyone, for a byline you choose to add" items, its "Public handles" item under how long things are kept, and `terms.html`'s paragraph of section 4 on public rooms.
-
-- [ ] **Step 2: The privacy policy's two items**, in "Who else sees it", replace the two:
-
-```html
-  <li><strong>Anyone with a public room's link</strong>, when the room's creator made it
-      public: its canvas and its log, with each member shown by the handle they claimed, or
-      by number if they have none. Briefs and the label you sign in with, usually your email
-      address, are never shown. A creator can make a public room private, and it cannot be
-      made public again.</li>
-  <li><strong>Anyone</strong>, for a handle you choose to claim. Once you claim one, every
-      public room you are in, or were in, names you by it. If you also sign a public room
-      you created, the room shows "by @yourhandle", and a page at your handle lists the
-      public rooms you signed and when you signed each. Unsign a room and its byline is
-      gone. Release your handle in Settings, or change it, and within an hour public rooms
-      stop showing it; the old handle is then held for 65 minutes, from everyone, you
-      included, before anyone can claim it.</li>
-```
-
-- [ ] **Step 3: The privacy policy's "Public handles" item**, under how long things are kept, becomes:
-
-```html
-  <li><strong>Public handles.</strong> A handle and its signatures are kept until you
-      release the handle in Settings, and releasing it deletes both at once. The name
-      itself is then held for 65 minutes, linked to no account, before anyone can claim
-      it. When we delete your account, your handle goes with it.</li>
-```
-
-- [ ] **Step 4: The terms' paragraph**, in section 4, replace the one on public rooms. It describes no release, so it states no hold:
-
-```html
-<p>A room&rsquo;s creator on a paid plan can make the room public. Anyone with its link can then
-read its canvas and its log without signing in, with each member shown by the handle they
-claimed, or by number if they have none. A creator can also sign a public room with their
-handle, and the room then names them as its author. Do not put anything in a public room you
-would not publish.</p>
-```
-
-- [ ] **Step 5: The effective dates.** On both pages, `<p class="updated">Effective 12 October 2026</p>` takes the day this merges.
-
-- [ ] **Step 6: Run the site's checks**
-
-Run the three commands above.
-Expected: the tests pass, and `git status --porcelain` lists `public/privacy.html` and `public/terms.html` alone.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add public/privacy.html public/terms.html
-git commit -m "The privacy policy and the terms name each member by the handle they claimed, and the policy states a freed handle's hold"
-```
-
-### Task 17: The site leaves `/r/*` to the dash
-
-**Files:**
-- Modify: `README.md`, `.github/workflows/deploy.yml`
-
-- [ ] **Step 1: The README.** After the paragraph that ends "this deployment serves `bellman.sh`.", add: "Except `bellman.sh/r/*`: a route on the zone sends it to the dash's Worker (`bellman-sh/dash`), which serves the public room pages there. A route runs before a Custom Domain's Worker, which this one is, so nothing here sees `/r/`. A change to this Worker's routing must leave `/r/*` to the dash, and the deploy checks that it does."
-
-- [ ] **Step 2: The deploy's check.** In "Smoke test the live site", before `exit $fail`:
-
-```bash
-          # bellman.sh/r/* is the dash's Worker's, by a route that runs before this one: its page carries the dash's policy.
-          check "bellman.sh/r/ is the dash's" \
-            "$(curl -sI --max-time 30 https://bellman.sh/r/no-such-room | tr -d '\r' | grep -ci '^content-security-policy:.*script-src https://dash.bellman.sh;')" \
-            "1"
-```
-
-- [ ] **Step 3: Run it by hand against the live site**
-
-Run the `curl` in Step 2 on its own.
-Expected: `1`, once Part 1 is deployed; before that, `0`.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add README.md .github/workflows/deploy.yml
-git commit -m "The site's README says bellman.sh/r/* is the dash's, and each deploy checks it still is"
-```
-
-### Part 3's review and PRs
-
-- [ ] **The whole-branch reviews:** one reviewer over each repo's `git diff origin/main...HEAD`, with this plan and the spec.
-- [ ] **The PRs,** after Part 2 is deployed, since their text is true only then, and soon after it: until they merge, the dash's Settings say a freed handle is free at once and the privacy page says members are shown by number. Read each diff's stat first. After the merges, read each deploy job, the site's smoke test included.
+One reviewer over the diff; read the stat; merge on `<EFFECTIVE_DATE>` with 2b; read the deploy job's smoke test.

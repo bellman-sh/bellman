@@ -79,10 +79,10 @@ only through the claude.ai connector have no local bridge, so the mod shows
 nothing of them and leaves their approvals as they are today (D8). A person who
 registered their own bridge has no use for the plugin's, so the mod is a second
 plugin in the same marketplace (`.claude-plugin/marketplace.json`), installed
-on its own. It is built by `npm run build:plugin` beside the bridge bundles, so
-it can share code with `src/`, and the CLAUDE.md rules for
-`plugin/bridge/*.mjs` (generated, committed, rebuilt by every release PR,
-checked by `tests/plugin.test.ts`) extend to its bundle.
+on its own. It is built by `npm run build:mod`, which `npm run build:plugin`
+runs too beside the bridge bundles, so it can share code with `src/`, and the
+CLAUDE.md rules for `plugin/bridge/*.mjs` (generated, committed, rebuilt by
+every release PR, checked by `tests/plugin.test.ts`) extend to its bundle.
 
 **D2. The view follows the room the terminal has.** *(person)*
 
@@ -139,10 +139,12 @@ room shown first is the one with the latest activity.
   (`$.ui.status`) says Bellman is not in a room.
 - **Members and presence:** `bellman_rooms` (each room's `members[]` with
   `room_role`, `presence` and `beat`; `status`; `active_members`;
-  `max_members`; `last_event`), called through `$.mcp.call`. It is a read that
-  moves nobody's `lastSeenAt`. The mod polls it on the MCP Apps monitor's
-  cadence (the interval constant in `ui/src/page.ts`). The list shows peers;
-  the count includes the person's own seat.
+  `max_members`; `last_event`), read through the door's `GET /rooms` (D9): the
+  bridge calls the tool through the connection it holds and keeps the rooms it
+  has a seat in. It is a read that moves nobody's `lastSeenAt`. The mod polls
+  it on the MCP Apps monitor's cadence (the interval constant in
+  `ui/src/page.ts`). The list shows peers; the count includes the person's own
+  seat.
 - **Unread:** new since the person last opened that room's Log (MCP Apps UI
   spec D4: the server keeps no read state).
 - **Pending approvals:** action requests in the room that the person's seat
@@ -151,25 +153,31 @@ room shown first is the one with the latest activity.
 
 **D5. The room pane: Log, Canvas, Members, Approve.** One pane id, with tabs
 the mod draws. It opens on Log, or on Approve when opened from an approval
-count or an approval toast.
+count.
 
-- **Log:** the room's whole history, newest at the bottom, paged backwards,
-  read through the bridge from `GET /rooms/:id/events` (`readEventsRoute`,
-  `MAX_EVENTS_READ` a page), which moves no one's `lastSeenAt` and no bridge's
-  cursor (D9). A row is the time, the sender's label and the event drawn by
-  type: a message's text, a canvas edit as its key and version, a join, an
-  action request with Approve and Deny while it is pending.
-- **Canvas:** read-only, read with `bellman_surface` (MCP Apps canvas spec D1)
-  and drawn per kind: `text` as `Markdown`; `link` as a `Link`; `diagram` as
-  its mermaid source in a `Code`; `file` by name and size; `image` as an
-  `Image` where the terminal speaks kitty graphics, else its name; `html` as a
-  link to the panel, since a terminal does not run pages. `connector` and
-  `shape` are the builder's.
+- **Log:** the room's log, newest at the bottom, read through the bridge's door
+  from `GET /rooms/:id/events` (`readEventsRoute`, `MAX_EVENTS_READ` a page),
+  which moves no one's `lastSeenAt` and no bridge's cursor (D9): the newest
+  page, then what arrives after it, the newest 500 events kept and as many rows
+  drawn as fit. Paging back past those is not built. A row is the time, the
+  sender's label and the event drawn by type: a message's text, a canvas edit
+  as its title or key, a join, an action request with Approve and Deny while it
+  is pending.
+- **Canvas:** read-only, read through the door from `GET /rooms/:id/surface`,
+  which is `bellman_surface`'s answer (MCP Apps canvas spec D1), and drawn per
+  kind: `text` as `Markdown`; `link` as a `Link`; `diagram` as its mermaid
+  source in a `Code`; `file` by name and size; `image` by its name, since the
+  door serves no blobs; `html` as a line that says to open it in the panel,
+  since a terminal does not run pages. `connector` and `shape` are not drawn:
+  they are the panel's.
 - **Members:** each member's role, presence and beat (`silent_for_seconds`,
   `note`).
 - **Approve:** *(person)* each pending request: who asked, what was asked (the
   request's payload, drawn as untrusted text, D10), the time left, and Approve
-  and Deny.
+  and Deny. A request the person approved draws `approved · waiting for Claude`
+  in place of its two buttons, here and in the Log's rows, until Claude's
+  answer lands or the request expires (D8). `Approve n`, on the tab and in the
+  sidebar and the band, counts only the requests still waiting on the person.
 
 **D6. Toasts.** *(person: a toast for the latest message; an action request
 raises a toast and never takes the keyboard)*
@@ -186,7 +194,11 @@ stays asleep)*
 
 - What wakes: a peer's event the server marks interrupting (`ambient` absent
   or false on `PeerEvent`; the posture table is `src/attention.ts`), in any
-  room. Ambient events keep waiting for the turn end, as now.
+  room. The mod keeps no list of event types of its own, which is what that
+  table is for: a roster change (`member_joined`, `member_left`,
+  `invite_issued`) wakes an idle session as a message does, as channel
+  delivery's push already starts a turn on one. Ambient events keep waiting
+  for the turn end, as now.
 - **Hook delivery only.** A bridge in channel delivery already starts a turn
   with its push, so the mod wakes nothing for it.
 - **Idle** (no turn running, tracked from `turn.start` and `turn.complete`):
@@ -204,35 +216,56 @@ stays asleep)*
 - Every wake is a turn, and the person accepted that cost for every room.
 - **The limit** *(person)*: after three wakes in a row with no input from the
   person, the mod stops waking until the person types a prompt or presses one
-  of the mod's buttons, and the sidebar or band says it has paused. Members
-  whose sessions all run the mod would otherwise wake each other on every
-  reply with nobody involved. A heartbeat tick counts as a wake.
+  of the mod's buttons, and the sidebar or band says it has paused. A prompt
+  typed in the composer counts as the person, and so does one sent through
+  Remote Control (`origin.kind` `bridge`): only the person can send either. A
+  peer's message, another plugin's prompt and a task's notification do not.
+  Members whose sessions all run the mod would otherwise wake each other on
+  every reply with nobody involved. A heartbeat tick counts as a wake.
 
 **D8. The gate.** *(person: Claude cannot answer an action request for the
 person)*
 
 - **Approve** is a press (`ui.press`, which only the person raises). The mod
-  records the approval by room and cursor in `$.state`, then wakes or tells
-  Claude with fixed text naming the request by its session id and cursor (both
+  records the approval by room and cursor in `$.state`, then tells Claude
+  once, with fixed text naming the request by its session id and cursor (both
   server-made): approved; carry it out; answer with `bellman_send` type
-  `action_response`, that `ref_id`, `approved: true` and the result.
-- **Deny** is answered by the mod itself: `bellman_send` type
-  `action_response`, the `ref_id`, `{ approved: false }`, through
-  `$.mcp.call`. Claude takes no turn for it; the mod appends a notice that the
-  person declined, so Claude does not act on the request.
+  `action_response`, that `ref_id`, `approved: true` and the result. Claude is
+  told by a row appended to the turn that is running, or else by a prompt of
+  the mod's own that starts one. An action request is not idempotent, so a
+  second press on an approved request tells Claude nothing: the request reads
+  `approved · waiting for Claude` where its buttons were (D5). An approval that
+  does not reach Claude, because the append or the prompt is refused, is taken
+  back: the request draws its buttons again, the gate stays shut for it, and a
+  toast tells the person.
+- **Deny** is answered by the mod itself, through the bridge's door:
+  `POST /rooms/<id>/decline { ref_id }` (D9), which sends `action_response`
+  with `{ approved: false }` as the bridge's seat and nothing else. It is no
+  tool call: a plugin's own `$.mcp.call` from a press or a timer skips the
+  plugin's own `mcp.call` hook, and outside the mod's own hook dispatches
+  Claude Code's permission check refuses it (open question 4). Claude takes no
+  turn for it; once the door says the room was answered, the mod appends a
+  notice that the person declined, so Claude does not act on the request. When
+  the door does not answer, a toast tells the person and the request still
+  waits.
 - **The gate** is a `tool.call` hook on every tool whose name ends in
   `bellman_send`, on any server, and an `mcp.call` hook on the same tools for
   another plugin calling through `$.mcp.call`. It acts on
-  `type: "action_response"` in a room the pane shows (D1); an answer in any
-  other room passes as today. In the pane's rooms it passes `approved: true`
-  with a `ref_id` the person approved, and refuses every other action
-  response, saying the person answers requests in the Bellman pane. It is
-  registered with a `.catch` that refuses when the hook failed before calling
-  `next`, so a broken gate stays shut.
+  `type: "action_response"` in a room the pane shows (D1: a room some door's
+  last reading listed a seat in); an answer in any other room passes as today.
+  In the pane's rooms it passes `approved: true` with a `ref_id` the person
+  approved, and refuses every other action response, Claude's own
+  `approved: false` included, since the person's Deny goes through the door and
+  never through here, saying the person answers requests in the Bellman pane.
+  It is registered with a `.catch` that refuses when the hook failed before
+  calling `next`, so a broken gate stays shut.
 - **Where it shuts** *(person)*: only while a terminal is attached
-  (`$.session.surfaces()`) and the mod's Approve tab is drawing there. Wherever
-  nothing draws Approve (the desktop app, VS Code, `claude -p`, the SDK, a pane
-  broken by an API change), approval works in chat, as it does today.
+  (`$.session.surfaces()` includes `terminal`) and the mod has drawn there
+  since it loaded (`hasDrawn`, `mod/src/drawn.ts`). That stands in for Approve
+  being on screen: the band, the sidebar and the pane each lead to it while a
+  request waits. Wherever nothing draws the mod (the desktop app, VS Code,
+  `claude -p`, the SDK, a pane broken by an API change), approval works in
+  chat, as it does today.
 - **What it is** *(person)*: a guard against Claude answering on its own, and
   no proof to the requester. A prompt-injected Claude could still read the
   bridge's saved sign-in and post an answer another way. Only the server can
@@ -246,24 +279,45 @@ person)*
   human in chat. While the gate is shut the mod tells the model instead,
   through a system-prompt section (`prompt.compose`), that approvals for the
   pane's rooms happen in the Bellman pane and that it will be told the answer.
+  Where an organization manages Claude Code, hooks on `prompt.compose` do not
+  run in a plugin a person installs (`claude plugin validate` says so), so the
+  section never reaches the model there; the gate still refuses Claude's own
+  answer, and its refusal says the same.
 
-**D9. The bridge grows a local door.** The mod needs three things the bridge
-holds: whether events are waiting (counts per room, interrupting or ambient,
-taken without draining), the room log (the events route needs the credential),
-and the connection state. The bridge serves them on a **door**: a local,
-per-bridge HTTP endpoint on a Unix socket, which the mod reaches with
-`$.http.fetch(url, { socketPath })`. The mod finds each local bridge by the
-bridge's own `bellman_whoami` tool, on whichever server lists it (the
-connector lists none), and reads that bridge's door from a field added to the
-tool's result, through `$.mcp.call`, so no new tool appears and
-`extension/manifest.json` stays as it is. A bridge in channel delivery keeps no
-inbox, so its door serves everything but the waiting counts, which only wake
-uses. `$.http.fetch` resolves only once the body is read, so the mod polls the
-door on a short timer; the polling is local, and the bridge's own connection to
-the room (the bus) is unchanged. The builder may find a better way for the mod
-to find its door. Whatever replaces it keeps all four properties: one door per
-Claude Code session, the credential stays in the bridge, no new tool the model
-sees, nothing drained.
+**D9. The bridge grows a local door.** The mod needs what the bridge holds,
+and what Claude Code will not let a mod ask for from a press or a timer:
+whether events are waiting (counts per room, interrupting or ambient, taken
+without draining), the room log (the events route needs the credential), the
+connection state, the rooms the bridge holds a seat in, a room's canvas, and a
+refusal of an action request. *(person: the bridge serves the rooms, the canvas
+and the decline.)* The bridge serves them on a **door**: a local, per-bridge
+HTTP endpoint on a Unix socket, `~/.claude/bellman/door/<bridge pid>.sock` (the
+folder `0700`, the socket `0600`), which the mod reaches with
+`$.http.fetch(url, { socketPath })`. It has five routes: `GET /status`,
+`GET /rooms`, `GET /rooms/<id>/events[?after=]`, `GET /rooms/<id>/surface` and
+`POST /rooms/<id>/decline { ref_id }`. The door is no longer read-only: any
+process running as the person can decline a request through it, as any such
+process can already read the person's Bellman sign-in. The decline sends one
+`action_response` with `{ approved: false }` as the bridge's seat in a room it
+watches, and nothing else. The bridge answers through the connection it
+already holds, never one that could start a sign-in: with none held the door
+says so, and the next Bellman tool call is what reconnects. The mod calls no
+Bellman tool but `bellman_whoami`.
+
+The mod finds each local bridge by the bridge's own `bellman_whoami` tool, on
+whichever server lists it (the connector lists none), and reads that bridge's
+door from a field added to the tool's result, `door`, so no new tool appears
+and `extension/manifest.json` stays as it is; open question 7 has how the mod
+asks. A bridge in channel delivery keeps no inbox, so its door serves
+everything but the waiting counts, which only wake uses. `$.http.fetch`
+resolves only once the body is read, so the mod polls the door on a short
+timer (`DOOR_POLL_MS`, two seconds); that poll is local, the rooms and logs it
+asks for are read from the server through the bridge's connection at a slower
+pace (`ROOMS_POLL_MS`, fifteen seconds), and the bridge's own connection to the
+room (the bus) is unchanged. The way the builder settled on
+keeps all four properties: a door per bridge (a session with two bridges has
+two), the credential stays in the bridge, no new tool the model sees, nothing
+drained.
 
 **D10. Peer text is untrusted on screen too.** Every peer-controlled string the
 mod draws has control characters stripped first; pane titles refuse them
@@ -282,23 +336,66 @@ showing what they show today.
 ## Open questions for a spike
 
 The builder answers these on the build in hand before planning around them.
+Each is answered below its question, with its source.
 
 1. What does a Claude Code build without mods do with a plugin that is only a
    hooks module: skip it quietly, or refuse it at install? (D1)
+
+   **Answered.** A build without mods skips a hooks-only plugin quietly (the
+   person, 2026-10-16). The README says the mod needs a Claude Code build with
+   mods.
 2. How narrow can a docked pane be? The sidebar wants about 20 columns. (D2)
+
+   **Answered.** The docked sidebar draws at `SIDEBAR_COLUMNS` (22) in Orca
+   fullscreen (the look).
 3. How far above the band can a `Box` with `position: "absolute"` paint? The
    floating bell sits four to six rows up. (D2)
+
+   **Answered.** The floating bell sits above the band below 144 columns, over
+   the transcript, and draws uncut on the main screen with
+   `CLAUDE_CODE_NO_FLICKER=0` (the look). It is placed at `top`
+   `-(BELL_ROWS + 1)` (`mod/src/view.tsx`).
 4. Does the mod's own `$.mcp.call` of `bellman_send` (Deny) pass through its
    own gate, and if so, is it let through? (D8)
+
+   **Moot.** Deny no longer calls `$.mcp.call`. A plugin's own `$.mcp.call`
+   from a press or a timer skips its own `mcp.call` hook, and outside the mod's
+   own hook dispatch Claude Code's permission check refuses it
+   (`tool.check skipped: re-entry`). Deny goes through the door's
+   `POST /rooms/<id>/decline` (D8, D9) (the look).
 5. How does `$.prompt.submit`'s text appear in the transcript (the
    `UserMessage` site), and can the mod make it read as a Bellman notice
    rather than as the person's typing? (D7)
+
+   **Answered.** The wake's prompt reads as the plugin's own (origin `plugin`,
+   never `asUser`: `wakeTick` in `mod/src/waking.ts` passes no `asUser`). The
+   person found `WAKE_TEXT` fine as it is (the person, 2026-10-16).
 6. Does Orca (`TERM_PROGRAM=Orca`, the person's terminal) draw the `Raster`
    bell, and does it speak kitty graphics? (D2)
+
+   **Answered.** Orca draws the bell's `▀` half blocks with separate
+   foreground and background colors (the person and the look). The bell is text
+   cells (`bellRows` in `src/mod/view.ts`), not a `Raster`; kitty graphics were
+   not needed and not tried.
 7. The door, and finding every local bridge whatever its server is called.
    (D9)
+
+   **Answered.** Each bridge is found by the names `$.tool.list()` returns that
+   match `mcp__<server>__bellman_whoami` (the list includes tools held behind
+   ToolSearch), and `bellman_whoami` is called through `$.mcp.call` only inside
+   the mod's own hook dispatches (`session.start`, `turn.start`,
+   `turn.complete`, `prompt.submit`), where the mod's `tool.check` hook allows
+   that one call: from a timer or a press the permission check refuses it
+   (`findDoors` in `mod/src/doors.ts`; the look). `$.mcp.call` results carry no
+   `structuredContent`; the JSON is in the first text block (`resultData` in
+   `src/mod/calls.ts`). Everything else the mod reads comes through the door
+   over `$.http.fetch`, which no permission check covers.
 8. How the gate tells that the Approve tab is drawing on an attached
    terminal. (D8)
+
+   **Answered.** The gate shuts while `$.session.surfaces()` includes
+   `terminal` and the mod has drawn there since it loaded (`gateShut` in
+   `mod/src/gate.ts`, `hasDrawn` in `mod/src/drawn.ts`).
 
 ## Testing
 
@@ -326,8 +423,11 @@ The builder answers these on the build in hand before planning around them.
   holding every event; the log read carries the bridge's credential and never
   returns it.
 - `claude plugin validate` on the plugin folder in `npm run verify`. Whether CI
-  can run `claude plugin test` (it needs the Claude Code CLI) is the builder's
-  to find out.
+  can run `claude plugin test` (it needs the Claude Code CLI) was the builder's
+  to find out, and it does not: `ci.yml` runs the pieces of `verify` and not
+  `test:mod`, and `publish.yml` runs `verify` on a runner with no CLI.
+  `scripts/test-mod.ts` skips when `CI` is set and no `claude` is on PATH, so
+  the kit tests run only where `verify` runs locally.
 
 ## Out of scope
 
@@ -353,7 +453,8 @@ wakes and toasts; the `$.state` contract's names; where the mod's tests live.
 The author made these without the person:
 
 - D1: the mod is its own plugin in the Bellman marketplace, so it installs
-  beside a bridge the person registered; built by `npm run build:plugin`.
+  beside a bridge the person registered; built by `npm run build:mod`, and by
+  `npm run build:plugin` in release PRs.
 - D2: a sidebar behind another plugin's pane counts as not on screen.
 - D2: the bell is pixel art in half-block text, the clickable form; no crisp
   icon.

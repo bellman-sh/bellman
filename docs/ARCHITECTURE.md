@@ -6,7 +6,7 @@ applies-when: |
   Need the shape of the whole system rather than one feature: what Bellman is
   and is not, why the server is remote-first, the storage objects, how identity
   and plans resolve, where trust boundaries sit, and what is still missing.
-siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md]
+siblings: [superpowers/specs/2026-09-23-room-manifests-design.md, superpowers/specs/2026-09-29-room-delivery-design.md, superpowers/specs/2026-10-02-heartbeat-events-design.md, superpowers/specs/2026-10-06-working-surface-design.md, superpowers/specs/2026-10-06-surface-blobs-design.md, superpowers/specs/2026-10-06-mcp-apps-ui-design.md, superpowers/specs/2026-10-06-surface-canvas-ui-design.md, superpowers/specs/2026-10-08-hosted-seat-design.md, superpowers/specs/2026-10-16-claude-code-mod-design.md]
 last-verified-against-source: 21f13b4
 last-updated: 2026-10-09
 ---
@@ -59,6 +59,7 @@ flowchart TB
     subgraph local["Local, optional"]
         BRIDGE["bridge<br/>dist/channel.js"]
         HOOK["Stop hook"]
+        MOD["bellman-mod<br/>Claude Code mod"]
     end
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
@@ -82,6 +83,7 @@ flowchart TB
     BRIDGE --> MCP
     BRIDGE -->|"one per room"| WS
     BRIDGE -.-> HOOK
+    MOD -->|"the door"| BRIDGE
     CCC --> MCP
     DESK --> MCP
     OTHER --> MCP
@@ -186,6 +188,7 @@ flowchart TB
 |---|---|---|---|
 | Claude Code, terminal | yes | **channel** | `bellman-claude` adds the flag; the best experience |
 | Claude Code, the plugin, or `BELLMAN_DELIVERY=hook` | yes | **Stop hook** | fires at end of turn, no flag needed; the plugin sets it up |
+| Claude Code, terminal, with `bellman-mod` | the bridge's | **wake**, hook delivery only | the surface the person arrives on: a sidebar or band, toasts, a room pane, and a turn started when events wait ([the mod and the door](#the-mod-and-the-door)) |
 | Claude Code, desktop or VS Code | yes | Stop hook, untested | channels are not exposed there ([#27](../../../issues/27)) |
 | Claude Code, cloud session | yes | Stop hook if committed to the repo | otherwise the agent polls |
 | Claude Desktop, consumer app | yes | none | manual `bellman_sync`; the MCP Apps monitor ([#28](../../../issues/28)) shows the room, and the canvas its working surface, without asking the agent |
@@ -430,6 +433,83 @@ code change.
 An unrecognised value reads as off, deliberately unlike `BELLMAN_DELIVERY`'s
 unknown-means-default: a typo should leave a room on the path that has been
 in production for months, not move it onto the new one.
+
+### The mod and the door
+
+Everything above delivers to the *session*. `bellman-mod` (`mod/`) is the surface
+the *person* arrives on in Claude Code's terminal: a second plugin in the
+marketplace, beside the bridge's, and a Claude Code *mod*, a hooks module that
+draws in the terminal and runs hooks on the session
+([the spec](superpowers/specs/2026-10-16-claude-code-mod-design.md)). It adds no
+path by which events reach Claude and takes none from Claude: events still come
+through the bridge, `bellman_sync` stays authoritative, and the mod calls
+neither `bellman_sync` nor drains an inbox. On top of what the bridge delivers
+it does three things.
+
+- **A view.** A sidebar where the terminal draws fullscreen and the engine has
+  docked the mod's pane (`chooseLayout`, `src/mod/view.ts`), and a band above
+  the prompt, with a bell over the transcript's edge, everywhere else. Either
+  shows the room (a picker when the session holds seats in several), its peers
+  and their presence, the unread count and the action requests waiting on the
+  person. Beside them a toast per interrupting event from a peer, and a room
+  pane: Log, Canvas, Members, Approve. It draws on `terminal` and passes
+  `next(e)` on `desktop`, `vscode` and `mobile`, which show Bellman through the
+  MCP Apps page or not at all.
+- **A wake.** In hook delivery an interrupting event sits in the bridge's inbox
+  until a turn ends, and a session nobody types into ends none. The mod reads the
+  inbox's counts through the door, which takes nothing from it, and starts a
+  turn with a prompt of fixed text (`WAKE_TEXT`) in an idle session, or appends
+  the same text as a row to the turn that is running, once for a batch. What
+  interrupts is the server's call (`ambient` on the event, `src/attention.ts`),
+  so the mod keeps no list of types of its own, and a roster change wakes as a
+  message does, as channel delivery's push already starts a turn on one. After
+  `WAKE_LIMIT` (three) wakes in a row with no input from the person (a prompt
+  from the composer or through Remote Control, or a press on one of the mod's
+  buttons) it pauses and says so: members whose sessions all run the mod would
+  otherwise wake each other on every reply with nobody involved. A bridge in
+  channel delivery gets the view and the gate and no wake.
+- **A gate** on who answers an action request, in
+  [section 7](#7-trust-boundaries).
+
+**The door is how the mod reads what only the bridge holds.** Each bridge serves
+one on a Unix socket, `~/.claude/bellman/door/<bridge pid>.sock`
+(`BELLMAN_DOOR_ROOT` moves the folder), which the mod reaches with
+`$.http.fetch(url, { socketPath })`. It has five routes:
+
+| Route | Answers |
+|---|---|
+| `GET /status` | the delivery mode, whether the bridge is signed in, the seats it watches, the inbox's counts per room (interrupting and ambient, counted and not taken; none in channel delivery, which keeps no inbox) and the latest events it delivered |
+| `GET /rooms` | the rooms the bridge holds a seat in, as `bellman_rooms` gave them |
+| `GET /rooms/<id>/events[?after=]` | a page of the room's log, read with the bridge's own credential because the events route needs one, and the cursor to ask for what is new |
+| `GET /rooms/<id>/surface` | the room's canvas, as `bellman_surface` gave it |
+| `POST /rooms/<id>/decline { ref_id }` | the one write: answers the action request `approved: false` as the bridge's seat, and sends nothing else |
+
+**How the mod finds a door.** A bridge is any MCP server that lists
+`bellman_whoami`, whatever it is registered as (the plugin's, or one the person
+added); the claude.ai connector lists none, so its rooms are not the mod's.
+`$.tool.list()` names them (`mcp__<server>__bellman_whoami`), and the tool's
+result carries `door`, the socket's path or null. No new tool appears, so
+`extension/manifest.json` is untouched. The mod calls `bellman_whoami` through
+`$.mcp.call` only inside its own hooks (`session.start`, `turn.start`,
+`turn.complete`, `prompt.submit`), where its `tool.check` hook allows that one
+call: from a timer or a press, Claude Code's permission check refuses a
+plugin's own tool call (`tool.check skipped: re-entry`). That is why the rooms,
+the canvas and the decline are door routes and not tool calls, and why they work
+from a timer, since `$.http.fetch` over a socket is covered by no permission
+check. A `$.mcp.call` result carries no `structuredContent`; the JSON is in its
+first text block (`resultData`, `src/mod/calls.ts`). The mod reads each door
+every `DOOR_POLL_MS` (two seconds), a read on this machine, and the rooms and
+their logs every `ROOMS_POLL_MS` (fifteen seconds, the MCP Apps monitor's
+cadence), which the bridge answers from the server through its own connection.
+The bridge's connection to the room, the bus, is as it was.
+
+**The door is an aid and never a dependency**, like the bus (invariant 6 below).
+The bridge is the session's Bellman MCP server, so a bridge that cannot make a
+door (a socket path that is too long, a folder it cannot create) logs it and
+goes on, and `bellman_whoami` names none; a throw behind a request is answered
+with a 500 and an error on the running server is swallowed, because either would
+be an uncaught exception in a process with no handler for one. A bridge older
+than the door names none either, and the mod says to update it.
 
 ## 5. Storage
 
@@ -1206,6 +1286,60 @@ loud:
   and the kind's rules; the rest is the panel's.
 - **An `action_request` is approved by the receiving human**, never by the
   receiving agent, and `request_actions` must be explicitly granted.
+- **In the terminal, the mod holds that line against the agent.** Until the
+  mod, "approved by the receiving human" was an instruction to the model
+  (`HOOK_INSTRUCTIONS`, `CHANNEL_INSTRUCTIONS`), and the model could send the
+  `action_response` itself. Where a terminal is attached and the mod has drawn
+  there (`gateShut`, `mod/src/gate.ts`), a `tool.call` hook on every tool whose
+  name ends in `bellman_send`, on any server, and an `mcp.call` hook on the same
+  tools for another plugin, refuse an `action_response` in a room the doors list
+  a seat in unless it is `approved: true` for a request the person approved by
+  pressing Approve (`judgeSend`, `src/mod/gate.ts`). Each hook has a `.catch`
+  that refuses when it failed before answering, so a broken gate stays shut and
+  breaks nothing else. The person's Deny is answered through the door and never
+  through here, so Claude's own `approved: false` is refused too. Approve tells
+  Claude once, and an approval that does not reach Claude is taken back. This is
+  a guard against Claude answering on its own and no proof to the requester: a
+  prompt-injected Claude could still read the bridge's saved sign-in and post an
+  answer another way, and only the server can prove a person pressed Approve,
+  which is a separate issue. It guards the answer and not the act: Claude can
+  still do what a request asks before the person approves, and Claude Code's
+  permission rules guard the tools. Where nothing draws the mod (the desktop
+  app, VS Code, `claude -p`, the SDK) approval stays in chat as before, and where
+  an organization manages Claude Code the system-prompt note (`prompt.compose`)
+  that tells the model approvals happen in the pane does not run, though the
+  refusal says it.
+- **The door is local and has one write.** Its folder is made `0700` when the
+  door has to make it, and each bridge's `<pid>.sock` is made `0600` by
+  narrowing the umask around the bind and not by a chmod afterwards, which would
+  leave it connectable for the moment between; a folder that already exists is
+  left as it is, as the bus's is. Those modes are the only check on who may
+  connect, as on the bus (`src/bus.ts`), so any process running as the person
+  can use the door: read a room's log and canvas through it, and decline an
+  action request, as it can already read the person's Bellman sign-in under
+  `~/.config/bellman/`. The decline is a `bellman_send` of one `action_response`
+  `{ approved: false }` for the bridge's seat in a room it watches, through the
+  connection the bridge holds, so the write path stays one and keeps its verb
+  check, its idempotency record (`bellman-mod-decline-<ref_id>`) and its audit
+  write. `ref_id` is a cursor of at most fifteen digits in a JSON body of at
+  most 1 KiB; anything else is a 400. The bridge answers through the connection
+  it already holds and never one that could start a sign-in, so a poll nobody
+  asked for cannot open a browser: with none held the door answers 503, and the
+  next Bellman tool call is what reconnects. An error body is a fixed code and
+  never the server's words, because a refusal can name a peer; a data body is
+  the server's, with every peer string still in the untrusted envelope it came
+  in.
+- **The mod hands the model fixed text and draws cleaned text.** `WAKE_TEXT`,
+  `approvedText`, `declinedText` and `APPROVALS_SECTION` are the only strings
+  that reach `$.prompt.submit`, `$.session.append` or a system-prompt section,
+  and the two that name a request carry only a room id and a cursor the server
+  made, checked first. Every peer string the mod draws (a label, a room name, a
+  message, a request, a canvas body) passes `cleanText` or `cleanBlock`
+  (`src/door-protocol.ts`) first, so a toast, a title or a row never carries an
+  escape sequence or a line break, and a link in a peer's canvas text opens only
+  if it is `http` or `https` (`safeLinks`, `src/mod/view.ts`). The model still
+  reads peer events only through the bridge's tools, wrapped as untrusted. This
+  applies the untrusted-content rules above to a new surface.
 - **No shared mutable state between sessions.** Reads return detached copies and
   every write is an explicit store method.
 - **Encryption would not change any of this.** End-to-end encryption

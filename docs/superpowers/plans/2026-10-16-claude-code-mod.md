@@ -4,7 +4,7 @@
 
 **Goal:** Ship `bellman-mod`, a Claude Code plugin that shows the session's Bellman rooms, toasts peers' messages, opens a room pane (Log, Canvas, Members, Approve), wakes an idle session on a peer's message, and lets only the person answer action requests; and give the bridge the local door the mod reads.
 
-**Architecture:** The bridge (`createBridge` in `src/bridge.ts`, started by `src/channel.ts`) gains a door: an HTTP server on a Unix socket (`src/door.ts`) serving the bridge's status and the room log, named by `bellman_whoami`. Runtime-free logic sits in `src/door-protocol.ts` and `src/mod/*.ts`, tested with vitest. The mod's wiring sits in `mod/src/*.tsx`, imports those modules and `claude-code`, and esbuild bundles it into `mod/hooks/register.mjs`; the engine's kit tests it from `mod/tests/`.
+**Architecture:** The bridge (`createBridge` in `src/bridge.ts`, started by `src/channel.ts`) gains a door: an HTTP server on a Unix socket (`src/door.ts`) serving the bridge's status, its rooms, the room log and canvas, and a decline of an action request, named by `bellman_whoami`. Runtime-free logic sits in `src/door-protocol.ts` and `src/mod/*.ts`, tested with vitest. The mod's wiring sits in `mod/src/*.tsx`, imports those modules and `claude-code`, and esbuild bundles it into `mod/hooks/register.mjs`; the engine's kit tests it from `mod/tests/`.
 
 **Tech Stack:** TypeScript, Node 22, vitest, esbuild, `node:http` on a Unix socket, the mod API of Claude Code 2.1.301 (`claude-code`, `claude-code/testing`).
 
@@ -15,14 +15,14 @@
 ## Global Constraints
 
 - Plugin `bellman-mod`, folder `mod/`, listed in `.claude-plugin/marketplace.json` with `"source": "./mod"`; its `plugin.json` version is `package.json`'s.
-- The door: `~/.claude/bellman/door/<bridge pid>.sock` (`BELLMAN_DOOR_ROOT` overrides the folder), the folder `0700`, the socket `0600`; routes `GET /status` and `GET /rooms/<session_id>/events[?after=<cursor>]`, nothing else.
+- The door: `~/.claude/bellman/door/<bridge pid>.sock` (`BELLMAN_DOOR_ROOT` overrides the folder), the folder `0700`, the socket `0600`; five routes, nothing else: `GET /status`, `GET /rooms`, `GET /rooms/<session_id>/events[?after=<cursor>]`, `GET /rooms/<session_id>/surface` and `POST /rooms/<session_id>/decline { ref_id }`.
 - `bellman_whoami`'s result gains `door: string | null`. No new tool: `extension/manifest.json` and its test stay as they are.
 - The mod hands the model fixed text only: `WAKE_TEXT`, `approvedText(sessionId, cursor)`, `declinedText(sessionId, cursor)`, `APPROVALS_SECTION`. No peer-controlled string (message, label, room name, request, canvas body) reaches `$.prompt.submit`, `$.session.append` or `prompt.compose`.
 - The mod never calls `bellman_sync` and never drains an inbox.
 - No `$.ui.open` of the mod's carries `focus` or `holdToasts`.
 - Render hooks draw on `terminal` only and answer `next(e)` on every other surface.
 - Every peer string drawn goes through `cleanText` (one line) or `cleanBlock` (Markdown) first.
-- Wake: bridges in hook delivery only; `WAKE_LIMIT = 3` wakes in a row without the person; the person's input is a `prompt.submit` whose `origin.kind` is `composer`, or a press on one of the mod's buttons.
+- Wake: bridges in hook delivery only; `WAKE_LIMIT = 3` wakes in a row without the person; the person's input is a `prompt.submit` whose `origin.kind` is `composer` or `bridge` (the person through Remote Control), or a press on one of the mod's buttons.
 - Gate: every tool whose name ends in `bellman_send`, on any server, plus `mcp.call` of `bellman_send`; it acts on `type: "action_response"` in a room the pane shows, while a terminal is attached and the mod has drawn there.
 - Constants: `SIDEBAR_COLUMNS = 22`, `PANE_COLUMNS = 64`, `COMPACT_BELOW = 40`, `DOOR_POLL_MS = 2_000`, `ROOMS_POLL_MS = 15_000` (the monitor's `POLL_MS` in `ui/src/page.ts`), `RECENT_LIMIT = 50`, `REQUEST_TTL_MS = 30 * 60 * 1000`, `BELL_COLUMNS = 10`, `BELL_ROWS = 4`, `PANE_ID = "bellman"`.
 - Write about members, peers and the room, never "two sessions" or "the other session" (CLAUDE.md, Writing).

@@ -112,6 +112,10 @@ declare module "claude-code" {
       wake: { paused: boolean };
       /** By room, the action requests waiting on the person (written by the room pane). */
       pending: Record<string, PendingRequest[]>;
+      /** `approvalKey`s (src/mod/gate.ts) of the requests the person approved: the gate passes Claude's `approved: true` answer for these (written by the room pane). */
+      approved: string[];
+      /** `approvalKey`s of the requests the person declined, while the mod's own `approved: false` answer is in flight: the gate passes that answer (written by the room pane). */
+      denying: string[];
     };
   }
 }

@@ -116,6 +116,8 @@ var layout = atom({ plugin: "bellman-mod", key: "layout" }, "band");
 var tab = atom({ plugin: "bellman-mod", key: "tab" }, "log");
 var wake = atom({ plugin: "bellman-mod", key: "wake" }, { paused: false });
 var pending = atom({ plugin: "bellman-mod", key: "pending" }, {});
+var approved = atom({ plugin: "bellman-mod", key: "approved" }, []);
+var denying = atom({ plugin: "bellman-mod", key: "denying" }, []);
 
 // mod/src/doors.ts
 var WHOAMI = /^mcp__(.+)__bellman_whoami$/;
@@ -205,14 +207,85 @@ async function startDoors($) {
   });
 }
 
-// mod/src/view.tsx
-import { read as read2, update as update2 } from "claude-code";
+// mod/src/gate.ts
+import { read as read2 } from "claude-code";
+
+// src/mod/gate.ts
+var SEND_TOOL = /^(?:mcp__.+__)?bellman_send$/;
+function sendCallOf(tool, args) {
+  if (!SEND_TOOL.test(tool)) return void 0;
+  const text = (value) => typeof value === "string" ? value : void 0;
+  const approved2 = args.payload?.approved;
+  return {
+    type: text(args.type) ?? "",
+    session_id: text(args.session_id) ?? text(args.room_id) ?? "",
+    ref_id: text(args.ref_id) ?? null,
+    approved: typeof approved2 === "boolean" ? approved2 : void 0
+  };
+}
+var approvalKey = (sessionId, refId) => `${sessionId}#${refId}`;
+var GATE_REASON = "Only the person answers a Bellman action request in this room. They approve or decline it in the Bellman pane, and you are told when they approve.";
+function judgeSend(call, ctx) {
+  const gated = ctx.shut && call.type === "action_response" && ctx.paneRooms.has(call.session_id);
+  if (!gated) return { allow: true };
+  if (call.ref_id !== null && call.approved !== void 0) {
+    const given = call.approved ? ctx.approved : ctx.denying;
+    if (given.has(approvalKey(call.session_id, call.ref_id))) return { allow: true };
+  }
+  return { allow: false, reason: GATE_REASON };
+}
 
 // mod/src/drawn.ts
 var drawn = false;
 function markDrawn() {
   drawn = true;
 }
+function hasDrawn() {
+  return drawn;
+}
+
+// mod/src/gate.ts
+var APPROVALS_SECTION = "Bellman action requests in the rooms shown in the Bellman pane are answered by the person there, not by you. Do not send an action_response for them yourself: you are told when the person approves one, and then you carry it out and answer it.";
+async function gateShut($) {
+  return hasDrawn() && (await $.session.surfaces()).includes("terminal");
+}
+async function paneRooms($) {
+  return new Set((await read2($, doors)).flatMap((door) => door.status?.seats.map((seat) => seat.session_id) ?? []));
+}
+async function judge($, call) {
+  return judgeSend(call, {
+    shut: await gateShut($),
+    paneRooms: await paneRooms($),
+    approved: new Set(await read2($, approved)),
+    denying: new Set(await read2($, denying))
+  });
+}
+function registerGate(on) {
+  on("tool.call", async ($, e, next) => {
+    const call = sendCallOf(String(e.tool), e);
+    if (call === void 0) return next(e);
+    const verdict = await judge($, call);
+    return verdict.allow ? next(e) : { deny: verdict.reason };
+  }).catch(
+    ($, e, next) => next.called ? next(e) : sendCallOf(String(e.tool), e)?.type === "action_response" ? { deny: GATE_REASON } : next(e)
+  );
+  on("mcp.call", async ($, e, next) => {
+    const call = sendCallOf(e.tool, e.args);
+    if (call === void 0) return next(e);
+    const verdict = await judge($, call);
+    return verdict.allow ? next(e) : { deny: verdict.reason };
+  }).catch(
+    ($, e, next) => next.called ? next(e) : sendCallOf(e.tool, e.args)?.type === "action_response" ? { deny: GATE_REASON } : next(e)
+  );
+  on("prompt.compose", async ($, e, next) => {
+    const composed = await next(e);
+    if (!await gateShut($) || (await paneRooms($)).size === 0) return composed;
+    return { sections: [...composed.sections, { id: "bellman-mod:approvals", text: APPROVALS_SECTION, scope: "session" }] };
+  });
+}
+
+// mod/src/view.tsx
+import { read as read3, update as update2 } from "claude-code";
 
 // mod/src/person.ts
 var listeners = [];
@@ -262,13 +335,13 @@ async function viewTick($, list) {
   );
   const seats = seatsOf(list);
   const ids = [...new Set(seats.map((s) => s.session_id))];
-  const views = await read2($, rooms);
+  const views = await read3($, rooms);
   const latest = views.filter((r) => ids.includes(r.session_id) && r.last_event !== null).sort((a, b) => Date.parse(b.last_event.at) - Date.parse(a.last_event.at))[0]?.session_id;
   const shown = await update2($, room, (current) => current !== null && ids.includes(current) ? current : latest ?? ids[0] ?? null);
   const events = list.flatMap((d) => d.status?.recent ?? []);
-  const logOpenFor = pane?.isPlaced && pane.isShown && paneWide && await read2($, tab) === "log" ? shown : null;
+  const logOpenFor = pane?.isPlaced && pane.isShown && paneWide && await read3($, tab) === "log" ? shown : null;
   const labels = new Map(ids.map((id) => [id, labelOf(id, views)]));
-  const toast = toastFor(events, { seats, seen: new Map(Object.entries(await read2($, seen))), logOpenFor, labels });
+  const toast = toastFor(events, { seats, seen: new Map(Object.entries(await read3($, seen))), logOpenFor, labels });
   if (toast) $.ui.toast(toast.text);
   await update2($, seen, (was) => {
     const now = { ...was };
@@ -282,9 +355,9 @@ async function viewTick($, list) {
   }
 }
 async function shownOf($, list, seats) {
-  const views = await read2($, rooms);
+  const views = await read3($, rooms);
   const ids = [...new Set(seats.map((s) => s.session_id))];
-  const current = await read2($, room);
+  const current = await read3($, room);
   const picked = current !== null && ids.includes(current) ? current : ids[0];
   const view = views.find((r) => r.session_id === picked);
   const mine = seats.filter((s) => s.session_id === picked);
@@ -299,10 +372,10 @@ async function shownOf($, list, seats) {
     peers: (view?.members ?? []).filter((m) => !mine.some((s) => s.member_id === m.member_id)).map((m) => `${m.presence === "present" ? "\u25CF" : "\u25CC"} ${cleanText(m.label, NAME_MAX)} ${m.presence === "present" ? cleanText(m.room_role, NAME_MAX) : "stale"}`),
     unread: unreadCount(
       list.flatMap((d) => d.status?.recent ?? []),
-      { sessionId: picked, seatMemberId: mine[0].member_id, openedThrough: (await read2($, openedThrough))[picked] ?? -1 }
+      { sessionId: picked, seatMemberId: mine[0].member_id, openedThrough: (await read3($, openedThrough))[picked] ?? -1 }
     ),
-    approve: (await read2($, pending))[picked]?.length ?? 0,
-    paused: (await read2($, wake)).paused
+    approve: (await read3($, pending))[picked]?.length ?? 0,
+    paused: (await read3($, wake)).paused
   };
 }
 function pieces($, ui, s) {
@@ -341,9 +414,9 @@ function startView(on) {
     if (e.surface !== "terminal") return next(e);
     isFullscreen = e.viewport?.isFullscreen;
     if (e.props.hasSurvey) return next(e);
-    const list = await read2($, doors);
+    const list = await read3($, doors);
     const seats = seatsOf(list);
-    if (seats.length === 0 || await read2($, layout) === "sidebar") return next(e);
+    if (seats.length === 0 || await read3($, layout) === "sidebar") return next(e);
     const ui = $.ui.resolve(e);
     const { Box } = ui;
     const s = await shownOf($, list, seats);
@@ -354,7 +427,7 @@ function startView(on) {
   on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e, next) => {
     if (e.surface !== "terminal") return next(e);
     paneWide = e.props.bodyColumns >= COMPACT_BELOW;
-    const list = await read2($, doors);
+    const list = await read3($, doors);
     const seats = seatsOf(list);
     const ui = $.ui.resolve(e);
     const { Box, Text } = ui;
@@ -380,12 +453,16 @@ function register(on) {
     return next(e);
   });
   startView(on);
+  registerGate(on);
 }
 export {
+  APPROVALS_SECTION,
   DOOR_POLL_MS,
+  GATE_REASON,
   PANE_COLUMNS,
   PANE_ID,
   ROOMS_POLL_MS,
   SIDEBAR_COLUMNS,
+  approvalKey,
   register
 };

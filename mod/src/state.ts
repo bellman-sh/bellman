@@ -21,3 +21,7 @@ export const tab = atom({ plugin: "bellman-mod", key: "tab" } as const, "log" as
 export const wake = atom({ plugin: "bellman-mod", key: "wake" } as const, { paused: false });
 /** Written by the room pane; read here for the Approve count. */
 export const pending = atom({ plugin: "bellman-mod", key: "pending" } as const, {} as Record<string, PendingRequest[]>);
+/** `approvalKey`s of the action requests the person approved, written by the room pane: the gate passes Claude's `approved: true` answer for exactly these. */
+export const approved = atom({ plugin: "bellman-mod", key: "approved" } as const, [] as string[]);
+/** `approvalKey`s of the requests the person declined while the mod's own `approved: false` answer is in flight, written by the room pane: the gate passes that answer and no other. */
+export const denying = atom({ plugin: "bellman-mod", key: "denying" } as const, [] as string[]);

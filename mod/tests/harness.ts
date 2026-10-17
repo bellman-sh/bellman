@@ -147,6 +147,8 @@ export type World = {
   /** A second local bridge, under another server's name, when a test sets one. */
   second?: Bridge;
   surfaces: RenderSurface[];
+  /** While true `$.session.surfaces()` fails, as a call the engine cannot answer does. */
+  surfacesDown: boolean;
   panes: UiPane[];
   /** Every `$.mcp.call`, in order. */
   calls: { server: string; tool: string; args: Readonly<Record<string, unknown>> }[];
@@ -161,6 +163,11 @@ export type World = {
   readonly rows: readonly SessionAppendInput[];
   /** What the mod holds in `$.state`, by key: each write the kit stored. */
   state: Partial<PluginState["bellman-mod"]>;
+  /**
+   * Values the mod finds in `$.state` that no write of its own put there, by key: the state a press left, for a
+   * test that needs it before the press exists. Read until the mod writes the key itself.
+   */
+  seed: Partial<PluginState["bellman-mod"]>;
 };
 
 /** An MCP tool's answer: its structured result, and the same as text. */
@@ -178,7 +185,7 @@ const reply = (status: number, body: unknown) => ({
  * door, `{ second }` for two bridges from the start. Set later, `w.door` is a bridge that restarted:
  * its old socket refuses from then on.
  */
-export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state">> = {}): Promise<World> {
+export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state" | "seed">> = {}): Promise<World> {
   const clock = mock.clock(on, { now: NOW });
   const session = mock.session(on);
   const w: World = {
@@ -189,6 +196,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     log: {},
     doorDown: false,
     surfaces: ["terminal"],
+    surfacesDown: false,
     panes: [],
     calls: [],
     submitted: [],
@@ -201,18 +209,28 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
       return session.appended();
     },
     state: {},
+    seed: {},
     ...over,
   };
   const bridges = (): Bridge[] => [{ server: "bellman", door: w.door, status: w.status, rooms: w.rooms }, ...(w.second ? [w.second] : [])];
 
   on("session.start", ($, e) => ({ cwd: e.cwd }));
-  on("session.surfaces", () => ({ value: w.surfaces }));
+  on("session.surfaces", () => {
+    // A hook that throws is skipped, and the call is left with no implementation: it rejects.
+    if (w.surfacesDown) throw new Error("session.surfaces is down");
+    return { value: w.surfaces };
+  });
 
   // Beneath the mod and above the kit's own store: a write that landed is the value a read would get.
   on("state.set", async ($, e, next) => {
     const set = await next(e);
     if (e.plugin === "bellman-mod" && set.value?.isSet) (w.state as Record<string, unknown>)[e.key] = e.value;
     return set;
+  });
+  // A seeded value reads at version 0, a value never written, so the mod's own first write of it still lands.
+  on("state.get", ($, e, next) => {
+    const seeded = e.plugin === "bellman-mod" && !(e.key in w.state) ? (w.seed as Record<string, unknown>)[e.key] : undefined;
+    return seeded === undefined ? next(e) : { value: { value: seeded, version: 0 } };
   });
 
   // Each bridge lists its own tools; the connector lists bellman_send and no bellman_whoami.
@@ -245,13 +263,18 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     }
   });
 
-  // Claude's bellman_send, on any bridge's server, runs and succeeds: a call nothing answers would fail,
-  // and the gate's tests would read that as the gate's refusal.
+  // Claude's bellman_send, on any bridge's server, and its Bash run and succeed: a call nothing answers would
+  // fail, and the gate's tests would read that as the gate's refusal.
   on("tool.call", ($, e, next) =>
     bridges().some((b) => e.tool === `mcp__${b.server}__bellman_send`)
       ? { result: { content: [{ type: "text", text: '{"cursor":99}' }], structuredContent: { cursor: 99 } } }
-      : next(e),
+      : e.tool === "Bash"
+        ? { result: { content: [{ type: "text", text: "ran" }] } }
+        : next(e),
   );
+
+  // The engine's own sections, which the mod adds to and never replaces.
+  on("prompt.compose", () => ({ sections: [{ id: "intro", text: "You are Claude Code.", scope: "shared" }] }));
 
   // A door answers on its bridge's socket. Any other socket is one nothing listens on, which refuses.
   on("http.fetch", ($, e) => {

@@ -6,11 +6,14 @@
  */
 import type { On } from "claude-code";
 import { onTick, startDoors } from "./doors";
+import { registerGate } from "./gate";
 import { startView, viewTick } from "./view";
 
-// For the kit tests, which tick the mocked clock by the bundle's own intervals and hold what the mod opens
-// to its own widths (mod/tests/harness.ts).
+// For the kit tests, which tick the mocked clock by the bundle's own intervals, hold what the mod opens to its
+// own widths, and compare what the gate says to the words it is meant to say (mod/tests/harness.ts).
 export { DOOR_POLL_MS, PANE_COLUMNS, PANE_ID, ROOMS_POLL_MS, SIDEBAR_COLUMNS } from "../../src/mod/view.js";
+export { GATE_REASON, approvalKey } from "../../src/mod/gate.js";
+export { APPROVALS_SECTION } from "./gate";
 
 export function register(on: On): void {
   // The module's one `session.start`: `claude plugin validate` refuses a second without a matcher. Whatever
@@ -21,4 +24,5 @@ export function register(on: On): void {
     return next(e);
   });
   startView(on);
+  registerGate(on);
 }

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { reportMail, type Report } from "../../src/reports.js";
 import { fileRoomReport } from "../../src/rooms.js";
-import { NEED_ROOM } from "../../src/tools/kit.js";
+import { NEED_ROOM, SEND_KINDS } from "../../src/tools/kit.js";
+import type { EventType } from "../../src/types.js";
 import { joinWith, pairUp, publicRoom, type PairedSession } from "../helpers/flows.js";
 import { DEV_KEY, Harness } from "../helpers/harness.js";
 
@@ -161,6 +162,57 @@ describe("bellman_report (spec §3)", () => {
     const taken = await s.joiner.call("bellman_report", { session_id: s.sessionId, cursor: said, reason: "other" });
     expect(taken.isError, taken.text).toBe(false);
     expect(mailed).toHaveLength(1);
+  });
+
+  /**
+   * Section 1C review, declined 3, ruled into the pass. The room writes some events on a member's behalf and names the member in
+   * them: a join, a leave, a code issued or revoked. They carry a member's id, so refusing only what the room writes as
+   * "system" let them through as messages, and a report of one is a report about the member it names. A message target is an
+   * event of a kind a member sends (`SEND_KINDS`), and trust.md's "not a notice the room wrote about itself" is that.
+   */
+  it("refuses the join and the leave the room wrote for a member, as it refuses any notice, and takes a message beside them", async () => {
+    const s = await pairUp(harness());
+    const said = await say(s, "from a member");
+    const left = await s.joiner.call("bellman_leave", { session_id: s.sessionId, member_id: s.joinerMemberId });
+    expect(left.isError, left.text).toBe(false);
+    const leave = (await h.store.eventsAfter(s.sessionId, s.joinerCursor)).find((e) => e.type === "member_left");
+    expect(leave?.fromMemberId, "the leave names the member who left").toBe(s.joinerMemberId);
+    for (const cursor of [s.joinerCursor, leave!.cursor]) {
+      const refused = await s.creator.call("bellman_report", { session_id: s.sessionId, cursor, reason: "spam" });
+      expect(refused.isError, `cursor ${cursor}`).toBe(true);
+      expect(refused.text, `cursor ${cursor}`).toContain("no message at that cursor");
+    }
+    expect(await h.store.listReports(10)).toEqual([]);
+    expect(mailed).toEqual([]);
+    const taken = await s.creator.call("bellman_report", { session_id: s.sessionId, cursor: said, reason: "spam" });
+    expect(taken.isError, taken.text).toBe(false);
+  });
+
+  /**
+   * The same rule for every kind of event there is, by the predicate and not by the list of notices I could think of. Each is
+   * written under a member's id, which is the case a "system" check lets through. Closed over EventType, so a type added to
+   * the union is a compile error here until it is classified: it must be a kind a member sends, or a notice.
+   */
+  it("takes an event of each kind a member sends and refuses each of the others, written under a member's id", async () => {
+    const s = await pairUp(harness());
+    const BY_A_MEMBER = {
+      message: true, artifact: true, action_request: true, action_response: true, brief_update: true, progress: true, surface: true,
+      member_joined: false, member_left: false, member_evicted: false, member_timed_out: false,
+      invite_issued: false, invite_revoked: false, session_expired: false, heartbeat: false, housekeeping: false,
+    } as const satisfies Record<EventType, boolean>;
+    const outcomes: [string, boolean][] = [];
+    for (const [type, byMember] of Object.entries(BY_A_MEMBER) as [EventType, boolean][]) {
+      const event = await h.store.appendEvent(s.sessionId, {
+        type, fromMemberId: s.creatorMemberId, fromUserId: "u_jesse", fromLabel: "jesse@codenerd", payload: {}, refId: null,
+      });
+      expect(event, type).not.toBeNull();
+      const out = await s.joiner.call("bellman_report", { session_id: s.sessionId, cursor: event!.cursor, reason: "spam" });
+      outcomes.push([type, !out.isError]);
+      if (out.isError) expect(out.text, type).toContain("no message at that cursor");
+      expect(byMember, type).toBe(!out.isError);
+    }
+    expect(outcomes.filter(([, taken]) => taken).map(([type]) => type).sort()).toEqual([...SEND_KINDS].sort());
+    expect((await h.store.listReports(20)).map((r) => r.target.kind)).toEqual(Array(SEND_KINDS.length).fill("message"));
   });
 
   it("turns a stranger away from a private room as it does from a room that is not there, and takes one to a public room", async () => {

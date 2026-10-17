@@ -14,7 +14,7 @@
  * This module must stay importable by the Node build: no `cloudflare:workers`,
  * directly or transitively.
  */
-import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } from "./types.js";
+import { SEND_KINDS, type AuditEntry, type Identity, type Member, type RoomManifest, type SessionEvent, type Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
 import type { BanScope } from "./bans.js";
@@ -1239,9 +1239,11 @@ export async function evictMember(
  * is purged: a report is how the people who were in a room tell the operators what happened there.
  *
  * The target is the room, a member (`memberId`) or a message (`cursor`), never two. A member is anyone the room ever
- * seated, one who left included. A message is an event a member sent: the server writes its own events as "system"
- * (an eviction, a door shut), and those are not messages. The report keeps whom it is about (R12), read from the
- * member or from the event's sender, so an operator can act on the account.
+ * seated, one who left included. A message is an event of a kind a member sends (`SEND_KINDS`). The room writes notices
+ * of its own, some as "system" (an eviction, a timeout, a heartbeat tick) and some under the member they are about (a
+ * join, a leave, a code issued or revoked), and none of those is a message: a report of one would be a report about
+ * whoever it names. The report keeps whom it is about (R12), read from the member or from the event's sender, so an
+ * operator can act on the account.
  *
  * A caller may report a message exactly when it could read it. A removed member read a room that is not public up to
  * its cut and no further (#113), so a cursor past the cut names an event it was never shown, and is refused as one that
@@ -1298,7 +1300,7 @@ export async function fileRoomReport(
     // check above, a caller of a room that is not public holds a handle, which `cutFor` needs: given none it says -Infinity.
     const cut = isPublic(session) ? undefined : cutFor(handles);
     const event = cut !== undefined && input.cursor > cut ? undefined : await store.eventAt(session.id, input.cursor);
-    if (!event || event.fromMemberId === "system") return refuse("invalid", "no message at that cursor.");
+    if (!event || !SEND_KINDS.some((kind) => kind === event.type)) return refuse("invalid", "no message at that cursor.");
     target = { kind: "message", cursor: event.cursor };
     subject = { memberId: event.fromMemberId, userId: event.fromUserId, label: event.fromLabel };
   }

@@ -789,6 +789,11 @@ export type HostAppend =
   | { ok: true; event: SessionEvent }
   | { ok: false; reason: "not_found" | "closed" | "frozen" | "removed" | "units" | "hourly"; used: number; allowed: number };
 
+/** What `setHostInstructions` answered: the instructions as the room now holds them, or why it took none. */
+export type HostInstructionsSet =
+  | { ok: true; instructions: string | null }
+  | { ok: false; reason: "not_found" | "no_host" | "closed" };
+
 /**
  * The meter's decision (hosted seat spec, D3), shared by both stores so they
  * cannot charge differently. Returns the refusal, or the units record to write.
@@ -1559,6 +1564,22 @@ export interface BellmanStore {
    * room is a no-op.
    */
   renewHostAllowance(sessionId: string, month: string, units: number): Promise<void>;
+  /**
+   * Set what the room's creator tells its hosted seat to ask (`PUT /rooms/:id/host`): the manifest's
+   * `host.instructions`, which the seat reads on every wake, so its next question is built from what this
+   * stores. `null` clears them, which leaves the host Bellman's rules alone. The caller trims and bounds the
+   * text (`HostInstructionsShape`); the store writes what it is handed.
+   *
+   * Refused, nothing is written: a missing room (`not_found`), a room whose manifest has no host (`no_host`) and a
+   * closed room (`closed`). The check and the write are one operation, so a room that closes after the route read
+   * it is refused here. A frozen room takes the change: setting instructions is not a send, and a thaw finds the
+   * host already told.
+   *
+   * `audit` is filed with the change and only with a change, as `removeMember` files its rows: the value the
+   * room already holds writes nothing and files nothing, so a retried request leaves one row. A row with no org
+   * names a stream nobody reads, and is dropped.
+   */
+  setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet>;
 
   putPendingConnect(p: PendingConnect): Promise<void>;
   takePendingConnect(token: string): Promise<PendingConnect | undefined>;
@@ -2522,6 +2543,21 @@ export class MemoryStore implements BellmanStore {
     if (!s || s.hostUnits.month >= month) return;
     s.hostUnitsPerMonth = units;
     s.hostUnits = { month, used: 0, wakes: [] };
+  }
+
+  async setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    const s = this.sessions.get(sessionId);
+    if (!s) return { ok: false, reason: "not_found" };
+    const host = s.manifest.host;
+    if (host === null) return { ok: false, reason: "no_host" };
+    if (s.closed) return { ok: false, reason: "closed" };
+    // No await from the read to the write, as `renewHostAllowance` has none. A new manifest rather than a write
+    // into the old one: a manifest object can be shared.
+    if (host.instructions !== instructions) {
+      s.manifest = { ...s.manifest, host: { ...host, instructions } };
+      this.recordAudit([...audit]);
+    }
+    return { ok: true, instructions };
   }
 
   async hostEventFor(sessionId: string, key: string): Promise<SessionEvent | undefined> {

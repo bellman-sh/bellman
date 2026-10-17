@@ -8,8 +8,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { hostMember } from "../src/host.js";
 import {
-  MAX_EVENTS_READ, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
+  MAX_EVENTS_READ, MAX_HOST_INSTRUCTIONS_BYTES, MAX_ROOMS_LISTED, MAX_SURFACE_WRITE_BYTES, ROSTER_DEPARTED, STATUS, roomRoutes, type RoomCaller, type RoomRouteDeps,
 } from "../src/http/rooms.js";
 import { STALE_AFTER_MS } from "../src/presence.js";
 import { isPublic } from "../src/rooms.js";
@@ -1594,6 +1595,141 @@ describe("POST /rooms/:id/unpublish (public rooms)", () => {
   it("takes POST alone", async () => {
     const res = (await call(DEV_KEY.jesse, `/rooms/${PUB}/unpublish`))!;
     expect([res.status, res.headers.get("allow")]).toEqual([405, "POST"]);
+  });
+});
+
+/**
+ * A room's creator changes what its hosted seat is told to ask, after the room has started. The seat
+ * reads the manifest on every wake, so the next question is built from what this stored. The admission is
+ * the ban routes': 401, the CSRF check, one 404 for a stranger and an unknown room, then 403.
+ */
+describe("PUT /rooms/:id/host (a live room's host instructions)", () => {
+  const HOSTED = "qs_host_put";
+  const hostedManifest = () => roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+    roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+    defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: "Ask about the week." } });
+  const set = (key: string | null, body: unknown, over: CallOptions = {}, room = HOSTED) =>
+    call(key, `/rooms/${room}/host`, { method: "PUT", body, ...over });
+  const stored = async (room = HOSTED) => (await store.getSession(room))!.manifest.host?.instructions;
+  const hostRows = async () => (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "host_instructions_changed");
+
+  beforeEach(async () => {
+    const m = hostedManifest();
+    await store.createSession(session({
+      id: HOSTED, manifest: m,
+      members: [member({ roomRole: "lead" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" }), hostMember(m, Date.now())],
+    }));
+  });
+
+  it("lets the creator set, change and clear the instructions, answering with what is stored", async () => {
+    for (const next of ["Ask how agents have grown.", "Ask what they have learned.", null]) {
+      const res = (await set(DEV_KEY.jesse, { instructions: next }))!;
+      expect([res.status, await bodyOf(res)]).toEqual([200, { instructions: next }]);
+      expect(await stored()).toBe(next);
+    }
+  });
+
+  it("changes the instructions and nothing else in the manifest", async () => {
+    const before = (await store.getSession(HOSTED))!.manifest;
+    await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+    expect((await store.getSession(HOSTED))!.manifest).toEqual({ ...before, host: { ...before.host!, instructions: "Ask how agents have grown." } });
+  });
+
+  it("trims the text it stores, and stores an empty or blank string as null", async () => {
+    const padded = (await set(DEV_KEY.jesse, { instructions: "  \n Ask how agents have grown. \t " }))!;
+    expect([padded.status, await bodyOf(padded)]).toEqual([200, { instructions: "Ask how agents have grown." }]);
+    expect(await stored()).toBe("Ask how agents have grown.");
+    for (const blank of ["", "   ", "\n\t "]) {
+      await set(DEV_KEY.jesse, { instructions: "something" });
+      const cleared = (await set(DEV_KEY.jesse, { instructions: blank }))!;
+      expect([cleared.status, await bodyOf(cleared)], JSON.stringify(blank)).toEqual([200, { instructions: null }]);
+      expect(await stored(), JSON.stringify(blank)).toBeNull();
+    }
+  });
+
+  it("accepts 300 characters and refuses 301, as a manifest does, changing nothing; padding does not count against it", async () => {
+    expect((await set(DEV_KEY.jesse, { instructions: "a".repeat(300) }))!.status).toBe(200);
+    expect(await stored()).toBe("a".repeat(300));
+    const over = (await set(DEV_KEY.jesse, { instructions: "b".repeat(301) }))!;
+    expect([over.status, (await bodyOf(over)).error]).toEqual([400, "invalid_request"]);
+    expect(await stored()).toBe("a".repeat(300));
+    expect((await set(DEV_KEY.jesse, { instructions: `  ${"c".repeat(300)}  ` }))!.status).toBe(200);
+    expect(await stored()).toBe("c".repeat(300));
+  });
+
+  it("refuses any other shape with 400, changing nothing", async () => {
+    const shapes: unknown[] = [
+      {}, { instructions: 5 }, { instructions: ["x"] }, { instructions: { text: "x" } }, { instructions: true }, { text: "x" },
+      { instructions: "x", extra: 1 }, [], "x", null, 7,
+    ];
+    for (const body of shapes) expect((await set(DEV_KEY.jesse, body))!.status, JSON.stringify(body)).toBe(400);
+    for (const rawBody of ["not json", "", "{"]) expect((await set(DEV_KEY.jesse, undefined, { rawBody }))!.status, rawBody).toBe(400);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("refuses a member who is not the creator with 403, a stranger and an unknown room with the one 404, and no credential with 401, changing nothing", async () => {
+    const member403 = (await set(DEV_KEY.peer, { instructions: "mine now" }))!;
+    expect([member403.status, await bodyOf(member403)])
+      .toEqual([403, { error: "forbidden", error_description: "only the room's creator may change its host's instructions" }]);
+    const stranger = (await set(DEV_KEY.outsider, { instructions: "mine now" }))!;
+    const unknown = (await set(DEV_KEY.jesse, { instructions: "mine now" }, {}, "qs_nope"))!;
+    expect([stranger.status, unknown.status]).toEqual([404, 404]);
+    expect(await bodyOf(stranger)).toEqual(await bodyOf(unknown));
+    expect((await set(null, { instructions: "mine now" }))!.status).toBe(401);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("refuses a cookie write without the panel's Origin, and takes the panel's", async () => {
+    expect((await set(null, { instructions: "forged" }, { cookie: DEV_KEY.jesse }))!.status).toBe(403);
+    expect((await set(null, { instructions: "forged" }, { cookie: DEV_KEY.jesse, headers: { origin: "https://elsewhere.example.test" } }))!.status).toBe(403);
+    expect(await stored()).toBe("Ask about the week.");
+    const real = (await set(null, { instructions: "from the panel" }, { cookie: DEV_KEY.jesse, headers: { origin: PANEL } }))!;
+    expect([real.status, real.headers.get("access-control-allow-origin"), await bodyOf(real)]).toEqual([200, PANEL, { instructions: "from the panel" }]);
+    expect(await stored()).toBe("from the panel");
+  });
+
+  it("answers 409 for a room with no host and for a closed room, changing nothing", async () => {
+    const noHost = (await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." }, {}, ROOM))!;
+    expect([noHost.status, (await bodyOf(noHost)).error]).toEqual([409, "no_host"]);
+    expect((await store.getSession(ROOM))!.manifest.host).toBeNull();
+    await store.closeSession(HOSTED);
+    const closed = (await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." }))!;
+    expect([closed.status, (await bodyOf(closed)).error]).toEqual([409, "closed"]);
+    expect(await stored()).toBe("Ask about the week.");
+    expect(await hostRows()).toEqual([]);
+  });
+
+  it("files an audit row naming the creator, with the length and not the text, once for each change", async () => {
+    await set(DEV_KEY.jesse, { instructions: "Ask how agents have grown." });
+    await set(DEV_KEY.jesse, { instructions: "  Ask how agents have grown.  " });
+    await set(DEV_KEY.jesse, { instructions: null });
+    const rows = await hostRows();
+    expect(rows.map((r) => [r.sessionId, r.actorUserId, r.detail])).toEqual([[HOSTED, "u_jesse", { chars: 26 }], [HOSTED, "u_jesse", { chars: 0 }]]);
+    expect(JSON.stringify(rows)).not.toContain("Ask how agents");
+  });
+
+  it("refuses a body over the bound before reading it, and a Content-Length that is not a number", async () => {
+    const fine = JSON.stringify({ instructions: "Ask how agents have grown." });
+    expect((await set(DEV_KEY.jesse, undefined, { rawBody: fine, headers: { "content-length": String(MAX_HOST_INSTRUCTIONS_BYTES + 1) } }))!.status).toBe(413);
+    expect((await set(DEV_KEY.jesse, undefined, { rawBody: fine, headers: { "content-length": "garbage" } }))!.status).toBe(400);
+    expect(await stored()).toBe("Ask about the week.");
+  });
+
+  it("takes PUT alone", async () => {
+    for (const method of ["GET", "POST", "DELETE"]) {
+      const res = (await call(DEV_KEY.jesse, `/rooms/${HOSTED}/host`, { method }))!;
+      expect([method, res.status, res.headers.get("allow")]).toEqual([method, 405, "PUT"]);
+    }
+  });
+
+  it("answers the panel's preflight with a grant for PUT, and a stranger's with none", async () => {
+    const panel = (await call(null, `/rooms/${HOSTED}/host`, { method: "OPTIONS", headers: { origin: PANEL } }))!;
+    expect([panel.status, panel.headers.get("access-control-allow-origin")]).toEqual([204, PANEL]);
+    expect(panel.headers.get("access-control-allow-methods")?.split(/,\s*/)).toContain("PUT");
+    const stranger = (await call(null, `/rooms/${HOSTED}/host`, { method: "OPTIONS", headers: { origin: "https://elsewhere.example.test" } }))!;
+    expect([stranger.status, stranger.headers.get("access-control-allow-origin")]).toEqual([204, null]);
   });
 });
 

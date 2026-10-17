@@ -49,6 +49,7 @@ Each entry is `{ at, session_id, actor, action, detail }`, where `actor` is a us
 - A session created (`session_created`), a room previewed (`connect_previewed`), and a member joining, when briefs are exchanged (`brief_exchanged`).
 - Every send, as `sent_message`, `sent_artifact`, `sent_action_request` and so on. A send's entry records the payload's length, not its content.
 - Members leaving (`member_left`) or being evicted (`member_evicted`), and invites issued and revoked.
+- A creator changing what a hosted room's host is told to ask (`host_instructions_changed`). Its entry records the length of the new text, not the text, and none is written when the text did not change.
 - The end of a room's record: `room_deleted` when its creator or an org admin asked for it to be deleted, and `room_purged` when it was purged.
 - Plan grants and revocations, `plan_granted` and `plan_revoked`. A team purchase or cancellation appears here with `stripe` as the actor.
 

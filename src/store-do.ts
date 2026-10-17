@@ -10,7 +10,7 @@ import type {
   SessionEvent, SurfaceRow,
 } from "./types.js";
 import type {
-  AppendExtras, BellmanStore, DepartedMembers, EventWrite, MemberPatch, RemovalOutcome, RemovalRequest,
+  AppendExtras, BellmanStore, DepartedMembers, EventWrite, HostInstructionsSet, MemberPatch, RemovalOutcome, RemovalRequest,
   SeatOutcome,
 } from "./store.js";
 import {
@@ -2131,6 +2131,33 @@ export class SessionDO extends DurableObject<BellmanEnv> {
       if (!s || s.hostUnits.month >= month) return;
       await putRows(txn, memberRows(s, { ...s, hostUnitsPerMonth: units, hostUnits: { month, used: 0, wakes: [] } }));
     });
+  }
+
+  /**
+   * `BellmanStore.setHostInstructions`, for this room: the manifest's `host.instructions` and the audit rows the
+   * change owes in one transaction, the rows riding the outbox as `removeMember`'s do and delivered once it has
+   * committed. The value the room already holds writes nothing and queues nothing. The refusals are read in the
+   * same transaction as the write, so a room that closes after the route read it is refused here.
+   */
+  async setHostInstructions(instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    let queued = false;
+    const result = await this.ctx.storage.transaction<HostInstructionsSet>(async (txn) => {
+      const s = await this.stored(txn);
+      if (!s) return { ok: false, reason: "not_found" };
+      const host = s.manifest.host;
+      if (host === null) return { ok: false, reason: "no_host" };
+      if (s.closed) return { ok: false, reason: "closed" };
+      if (host.instructions === instructions) return { ok: true, instructions };
+      // A falsy org names a stream nobody reads (ARCHITECTURE.md section 9, runtime fact 4): filtered here, as
+      // `removeMember` filters its rows, so a dead row never enters the queue.
+      const intents = audit.filter((e) => e.orgId).map(auditIntent);
+      queued = intents.length > 0;
+      const rows = await this.driver.enqueue(txn, intents);
+      await putRows(txn, { ...memberRows(s, { ...s, manifest: { ...s.manifest, host: { ...host, instructions } } }), ...rows });
+      return { ok: true, instructions };
+    });
+    if (queued) await this.driver.deliverNow();
+    return result;
   }
 
   /** `limit` bounds the storage list itself (I4): the hosted seat's read passes one, every other read none. */
@@ -4563,6 +4590,10 @@ export class DurableObjectStore implements BellmanStore {
 
   async renewHostAllowance(sessionId: string, month: string, units: number): Promise<void> {
     await this.session(sessionId).renewHostAllowance(month, units);
+  }
+
+  async setHostInstructions(sessionId: string, instructions: string | null, audit: readonly AuditEntry[]): Promise<HostInstructionsSet> {
+    return this.session(sessionId).setHostInstructions(instructions, audit);
   }
 
   async waitForEvents(

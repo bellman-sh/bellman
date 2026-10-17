@@ -5,6 +5,7 @@ import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore } from "../src/store.js";
 import { SUSPENDED, SUSPENSION_CACHE_MS, SuspensionCache } from "../src/suspension.js";
+import { member, roomManifest, session } from "./helpers/fixtures.js";
 import { DEV_KEY } from "./helpers/harness.js";
 
 describe("the suspension cache (spec D4)", () => {
@@ -64,6 +65,33 @@ describe("a suspended account on the Node server (spec \u{A7}1, R8)", () => {
       });
     });
   }
+
+  // PUT /rooms/:id/host writes a room's manifest as its caller, and R8 gates it with the rest of /rooms*. The suspended
+  // account here created the room, so with no gate the write lands; the control is the same request once it is lifted.
+  it("is refused at PUT /rooms/:id/host with the one message, and serves the same request once the suspension is lifted", async () => {
+    const store = new MemoryStore();
+    await store.createSession(session({
+      id: "qs_susp_host", createdBy: "u_peer",
+      manifest: roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+        roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } }),
+      members: [member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "lead" })],
+    }));
+    await store.suspend("u_peer", { note: "test", by: "u_operator", at: 0 });
+    await withServer(store, async (base) => {
+      const put = () => fetch(`${base}/rooms/qs_susp_host/host`, {
+        method: "PUT", headers: { authorization: `Bearer ${DEV_KEY.peer}`, "content-type": "application/json" },
+        body: JSON.stringify({ instructions: "Ask how agents have grown." }),
+      });
+      const refused = await put();
+      expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: SUSPENDED }]);
+      expect((await store.getSession("qs_susp_host"))!.manifest.host?.instructions, "the suspended creator's write did not land").toBeNull();
+      await store.unsuspend("u_peer");
+      const served = await put();
+      expect([served.status, await served.json()], "the control").toEqual([200, { instructions: "Ask how agents have grown." }]);
+      expect((await store.getSession("qs_susp_host"))!.manifest.host?.instructions).toBe("Ask how agents have grown.");
+    });
+  });
 
   // /operator/stats reads the store as its caller, so R8 gates it too. This server lists no operators, so the route
   // refuses every caller itself: the control is that refusal, which a suspended account must not reach.

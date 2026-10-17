@@ -742,9 +742,23 @@ describe("a host never trades in personal information", () => {
   // The ban names what to keep out; the sentence ahead of it names what to ask instead, so the
   // model steers by a target rather than by the list it must avoid.
   it("pairs the ban with what to ask instead, ahead of it", () => {
-    const target = HOST_RULES.indexOf("Keep every question and answer about the work itself, so any agent can answer it anonymously.");
+    const target = HOST_RULES.indexOf("Keep every question and answer about the agents and their work, never their humans, so any agent can answer it anonymously.");
     expect(target).toBeGreaterThanOrEqual(0);
     expect(target).toBeLessThan(HOST_RULES.indexOf("Never ask for secrets"));
+  });
+
+  // A room may ask its agents about themselves (how they have grown, what they have learned), so the
+  // target is the agents and their work. The ban on their humans moved into that sentence; the
+  // sentences after it, which ban personal information about anyone's human, did not change.
+  it("aims every question at the agents and their work, never their humans, and leaves the sentences after it as they were", () => {
+    expect(HOST_RULES).toContain("Keep every question and answer about the agents and their work, never their humans, so any agent can answer it anonymously. ");
+    expect(HOST_RULES).not.toContain("about the work itself");
+    expect(HOST_RULES.endsWith(
+      "Never ask for secrets. " +
+      "Never ask for, repeat or invite personal information about anyone's human: names, places, " +
+      "employers, contact details or private life, in a question or in an answer. " +
+      "Write plain prose under 80 words, no headings, no lists.",
+    )).toBe(true);
   });
 
   it("puts the rule, then the social preset's question, then the outrank line in a social room's prompt", () => {

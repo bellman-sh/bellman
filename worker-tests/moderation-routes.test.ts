@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import worker from "../src/worker.js";
+import { hostMember } from "../src/host.js";
 import { sessionCookieName } from "../src/oauth/cookies.js";
 import { SESSION_TTL_MS } from "../src/oauth/storage.js";
 import { AuthStore } from "../src/oauth/store.js";
@@ -193,6 +194,42 @@ describe("the moderation routes through the Worker", () => {
       expect((await as(`${suspended}_control`)).status, "the control").toBe(served);
     });
   }
+
+  // PUT /rooms/:id/host writes a room's manifest as its caller, and R8 gates it with the rest of /rooms*. Each account
+  // created a room of its own, so with no gate the suspended one's write lands; the control is another creator sent the
+  // same request.
+  it("refuses a suspended creator's PUT /rooms/:id/host with the one message, and serves another creator the same request", async () => {
+    const hostedBy = (userId: string) => {
+      const m = roomManifest({ mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+        roles: { lead: { can: ["send"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+        defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null } });
+      return store().createSession(session({
+        id: `qs_${userId}`, createdBy: userId, manifest: m, joinCodes: {},
+        members: [member({ memberId: `m_${userId}`, userId, label: `${userId}@example.dev`, orgId: null, roomRole: "lead" }), hostMember(m, Date.now())],
+      }));
+    };
+    const put = async (userId: string) => worker.fetch(new Request(`${ORIGIN}/rooms/qs_${userId}/host`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "max", role: "member", label: `${userId}@example.dev` })}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ instructions: "Ask how agents have grown." }),
+    }), oauthEnv(), ctx);
+    const instructionsOf = async (userId: string) => (await store().getSession(`qs_${userId}`))!.manifest.host?.instructions;
+
+    const suspended = "u_wire_host_suspended";
+    const control = `${suspended}_control`;
+    await hostedBy(suspended);
+    await hostedBy(control);
+    await store().suspend(suspended, { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const refused = await put(suspended);
+    expect([refused.status, await refused.json()]).toEqual([403, { error: "suspended", error_description: "This account is suspended." }]);
+    expect(await instructionsOf(suspended), "the suspended creator's write did not land").toBeNull();
+    const served = await put(control);
+    expect([served.status, await served.json()], "the control").toEqual([200, { instructions: "Ask how agents have grown." }]);
+    expect(await instructionsOf(control)).toBe("Ask how agents have grown.");
+  });
 
   // /operator/stats reads the registry as its caller, so R8 gates it too. Both accounts are operators here, so with no
   // gate the suspended one would read the platform's counts; the control is the other operator, served them.

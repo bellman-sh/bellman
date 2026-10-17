@@ -25,7 +25,7 @@ MCP is the one protocol every major provider's clients now speak, which makes a 
 | `bellman_rooms` | The rooms you hold a seat in: members with their roles, presence and last beat, live codes, expiry. Backs the in-chat monitor. |
 | `bellman_surface` | The room's working surface, read-only: every item and the cursor of its last change. Backs the in-chat canvas. |
 | `bellman_leave` | Depart with a broadcast event. |
-| `bellman_evict` | Creator-only: remove a member and retire their seat's code. Not a verb — no role grants it. |
+| `bellman_evict` | Creator-only: remove a member and retire their seat's code, unless it is a public room's permanent one. `ban` (`"room"` or `"all"`) also keeps their account out of this room, or out of every room you own, and `"all"` removes it from the others it sits in now. Not a verb — no role grants it. |
 | `bellman_invite` | Issue a fresh join code for a role at any time, or revoke one role's code — or, with no role named, every live code the room has. Issuing needs the `invite` verb; revoking needs `revoke`. Returns the code and the link it is shared as. With `permanent: true`, a public room's default seat gets a code that does not expire. |
 | `bellman_audit` | Enterprise: every crossing that touched your org's boundary. |
 
@@ -121,6 +121,7 @@ panel's, in the dash repo; the designs are in `docs/superpowers/specs/`.
 - **Untrusted envelopes**: peer-written briefs, messages and artifacts arrive wrapped `{ trust: "untrusted", origin, data }`, and a response carrying them opens its text with a preamble telling the receiving agent to treat them as data, not instructions. `structuredContent` has none, so there `trust` is the only marker; role names, modes, verbs and agent fields ship unwrapped.
 - **Capability grants**: members declare what may be done *to* them (`read_context`, `receive_messages`, `request_actions`). Action requests are approved by the receiving **human**, not the receiving agent.
 - **Member handles**: `member_id` is per-connection, so one user pairing with themself across two machines works — and a handle can only be driven by the identity that minted it.
+- **Bans and suspensions** (ADR 0022): `bellman_evict` with `ban: "room"` keeps an account out of that room, and `"all"` out of every room its creator owns, now and later: it also removes the account from each of the creator's other rooms it sits in, found through the joined-rooms index. An operator suspends an account everywhere. An eviction leaves a public room's permanent code open, so a ban is what keeps a person out of one. A banned account is told only `You can't join this room.`, whichever code it redeems, naming neither who banned it nor how far the ban reaches. A ban adds no event of its own, and `member_evicted` does not say there was one; nothing leaves the log. A suspended account is told `This account is suspended.` at `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`, `/account/handle`, `/account/bans*` and `/operator/stats`; the authorization server's paths, the `/account` page, `/callback`, `/admin/grants`, `/upgrade` and `/token` among them, are not gated, so it can still sign out. A ban is on the account, so a new GitHub or Google sign-in gets around it. Known gaps: a suspension takes up to 60 seconds to reach each isolate; a room socket already open stays open after a suspension; a ban `"all"` that only widens an earlier room ban files no audit row; and a ban `"all"` leaves a seat the joined-rooms index never recorded.
 
 ## What a plan gates
 
@@ -310,6 +311,18 @@ DELETE /admin/grants?key=<key>   revoke
 An address key is for onboarding someone you know by email, and it is **claimed on first use**: the first sign-in that resolves through it rewrites the grant onto that provider's numeric subject and retires the address key. After that the address carries nothing, so an address later reassigned inside a managed domain does not take the plan with it. Grant by subject where you can; grant by address when that is all you have, and expect it to move.
 
 `orgId` must be your own org: grants are org-tenanted, and an admin administers only their own. Grants and revocations are written to the org audit log, so `bellman_audit` shows who changed whose plan and when.
+
+Bans and suspensions have routes of their own. The first three below are a room's creator's: list its bans, ban a member (it runs `bellman_evict` and answers with that tool's fields) and lift a ban. The next two are for anyone signed in, about the bans they made across the rooms they own. The last two are the operator's: they take a bearer token for a user id the `BELLMAN_OPERATORS` secret lists, never a cookie, and with the secret unset or empty nobody passes. A lift answers 204, or 404 when there is no such ban or suspension.
+
+```
+GET    /rooms/:id/bans             a room's bans: ban_id, label, at
+POST   /rooms/:id/bans             {member_id, scope: "room" | "all"}
+DELETE /rooms/:id/bans/:banId      lift one room ban
+GET    /account/bans               your bans from every room you own
+DELETE /account/bans/:banId        lift one
+POST   /admin/suspensions/:userId  {note}, 1 to 500 characters
+DELETE /admin/suspensions/:userId  lift it
+```
 
 ### Paying for a plan
 

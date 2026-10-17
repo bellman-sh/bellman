@@ -459,8 +459,8 @@ flowchart LR
     DOS --> ADO
 
     subgraph objects["Durable Objects"]
-        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures"]
+        SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -1203,6 +1203,35 @@ loud:
   a file item's bytes come down through the download route under the headers a
   member's do. The delete is the one write, and the room's creator may ask for it
   as well.
+- **A ban and a suspension each refuse with one message, and a ban adds no event**
+  (ADR 0022). A creator bans an account from one room, or from every room they own,
+  with `bellman_evict`'s `ban` or `POST /rooms/:id/bans`. A ban from every room also
+  removes the account from each of the creator's other rooms it sits in now, found
+  through the joined-rooms index: each handle by the removal an eviction makes in that
+  room, under its own code rules, with no room ban of its own, and `also_removed_from`
+  counts those rooms. The room's own ban is read by
+  `bellman_connect`, and again inside `seatMember`, in the transaction that seats, where a
+  ban made after the preview is seen. The creator-wide ban is read from
+  the registry beside the code's resolution, by `bellman_connect` and again by
+  `bellman_confirm`, because a preview holds a 10-minute token. Either way the account
+  is told `You can't join this room.`, whichever code it redeems, which names neither
+  who banned it nor how far the ban reaches. A ban adds no event of its own, and the
+  `member_evicted` event does not say there was one: a public room's log is public. A ban
+  removes nothing from the log, and lifting one removes only the ban. It is on the account, so a new GitHub or Google sign-in gets around it; the
+  send limit and reports are the backstop.
+
+  An operator suspends an account with `POST /admin/suspensions/:userId`, through the
+  bearer-only gate that releases a handle (`BELLMAN_OPERATORS`; with it unset, nobody
+  passes). The Worker then answers `/mcp`, `/ws`, `/rooms*`, `/presets*`, `/audit*`,
+  `/account/handle`, `/account/bans*` and `/operator/stats` with `This account is suspended.`, and leaves
+  `/auth/*`, the `/account` page, `/token`, `/authorize`, `/upgrade` and `/admin/*` alone,
+  so the person can still sign out. It asks the registry once per identity per isolate a
+  minute (`SuspensionCache`).
+
+  Known gaps. A suspension takes up to 60 seconds to reach each isolate. A room
+  socket open at the time stays open, receive-only, and only the next connect is
+  refused. A ban `"all"` that only widens an earlier room ban files no audit row. A ban
+  `"all"` leaves a seat the joined-rooms index never recorded (`sessionsJoinedBy`).
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -1542,7 +1571,9 @@ It is used four times:
   A hosted room's close queues one more row on this pair, `hosted_release`, in the
   close's transaction: it gives the creator's hosted-room slot back (I7), and a
   delete of an absent row is harmless, so a redelivery is absorbed by the registry
-  as it is.
+  as it is. An eviction that asks for `ban: "all"` queues a `creator_ban` row in the
+  removal's transaction, and `putCreatorBan` writes it only while the creator holds no
+  ban on the account, so a redelivery keeps the first one (ADR 0022).
 - **`SessionDO → AuditDO` ([#73](../../../issues/73), [#117](../../../issues/117)).**
   `removeMember` queues a removal's audit rows, and those of the door it shuts,
   in the transaction that makes the change each one records. Auditing afterwards
@@ -1867,7 +1898,7 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,759** | every request, whether or not you are in a room |
+| Tool definitions | **~9,066** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
@@ -1894,6 +1925,21 @@ Re-measured on 2026-10-16 for #208, by the method below: 30 tokens over the 8,69
 (`c34d089`) measures, all of them `bellman_sync`'s (740 to 770), whose `Returns:` line names
 `more` and says to call again at once when a page comes back full. No other tool changed.
 That is 8,724.
+
+Re-measured on 2026-10-16 for bans, by the method below: 200 tokens over the 8,697 that
+main (`7d1dbad`) measures. `bellman_evict` is up 200, to 713: `ban` in its schema and its
+`Args:` line, the sentences saying what a ban refuses, that `"all"` also removes the
+account from the creator's other rooms it sits in now, and that a public room's permanent
+code is the one door an eviction leaves open, `banned` and `also_removed_from` in its
+`Returns:` line, and "and not permanent" in its `Errors:` line. No other tool changed and
+none was added. That is 8,897. The clause on `"all"` and `also_removed_from` came with the
+branch's fix pass, 29 of the 200, over the 8,868 measured before it.
+Merged over #244 (below), whose main (`c34d089`) measures 8,694 by this method, the listing
+measures 8,894: the same 200, all `bellman_evict`'s (513 to 713).
+Merged over main at `1e8bf54` (the three paragraphs above), the listing measures 9,066. Main
+measures 8,842, since its row's 8,759 was taken without the seats' 83. The branch adds 224 over
+the merge base (`29aa2a7`, 8,723): `bellman_evict`'s 200, and 24 for the permanent code an
+eviction leaves open, `bellman_invite` 824 to 845 and `bellman_connect` 758 to 761.
 
 Re-measured on 2026-10-16 for #244, by the method below: 3 tokens under the 8,697 that main
 (`1aad606`) measures, all of them `bellman_rooms`'s (255 to 252), whose `Returns:` line no

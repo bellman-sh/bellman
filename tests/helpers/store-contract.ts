@@ -4238,6 +4238,18 @@ export function describeStoreContract(
       });
     });
 
+    describe("suspensions (abuse protections spec \u{A7}1)", () => {
+      it("suspends an account, says so for it alone, and lifts it once", async () => {
+        expect(await store.isSuspended("u_peer")).toBe(false);
+        await store.suspend("u_peer", { note: "spam in three rooms", by: "u_operator", at: 1_000 });
+        expect(await store.isSuspended("u_peer")).toBe(true);
+        expect(await store.isSuspended("u_pee")).toBe(false);
+        expect(await store.unsuspend("u_peer")).toBe(true);
+        expect(await store.unsuspend("u_peer")).toBe(false);
+        expect(await store.isSuspended("u_peer")).toBe(false);
+      });
+    });
+
     describe("handles and bylines", () => {
       it("claims a handle once, refuses it to a second user, and answers claimed on a repeat", async () => {
         expect(await store.claimHandle("u_a", "ada")).toBe("claimed");
@@ -5598,6 +5610,267 @@ export function describeStoreContract(
       expect(await store.auditForOrg("", 10)).toEqual([]);
       expect((await store.auditForOrg("org_codenerd", 10)).map((a) => a.action))
         .toEqual(["member_evicted", "invite_revoked"]);
+    });
+
+    /**
+     * Strings that are not ban ids: ones near enough to `banId` to be taken for it, and two past 2 KiB, the
+     * limit on a Durable Object storage key. A ban id is `ban_` and 16 hex characters, so a store answers all
+     * of these without reading storage. The local workerd enforces no key limit, so these cases cannot see a
+     * lift read one: worker-tests/ban-id-guard.test.ts counts the storage a lift opens.
+     */
+    const notBanIds = (banId: string) => ["", "ban_", banId.slice(0, -1), `${banId}0`, "x".repeat(3_000), `ban_${"0".repeat(3_000)}`];
+
+    describe("room bans (abuse protections spec \u{A7}1)", () => {
+      const twoInRoom = () => session({
+        members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+      });
+      const back = (memberId = "m_peer_2", roomRole = "peer_b") =>
+        member({ memberId, userId: "u_peer", label: "peer@codenerd", roomRole });
+
+      it("records the account on an eviction that asks, and refuses its next seating in any seat", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        expect(await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" }))
+          .toEqual({ refused: null, removed: true, codeRetired: "peer_b" });
+        expect(await store.roomBans(s.id)).toEqual([
+          { banId: expect.stringMatching(/^ban_[0-9a-f]{16}$/), userId: "u_peer", label: "peer@codenerd", at: 9_000_000 },
+        ]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBe("banned");
+        expect((await store.seatMember(s.id, back("m_peer_3", "peer_a"), 1, 9_100_000)).refused).toBe("banned");
+        expect((await store.seatMember(s.id, member({ memberId: "m_other", userId: "u_other", label: "other@x" }), 1, 9_100_000)).refused,
+          "the control: another account seats").toBeNull();
+      });
+
+      it("refuses a banned account as banned and not as full, when the room has no seat free", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const seat = (memberId: string, userId: string) =>
+          store.seatMember(s.id, member({ memberId, userId, label: `${userId}@x` }), 1, 9_100_000);
+        expect((await seat("m_other", "u_other")).refused, "the other account takes the free seat").toBeNull();
+        expect((await seat("m_third", "u_third")).refused, "the control: the room is full").toBe("full");
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBe("banned");
+      });
+
+      it("writes no ban for a removal that does not ask, and the account seats again", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", eviction());
+        expect(await store.roomBans(s.id)).toEqual([]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBeNull();
+      });
+
+      /** Review Focus 1. */
+      it("bans a member who already left, behind no live door, writing no event and moving no cursor", async () => {
+        const s = session({
+          joinCodes: {},
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+        });
+        await store.createSession(s);
+        expect(await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" }))
+          .toEqual({ refused: null, removed: false, codeRetired: null });
+        expect((await store.roomBans(s.id)).map((b) => b.userId)).toEqual(["u_peer"]);
+        expect(await store.eventsAfter(s.id, 0)).toEqual([]);
+        expect((await store.appendEvent(s.id, leaveEvent("m_creator")))?.cursor).toBe(1);
+      });
+
+      // The audit log is where an org reads every ban. One on someone who already left is the eviction's
+      // row all the same, carrying the scope, and it is filed once: the call that wrote the ban files it,
+      // and a repeat, which writes none, does not. "all" is the case that tells the stores apart on a
+      // repeat, since the Durable Objects store queues the registry's write each time it is asked.
+      for (const scope of ["room", "all"] as const) {
+        it(`files the eviction's audit row for a ban on a member who already left, and only once (${scope})`, async () => {
+          const s = session({
+            joinCodes: {},
+            members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+          });
+          await store.createSession(s);
+          const asked = (now: number): RemovalRequest => ({
+            ...eviction(now), ban: scope, audit: [{ ...auditRow("member_evicted"), detail: { ban: scope } }],
+          });
+          const filed = async () => (await store.auditForOrg("org_codenerd", 10)).map((a) => [a.action, a.detail]);
+
+          expect(await store.removeMember(s.id, "m_peer", asked(9_000_000)))
+            .toEqual({ refused: null, removed: false, codeRetired: null });
+          expect(await filed()).toEqual([["member_evicted", { ban: scope }]]);
+
+          await store.removeMember(s.id, "m_peer", asked(9_500_000));
+          expect(await filed(), "a repeat files no second row").toEqual([["member_evicted", { ban: scope }]]);
+        });
+      }
+
+      it("keeps one ban per account: a repeat records nothing new", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const first = await store.roomBans(s.id);
+        await store.removeMember(s.id, "m_peer", { ...eviction(9_500_000), ban: "room" });
+        expect(await store.roomBans(s.id)).toEqual(first);
+      });
+
+      it("writes no ban when the removal is refused", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), byUserId: "u_someone_else", ban: "room" });
+        expect(await store.roomBans(s.id)).toEqual([]);
+      });
+
+      it("lifts a ban by its id, once, and the account seats again", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const [ban] = await store.roomBans(s.id);
+        expect(await store.liftRoomBan(s.id, "ban_0000000000000000")).toBe(false);
+        expect(await store.liftRoomBan(s.id, ban.banId)).toBe(true);
+        expect(await store.liftRoomBan(s.id, ban.banId)).toBe(false);
+        expect(await store.roomBans(s.id)).toEqual([]);
+        expect((await store.seatMember(s.id, back(), 1, 9_100_000)).refused).toBeNull();
+      });
+
+      // The preview's check: `bellman_connect` asks it before it describes the room.
+      it("says whether the room bans an account, for that account and room alone, until the ban is lifted", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "the control: not yet banned").toBe(false);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        expect(await store.isBannedFromRoom(s.id, "u_peer")).toBe(true);
+        expect(await store.isBannedFromRoom(s.id, "u_pee"), "another account").toBe(false);
+        expect(await store.isBannedFromRoom("qs_nowhere", "u_peer"), "an unknown room").toBe(false);
+        const [ban] = await store.roomBans(s.id);
+        await store.liftRoomBan(s.id, ban.banId);
+        expect(await store.isBannedFromRoom(s.id, "u_peer"), "lifted").toBe(false);
+      });
+
+      it("lists bans oldest first by when each was made, not in the order they were written", async () => {
+        const s = swarmSession({
+          members: [
+            member({ memberId: "m_creator" }),
+            ...["a", "b", "c", "d"].map((n) => member({ memberId: `m_${n}`, userId: `u_${n}`, label: `${n}@x` })),
+          ],
+        });
+        await store.createSession(s);
+        for (const [n, at] of [["a", 9_300_000], ["b", 9_100_000], ["c", 9_400_000], ["d", 9_200_000]] as const) {
+          await store.removeMember(s.id, `m_${n}`, { ...eviction(at), ban: "room" });
+        }
+        expect((await store.roomBans(s.id)).map((b) => b.userId)).toEqual(["u_b", "u_d", "u_a", "u_c"]);
+      });
+
+      it("forgets a room's bans when the room is purged", async () => {
+        const s = session({
+          id: "qs_ban_purge",
+          retainAfterCloseMs: 60_000,
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+        });
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        expect((await store.roomBans(s.id)).map((b) => b.userId), "the control: the ban is there").toEqual(["u_peer"]);
+        await store.closeSession(s.id);
+        vi.advanceTimersByTime(60_001);
+        await sweepRoom(s.id);
+        expect(await store.getSession(s.id), "the room is purged").toBeUndefined();
+        expect(await store.roomBans(s.id)).toEqual([]);
+      });
+
+      it("answers no bans for an unknown room", async () => {
+        expect(await store.roomBans("qs_nowhere")).toEqual([]);
+        expect(await store.liftRoomBan("qs_nowhere", "ban_0000000000000000")).toBe(false);
+      });
+
+      it("lifts nothing for an id that is not a ban id, and does not throw", async () => {
+        const s = twoInRoom();
+        await store.createSession(s);
+        await store.removeMember(s.id, "m_peer", { ...eviction(), ban: "room" });
+        const [ban] = await store.roomBans(s.id);
+        for (const id of notBanIds(ban.banId)) expect(await store.liftRoomBan(s.id, id), id.slice(0, 24)).toBe(false);
+        expect((await store.roomBans(s.id)).map((b) => b.banId), "the control: the ban is still there").toEqual([ban.banId]);
+      });
+    });
+
+    describe("creator-wide bans (abuse protections spec \u{A7}1)", () => {
+      const room = (id: string, createdBy = "u_jesse") => session({
+        id, createdBy,
+        members: [member({ memberId: "m_creator", userId: createdBy }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" })],
+      });
+
+      it("bans the account from every room the creator owns and from no one else's, and from this room too", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+        expect(await store.isBannedByCreator("u_someone_else", "u_peer")).toBe(false);
+        expect(await store.isBannedByCreator("u_jesse", "u_other")).toBe(false);
+        expect((await store.roomBans("qs_a")).map((b) => b.userId)).toEqual(["u_peer"]);
+        expect(await store.creatorBans("u_jesse")).toEqual([
+          { banId: expect.stringMatching(/^ban_[0-9a-f]{16}$/), userId: "u_peer", label: "peer@codenerd", at: 9_000_000, sessionId: "qs_a" },
+        ]);
+      });
+
+      it("writes nothing creator-wide for a room ban", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "room" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(false);
+        expect(await store.creatorBans("u_jesse")).toEqual([]);
+      });
+
+      it("bans creator-wide a member who already left, and keeps the first ban on a repeat", async () => {
+        await store.createSession(session({
+          id: "qs_a", joinCodes: {},
+          members: [member({ memberId: "m_creator" }), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", leftAt: 5_000 })],
+        }));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const first = await store.creatorBans("u_jesse");
+        expect(first.map((b) => b.userId)).toEqual(["u_peer"]);
+        await store.removeMember("qs_a", "m_peer", { ...eviction(9_500_000), ban: "all" });
+        expect(await store.creatorBans("u_jesse")).toEqual(first);
+      });
+
+      it("widens a room ban to every room on a later eviction that asks for all", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "room" });
+        await store.removeMember("qs_a", "m_peer", { ...eviction(9_500_000), ban: "all" });
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+      });
+
+      it("lifts by id for its creator only, and leaves the room ban that came with it", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const [ban] = await store.creatorBans("u_jesse");
+        expect(await store.liftCreatorBan("u_someone_else", ban.banId)).toBe(false);
+        expect(await store.liftCreatorBan("u_jesse", ban.banId)).toBe(true);
+        expect(await store.liftCreatorBan("u_jesse", ban.banId)).toBe(false);
+        expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(false);
+        expect((await store.roomBans("qs_a")).map((b) => b.userId)).toEqual(["u_peer"]);
+      });
+
+      // Operator-issued user ids may hold a colon, so one creator's id can begin another's past the key's separator.
+      it("keeps creators whose ids share a prefix apart", async () => {
+        await store.createSession(room("qs_xy", "u_x:y"));
+        await store.removeMember("qs_xy", "m_peer", { ...eviction(), byUserId: "u_x:y", ban: "all" });
+        expect(await store.creatorBans("u_x")).toEqual([]);
+        expect(await store.isBannedByCreator("u_x", "u_peer")).toBe(false);
+        expect((await store.creatorBans("u_x:y")).map((b) => b.userId)).toEqual(["u_peer"]);
+      });
+
+      it("lists bans oldest first by when each was made, not in the order they were written", async () => {
+        const s = swarmSession({
+          members: [
+            member({ memberId: "m_creator" }),
+            ...["a", "b", "c", "d"].map((n) => member({ memberId: `m_${n}`, userId: `u_${n}`, label: `${n}@x` })),
+          ],
+        });
+        await store.createSession(s);
+        for (const [n, at] of [["a", 9_300_000], ["b", 9_100_000], ["c", 9_400_000], ["d", 9_200_000]] as const) {
+          await store.removeMember(s.id, `m_${n}`, { ...eviction(at), ban: "all" });
+        }
+        expect((await store.creatorBans("u_jesse")).map((b) => b.userId)).toEqual(["u_b", "u_d", "u_a", "u_c"]);
+      });
+
+      it("lifts nothing for an id that is not a ban id, and does not throw", async () => {
+        await store.createSession(room("qs_a"));
+        await store.removeMember("qs_a", "m_peer", { ...eviction(), ban: "all" });
+        const [ban] = await store.creatorBans("u_jesse");
+        for (const id of notBanIds(ban.banId)) expect(await store.liftCreatorBan("u_jesse", id), id.slice(0, 24)).toBe(false);
+        expect((await store.creatorBans("u_jesse")).map((b) => b.banId), "the control: the ban is still there").toEqual([ban.banId]);
+      });
     });
 
     describe("signing in (#258)", () => {

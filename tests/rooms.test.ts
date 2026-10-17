@@ -786,7 +786,7 @@ describe("evictMember", () => {
 
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -810,7 +810,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-TEST-01"), "the door is shut").toBeUndefined();
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type), "the removal is not announced again").toEqual(["invite_revoked"]);
@@ -913,8 +913,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["invite_revoked"]);
     expect(await store.auditForOrg("org_codenerd", 50)).toHaveLength(1);
   });
@@ -931,7 +931,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.eventsAfter("qs_test", 0)).toEqual([]);
     expect(await store.auditForOrg("org_codenerd", 50)).toEqual([]);
   });
@@ -952,7 +952,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const events = await store.eventsAfter("qs_test", 0);
@@ -973,7 +973,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: "observer", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect(await store.getSessionByJoinCode("BELL-WATCH-01"), "the observer door is shut").toBeUndefined();
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     const [evicted, revoked] = await store.eventsAfter("qs_test", 0);
@@ -1000,7 +1000,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.getSessionByJoinCode("BELL-HELPER-01"))?.role, "the helper door is untouched").toBe("helper");
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
@@ -1241,7 +1241,7 @@ describe("evictMember", () => {
 
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(r.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     expect((await store.eventsAfter("qs_test", 0)).map((e) => e.type)).toEqual(["member_evicted"]);
     const rows = await store.auditForOrg("org_codenerd", 50);
     expect(rows.map((a) => a.detail)).toEqual([
@@ -1341,6 +1341,115 @@ describe("evictMember", () => {
     expect(rows[0].detail).toEqual({ member_id: "m_peer", user_id: "u_peer", room_role: "peer_b" });
   });
 
+  describe("with ban (abuse protections spec section 1)", () => {
+    /** A swarm room: the creator, one account in two handles in the default seat, and a bystander. */
+    const manifest = resolveManifest(manifestFixture({ preset: "swarm" }));
+    const twoHandles = () => session({
+      manifest,
+      joinCodes: oneCode("BELL-HELPER-01", "helper"),
+      members: [
+        member({ roomRole: manifest.creatorRole }),
+        member({ memberId: "m_laptop", userId: "u_peer", label: "peer@codenerd", roomRole: "helper" }),
+        member({ memberId: "m_desktop", userId: "u_peer", label: "peer@codenerd", roomRole: "helper" }),
+        member({ memberId: "m_other", userId: "u_other", label: "other@codenerd", roomRole: "helper" }),
+      ],
+    });
+    const stillIn = async () =>
+      (await store.membersOfUser("qs_test", "u_peer")).filter((m) => m.leftAt === null).map((m) => m.memberId);
+
+    it("puts the ban in the eviction's audit row and in no event, because a public room's log is public", async () => {
+      await store.createSession(peopled());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_peer", "room");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.banned).toBe("room");
+      const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
+      expect(rows.map((a) => a.detail)).toEqual([{ member_id: "m_peer", user_id: "u_peer", room_role: "peer_b", ban: "room" }]);
+      // The events an eviction without a ban writes, with the payload it writes: nothing in the log tells a ban from one.
+      const events = await store.eventsAfter("qs_test", 0);
+      expect(events.map((e) => e.type)).toEqual(["member_evicted", "invite_revoked"]);
+      expect(Object.keys(events[0].payload as object).sort()).toEqual(["label", "member_id", "room_role"]);
+      expect(events[1].payload).toEqual({ roles: ["peer_b"] });
+    });
+
+    it("removes every other handle the account holds, each with its own event and audit row", async () => {
+      await store.createSession(twoHandles());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_laptop", "room");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(await stillIn()).toEqual([]);
+      expect(await store.getMember("qs_test", "m_other"), "the bystander stays").toMatchObject({ leftAt: null });
+      const evicted = (await store.eventsAfter("qs_test", 0)).filter((e) => e.type === "member_evicted");
+      expect(evicted.map((e) => (e.payload as { member_id: string }).member_id)).toEqual(["m_laptop", "m_desktop"]);
+      const rows = (await store.auditForOrg("org_codenerd", 50)).filter((a) => a.action === "member_evicted");
+      expect(rows.map((a) => [a.detail.member_id, a.detail.ban])).toEqual([["m_laptop", "room"], ["m_desktop", "room"]]);
+      expect(await store.roomBans("qs_test"), "one ban for the account, not one per handle").toHaveLength(1);
+    });
+
+    it("removes only the handle it names when it does not ban", async () => {
+      await store.createSession(twoHandles());
+
+      await evictMember(store, jesse, "qs_test", "m_laptop");
+
+      expect(await stillIn()).toEqual(["m_desktop"]);
+    });
+
+    it("finishes the other handles when the eviction is repeated after a refusal partway", async () => {
+      await store.createSession(twoHandles());
+      const removeMember = store.removeMember.bind(store);
+      vi.spyOn(store, "removeMember")
+        .mockImplementationOnce((...args) => removeMember(...args))
+        .mockRejectedValueOnce(new Error("remove failed"));
+
+      await expect(evictMember(store, jesse, "qs_test", "m_laptop", "room")).rejects.toThrow("remove failed");
+      expect(await stillIn(), "the target is out and the other handle is not").toEqual(["m_desktop"]);
+      expect(await store.roomBans("qs_test"), "the ban was written with the target's removal").toHaveLength(1);
+
+      const retry = await evictMember(store, jesse, "qs_test", "m_laptop", "room");
+
+      expect(retry.ok, JSON.stringify(retry)).toBe(true);
+      expect(await stillIn()).toEqual([]);
+      expect(await store.roomBans("qs_test"), "the repeat keeps the one ban").toHaveLength(1);
+    });
+
+    it("bans the account from every room the creator owns when it asks for all", async () => {
+      await store.createSession(peopled());
+
+      const r = await evictMember(store, jesse, "qs_test", "m_peer", "all");
+
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      if (!r.ok) return;
+      expect(r.value.banned).toBe("all");
+      expect(await store.isBannedByCreator("u_jesse", "u_peer")).toBe(true);
+      expect(await store.isBannedByCreator("u_jesse", "u_other"), "the control: nobody else").toBe(false);
+    });
+
+    it("leaves a public room's permanent code open, where it shuts a code that expires", async () => {
+      const permanent = { helper: { code: "BELL-PERM-01-HELPER", expiresAt: null } };
+      await store.createSession(session({
+        manifest: resolveManifest(manifestFixture({ preset: "swarm", public: true })),
+        joinCodes: { ...permanent, ...oneCode("BELL-WATCH-01", "observer") },
+        members: [
+          member({ roomRole: manifest.creatorRole }),
+          member({ memberId: "m_helper", userId: "u_helper", label: "helper@codenerd", roomRole: "helper" }),
+          member({ memberId: "m_watcher", userId: "u_watcher", label: "watcher@codenerd", roomRole: "observer" }),
+        ],
+      }));
+      expect((await store.getSessionByJoinCode("BELL-PERM-01-HELPER"))?.role, "the control: the permanent code resolves").toBe("helper");
+
+      const gone = await evictMember(store, jesse, "qs_test", "m_helper");
+      const shut = await evictMember(store, jesse, "qs_test", "m_watcher");
+
+      expect(gone.ok && gone.value.codeRetired, "an eviction does not retire the permanent code").toBeNull();
+      expect((await store.getSessionByJoinCode("BELL-PERM-01-HELPER"))?.role).toBe("helper");
+      expect(shut.ok && shut.value.codeRetired, "and still retires a code that expires").toBe("observer");
+      expect(await store.getSessionByJoinCode("BELL-WATCH-01")).toBeUndefined();
+    });
+  });
+
   // The door an eviction shuts is recorded the same way whether or not the member
   // was still in the room: an `invite_revoked` row, beside the member's when there
   // was one. So a query for the doors an eviction shut finds all of them, where a
@@ -1414,8 +1523,8 @@ describe("evictMember", () => {
     expect(first.ok, JSON.stringify(first)).toBe(true);
     expect(again.ok, JSON.stringify(again)).toBe(true);
     if (!first.ok || !again.ok) return;
-    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active" });
-    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active" });
+    expect(first.value).toEqual({ evicted: true, codeRetired: "peer_b", sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
+    expect(again.value).toEqual({ evicted: true, codeRetired: null, sessionStatus: "active", banned: null, alsoRemovedFrom: 0 });
     const events = await store.eventsAfter("qs_test", 0);
     expect(events.map((e) => e.type)).toEqual(["member_evicted", "invite_revoked"]);
     const rows = await store.auditForOrg("org_codenerd", 50);

@@ -71,7 +71,8 @@ export interface OAuthConfig {
   /**
    * The user ids BELLMAN_OPERATORS names (`parseOperators`): who holds the
    * operator's platform-wide powers, which no plan, role or grant confers.
-   * Today that is releasing anyone's handle. Absent or empty names no one.
+   * Today that is releasing anyone's handle and suspending an account. Absent
+   * or empty names no one.
    */
   operators?: ReadonlySet<string>;
   fetchImpl?: typeof fetch;
@@ -85,6 +86,7 @@ export type PlanStore = Pick<
   | "countCreatesThisMonth"
   | "releaseHandleNamed"
   | "recordSignIn"
+  | "suspend" | "unsuspend"
 >;
 
 export type PlanSource = "operator" | "grant" | "default";
@@ -1352,18 +1354,8 @@ export async function handleOAuth(
   // for /admin/grants' reason. The segment is read as the handle page reads it.
   const named = ADMIN_HANDLE.exec(path);
   if (named) {
-    const who = await caller(request, config);
-    if (!who) return oauthError("invalid_token", "sign in first", 401);
-    if (who.via === "cookie") {
-      return oauthError(
-        "invalid_token",
-        "this endpoint requires a bearer token, not a browser session",
-        401
-      );
-    }
-    if (!config.operators?.has(who.identity.userId)) {
-      return oauthError("insufficient_scope", "releasing a handle is limited to the user ids BELLMAN_OPERATORS lists", 403);
-    }
+    const gate = await operatorGate(request, config, "releasing a handle");
+    if (gate instanceof Response) return gate;
     if (method !== "DELETE") {
       return new Response("Method not allowed", { status: 405, headers: { allow: "DELETE" } });
     }
@@ -1375,10 +1367,71 @@ export async function handleOAuth(
     return new Response(null, { status: 204 });
   }
 
+  // ------------------------------------------ /admin/suspensions/:userId
+  // The operator suspends an account or lifts its suspension (abuse protections
+  // spec, section 1): every authenticated call that reads or writes the store as
+  // a suspended account is refused (plan ruling R8). On /admin/handles' gate. No
+  // listing route: the spec names none (R14).
+  const suspension = ADMIN_SUSPENSION.exec(path);
+  if (suspension) {
+    const gate = await operatorGate(request, config, "suspending an account");
+    if (gate instanceof Response) return gate;
+    if (method !== "POST" && method !== "DELETE") {
+      return new Response("Method not allowed", { status: 405, headers: { allow: "POST, DELETE" } });
+    }
+    if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
+    let userId: string;
+    try {
+      userId = decodeURIComponent(suspension[1]);
+    } catch {
+      return oauthError("invalid_request", "the path's user id is not a valid percent-encoding");
+    }
+    if (!isLinkableUserId(userId)) {
+      return oauthError("invalid_request", "the path must name a user id: u_ and up to 198 letters, digits, - or _");
+    }
+    if (method === "DELETE") {
+      return (await config.plans.unsuspend(userId))
+        ? new Response(null, { status: 204 })
+        : oauthError("not_found", "no such suspension", 404);
+    }
+    // A body that is not JSON, `null`, an array or a scalar has no note, and is the one 400 below.
+    const { note } = ((await request.json().catch(() => null)) ?? {}) as { note?: unknown };
+    const trimmed = typeof note === "string" ? note.trim() : "";
+    if (trimmed.length < 1 || trimmed.length > 500) {
+      return oauthError("invalid_request", "note must be 1 to 500 characters");
+    }
+    const at = Date.now();
+    await config.plans.suspend(userId, { note: trimmed, by: gate.identity.userId, at });
+    return json({ user_id: userId, note: trimmed, suspended_at: new Date(at).toISOString() });
+  }
+
   return undefined;
 }
 
 const ADMIN_HANDLE = /^\/admin\/handles\/([^/]+)$/;
+const ADMIN_SUSPENSION = /^\/admin\/suspensions\/([^/]+)$/;
+
+/**
+ * The gate for the operator's platform-wide powers (ADR 0021; abuse protections spec D3): a bearer token, never a
+ * cookie, for a user id BELLMAN_OPERATORS lists. The operator, or the refusal: 401 for no credential or a cookie,
+ * 403 `insufficient_scope` "<what> is limited to the user ids BELLMAN_OPERATORS lists".
+ */
+async function operatorGate(request: Request, config: OAuthConfig, what: string): Promise<{ identity: Identity } | Response> {
+  const who = await caller(request, config);
+  if (!who) return oauthError("invalid_token", "sign in first", 401);
+  // Bearer only, for /admin/grants' reason.
+  if (who.via === "cookie") {
+    return oauthError(
+      "invalid_token",
+      "this endpoint requires a bearer token, not a browser session",
+      401
+    );
+  }
+  if (!config.operators?.has(who.identity.userId)) {
+    return oauthError("insufficient_scope", `${what} is limited to the user ids BELLMAN_OPERATORS lists`, 403);
+  }
+  return who;
+}
 
 /**
  * BELLMAN_OPERATORS, a Worker secret: the user ids, comma-separated, that hold

@@ -1,6 +1,6 @@
 # ADR 0020 — A public room may hold a permanent code for its default seat
 
-**Date:** 2026-10-12 · **Status:** accepted · **Amends:** ADR 0010, decision 4
+**Date:** 2026-10-12 · **Status:** accepted; decision 5 amended by ADR 0022 · **Amends:** ADR 0010, decision 4
 
 ## Context
 

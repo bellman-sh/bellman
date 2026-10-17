@@ -15,7 +15,7 @@ import { createApp } from "../src/app.js";
 import { MemoryBlobStore } from "../src/blobs.js";
 import { MemoryStore, type BellmanStore } from "../src/store.js";
 import { text } from "./helpers/blob-bytes.js";
-import { brief, manifestFixture, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
+import { brief, manifestFixture, member, openaiAgent, roomManifest, session } from "./helpers/fixtures.js";
 
 let http: Server;
 let store: BellmanStore;
@@ -67,6 +67,23 @@ describe("HTTP surface", () => {
     const res = await fetch(`${base}/presets`, { headers: { authorization: "Bearer qk_dev_jesse" } });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { builtin: unknown[] }).builtin).toHaveLength(4);
+  });
+
+  it("serves the ban routes beside the room routes", async () => {
+    await store.createSession(session({
+      id: "qs_http_bans",
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+    const headers = { authorization: "Bearer qk_dev_jesse", "content-type": "application/json" };
+    // A room ban, not "all": this file's one store serves every test, and a ban from every room jesse owns
+    // would refuse the peer at the pairing tests below. The account list's rows are pinned in tests/http-moderation.test.ts.
+    const banned = await fetch(`${base}/rooms/qs_http_bans/bans`, { method: "POST", headers, body: JSON.stringify({ member_id: "m_peer", scope: "room" }) });
+    expect(banned.status).toBe(200);
+    const room = await fetch(`${base}/rooms/qs_http_bans/bans`, { headers });
+    const account = await fetch(`${base}/account/bans`, { headers });
+    expect([room.status, account.status]).toEqual([200, 200]);
+    expect(((await room.json()) as { bans: { label: string }[] }).bans.map((b) => b.label)).toEqual(["peer@codenerd"]);
+    expect(Array.isArray(((await account.json()) as { bans: unknown }).bans)).toBe(true);
   });
 
   // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.

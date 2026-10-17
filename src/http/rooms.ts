@@ -70,7 +70,7 @@ const UNPUBLISH = /^\/rooms\/([^/]+)\/unpublish$/;
 const BYLINE = /^\/rooms\/([^/]+)\/byline$/;
 
 /** A refusal's status from the code the operation answered with. Closed: a new code is a compile error here. */
-const STATUS: Record<RoomFailure, number> = {
+export const STATUS: Record<RoomFailure, number> = {
   not_found: 404, closed: 409, frozen: 409, forbidden: 403, conflict: 409, invalid: 400,
 };
 

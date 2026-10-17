@@ -3,6 +3,7 @@ import type {
   RoomManifest, Session, SessionEvent, EventType, SavedPreset, SurfaceRow, UserRecord,
 } from "./types.js";
 import { MemoryBlobStore, type BlobStore } from "./blobs.js";
+import { isBanId, newBanId, oldestFirst, type Ban, type BanScope, type CreatorBan } from "./bans.js";
 import { fingerprint, idempotencyKey, type IdempotencyRecord } from "./idempotency.js";
 import {
   creditedBlobBytes, orgsOnRoster, purgeDueAt, roomDeletedEntry, roomPurgedEntry, sweepDueAt, unnamedObjects,
@@ -18,6 +19,7 @@ import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant
 import { mustReport } from "./roles.js";
 import { presetInNewWords } from "./presets.js";
 import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
+import type { Suspension } from "./suspension.js";
 import {
   auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
 } from "./audit.js";
@@ -584,7 +586,29 @@ export interface RemovalRequest {
    * caller expected to happen.
    */
   retire?: { role: string; event: EventBody; audit?: readonly AuditEntry[] };
-  /** Queued in the same transaction and delivered by the outbox, only if this call did the removing. */
+  /**
+   * Ban the member's account from this room (spec section 1): its user id and label as the member
+   * holds them, stamped `now`. One ban per account, so a room that already holds one keeps it as it
+   * is and writes nothing new.
+   *
+   * Written whether or not this call removed the member, as the door is: someone who left an hour
+   * ago can still be banned, and a retry finishes what a failed call began. Never written on a
+   * refusal. A removal that only bans, the member already out and no live door behind them, writes
+   * no event: a public room's log is public, and the person banned is told only that they can't join.
+   *
+   * Either scope writes this room's ban. `"all"` also writes the creator's ban from every room they
+   * own (`creatorBans`), a separate record: lifting one leaves the other. That one is owed whether or
+   * not this room already holds a ban for the account, so an eviction that asks for `"all"` widens a
+   * room ban made earlier, and a repeat keeps the first creator-wide ban and writes nothing new. A
+   * removal that only widens writes no event, as one that only bans writes none.
+   */
+  ban?: BanScope;
+  /**
+   * Queued in the same transaction and delivered by the outbox, only if this call did the removing or
+   * wrote this room's ban (`ban`). A ban on someone who already left is an eviction in the audit log's
+   * terms, and an org reading it expects every ban there. Not for a creator-wide ban alone: the Durable
+   * Objects store cannot tell a first one from a repeat, so a retry would file the row again.
+   */
   audit: readonly AuditEntry[];
 }
 
@@ -612,9 +636,13 @@ export interface RemovalRequest {
  * is here so the outcome says what the seating did. `SessionDO` reads it to decide
  * whether the seating queued registry drops that want delivering, and the contract
  * suite reads it to pin what a seating did.
+ *
+ * "banned" is an account the room's creator banned (spec section 1). It is refused after "frozen" and
+ * before "full", so a banned account is told it cannot join whether or not a seat is free, and never
+ * learns that the room is full. Like every refusal it writes nothing.
  */
 export interface SeatOutcome {
-  refused: "not_found" | "closed" | "frozen" | "full" | null;
+  refused: "not_found" | "closed" | "frozen" | "full" | "banned" | null;
   reclaimed: Member[];
   /** The seating filled the room and retired the temporary codes it held. False when it held none. */
   codesCleared: boolean;
@@ -1013,6 +1041,11 @@ export interface BellmanStore {
    * and so could not replay (#116). "Fills" means a further joiner would be refused,
    * which is `seatVictims` answering null once this member is in: not a count of
    * undeparted members, because a stale seat is occupied and still reclaimable.
+   *
+   * An account the room has banned (`RemovalRequest.ban`) is refused "banned" whatever seat it asks
+   * for: after the frozen refusal and before any seat is counted, so a full room does not tell a
+   * banned account it is full. The check is inside the operation for the reason the others are: a ban
+   * landing between a caller's read and this write would otherwise seat the account it was made against.
    */
   seatMember(
     sessionId: string,
@@ -1050,16 +1083,67 @@ export interface BellmanStore {
    * announces no second one. What is still owed is a live code behind them: a
    * leave retires none, so it was never shut, and shutting it is a write that has
    * not happened yet and not a duplicate of one that has. `codeRetired` says so.
-   * With no live code, nothing is written and nothing is queued at all. Closing
-   * the room if it has emptied is NOT part of this — `closeSessionIfEmpty` makes
-   * that decision atomically on its own, and folding it in here would close over a
-   * member who joined in the gap.
+   * A ban asked for (`req.ban`) that the room does not hold yet is owed the same
+   * way: written whether or not this call removed the member, and with no event
+   * when it did not. With no live code and no ban owed, nothing is written and
+   * nothing is queued at all. Closing the room if it has emptied is NOT part of
+   * this — `closeSessionIfEmpty` makes that decision atomically on its own, and
+   * folding it in here would close over a member who joined in the gap. The
+   * creator-wide ban that `"all"` asks for is owed the same way as a room ban.
    */
   removeMember(
     sessionId: string,
     memberId: string,
     req: RemovalRequest,
   ): Promise<RemovalOutcome>;
+  /**
+   * The accounts banned from this room, oldest first (spec section 1). An unknown room answers
+   * none. Each carries the user id, because the store keeps it: what reaches a creator is
+   * `banView`, which leaves it out.
+   */
+  roomBans(sessionId: string): Promise<Ban[]>;
+  /**
+   * Lift one ban by its id, as ONE operation, and say whether there was one. A second lift of
+   * the same id, an id the room never issued and an unknown room all answer false, and so does a
+   * string that is not shaped like a ban id (`isBanId`), without storage being read: the id is a
+   * creator's input, and Durable Object storage limits a key to 2 KiB. It removes the
+   * ban and nothing else: the member the ban came with stays out, and the account seats again
+   * wherever a door is open to it.
+   */
+  liftRoomBan(sessionId: string, banId: string): Promise<boolean>;
+  /**
+   * The accounts this creator banned from every room they own (spec section 1), oldest first. Each
+   * carries the user id and the room it was made in: what reaches a creator is `creatorBanView`, which
+   * leaves the user id out. A room's ban and the creator-wide ban that came with it are separate records.
+   */
+  creatorBans(creatorId: string): Promise<CreatorBan[]>;
+  /**
+   * Lift one of this creator's bans by its id, as ONE operation, and say whether there was one. A
+   * second lift, another creator's id and a string that is not shaped like a ban id (`isBanId`) all
+   * answer false, the last without storage being read. It lifts that ban and nothing else: the room
+   * ban that came with it stays.
+   */
+  liftCreatorBan(creatorId: string, banId: string): Promise<boolean>;
+  /**
+   * Whether this creator banned this account from every room they own. The join check, asked of the
+   * room's creator once a code has resolved: the registry's code rows do not know who made the room.
+   */
+  isBannedByCreator(creatorId: string, userId: string): Promise<boolean>;
+  /**
+   * Whether this room bans this account, in one read. The preview's check, so a banned account is refused before the
+   * room is described to it. The seating decides for itself (`seatMember`), where a ban landing after this read is seen.
+   */
+  isBannedFromRoom(sessionId: string, userId: string): Promise<boolean>;
+  /**
+   * Suspend an account (abuse protections spec, section 1): every authenticated call that reads or writes
+   * the store as it is then refused (plan ruling R8). The registry keeps it, one row an account, and a
+   * repeat replaces the note.
+   */
+  suspend(userId: string, s: Suspension): Promise<void>;
+  /** Lift a suspension, and say whether there was one. */
+  unsuspend(userId: string): Promise<boolean>;
+  /** One read. The Worker keeps the answer a minute per isolate (`SuspensionCache`); the Node server asks each time. */
+  isSuspended(userId: string): Promise<boolean>;
   /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
@@ -1590,6 +1674,12 @@ export class MemoryStore implements BellmanStore {
   private surfaces = new Map<string, Map<string, SurfaceRow>>();
   /** Briefs, by session then by member (ADR 0018): beside the record, as SessionDO keeps them in rows. */
   private briefs = new Map<string, Map<string, Brief>>();
+  /** Room bans, by session (spec section 1): beside the record for `briefs`' reason, and gone with the room at the purge. */
+  private roomBanned = new Map<string, Ban[]>();
+  /** Creator-wide bans, by creator (spec section 1): about a creator and not a room, so the purge leaves them. */
+  private creatorBanned = new Map<string, CreatorBan[]>();
+  /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
+  private suspensions = new Map<string, Suspension>();
   /**
    * Where the purge deletes a room's objects from (#65). Hand it the store the routes and the
    * tools serve, as `src/index.ts` does, or the purge empties a bucket nobody reads. Absent, the
@@ -1746,6 +1836,8 @@ export class MemoryStore implements BellmanStore {
     if (!s) return { refused: "not_found", reclaimed: [], codesCleared: false };
     if (s.closed) return { refused: "closed", reclaimed: [], codesCleared: false };
     if (s.frozenAt !== null) return { refused: "frozen", reclaimed: [], codesCleared: false };
+    // Before capacity is asked, so a banned account is never told the room is full.
+    if (this.isBanned(sessionId, member.userId)) return { refused: "banned", reclaimed: [], codesCleared: false };
 
     const connected = connectedAmong(s.members, this.attachedTo(sessionId));
     const victims = seatVictims(s.members, capacityOf(s.manifest), staleBefore, connected);
@@ -1824,12 +1916,25 @@ export class MemoryStore implements BellmanStore {
       ? { role: req.retire.role, code: rec.code, event: req.retire.event, audit: req.retire.audit ?? [] }
       : null;
 
+    // The ban this call owes: asked for, and not yet on the room. One ban per account, so a repeat
+    // keeps the first and owes nothing. Decided before the member's state is looked at, for the
+    // door's reason: a ban is owed to one who is already out as much as to one who is not.
+    const banning = req.ban !== undefined && !this.isBanned(s.id, m.userId)
+      ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now }
+      : null;
+    // The creator-wide ban that "all" also asks for, owed on its own account: a room ban made earlier
+    // does not stand in for it, so a later eviction widens one. Not owed to an account this creator
+    // already bans, whose first ban stands.
+    const widening = req.ban === "all" && !this.bansCreatorWide(s.createdBy, m.userId)
+      ? { banId: newBanId(), userId: m.userId, label: m.label, at: req.now, sessionId: s.id }
+      : null;
+
     // Already out: the idempotent path. The departure is not said again, which is
-    // the point of it. A live door behind them is a different matter: it was never
-    // shut, so shutting it is a write that has not happened yet and not a
-    // duplicate. With neither owed, nothing is written.
+    // the point of it. A live door behind them, or a ban not yet on the room, is a
+    // different matter: it was never done, so doing it is a write that has not
+    // happened yet and not a duplicate. With none owed, nothing is written.
     const leaving = isActiveMember(m);
-    if (!leaving && !retiring) return { refused: null, ...none };
+    if (!leaving && !retiring && !banning && !widening) return { refused: null, ...none };
 
     if (leaving) {
       // The event first, then the member write, because a cut names the
@@ -1864,14 +1969,80 @@ export class MemoryStore implements BellmanStore {
       delete s.joinCodes[retiring.role];
       this.appendNow(s, retiring.event);
     }
+    // Last, so a call that throws above leaves no ban behind.
+    if (banning) this.roomBanned.set(s.id, [...(this.roomBanned.get(s.id) ?? []), banning]);
+    if (widening) this.creatorBanned.set(s.createdBy, [...(this.creatorBanned.get(s.createdBy) ?? []), widening]);
     // A falsy org names a stream nobody reads, and the Durable Objects store
     // drops such an entry rather than file it, so this one does too. The member's
-    // rows, then the door's: the order the events were written in.
+    // rows, then the door's: the order the events were written in. The member's rows
+    // are filed for a call that removed them or wrote this room's ban: a ban on someone
+    // who already left is the eviction's row all the same, and a repeat writes none.
     this.recordAudit(
-      [...(leaving ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
+      [...(leaving || banning ? req.audit : []), ...(retiring ? retiring.audit : [])].filter((e) => e.orgId),
     );
 
     return { refused: null, removed: leaving, codeRetired: retiring?.role ?? null };
+  }
+
+  /** Whether this room holds a ban for the account (spec section 1). */
+  private isBanned(sessionId: string, userId: string): boolean {
+    return (this.roomBanned.get(sessionId) ?? []).some((b) => b.userId === userId);
+  }
+
+  async roomBans(sessionId: string): Promise<Ban[]> {
+    return detach([...(this.roomBanned.get(sessionId) ?? [])].sort(oldestFirst));
+  }
+
+  async liftRoomBan(sessionId: string, banId: string): Promise<boolean> {
+    // The Durable Objects store answers this before it reads storage, so this one does too, though
+    // nothing here can throw on a long id: both stores say false for the same strings.
+    if (!isBanId(banId)) return false;
+    // No await from the read to the write, the rule `seatMember` follows. The Durable Objects
+    // store gets it from a transaction instead.
+    const held = this.roomBanned.get(sessionId) ?? [];
+    const kept = held.filter((b) => b.banId !== banId);
+    if (kept.length === held.length) return false;
+    this.roomBanned.set(sessionId, kept);
+    return true;
+  }
+
+  /** Whether this creator bans the account from every room they own (spec section 1). */
+  private bansCreatorWide(creatorId: string, userId: string): boolean {
+    return (this.creatorBanned.get(creatorId) ?? []).some((b) => b.userId === userId);
+  }
+
+  async creatorBans(creatorId: string): Promise<CreatorBan[]> {
+    return detach([...(this.creatorBanned.get(creatorId) ?? [])].sort(oldestFirst));
+  }
+
+  async liftCreatorBan(creatorId: string, banId: string): Promise<boolean> {
+    if (!isBanId(banId)) return false;
+    // No await from the read to the write, as `liftRoomBan` has none.
+    const held = this.creatorBanned.get(creatorId) ?? [];
+    const kept = held.filter((b) => b.banId !== banId);
+    if (kept.length === held.length) return false;
+    this.creatorBanned.set(creatorId, kept);
+    return true;
+  }
+
+  async isBannedByCreator(creatorId: string, userId: string): Promise<boolean> {
+    return this.bansCreatorWide(creatorId, userId);
+  }
+
+  async isBannedFromRoom(sessionId: string, userId: string): Promise<boolean> {
+    return this.isBanned(sessionId, userId);
+  }
+
+  async suspend(userId: string, s: Suspension): Promise<void> {
+    this.suspensions.set(userId, detach(s));
+  }
+
+  async unsuspend(userId: string): Promise<boolean> {
+    return this.suspensions.delete(userId);
+  }
+
+  async isSuspended(userId: string): Promise<boolean> {
+    return this.suspensions.has(userId);
   }
 
   /**
@@ -2828,6 +2999,7 @@ export class MemoryStore implements BellmanStore {
     for (const w of this.waiters.get(s.id) ?? []) w.resolve([]);
     this.waiters.delete(s.id);
     this.keys.delete(s.id);
+    this.roomBanned.delete(s.id);
     this.surfaces.delete(s.id);
     this.sessions.delete(s.id);
   }

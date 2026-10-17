@@ -134,7 +134,7 @@ describe("bellman_evict", () => {
       });
 
       expect(out.isError, out.text).toBe(false);
-      expect(out.data).toEqual({ evicted: true, code_retired: null, session_status: "active" });
+      expect(out.data).toEqual({ evicted: true, code_retired: null, session_status: "active", banned: null, also_removed_from: 0 });
     });
 
     it("says the room is closed when the member removed was the last one in it", async () => {
@@ -155,7 +155,7 @@ describe("bellman_evict", () => {
       });
 
       expect(out.isError, out.text).toBe(false);
-      expect(out.data).toEqual({ evicted: true, code_retired: null, session_status: "closed" });
+      expect(out.data).toEqual({ evicted: true, code_retired: null, session_status: "closed", banned: null, also_removed_from: 0 });
     });
 
     it("shuts the seat's door behind a member who already left, and only once", async () => {
@@ -182,7 +182,7 @@ describe("bellman_evict", () => {
       });
       expect(first.isError, first.text).toBe(false);
       expect(first.data).toEqual({
-        evicted: true, code_retired: String(issued.data.role), session_status: "active",
+        evicted: true, code_retired: String(issued.data.role), session_status: "active", banned: null, also_removed_from: 0,
       });
       const after = await stranger.call("bellman_connect", { join_code: issued.data.join_code });
       expect(after.isError, after.text).toBe(true);
@@ -192,8 +192,24 @@ describe("bellman_evict", () => {
         member_id: s.joinerMemberId,
       });
       expect(second.isError, second.text).toBe(false);
-      expect(second.data).toEqual({ evicted: true, code_retired: null, session_status: "active" });
+      expect(second.data).toEqual({ evicted: true, code_retired: null, session_status: "active", banned: null, also_removed_from: 0 });
     });
+
+    // The other end of `banned`'s range: what the call asked for, whole, beside the fields above.
+    for (const ban of ["room", "all"] as const) {
+      it(`says which ban it made, when it made one (${ban})`, async () => {
+        const s = await pairUp(h);
+
+        const out = await s.creator.call("bellman_evict", {
+          session_id: s.sessionId,
+          member_id: s.joinerMemberId,
+          ban,
+        });
+
+        expect(out.isError, out.text).toBe(false);
+        expect(out.data).toEqual({ evicted: true, code_retired: null, session_status: "active", banned: ban, also_removed_from: 0 });
+      });
+    }
   });
 
   describe("what a refusal says", () => {

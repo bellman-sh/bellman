@@ -17,11 +17,12 @@
 import type { AuditEntry, Identity, Member, RoomManifest, SessionEvent, Verb } from "./types.js";
 import type { StoredSession } from "./stored-session.js";
 import { publicRoomUrl, renderJoinCode } from "./codes.js";
+import type { BanScope } from "./bans.js";
 import { claimName } from "./public-names.js";
 import { denyVerb } from "./roles.js";
 import {
-  JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
-  type AppendExtras, type BellmanStore, type EventBody,
+  JOINED_SCAN, JOIN_CODE_TTL, ROOM_MEMBER_CEILING, capacityOf, codeIsLive, isActiveMember, isActivePerson, isPublic, isRemovedMember,
+  type AppendExtras, type BellmanStore, type EventBody, type RemovalRequest,
 } from "./store.js";
 import { NO_SOCKETS, STALE_AFTER_MS, lastSeen, presentMembers } from "./presence.js";
 import { surfaceItem } from "./projections.js";
@@ -945,13 +946,36 @@ function doorShutEvent(actor: Identity, role: string): EventBody {
  * seat free, and evicting them shuts that door. Only the removal is not said a
  * second time: the store writes the departure for a member it removes, and the
  * door's closing whenever a code is live.
+ *
+ * A public room's permanent code is the one door an eviction leaves open. This departs from
+ * ADR 0020 section 5, which has an eviction shut it. It is the link everyone else uses, and a
+ * stranger came in through it, so shutting it on every removal would make the creator reissue
+ * and republish it each time. Keeping someone out of a room that publishes one is what `ban` is for.
+ *
+ * `ban` also bars the account from joining again (spec section 1): from this room, or from every
+ * room the creator owns. The store writes it with the removal, in the transaction that records the
+ * member out, and it is not an event: a public room's log is public, and the person banned is told
+ * only that they can't join. The audit row of the eviction carries `ban`, and the store files that
+ * row for a ban on a member who already left too. A ban is on the account and a member_id is per
+ * connection, so every other handle the account still holds in the room is removed as well, each by
+ * a removal of its own with its own event, door and rows. Their outcomes are not reported: a refusal
+ * partway is finished by repeating the eviction, which finds the target out and removes the rest.
+ *
+ * `"all"` covers the creator's rooms now as well as later: every other room they own where the account
+ * holds a handle loses it too, each handle by the removal an eviction makes there, under that room's own
+ * code rules, and with no room ban, since the creator-wide one keeps the account out. `alsoRemovedFrom`
+ * counts the rooms this call removed it from. They are found through the joined-rooms index, so a seat
+ * the index lost (`BellmanStore.sessionsJoinedBy`) stays, and only the account's next join there is refused.
  */
 export async function evictMember(
   store: BellmanStore,
   actor: Identity,
   sessionId: string,
   targetMemberId: string,
-): Promise<RoomResult<{ evicted: boolean; codeRetired: string | null; sessionStatus: string }>> {
+  ban?: BanScope,
+): Promise<RoomResult<{
+  evicted: boolean; codeRetired: string | null; sessionStatus: string; banned: BanScope | null; alsoRemovedFrom: number;
+}>> {
   const session = await store.getSession(sessionId);
   if (!session) return refuse("not_found", "session not found.");
 
@@ -987,7 +1011,13 @@ export async function evictMember(
     return refuse("forbidden", "you cannot evict yourself; leave the room instead.");
   }
 
-  const outcome = await store.removeMember(sessionId, targetMemberId, {
+  // One removal's request, built from the member it removes. A ban takes every handle the account
+  // holds in the room (below), and each is a member of its own, with its own seat, door and org, so
+  // each gets its own event, door and audit rows. With no ban, and no permanent code behind the seat,
+  // for one handle it is the request this function has always made. `room` is the room the member is
+  // removed from, whose codes and orgs the request reads; `stored` is the ban the store is asked to
+  // write, and the audit row carries the call's `ban` whatever it is.
+  const request = (room: StoredSession, m: Member, stored: BanScope | undefined): RemovalRequest => ({
     now: Date.now(),
     frozen: "refuse",
     // An eviction cuts the feed (#113): the target is recorded out at the
@@ -1015,7 +1045,7 @@ export async function evictMember(
       fromMemberId: "system",
       fromUserId: actor.userId,
       fromLabel: actor.label,
-      payload: { member_id: targetMemberId, label: target.label, room_role: target.roomRole },
+      payload: { member_id: m.memberId, label: m.label, room_role: m.roomRole },
       refId: null,
     },
     // The door and the member go together now. Under the old shape the door shut
@@ -1044,13 +1074,19 @@ export async function evictMember(
     // already left is no party to it, and their org is not added: the row names a
     // role and no person, so that org could not tell whom it concerned, and a row
     // an org cannot resolve to anyone is worse than none.
-    retire: {
-      role: target.roomRole,
-      event: doorShutEvent(actor, target.roomRole),
-      audit: auditEntries(session, actor, "invite_revoked", { roles: [target.roomRole] }),
-    },
+    //
+    // Except a public room's permanent code, which an eviction leaves open (see above). Read from
+    // the room as this call found it, so a code replaced since is the next eviction's to shut.
+    ...(room.joinCodes[m.roomRole]?.expiresAt === null ? {} : {
+      retire: {
+        role: m.roomRole,
+        event: doorShutEvent(actor, m.roomRole),
+        audit: auditEntries(room, actor, "invite_revoked", { roles: [m.roomRole] }),
+      },
+    }),
+    ...(stored ? { ban: stored } : {}),
     audit: auditEntries(
-      session, actor, "member_evicted",
+      room, actor, "member_evicted",
       {
         // The seat and the person. member_id is per connection and only resolves
         // inside the room, so user_id is what lets an org reading its own log see
@@ -1059,13 +1095,18 @@ export async function evictMember(
         // No `code_retired`: whether a door shut is the store's answer, and this
         // row is built before the store gives it. The door has its own row, see
         // `retire`.
-        member_id: targetMemberId, user_id: target.userId, room_role: target.roomRole,
+        member_id: m.memberId, user_id: m.userId, room_role: m.roomRole,
+        // The ban, when the call asked for one, so an org reading its log finds every ban there. The
+        // event above never carries it: the log is public in a public room.
+        ...(ban ? { ban } : {}),
       },
       // The evicted member's org as well. The roster counts them only while they are
       // still in the room, and a target who has already left still needs this row.
-      [target.orgId],
+      [m.orgId],
     ),
   });
+
+  const outcome = await store.removeMember(sessionId, targetMemberId, request(session, target, ban));
 
   if (outcome.refused === "closed") return refuse("closed", "session is closed.");
   if (outcome.refused === "frozen") return refuse("frozen", FROZEN);
@@ -1073,6 +1114,40 @@ export async function evictMember(
     return refuse("forbidden", "only the person who created this room can remove a member from it.");
   }
   if (outcome.refused !== null) return refuse("not_found", "session not found.");
+
+  // A ban is on the account and a member_id is per connection, so the person's other handles in
+  // the room go too, or one of them keeps sending. Each is removed by a removal of its own, and
+  // the outcomes are not read: a refusal partway, such as a freeze landing between two of them,
+  // is finished by repeating the eviction. That finds the target out and the ban kept, and removes
+  // whoever is left. Each asks the store for the room's ban alone: the target's removal queued the
+  // creator-wide one, and a second row the outbox delivered after a lift would bring it back.
+  if (ban) {
+    for (const other of await handlesOf(store, session, target)) {
+      if (other.memberId !== targetMemberId && isActiveMember(other)) {
+        await store.removeMember(sessionId, other.memberId, request(session, other, "room"));
+      }
+    }
+  }
+
+  // "all" now: the account's handles in the creator's other rooms go as well, each by the removal an
+  // eviction makes in that room, read from that room, with no ban of the room's own. A room that refuses,
+  // frozen say, is finished by repeating the ban, as above. Each room that loses its last person closes,
+  // the rule every removal ends on. The scan is bounded by JOINED_SCAN, whose note gives the cost.
+  let alsoRemovedFrom = 0;
+  if (ban === "all") {
+    for (const id of await store.sessionsJoinedBy(target.userId, JOINED_SCAN)) {
+      const room = id === sessionId ? undefined : await store.getSession(id);
+      if (!room || room.closed || room.createdBy !== session.createdBy) continue;
+      let removed = false;
+      for (const m of room.members.filter((mm) => mm.userId === target.userId && isActiveMember(mm))) {
+        removed = (await store.removeMember(id, m.memberId, request(room, m, undefined))).removed || removed;
+      }
+      if (removed) {
+        alsoRemovedFrom++;
+        await store.closeSessionIfEmpty(id);
+      }
+    }
+  }
 
   // `removed: false` with no refusal is a member who was already out. The store
   // did not say the departure again, and shut their seat's door if it was still
@@ -1085,5 +1160,10 @@ export async function evictMember(
     // Last, as before: whatever came after the close would be lost, because
     // every later call refuses on "closed".
     sessionStatus: await closeIfEmpty(store, session),
+    // What the call asked for, and the target's removal has committed it: the room's ban in its
+    // own transaction, and for "all" the registry's, queued in that transaction for the outbox
+    // to deliver. A refusal returned above, so none of this is claimed for one.
+    banned: ban ?? null,
+    alsoRemovedFrom,
   });
 }

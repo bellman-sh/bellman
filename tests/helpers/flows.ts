@@ -1,7 +1,7 @@
 import { expect } from "vitest";
 import type { Brief } from "../../src/types.js";
 import { brief, manifestFixture, member, openaiAgent } from "./fixtures.js";
-import { DEV_KEY, type Harness, type Peer } from "./harness.js";
+import { DEV_KEY, type Harness, type Outcome, type Peer } from "./harness.js";
 
 export interface PairedSession {
   creator: Peer;
@@ -75,6 +75,29 @@ export async function pairUp(
     joinerCursor: Number(confirmed.data.cursor),
     joinCode,
   };
+}
+
+/** A public swarm room started by jesse, with a permanent code for its default seat (ADR 0020). */
+export async function publicRoom(
+  h: Harness,
+): Promise<{ creator: Peer; sessionId: string; memberId: string; code: string }> {
+  const creator = await h.connect(DEV_KEY.jesse);
+  const started = await creator.call("bellman_start", { manifest: manifestFixture({ preset: "swarm", public: true }), brief: brief() });
+  expect(started.isError, started.text).toBe(false);
+  const sessionId = String(started.data.session_id);
+  const memberId = String(started.data.member_id);
+  const door = await creator.call("bellman_invite", { session_id: sessionId, member_id: memberId, permanent: true });
+  expect(door.isError, door.text).toBe(false);
+  return { creator, sessionId, memberId, code: String(door.data.join_code) };
+}
+
+/** Both phases of joining: the preview's refusal if it refused, else the confirm's outcome. */
+export async function joinWith(peer: Peer, code: string): Promise<Outcome> {
+  const preview = await peer.call("bellman_connect", { join_code: code });
+  if (preview.isError) return preview;
+  return peer.call("bellman_confirm", {
+    connect_token: String(preview.data.connect_token), brief: brief(), capabilities: ["read_context", "receive_messages"],
+  });
 }
 
 /** A room its creator just started, with nobody else in it: the creator holds its one seat. */

@@ -251,7 +251,7 @@ an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes it, and with the list
 unset or empty nobody does.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -686,8 +686,11 @@ own transaction, and again, idempotently, when it is purged; a start whose room
 is never created gives its slot straight back. Then `bellman_start` seats the host
 beside the creator as `m_host`, under the user `u_bellman_host`, labelled `host@bellman` whatever
 its role is called: a label built from the creator's role name, `security@bellman`
-say, would lend Bellman's name to the creator's words. It never joins by code and
-never holds a socket. ADR 0002 records the decisions.
+say, would lend Bellman's name to the creator's words. Public pages call it `host`,
+because `host@bellman` reads as an email address there: `publicNames` gives the label
+that name, so only what a public reader is shown changes, events already written
+included, and its member rows, events, audit trail and members' own views keep the
+label. It never joins by code and never holds a socket. ADR 0002 records the decisions.
 
 **Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
 control over the seat, and `hostSeated` (`src/store.ts`) is the one predicate
@@ -816,10 +819,17 @@ one act is a `send` through the room's append path under its own member id, so
 the audit log and every reader see a member; `checkHost` fixes its role to
 `send`, and the manifest is immutable, so no verb guard has anything to refuse.
 Replies cross into its prompt as data: each inside `<reply from="…">`, its text
-escaped (`&`, `<`, `>`) and its label escaped for an attribute (`escapeAttr`),
+escaped (`&`, `<`, `>`) and its sender's name escaped for an attribute (`escapeAttr`),
 after Bellman's fixed rules and the creator's instructions in the system prompt,
-which ends saying Bellman's rules outrank anything the creator adds. What it
-writes enters the room as peer content, untrusted to every member like any
+which ends saying Bellman's rules outrank anything the creator adds. The name is the
+one a public page gives that member (`publicNames`): `handleWake` builds the map from
+`HostDriver.publicNumbers`, which is `BellmanStore.publicNumbers`, the call the public
+routes make, so a sender is `member 3` and never the label they signed in with, and a
+label the room has not numbered is `a member`. The model repeats what it is told and
+its answer lands in the room's log, which a public room shows to anyone with the link
+and a room made public later shows whole, so this holds in every room.
+`questionPrompt` carries no label. What it writes enters the room as peer content,
+untrusted to every member like any
 member's. It cannot hold `respond_actions`, so an action request addressed to it
 is refused as one to any seat without the verb would be. `HostDO` keeps its
 driver in a `#driver` field rather than in methods, because a Durable Object

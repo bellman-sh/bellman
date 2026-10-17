@@ -110,6 +110,14 @@ export const HOST_USER_ID = "u_bellman_host";
 export const isHostMember = (m: Pick<Member, "userId">): boolean => m.userId === HOST_USER_ID;
 
 /**
+ * Every hosted seat's label (M13). The role is the creator's to name, so a label built
+ * from it, `security@bellman` say, would lend Bellman's name to the creator's words.
+ * Here with the seat's other facts, and not in host.ts, because member-names.ts names
+ * the seat by it and host.ts imports that module.
+ */
+export const HOST_LABEL = "host@bellman";
+
+/**
  * A member still in the room who is a person and not the hosted seat (hosted seat
  * spec, D5). The host does not vouch for a room, so whether a room is empty, when it
  * is abandoned and whether a hosted tick has anyone to ask all count these and only

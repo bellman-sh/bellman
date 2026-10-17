@@ -34,6 +34,8 @@ preset: review          # pair | swarm | review | social
 
 `social` declares a hosted seat, so `bellman_start` refuses it with `hosted seats are not available yet` for as long as hosted seats are unavailable.
 
+A hosted seat is a member Bellman runs. Its label is `host@bellman`, whatever its role is called, and public pages call it `host`. When it answers replies, its prompt names each sender as a public page names members, `member 3` and so on, and never by the label they signed in with.
+
 ## Write the roles
 
 Author the roles when you can name the seat and the reason: the CI agent may send but must never invite, or auditors read and nothing else.

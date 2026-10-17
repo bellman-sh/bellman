@@ -116,6 +116,10 @@ declare module "claude-code" {
       approved: string[];
       /** `approvalKey`s of the requests the person declined, while the mod's own `approved: false` answer is in flight: the gate passes that answer (written by the room pane). */
       denying: string[];
+      /** By room, the newest events of its log as its door serves them, oldest first (written by the log reads). */
+      logs: Record<string, DoorEvent[]>;
+      /** By room, `bellman_surface`'s structured result as last read, while the pane showed its Canvas: peer content, read with care. */
+      canvas: Record<string, unknown>;
     };
   }
 }

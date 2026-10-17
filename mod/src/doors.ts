@@ -11,13 +11,17 @@
  * may connect after the session starts.
  *
  * The rooms the seats are in come from each bridge's `bellman_rooms`, every `ROOMS_POLL_MS` and on any tick
- * whose seats changed, so a room Claude just joined shows within a tick.
+ * whose seats changed, so a room Claude just joined shows within a tick. Each room's log comes through its door at
+ * the same moments, and on every tick while the room pane shows that room's Log; its canvas through the bridge's
+ * `bellman_surface`, only while the pane shows the Canvas. Nothing here calls `bellman_sync` or takes from an
+ * inbox: those belong to Claude.
  */
 import { read, update } from "claude-code";
 import type { EngineInterface } from "claude-code";
-import { DOOR_POLL_MS, ROOMS_POLL_MS } from "../../src/mod/view.js";
-import type { DoorStatus, DoorView, RoomView } from "../types";
-import { doors, rooms } from "./state";
+import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
+import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
+import { shownTab } from "./drawn";
+import { canvas, doors, logs, openedThrough, pending, room, rooms } from "./state";
 
 /** `bellman_whoami` under any server's name: `mcp__<server>__bellman_whoami`. */
 const WHOAMI = /^mcp__(.+)__bellman_whoami$/;
@@ -99,6 +103,125 @@ async function refreshRooms($: EngineInterface, list: readonly DoorView[]): Prom
   roomsFor = seatsKey(list);
   const fresh = await readRooms($, list, await read($, rooms));
   await update($, rooms, () => fresh);
+  await readLogs($, list, [...seatedRooms(list).keys()], false);
+  if ((await shownTab($)) === "canvas") await readCanvas($);
+}
+
+/** A seat and the door that lists it. */
+export type SeatAt = { door: DoorView; seat: DoorSeat };
+
+/** Each room the doors list a seat in, once, with the first door that lists it: the door its log and answers go through. */
+function seatedRooms(list: readonly DoorView[]): Map<string, SeatAt> {
+  const seated = new Map<string, SeatAt>();
+  for (const door of list) {
+    for (const seat of door.status?.seats ?? []) if (!seated.has(seat.session_id)) seated.set(seat.session_id, { door, seat });
+  }
+  return seated;
+}
+
+/** The session's seat in `sessionId`, as the doors list it now. */
+export const seatIn = (list: readonly DoorView[], sessionId: string): SeatAt | undefined => seatedRooms(list).get(sessionId);
+
+/** How many of a room's events `logs` keeps: the newest. */
+const LOG_KEPT = 500;
+
+/** A page of a room's log through a door: the newest page, or the page past `after`. */
+async function fetchLog($: EngineInterface, socketPath: string, sessionId: string, after: number | undefined): Promise<DoorEvent[]> {
+  const page = after === undefined ? "" : `?after=${after}`;
+  const res = await $.http.fetch(`http://door/rooms/${encodeURIComponent(sessionId)}/events${page}`, { socketPath });
+  if (!res.ok) throw new Error(`the door answered ${res.status} for a room's log`);
+  // ponytail: read as DoorLog unchecked, as the status is; it is our own bridge's answer.
+  return (JSON.parse(res.text) as DoorLog).events;
+}
+
+/** `was` and `fresh` as one log, each cursor once, oldest first, the newest `LOG_KEPT` kept. */
+function merged(was: readonly DoorEvent[], fresh: readonly DoorEvent[]): DoorEvent[] {
+  const byCursor = new Map(was.map((e) => [e.cursor, e]));
+  for (const e of fresh) byCursor.set(e.cursor, e);
+  return [...byCursor.values()].sort((a, b) => a.cursor - b.cursor).slice(-LOG_KEPT);
+}
+
+/**
+ * Reads the logs of the rooms `ids` through their doors: the newest page, or with `newer` the page past the newest
+ * cursor kept. Then every seated room's requests waiting on the person are counted again from its log. A room no
+ * door lists a seat in any more is dropped; a log that cannot be read keeps what it had.
+ */
+async function readLogs($: EngineInterface, list: readonly DoorView[], ids: readonly string[], newer: boolean): Promise<void> {
+  const seated = seatedRooms(list);
+  const known = await read($, logs);
+  const fresh = new Map<string, DoorEvent[]>();
+  await Promise.all(
+    ids.map(async (id) => {
+      const socketPath = seated.get(id)?.door.socketPath;
+      if (!socketPath) return;
+      try {
+        fresh.set(id, await fetchLog($, socketPath, id, newer ? known[id]?.at(-1)?.cursor : undefined));
+      } catch (error) {
+        $.ui.log(`bellman-mod: a room's log: ${message(error)}`, { to: "debug" });
+      }
+    }),
+  );
+  const kept = await update($, logs, (current) =>
+    Object.fromEntries([...seated.keys()].map((id) => [id, merged(current[id] ?? [], fresh.get(id) ?? [])])),
+  );
+  const views = await read($, rooms);
+  const now = await $.clock.now();
+  await update($, pending, () =>
+    Object.fromEntries(
+      [...seated].map(([id, { seat }]): [string, PendingRequest[]] => [
+        id,
+        pendingRequests(kept[id] ?? [], {
+          sessionId: id,
+          seatMemberId: seat.member_id,
+          canRespond: views.find((r) => r.session_id === id)?.room.your_verbs.includes("respond_actions") ?? false,
+          now,
+        }),
+      ]),
+    ),
+  );
+}
+
+/** True while a read of the shown Log runs: one slower than `DOOR_POLL_MS` (the door asks the server) is not stacked on. */
+let readingLog = false;
+
+/**
+ * After each door tick (register.tsx subscribes it), while the room pane shows a room's Log: what is new in it, and
+ * the person has seen it. The tick does not wait for it: the door reads the log from the server, and a slow answer
+ * must not hold up the next tick's toasts and wake.
+ */
+export async function readShownLog($: EngineInterface, list: readonly DoorView[]): Promise<void> {
+  if (readingLog || (await shownTab($)) !== "log") return;
+  const id = await read($, room);
+  if (id === null) return;
+  readingLog = true;
+  void (async () => {
+    try {
+      await readLogs($, list, [id], true);
+      const newest = (await read($, logs))[id]?.at(-1)?.cursor;
+      if (newest !== undefined) await update($, openedThrough, (was) => ({ ...was, [id]: Math.max(was[id] ?? -1, newest) }));
+    } catch (error) {
+      $.ui.log(`bellman-mod: the shown Log: ${message(error)}`, { to: "debug" });
+    } finally {
+      readingLog = false;
+    }
+  })();
+}
+
+/**
+ * The canvas of the room the pane shows, through the bridge whose door lists its seat: `bellman_surface`, a read
+ * that keeps no seat alive. Called while the pane shows the Canvas, and when the person turns to it.
+ */
+export async function readCanvas($: EngineInterface): Promise<void> {
+  const id = await read($, room);
+  const at = id === null ? undefined : seatIn(await read($, doors), id);
+  if (id === null || !at) return;
+  try {
+    const result = await $.mcp.call(at.door.server, "bellman_surface", { session_id: id });
+    if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_surface failed");
+    await update($, canvas, (was) => ({ ...was, [id]: result.structuredContent ?? null }));
+  } catch (error) {
+    $.ui.log(`bellman-mod: bellman_surface on ${at.door.server}: ${message(error)}`, { to: "debug" });
+  }
 }
 
 const subscribers: ((list: DoorView[]) => Promise<void>)[] = [];

@@ -3,7 +3,7 @@
  * (`PluginState["bellman-mod"]` in ../types). The session's, so a hot reload keeps them.
  */
 import { atom } from "claude-code";
-import type { DoorView, Layout, PendingRequest, RoomView, Tab } from "../types";
+import type { DoorEvent, DoorView, Layout, PendingRequest, RoomView, Tab } from "../types";
 
 /** Every local bridge in the session and what its door said, written by each door tick. */
 export const doors = atom({ plugin: "bellman-mod", key: "doors" } as const, [] as DoorView[]);
@@ -25,3 +25,7 @@ export const pending = atom({ plugin: "bellman-mod", key: "pending" } as const, 
 export const approved = atom({ plugin: "bellman-mod", key: "approved" } as const, [] as string[]);
 /** `approvalKey`s of the requests the person declined while the mod's own `approved: false` answer is in flight, written by the room pane: the gate passes that answer and no other. */
 export const denying = atom({ plugin: "bellman-mod", key: "denying" } as const, [] as string[]);
+/** By room, the newest events of its log, written by the log reads (doors.ts). */
+export const logs = atom({ plugin: "bellman-mod", key: "logs" } as const, {} as Record<string, DoorEvent[]>);
+/** By room, `bellman_surface`'s result, written while the pane shows the Canvas (doors.ts). */
+export const canvas = atom({ plugin: "bellman-mod", key: "canvas" } as const, {} as Record<string, unknown>);

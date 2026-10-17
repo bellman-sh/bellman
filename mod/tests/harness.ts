@@ -152,6 +152,12 @@ export type World = {
   panes: UiPane[];
   /** Every `$.mcp.call`, in order. */
   calls: { server: string; tool: string; args: Readonly<Record<string, unknown>> }[];
+  /**
+   * The mod's `denying` as each `bellman_send` reached the bridge: what the gate reads for it. A call the mod makes
+   * from a press or a timer skips the mod's own `mcp.call` hook, so its gate never judges the mod's own Deny; this is
+   * how a test sees the key was there anyway.
+   */
+  denyingAtSend: string[][];
   /** The text of every prompt submitted. */
   submitted: string[];
   /** Where each of them came from, in the same order: the person's composer, a plugin, a peer. */
@@ -201,6 +207,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     surfacesDown: false,
     panes: [],
     calls: [],
+    denyingAtSend: [],
     submitted: [],
     origins: [],
     toasts: [],
@@ -260,6 +267,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
       case "bellman_surface":
         return answer(w.surface[String(e.args.session_id)]);
       case "bellman_send":
+        w.denyingAtSend.push([...(w.state.denying ?? [])]);
         return answer({ cursor: 99 });
       default:
         return { deny: `the world answers no ${e.tool}` };

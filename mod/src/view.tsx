@@ -1,7 +1,8 @@
 /**
  * What the person sees of the session's rooms in the terminal (spec D2 to D6): the band above the prompt with the
  * bell floating over it, or, while the terminal is fullscreen and the pane docks beside it, the sidebar instead;
- * a toast for a peer's message; and, while the session holds no seat, the status line alone.
+ * the same pane at full width as the room pane, which pane.tsx draws; a toast for a peer's message; and, while the
+ * session holds no seat, the status line alone.
  *
  * Every string a peer controls reaches the screen through src/mod/view.ts (`roomLabel`, `toastFor`) or
  * `cleanText`. The render hooks draw on the terminal and answer `next(e)` on every other surface (spec D11).
@@ -25,14 +26,14 @@ import {
   unreadCount,
 } from "../../src/mod/view.js";
 import type { DoorSeat, DoorView, RoomView, Tab } from "../types";
-import { markDrawn } from "./drawn";
+import { readCanvas } from "./doors";
+import { markDrawn, markPaneWide, shownTab } from "./drawn";
+import { drawPane } from "./pane";
 import { personActed } from "./person";
 import { doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
 
 /** Whether the terminal docks a pane, as the band last drawn saw it (`RenderViewport.isFullscreen`). */
 let isFullscreen: boolean | undefined;
-/** Whether the pane last drew as the room pane, wide, rather than as the sidebar. */
-let paneWide = false;
 /**
  * The person closed the pane by hand and has not opened it since, so no sidebar opens unasked (R4).
  * ponytail: a module variable, so a reload forgets it and the sidebar may open once more; `$.state` if that shows.
@@ -63,6 +64,7 @@ export async function openPane($: EngineInterface, to: Tab): Promise<void> {
   refused = false;
   await update($, tab, () => to);
   await $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+  if (to === "canvas") await readCanvas($);
 }
 
 /** After each door tick: the sidebar, the layout, the room shown, a toast, and the status line. */
@@ -90,7 +92,7 @@ export async function viewTick($: EngineInterface, list: DoorView[]): Promise<vo
 
   // A toast for the newest peer event worth one; then each room's events count as seen, toasted or not.
   const events = list.flatMap((d) => d.status?.recent ?? []);
-  const logOpenFor = pane?.isPlaced && pane.isShown && paneWide && (await read($, tab)) === "log" ? shown : null;
+  const logOpenFor = (await shownTab($)) === "log" ? shown : null;
   const labels = new Map(ids.map((id) => [id, labelOf(id, views)]));
   const toast = toastFor(events, { seats, seen: new Map(Object.entries(await read($, seen))), logOpenFor, labels });
   if (toast) $.ui.toast(toast.text);
@@ -107,8 +109,8 @@ export async function viewTick($: EngineInterface, list: DoorView[]): Promise<vo
   }
 }
 
-/** What the band and the sidebar both show of the room in view. Every string in it is cleaned. */
-type Shown = {
+/** What the band, the sidebar and the room pane show of the room in view. Every string in it is cleaned. */
+export type Shown = {
   retrying: boolean;
   options: { value: string; label: string }[];
   picked: string;
@@ -148,7 +150,10 @@ async function shownOf($: EngineInterface, list: readonly DoorView[], seats: rea
   };
 }
 
-/** The pieces the band and the sidebar lay out differently. Every press is the person's, so each says so first. */
+/** What `pieces` hands the band, the sidebar and the room pane's header. */
+export type Pieces = ReturnType<typeof pieces>;
+
+/** The pieces the band, the sidebar and the room pane lay out differently. Every press is the person's, so each says so first. */
 function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
   const { Button, Select, Text } = ui;
   const press = (to: Tab) => () => {
@@ -241,7 +246,8 @@ export function startView(on: On): void {
 
   on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e, next) => {
     if (e.surface !== "terminal") return next(e);
-    paneWide = e.props.bodyColumns >= COMPACT_BELOW;
+    const wide = e.props.bodyColumns >= COMPACT_BELOW;
+    markPaneWide(wide);
     const list = await read($, doors);
     const seats = seatsOf(list);
     const ui = $.ui.resolve(e);
@@ -256,10 +262,8 @@ export function startView(on: On): void {
     }
     const s = await shownOf($, list, seats);
     markDrawn();
-    if (paneWide) {
-      return <Text wrap="truncate-end">{`${s.retrying ? "◌ Reconnecting" : "● Connected"} · ${s.label}`}</Text>;
-    }
     const p = pieces($, ui, s);
+    if (wide) return drawPane($, ui, { bodyRows: e.props.scroll.bodyRows, placement: e.props.placement }, s, p);
     return (
       <Box flexDirection="column">
         {p.bell}

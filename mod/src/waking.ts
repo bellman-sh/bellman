@@ -28,6 +28,9 @@ let state: WakeState = IDLE_WAKE;
 /** Whether the session's own turn is running. A subagent's turn is not: it neither makes the session busy nor ends its turn. */
 let turnRunning = false;
 
+/** The same, for the room pane's Approve: a running turn is told by an appended row, an idle session by a prompt. */
+export const isTurnRunning = (): boolean => turnRunning;
+
 const person = (): void => {
   state = stepWake(state, { kind: "person" }).state;
 };

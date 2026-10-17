@@ -21,6 +21,7 @@ Success means:
 - **D2. The dash's Worker gains a small script.** Today it serves assets only. The script writes each public room's head as it serves the page, and loads the app's scripts from `dash.bellman.sh`.
 - **D3. A member's public name is their handle, else "member N"** (amending the public rooms spec's numbering). Only names people chose to publish appear.
 - **D4. Untrusted text stays text.** The room's name and purpose, and members' names, are written into HTML as text and into attributes as escaped values, never as markup.
+- **D5. Handles are cached for an hour, and a released name is held for longer.** Public pages poll every 4 seconds, so reading handles from the registry on every poll would put every viewer's polls on one object. The server caches each account's handle for an hour where it serves public reads. A name that is released, changed away from, or released by an operator can't be claimed by any account, its last holder included, for 65 minutes: longer than the hour a name can sit in the server's cache plus the minute it can sit in the dash's preview cache. So no message ever shows under a name another account now holds. (The owner's choice, 2026-10-17, over a one-minute cache and over storing handles in each room.)
 
 ## 1. Serving bellman.sh/r/{room}
 
@@ -46,14 +47,15 @@ Success means:
   - a Twitter summary card;
   - a canonical link to `bellman.sh/r/{room}`.
 - **A summary for crawlers.** The body gets a plain block: the room's name and purpose, its byline if signed, and the members' public names (section 3). The app replaces the block when it loads, so readers see the live page, while a crawler or link unfurler that runs no script still reads the room.
-- **A short cache.** The script caches a room's public data for about a minute, so repeated unfurls don't each reach the API. A room made private stops being described within that minute.
+- **A short cache.** The script caches a room's public data for at most a minute, so repeated unfurls don't each reach the API. A room made private stops being described within that minute.
 - **No room, or not public:** the head stays generic, the page answers 404, and nothing about the room is written. The app shows its usual "not found".
 
 ## 3. Names
 
 - **Where names are made.** The server's public projection (`src/http/public.ts`, where "member N" is made today) names each member by the handle their account has claimed, as `@handle`, and anyone without one as "member N". The hosted seat keeps its own label.
 - **Every place a label appears is covered:** envelope origins, event senders, joins, leaves, evictions, the roster and surface writers. That's the same set "member N" covers today.
-- **One person's seats share a name,** as they share a number now. A released handle goes back to "member N" on the next read.
+- **One person's seats share a name,** as they share a number now. A claimed, changed or released handle reaches public pages within the hour (D5).
+- **The hold.** While a released name is held, claiming it answers "taken" to every account, its last holder too, so a holder can't undo an operator's release.
 - **The consequence:** a member's handle shows in every public room they hold or held a seat in. Claiming a handle makes their public participation visible under it, not only in rooms they signed.
 - **The dash** still relabels a signed room's creator; with the server naming everyone, that step becomes redundant, and the dash PR may drop it.
 
@@ -62,7 +64,8 @@ Success means:
 - **Server names:**
   - a member with a handle shows as `@handle`, and one without as "member N";
   - the hosted seat keeps its label;
-  - a released handle goes back to "member N";
+  - a released handle still shows within the cache's hour, and goes back to "member N" after it;
+  - a released, changed-away or operator-released name answers "taken" to every account, its last holder included, for 65 minutes, and can be claimed after;
   - no public response contains a member's sign-in label, checked against every label in the room.
 - **The dash's Worker:**
   - `/r/*` on `bellman.sh` serves the page with its scripts pointing at `dash.bellman.sh`;
@@ -95,3 +98,4 @@ Success means:
 - **The route needs zone permission.** If the token lacks it, the first deploy waits on the owner.
 - **Two Workers serve one host.** A change to the site's routing must leave `/r/*` to the dash.
 - **Handles reveal participation.** Section 3 states the consequence, and the owner approved it.
+- **An hour of staleness.** A new handle can take an hour to appear on public pages, and a released one an hour to go. Someone whose handle an operator released from an impersonator waits 65 minutes to claim it (D5).

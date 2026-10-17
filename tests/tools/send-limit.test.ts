@@ -23,6 +23,21 @@ describe("who is a stranger (spec \u{A7}2)", () => {
     expect((await h.store.getMember(room.sessionId, String(regular.data.member_id)))?.via).toBeUndefined();
     expect((await h.store.getMember(room.sessionId, room.memberId))?.via, "the creator").toBeUndefined();
   });
+
+  // The creator is never a stranger, by the first seat or by any later one: the permanent code is the link
+  // everyone else uses, and the creator can redeem it for another handle like anyone.
+  it("does not mark the creator's own handle a stranger when the creator redeems their room's permanent code", async () => {
+    const room = await publicRoom(h);
+    const joined = await joinWith(room.creator, room.code);
+    expect(joined.isError, joined.text).toBe(false);
+    const handle = String(joined.data.member_id);
+    expect(handle, "the premise: a second handle").not.toBe(room.memberId);
+    expect((await h.store.getMember(room.sessionId, handle))?.via, "the creator's second handle").toBeUndefined();
+    for (let i = 0; i < 7; i++) {
+      const r = await room.creator.call("bellman_send", { session_id: room.sessionId, member_id: handle, type: "message", payload: { text: `m${i}` } });
+      expect(r.isError, `send ${i + 1}: ${r.text}`).toBe(false);
+    }
+  });
 });
 
 describe("the send limit (spec \u{A7}2)", () => {

@@ -12,7 +12,7 @@
  * A test reads the mod's `$.state` as `w.state`: the kit's `$` has no `state` noun, and it refuses a
  * test's own `$.state.get`, so the world keeps each value the kit stored for the mod.
  */
-import type { On, PaneOpenArgs, PluginState, RenderElement, RenderPropsOf, RenderSurface, SessionAppendInput, UiPane } from "claude-code";
+import type { On, PaneOpenArgs, PluginState, PromptOrigin, RenderElement, RenderPropsOf, RenderSurface, SessionAppendInput, UiPane } from "claude-code";
 import { mock } from "claude-code/testing";
 import type { Engine, MockClock } from "claude-code/testing";
 import { DOOR_POLL_MS, PANE_ID, ROOMS_POLL_MS } from "../hooks/register.mjs";
@@ -102,7 +102,7 @@ export const ROOMS = [
     max_members: 8,
     active_members: 4,
     your_member_id: "m-me",
-    room: { preset: "swarm", public_name: null, your_role: "lead", your_verbs: ["send", "request_actions", "respond_actions"] },
+    room: { preset: "swarm", public_name: null as string | null, your_role: "lead", your_verbs: ["send", "request_actions", "respond_actions"] },
     members: [
       member("m-me", "you", "lead", "present"),
       member("m-ada", "ada", "builder", "present"),
@@ -154,6 +154,8 @@ export type World = {
   calls: { server: string; tool: string; args: Readonly<Record<string, unknown>> }[];
   /** The text of every prompt submitted. */
   submitted: string[];
+  /** Where each of them came from, in the same order: the person's composer, a plugin, a peer. */
+  origins: PromptOrigin[];
   toasts: string[];
   statuses: (string | undefined)[];
   opened: PaneOpenArgs[];
@@ -200,6 +202,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     panes: [],
     calls: [],
     submitted: [],
+    origins: [],
     toasts: [],
     statuses: [],
     opened: [],
@@ -290,8 +293,12 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
 
   on("prompt.submit", ($, e) => {
     w.submitted.push(e.text);
+    w.origins.push(e.origin);
     return { text: e.text, origin: e.origin };
   });
+  // A turn the test starts and ends, as the engine raises them: a hook that answers `{ turnId }` and `{ text }`.
+  on("turn.start", ($, e) => ({ turnId: e.turnId }));
+  on("turn.complete", () => ({ text: "" }));
   on("ui.toast", ($, e) => {
     w.toasts.push(e.text);
     return { value: undefined };

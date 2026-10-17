@@ -1,6 +1,6 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
-import type { On } from "claude-code";
+import type { McpToolName, On } from "claude-code";
 import { APPROVALS_SECTION, GATE_REASON, approvalKey } from "../hooks/register.mjs";
 import { ENGINE, ROOMS, STATUS, band, tick, world } from "./harness";
 import type { World } from "./harness";
@@ -18,7 +18,7 @@ async function shut($: Engine, on: On): Promise<World> {
 }
 
 /** Claude's answer to the action request at cursor 5, approving it: what `over` changes is changed. */
-const send = ($: Engine, over: Record<string, unknown> = {}, tool = "mcp__bellman__bellman_send") =>
+const send = ($: Engine, over: Record<string, unknown> = {}, tool: McpToolName = "mcp__bellman__bellman_send") =>
   $.tool.call({ tool, type: "action_response", session_id: "qs_room1", ref_id: "5", payload: { approved: true }, ...over });
 
 const compose = ($: Engine) =>

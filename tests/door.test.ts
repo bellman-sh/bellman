@@ -1,8 +1,8 @@
 /**
- * The bridge's door (src/door.ts): its status and a room's log, on a Unix socket. Each test starts a real door
- * on a socket under a scratch folder and asks it over HTTP, as the mod will. Only the bridge behind it is a
- * stand-in: a `DoorSource` of spies, because what the door reports is the bridge's and what the door does with it
- * is the point here.
+ * The bridge's door (src/door.ts): its status, a room's log, the room list, a room's canvas and a decline, on a Unix
+ * socket. Each test starts a real door on a socket under a scratch folder and asks it over HTTP, as the mod will. Only
+ * the bridge behind it is a stand-in: a `DoorSource` of spies, because what the door reports is the bridge's and what
+ * the door does with it is the point here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
@@ -53,6 +53,9 @@ function source(over: Partial<DoorSource> = {}): DoorSource {
     seats: () => [{ session_id: "qs_room1", member_id: "m1", retrying: false }],
     recent: () => [event()],
     readEvents: vi.fn(async () => ({ status: 200, body: { events: [], cursor: 3 } })),
+    readRooms: vi.fn(async () => ({ status: 200, body: { rooms: [] } })),
+    readSurface: vi.fn(async () => ({ status: 200, body: { session_id: "qs_room1", room: {}, surface: { cursor: 0, items: [] } } })),
+    decline: vi.fn(async () => ({ status: 200, body: { cursor: 12 } })),
     ...over,
   };
 }
@@ -64,10 +67,20 @@ async function start(name: string, src: DoorSource) {
   return door;
 }
 
+/** What a test sends with a request: a body, and its content type (application/json unless it says otherwise; null sends none). */
+interface Sent {
+  body?: string;
+  type?: string | null;
+}
+
 /** One request over a socket, answered as the door answered it. A door that does not answer fails the test, not hangs it. */
-function request(method: string, socketPath: string, path: string) {
+function request(method: string, socketPath: string, path: string, sent: Sent = {}) {
   return new Promise<{ status: number; type: string | undefined; body: string }>((resolve, reject) => {
-    const req = http.request({ socketPath, path, method, agent: false, timeout: 3_000 }, (res) => {
+    const headers: Record<string, string> = {};
+    // Framed with a length, so that a body on a DELETE is a body and not the start of another request.
+    if (sent.body !== undefined) headers["content-length"] = String(Buffer.byteLength(sent.body));
+    if (sent.body !== undefined && sent.type !== null) headers["content-type"] = sent.type ?? "application/json";
+    const req = http.request({ socketPath, path, method, headers, agent: false, timeout: 3_000 }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () =>
@@ -80,12 +93,12 @@ function request(method: string, socketPath: string, path: string) {
     });
     req.on("timeout", () => req.destroy(new Error("the door did not answer")));
     req.on("error", reject);
-    req.end();
+    req.end(sent.body);
   });
 }
 
 const get = (socketPath: string, path: string) => request("GET", socketPath, path);
-const post = (socketPath: string, path: string) => request("POST", socketPath, path);
+const post = (socketPath: string, path: string, sent?: Sent) => request("POST", socketPath, path, sent);
 
 /** The process's umask, read the way that is not deprecated: set one, and put it back. */
 function currentUmask(): number {
@@ -231,20 +244,30 @@ describe("the door", () => {
     expect((await get(door.path, "/elsewhere")).status).toBe(404);
   });
 
-  it("serves two routes and nothing near them", async () => {
+  it("serves its routes and nothing near them", async () => {
     const src = source();
     const door = await start("3.sock", src);
     const near = [
       "/",
       "/status/",
       "//status",
-      "/rooms",
+      "//rooms",
+      "/rooms/",
       "/rooms/qs_room1",
       "/rooms//events",
       "/rooms/qs_room1/events/more",
       "/x/rooms/qs_room1/events",
       "/rooms/a/b/events",
       "/rooms/%E0%A4%A/events", // an escape that does not decode names no room
+      "/rooms//surface",
+      "/rooms/qs_room1/surface/",
+      "/rooms/qs_room1/Surface",
+      "/x/rooms/qs_room1/surface",
+      "/rooms/a/b/surface",
+      "/rooms/%E0%A4%A/surface",
+      "/rooms//decline",
+      "/rooms/qs_room1/decline/",
+      "/rooms/%E0%A4%A/decline",
     ];
     for (const path of near) {
       const res = await get(door.path, path);
@@ -252,6 +275,9 @@ describe("the door", () => {
       expect(JSON.parse(res.body), path).toEqual({ error: "not_found" });
     }
     expect(src.readEvents).not.toHaveBeenCalled();
+    expect(src.readRooms).not.toHaveBeenCalled();
+    expect(src.readSurface).not.toHaveBeenCalled();
+    expect(src.decline).not.toHaveBeenCalled();
   });
 
   it("answers 500 to whatever throws behind a request, and goes on serving", async () => {
@@ -364,5 +390,188 @@ describe("the door", () => {
     ]);
     expect(outcome).toBe("closed");
     expect(await dropped).toBeInstanceOf(Error);
+  });
+});
+
+const DECLINE = "/rooms/qs_room1/decline";
+const declineWith = (socketPath: string, body: string, sent: Sent = {}) => post(socketPath, DECLINE, { body, ...sent });
+const BAD_REQUEST = { error: "bad_request" };
+
+describe("the rooms, the canvas and a decline", () => {
+  it("serves /rooms from readRooms, with the status and body it gave", async () => {
+    const rooms = { rooms: [{ session_id: "qs_room1", status: "active" }] };
+    const readRooms = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: rooms })
+      .mockResolvedValueOnce({ status: 503, body: { error: "not_connected" } });
+    const door = await start("9.sock", source({ readRooms }));
+    const ok = await get(door.path, "/rooms");
+    expect(ok).toMatchObject({ status: 200, type: "application/json" });
+    expect(JSON.parse(ok.body)).toEqual(rooms);
+    const refused = await get(door.path, "/rooms");
+    expect(refused).toMatchObject({ status: 503, type: "application/json" });
+    expect(JSON.parse(refused.body)).toEqual({ error: "not_connected" });
+    expect(readRooms).toHaveBeenCalledTimes(2);
+  });
+
+  it("serves a room's canvas from readSurface, the room decoded from the path, with the status and body it gave", async () => {
+    const canvas = { session_id: "qs/a b", room: {}, surface: { cursor: 4, items: [] } };
+    const readSurface = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: canvas })
+      .mockResolvedValueOnce({ status: 404, body: { error: "not_found" } });
+    const door = await start("9.sock", source({ readSurface }));
+    const ok = await get(door.path, "/rooms/qs%2Fa%20b/surface");
+    expect(ok).toMatchObject({ status: 200, type: "application/json" });
+    expect(JSON.parse(ok.body)).toEqual(canvas);
+    expect(readSurface).toHaveBeenLastCalledWith("qs/a b");
+    const none = await get(door.path, "/rooms/qs_elsewhere/surface");
+    expect(none.status).toBe(404);
+    expect(JSON.parse(none.body)).toEqual({ error: "not_found" });
+    expect(readSurface).toHaveBeenLastCalledWith("qs_elsewhere");
+  });
+
+  it("declines through the bridge: the room from the path, the ref_id from the body, the answer as it came", async () => {
+    const decline = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 200, body: { cursor: 12 } })
+      .mockResolvedValueOnce({ status: 404, body: { error: "not_found" } });
+    const door = await start("10.sock", source({ decline }));
+    const ok = await post(door.path, "/rooms/qs%2Fa%20b/decline", { body: '{"ref_id":"5"}' });
+    expect(ok).toMatchObject({ status: 200, type: "application/json" });
+    expect(JSON.parse(ok.body)).toEqual({ cursor: 12 });
+    expect(decline).toHaveBeenLastCalledWith("qs/a b", "5");
+    const none = await declineWith(door.path, '{"ref_id":"5"}');
+    expect(none.status).toBe(404);
+    expect(JSON.parse(none.body)).toEqual({ error: "not_found" });
+    expect(decline).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes a ref_id of one to fifteen decimal digits and refuses anything else", async () => {
+    const src = source();
+    const door = await start("10.sock", src);
+    const refused = ["", "abc", "-1", "1.5", "1e3", " 5", "5 ", "5\n", "0x10", "\u{ff15}", "1234567890123456", "5; drop"];
+    for (const ref of refused) {
+      const res = await declineWith(door.path, JSON.stringify({ ref_id: ref }));
+      expect(res.status, JSON.stringify(ref)).toBe(400);
+      expect(JSON.parse(res.body), JSON.stringify(ref)).toEqual(BAD_REQUEST);
+    }
+    expect(src.decline).not.toHaveBeenCalled();
+    for (const ref of ["0", "5", "007", "999999999999999"]) {
+      expect((await declineWith(door.path, JSON.stringify({ ref_id: ref }))).status, ref).toBe(200);
+      expect(src.decline).toHaveBeenLastCalledWith("qs_room1", ref);
+    }
+  });
+
+  it("takes a body that is exactly { ref_id } and refuses every other", async () => {
+    const src = source();
+    const door = await start("10.sock", src);
+    const refused: Array<[string, string]> = [
+      ["text that is not JSON", "ref_id=5"],
+      ["nothing", ""],
+      ["JSON that is cut off", '{"ref_id":"5"'],
+      ["a string", '"5"'],
+      ["a number", "5"],
+      ["null", "null"],
+      ["a list", '["5"]'],
+      ["an object without a ref_id", "{}"],
+      ["another key beside ref_id", '{"ref_id":"5","approved":true}'],
+      ["another key in place of ref_id", '{"ref":"5"}'],
+      ["a number for ref_id", '{"ref_id":5}'],
+      ["null for ref_id", '{"ref_id":null}'],
+      ["a list for ref_id", '{"ref_id":["5"]}'],
+      ["a ref_id that only a prototype holds", '{"__proto__":{"ref_id":"5"}}'],
+    ];
+    for (const [why, body] of refused) {
+      const res = await declineWith(door.path, body);
+      expect(res.status, why).toBe(400);
+      expect(JSON.parse(res.body), why).toEqual(BAD_REQUEST);
+    }
+    expect(src.decline).not.toHaveBeenCalled();
+    expect((await declineWith(door.path, ' {\n "ref_id" : "5" } ')).status).toBe(200);
+    expect(src.decline).toHaveBeenCalledWith("qs_room1", "5");
+  });
+
+  it("takes a body of 1 KiB at most, however much more is sent", async () => {
+    const src = source();
+    const door = await start("10.sock", src);
+    const padded = (bytes: number) => '{"ref_id":"5"}' + " ".repeat(bytes - 14);
+    expect((await declineWith(door.path, padded(1024))).status).toBe(200);
+    expect(src.decline).toHaveBeenCalledTimes(1);
+    for (const bytes of [1025, 1_048_576]) {
+      const res = await declineWith(door.path, padded(bytes));
+      expect(res.status, `${bytes} bytes`).toBe(400);
+      expect(JSON.parse(res.body), `${bytes} bytes`).toEqual(BAD_REQUEST);
+    }
+    expect(src.decline).toHaveBeenCalledTimes(1);
+    expect((await get(door.path, "/status")).status).toBe(200);
+  });
+
+  it("takes application/json, with parameters and in any case, and no other content type", async () => {
+    const src = source();
+    const door = await start("10.sock", src);
+    for (const type of ["text/plain", "application/x-www-form-urlencoded", "application/jsonp", "application/json-patch+json", "multipart/form-data", "json", null]) {
+      const res = await declineWith(door.path, '{"ref_id":"5"}', { type });
+      expect(res.status, String(type)).toBe(400);
+      expect(JSON.parse(res.body), String(type)).toEqual(BAD_REQUEST);
+    }
+    expect(src.decline).not.toHaveBeenCalled();
+    for (const type of ["application/json", "Application/JSON", "application/json; charset=utf-8"]) {
+      expect((await declineWith(door.path, '{"ref_id":"5"}', { type })).status, type).toBe(200);
+    }
+  });
+
+  it("allows a POST on the decline route and on no other path, and no other method anywhere", async () => {
+    const src = source();
+    const door = await start("11.sock", src);
+    const paths = ["/status", "/rooms", "/rooms/qs_room1/events", "/rooms/qs_room1/surface", "/rooms/qs_room1", "/", "/elsewhere"];
+    for (const path of paths) {
+      const res = await post(door.path, path, { body: '{"ref_id":"5"}' });
+      expect(res.status, `POST ${path}`).toBe(405);
+      expect(JSON.parse(res.body), `POST ${path}`).toEqual({ error: "method_not_allowed" });
+    }
+    for (const method of ["PUT", "PATCH", "DELETE"]) {
+      for (const path of [...paths, DECLINE]) {
+        const res = await request(method, door.path, path, { body: '{"ref_id":"5"}' });
+        expect(res.status, `${method} ${path}`).toBe(405);
+      }
+    }
+    expect(src.readEvents).not.toHaveBeenCalled();
+    expect(src.readRooms).not.toHaveBeenCalled();
+    expect(src.readSurface).not.toHaveBeenCalled();
+    expect(src.decline).not.toHaveBeenCalled();
+  });
+
+  it("answers a GET on the decline route as it answers any path it does not serve", async () => {
+    const src = source();
+    const door = await start("11.sock", src);
+    const res = await get(door.path, DECLINE);
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.body)).toEqual({ error: "not_found" });
+    expect(src.decline).not.toHaveBeenCalled();
+  });
+
+  it("answers 500 to whatever throws behind these routes, and goes on serving", async () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic; // JSON cannot say it
+    const door = await start(
+      "12.sock",
+      source({
+        readRooms: vi.fn().mockRejectedValue(new Error("secret detail")),
+        readSurface: vi.fn().mockResolvedValue({ status: 200, body: cyclic }),
+        decline: vi.fn().mockRejectedValue(new Error("secret detail")),
+      }),
+    );
+    const thrown = [
+      ["GET", "/rooms", undefined, "a room list that rejects"],
+      ["GET", "/rooms/qs_room1/surface", undefined, "a canvas that will not serialize"],
+      ["POST", DECLINE, { body: '{"ref_id":"5"}' }, "a decline that rejects"],
+    ] as const;
+    for (const [method, path, sent, why] of thrown) {
+      const res = await request(method, door.path, path, sent);
+      expect(res.status, why).toBe(500);
+      expect(JSON.parse(res.body), why).toEqual({ error: "internal" });
+    }
+    expect((await get(door.path, "/status")).status).toBe(200);
   });
 });

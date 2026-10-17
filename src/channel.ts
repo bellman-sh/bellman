@@ -154,9 +154,10 @@ const bridge = createBridge({
 });
 
 /**
- * The door (src/door.ts): how the Claude Code mod in this session reads what only the bridge holds: the inbox's counts,
- * a room's log, whether it is signed in. Named for this pid, under BELLMAN_DOOR_ROOT or ~/.claude/bellman/door, and
- * bellman_whoami says where.
+ * The door (src/door.ts): how the Claude Code mod in this session reads what only the bridge holds (the inbox's counts,
+ * a room's log, whether it is signed in) and gets what it cannot ask Claude Code for: the rooms the bridge sits in, a
+ * room's canvas, and a decline of an action request, all through the connection the bridge holds. Named for this pid,
+ * under BELLMAN_DOOR_ROOT or ~/.claude/bellman/door, and bellman_whoami says where.
  *
  * The bridge is the session's Bellman server and the door only an aid to something else, so a door that cannot be made
  * (a folder it cannot create, a path too long for a Unix socket, no home directory to build the path from) is a line in
@@ -174,6 +175,9 @@ const doorOpened = (async () => {
       recent: bridge.recent,
       inboxDir,
       readEvents: bridge.readEvents,
+      readRooms: bridge.readRooms,
+      readSurface: bridge.readSurface,
+      decline: bridge.decline,
     });
     door = opened;
     doorPath = opened.path;

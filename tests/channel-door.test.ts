@@ -211,6 +211,12 @@ function get(socketPath: string, path: string) {
 
 const statusOf = async (door: string) => JSON.parse((await get(door, "/status")).body) as DoorStatus;
 
+/** A GET, answered: its status, and its body read as JSON. */
+async function json(door: string, path: string): Promise<{ status: number; body: unknown }> {
+  const reply = await get(door, path);
+  return { status: reply.status, body: JSON.parse(reply.body) };
+}
+
 async function until(check: () => Promise<boolean>, what: string, timeoutMs = 15_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!(await check())) {
@@ -311,6 +317,7 @@ describe("the bridge's door, as the process opens it", () => {
     /** The smallest Bellman that can seat a member and answer for its room: one event in the log, and the route that serves it. */
     async function bellman() {
       const logReads: Array<{ authorization: string | undefined; url: string | undefined }> = [];
+      let initializes = 0;
       const server = http.createServer(async (req, res) => {
         if (req.method === "GET" && req.url?.startsWith(`/rooms/${ROOM}/events`)) {
           logReads.push({ authorization: req.headers.authorization, url: req.url });
@@ -330,6 +337,7 @@ describe("the bridge's door, as the process opens it", () => {
         }
         let result: unknown = {};
         if (message.method === "initialize") {
+          initializes += 1;
           result = {
             protocolVersion: message.params?.protocolVersion,
             capabilities: { tools: {} },
@@ -337,7 +345,7 @@ describe("the bridge's door, as the process opens it", () => {
           };
         } else if (message.method === "tools/list") {
           result = {
-            tools: ["bellman_start", "bellman_sync"].map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
+            tools: ["bellman_start", "bellman_sync", "bellman_rooms"].map((name) => ({ name, description: name, inputSchema: { type: "object" } })),
           };
         } else if (message.method === "tools/call") {
           if (message.params?.name === "bellman_start") {
@@ -345,6 +353,13 @@ describe("the bridge's door, as the process opens it", () => {
               content: [{ type: "text", text: "started" }],
               structuredContent: { session_id: ROOM, member_id: MEMBER, join_code: "BELL-X" },
             };
+          } else if (message.params?.name === "bellman_rooms") {
+            // The account's rooms: the one the bridge sits in, and one it does not.
+            const rooms = [
+              { session_id: ROOM, your_member_id: MEMBER, status: "active" },
+              { session_id: "qs_elsewhere", your_member_id: "m_else", status: "active" },
+            ];
+            result = { content: [{ type: "text", text: JSON.stringify({ rooms }) }], structuredContent: { rooms } };
           } else {
             // The member's long poll: the event to the first, and to the rest a poll that holds a little and brings nothing.
             const since = Number(message.params?.arguments?.since_cursor ?? 0);
@@ -360,7 +375,7 @@ describe("the bridge's door, as the process opens it", () => {
       servers.push(server);
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const { port } = server.address() as { port: number };
-      return { url: `http://127.0.0.1:${port}/mcp`, logReads };
+      return { url: `http://127.0.0.1:${port}/mcp`, logReads, connections: () => initializes };
     }
 
     it("reports its seat, the event that arrived, the one waiting for the hook, and reads the room's log", async () => {
@@ -388,6 +403,28 @@ describe("the bridge's door, as the process opens it", () => {
         body: { events: [event], cursor: 1 },
         reads: [{ authorization: `Bearer ${DEV_KEY.jesse}`, url: `/rooms/${ROOM}/events?after=0` }],
       });
+    });
+
+    // The room list is the server's, asked through the connection the bridge holds. The door makes none of its own: on a
+    // signed-in bridge that is what would open a browser, for a read nobody asked for.
+    it("serves the room list for the seats it holds, and connects to nothing to do it", async () => {
+      const fake = await bellman();
+      const scratch = scratchDir();
+      const bridge = await open(scratch, { key: DEV_KEY.jesse, url: fake.url });
+      const door = join(scratch, `${bridge.pid}.sock`);
+
+      expect(await json(door, "/rooms")).toEqual({ status: 503, body: { error: "not_connected" } });
+      expect(fake.connections()).toBe(0);
+
+      expect((await bridge.call("bellman_start", { manifest: { room: "door-room", preset: "pair" } })).session_id).toBe(ROOM);
+      expect(fake.connections()).toBe(1);
+
+      // Cut to the bridge's seat: the account's other room is not listed.
+      expect(await json(door, "/rooms")).toEqual({
+        status: 200,
+        body: { rooms: [{ session_id: ROOM, your_member_id: MEMBER, status: "active" }] },
+      });
+      expect(fake.connections()).toBe(1);
     });
   });
 });

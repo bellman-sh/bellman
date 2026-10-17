@@ -46,6 +46,33 @@ export interface DoorLog {
   cursor: number;
 }
 
+/**
+ * `GET /rooms`: the rooms the bridge holds a seat in, each as `bellman_rooms` gave it (`roomSummary` in
+ * src/projections.ts) and untouched, so a peer's text is still in the untrusted envelope the server put it in.
+ */
+export interface DoorRooms {
+  rooms: Array<{ session_id: string } & Record<string, unknown>>;
+}
+
+/**
+ * `GET /rooms/<session_id>/surface`: what `bellman_surface` returned for the room, untouched: the room's block and its
+ * canvas, each item in an untrusted envelope.
+ */
+export interface DoorSurface {
+  session_id: string;
+  room: Record<string, unknown>;
+  surface: { cursor: number; items: unknown[] };
+}
+
+/**
+ * `POST /rooms/<session_id>/decline`, sent `{ "ref_id": "<decimal digits>" }` as application/json. The action request
+ * `ref_id` names is answered `approved: false`, as the bridge's seat in that room, and this is the cursor of that
+ * answer. The door sends that answer and nothing else.
+ */
+export interface DoorDeclined {
+  cursor: number;
+}
+
 // ---------------------------------------------------------------------------
 // Cleaning — a peer controls every string below, and a terminal obeys escapes
 // ---------------------------------------------------------------------------

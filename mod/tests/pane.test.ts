@@ -448,3 +448,32 @@ test("docked, the pane narrows back to the sidebar; inline, it closes", async ($
   await inline.press({ key: "close" });
   expect(w.closed).toEqual([PANE_ID]);
 });
+
+test("the wide pane's × closes the pane as the person's too: no tick opens the sidebar unasked after it, and the bell does", async ($, on) => {
+  // The mod's own `$.ui.close` is raised with origin `plugin`, which the `ui.close` hook does not count as the person's,
+  // so the press itself has to keep the sidebar from opening once the terminal docks a pane (R4).
+  const w = await world($, on);
+  await tick(w);
+  // Inline on the main screen: the bell opens the pane wide, and its × closes it.
+  await (await band($)).press({ key: "bell-0" });
+  w.panes = [SHOWN];
+  const inline = await $.ui.mount({
+    plugin: "bellman-mod",
+    surface: "terminal",
+    component: "Pane",
+    requestId: PANE_ID,
+    props: { ...PANE, bodyColumns: PANE_COLUMNS, placement: "inline" },
+    viewport: { columns: 100, rows: 40, isFullscreen: false },
+  });
+  await inline.press({ key: "close" });
+  expect(w.closed).toEqual([PANE_ID]);
+  // The engine closed it and the terminal goes fullscreen. Ten ticks later none has opened the sidebar.
+  w.panes = [];
+  await band($, "terminal", true);
+  for (let i = 0; i < 10; i++) await tick(w);
+  expect(w.opened).toHaveLength(1);
+  // The bell opens the pane again, wide.
+  await (await band($, "terminal", true)).press({ key: "bell-0" });
+  expect(w.opened).toHaveLength(2);
+  expect(w.opened.at(-1)).toEqual({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+});

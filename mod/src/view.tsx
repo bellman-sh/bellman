@@ -37,7 +37,8 @@ import { doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } f
 let isFullscreen: boolean | undefined;
 /**
  * The person closed the pane by hand and has not opened it since, so no sidebar opens unasked (R4). Set by the engine's
- * close mark or key (the `ui.close` hook below) and by the sidebar's `×` (`pieces`); cleared by `openPane`.
+ * close mark or key (the `ui.close` hook below) and by the `×` of the sidebar and of the inline room pane (`pieces`);
+ * cleared by `openPane`.
  * ponytail: a module variable, so a reload forgets it and the sidebar may open once more; `$.state` if that shows.
  */
 let refused = false;
@@ -175,9 +176,9 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
     personActed();
     void update($, room, () => value);
   };
-  // The sidebar's `×`. The mod's own `$.ui.close` is raised with origin `plugin`, which the `ui.close` hook does not
-  // count as the person's, so the press sets `refused` itself (R4). Like every press that opens or closes the pane, it
-  // calls the engine before any await.
+  // The `×` of the sidebar and of the room pane drawn inline (a docked one narrows to the sidebar instead). The mod's own
+  // `$.ui.close` is raised with origin `plugin`, which the `ui.close` hook does not count as the person's, so the press
+  // sets `refused` itself (R4). Like every press that opens or closes the pane, it calls the engine before any await.
   const close = () => {
     personActed();
     refused = true;

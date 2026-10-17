@@ -288,7 +288,7 @@ export async function drawPane(
         {site.placement === "dock" ? (
           <Button key="narrow" label="›" onPress={act(() => $.ui.open({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS }))} />
         ) : (
-          <Button key="close" label="×" onPress={act(() => $.ui.close({ id: PANE_ID }))} />
+          p.close
         )}
       </Box>
       <Box columnGap={1}>

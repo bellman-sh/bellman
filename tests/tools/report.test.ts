@@ -229,16 +229,24 @@ describe("bellman_report (spec §3)", () => {
     expect((await h.store.listReports(10)).map((r) => r.sessionId).sort()).toEqual([frozen.sessionId, gone.sessionId].sort());
   });
 
-  /** Review Focus 4, through the tool: the note reaches the mailer as written, and the subject does not carry it. */
-  it("stores and mails a note as written, header lookalikes and markup included, under a subject built from closed sets", async () => {
+  /**
+   * Review Focus 4, through the tool, and the owner's decision of 2026-10-17 that the email is a notice. The queue keeps the
+   * note as written, header lookalikes and markup included; the message sent to support@ carries none of it, nor who filed the
+   * report, nor the room's creator.
+   */
+  it("stores a note as written, header lookalikes and markup included, and mails a notice that carries none of it", async () => {
     const s = await pairUp(harness());
     const note = "line one\r\nSubject: forged\r\n<b>bold</b>";
     const out = await s.joiner.call("bellman_report", { session_id: s.sessionId, reason: "harassment", note });
     expect(out.isError, out.text).toBe(false);
-    expect(mailed.map((r) => r.note)).toEqual([note]);
+    expect((await h.store.listReports(10)).map((r) => r.note), "the queue holds it as written").toEqual([note]);
+    expect(mailed.map((r) => r.id)).toEqual([out.data.report_id]);
     const message = reportMail(mailed[0]);
     expect(message.subject).toBe(`Bellman report ${out.data.report_id}: harassment, the room`);
-    expect(message.text).toContain(note);
+    const everything = `${message.subject}\n${message.text}`;
+    for (const absent of ["line one", "forged", "<b>bold</b>", "\r", "peer@codenerd", "u_peer", "jesse@codenerd", "u_jesse"]) {
+      expect(everything, absent).not.toContain(absent);
+    }
   });
 
   it("refuses the eleventh report in a day as rate_limited with retry_after, and files and mails nothing for it", async () => {

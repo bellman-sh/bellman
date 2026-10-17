@@ -21,14 +21,20 @@ describe("the report's email (spec §3)", () => {
     at: Date.UTC(2026, 9, 15), resolvedAt: null, resolution: null, resolvedBy: null,
   };
 
-  /** Review Focus 4. */
-  it("builds the subject from closed sets, and carries the note in the body as written", () => {
+  /**
+   * Review Focus 4, and the owner's decision of 2026-10-17: the email is a notice, and the queue holds the rest. A note with
+   * CR/LF, a `Subject:` line or markup reaches neither the subject nor the body, and neither does anything else the queue
+   * keeps: who filed the report, whom it is about, the room's creator, the message's cursor.
+   */
+  it("builds the subject from closed sets, and carries no note, no reporter, no one's label or id and no creator", () => {
     const mail = reportMail(report);
     expect(mail.subject).toBe("Bellman report rpt_000001792108523622_ab12cd34: harassment, a message");
-    expect(mail.text).toContain("line one\r\nSubject: forged\r\n<b>bold</b>");
-    expect(mail.text).toContain("Room: qs_1 (creator u_jesse)");
-    expect(mail.text).toContain("Message: cursor 12, from peer@codenerd (m_peer, u_peer)");
-    expect(mail.text).toContain("Filed by: reader@example.dev (u_reader)");
+    expect(mail.text).toContain("Room: qs_1");
+    const everything = `${mail.subject}\n${mail.text}`;
+    for (const absent of [
+      "line one", "forged", "Subject: forged", "<b>bold</b>", "\r", "Note", "Filed by",
+      "reader@example.dev", "u_reader", "peer@codenerd", "m_peer", "u_peer", "u_jesse", "creator", "cursor",
+    ]) expect(everything, absent).not.toContain(absent);
   });
 
   it("sends one message from reports@ to support@, and logs a failure or a missing binding without throwing", async () => {
@@ -83,16 +89,17 @@ describe("the report's email (spec §3)", () => {
     expect(reportMail(room).subject).toBe("Bellman report rpt_000001792108523622_ab12cd34: other, the room");
     expect(lines(room)).toEqual([
       "Report rpt_000001792108523622_ab12cd34, filed 2026-10-15T00:00:00.000Z.",
-      "Room: qs_1 (creator u_jesse)",
+      "Room: qs_1",
       "About: the room",
       "Reason: other",
-      "Filed by: reader@example.dev (u_reader)",
-      "Note (untrusted, as written):",
-      "(none)",
       "",
       "Read the queue at GET /admin/reports, and close this report at POST /admin/reports/rpt_000001792108523622_ab12cd34/resolve.",
     ]);
-    expect(lines(member)[2]).toBe("Member: peer@codenerd (m_peer, u_peer)");
+    // The same words for a note and for none, and for every kind of target but the one line that names it.
+    expect(lines({ ...room, note: "a note" })).toEqual(lines(room));
+    expect(lines(member)[2]).toBe("About: a member");
+    expect(lines(report)[2]).toBe("About: a message");
+    expect(lines(member).filter((_, i) => i !== 2)).toEqual(lines(room).filter((_, i) => i !== 2).map((l) => l === "Reason: other" ? "Reason: spam" : l));
   });
 });
 

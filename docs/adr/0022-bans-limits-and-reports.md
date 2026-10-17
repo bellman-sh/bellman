@@ -140,8 +140,14 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     email.
 20. **The email uses the builder form of `send_email` (R13).** `{ from:
     "reports@bellman.sh", to: "support@bellman.sh", subject, text }`, sent by the tool and
-    the route after the store answers `filed`. The subject is built from closed sets, and
-    the note, which is untrusted text, goes only in the body, as written. The dash shows
+    the route after the store answers `filed`. The subject is built from closed sets. The
+    email is a notice (the owner's decision of 2026-10-17, amending R13's copy, which put
+    the reporter and the note in it): its body carries the report's id and filing time,
+    the room's id, what the report is about (the room, a member or a message), the
+    reason, and the two routes of the queue. It carries no reporter, no note, no label or
+    id of the person reported and no creator, so nothing the privacy page promises to
+    delete 180 days after resolution sits in an inbox with no expiry. The queue holds the
+    rest, and an operator works from it. The note is untrusted text, and the dash shows
     it as text.
 21. **A resolved report is deleted by a named handler (R15).** `report_purge`, on the
     registry's one alarm, deletes a report 180 days after it was resolved. Unresolved

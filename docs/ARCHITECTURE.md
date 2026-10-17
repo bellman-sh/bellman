@@ -1271,11 +1271,15 @@ loud:
 - **A report's note is untrusted text, and its subject is built from closed sets**
   (ADR 0022). A note of up to 500 characters is written by whoever may report the
   room, which for a public room is anyone signed in, so it is handled as a peer's
-  content is. The dash shows it as text, never as markup, and
-  the email to support@ carries it as plain text, in the body once and as written.
-  The email's subject is built from the report's id, its reason and the kind of
-  target, which the server made or a closed set holds, so a note or a label that
-  carries CR/LF or a `Subject:` line cannot reach a header. What a room's creator
+  content is. The dash shows it as text, never as markup. The email to support@ is a
+  notice and carries none of it: the report's id and time, the room's id, the kind
+  of target, the reason and the queue's routes, and no reporter, no note, no label or
+  id of the person reported and no creator, because an inbox keeps what it is sent
+  with no expiry and the queue's purge deletes those 180 days after a report is
+  resolved. Every word of it is the server's, and the email's subject is built from
+  the report's id, its reason and the kind of target, which the server made or a
+  closed set holds, so a note or a label that carries CR/LF or a `Subject:` line
+  cannot reach a header or the body. What a room's creator
   reads of a report is built field by field (`creatorReportView`) and never names
   who filed it, so a field added to a report reaches no creator until that function
   names it. A report about the creator's own seats or messages is not in the creator's

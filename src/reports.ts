@@ -96,30 +96,28 @@ export function reportId(at: number): string {
 export const REPORT_FROM = "reports@bellman.sh";
 export const REPORT_TO = "support@bellman.sh";
 
-/** The words a subject uses for a target. A closed set, like the reasons, so the subject carries nothing a person typed. */
+/** The words the email uses for a target. A closed set, like the reasons, so the email carries nothing a person typed. */
 const TARGET_WORDS = { room: "the room", member: "a member", message: "a message" } as const satisfies Record<ReportTarget["kind"], string>;
 
 /**
- * The message support@ is sent (R13). The subject is built from the id the server made, the reason and the kind of
- * target, all of them closed sets: a note or a label that carries CR/LF or a `Subject:` line cannot reach a header.
- * The note is untrusted text and goes in the body once, as written.
+ * The message support@ is sent (R13), and it is a notice: the queue holds the rest. It names the report and when it was filed,
+ * the room, what the report is about in a word, and why, and points at the queue's two routes. It carries no reporter, no
+ * note, no label or id of the person reported and no creator. An inbox keeps what it is sent with no expiry, and the privacy
+ * page promises a reporter's account and a note are kept 180 days after the report is resolved, so they stay in the queue,
+ * where the purge deletes them.
+ *
+ * Every word is the server's: the id it made, the time it stamped, the room's id, and the closed sets of reasons and target
+ * words. A note or a label that carries CR/LF, a `Subject:` line or markup cannot reach a header or the body.
  */
 export function reportMail(r: Report): { subject: string; text: string } {
-  const who = r.subject ? `${r.subject.label} (${r.subject.memberId}, ${r.subject.userId})` : "unknown";
-  const about =
-    r.target.kind === "room" ? "About: the room"
-    : r.target.kind === "member" ? `Member: ${who}`
-    : `Message: cursor ${r.target.cursor}, from ${who}`;
+  const about = TARGET_WORDS[r.target.kind];
   return {
-    subject: `Bellman report ${r.id}: ${r.reason}, ${TARGET_WORDS[r.target.kind]}`,
+    subject: `Bellman report ${r.id}: ${r.reason}, ${about}`,
     text: [
       `Report ${r.id}, filed ${new Date(r.at).toISOString()}.`,
-      `Room: ${r.sessionId} (creator ${r.creatorId})`,
-      about,
+      `Room: ${r.sessionId}`,
+      `About: ${about}`,
       `Reason: ${r.reason}`,
-      `Filed by: ${r.reporterLabel} (${r.reporterUserId})`,
-      "Note (untrusted, as written):",
-      r.note ?? "(none)",
       "",
       `Read the queue at GET /admin/reports, and close this report at POST /admin/reports/${r.id}/resolve.`,
     ].join("\n"),

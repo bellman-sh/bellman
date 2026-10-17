@@ -1249,8 +1249,9 @@ export async function evictMember(
  * anyone, so while the room is public there is no cut, and someone removed from it may still report what is said about
  * them afterwards. A member who left keeps the open feed, and so the open cursors.
  *
- * The shape of the request is checked first, because it reads nothing from the room. A note is trimmed and an empty
- * one is none, and the limit applies to the trimmed length. The note is untrusted text and is kept as written.
+ * The shape of the request is checked first, because it reads nothing from the room. The limit on a note applies to what
+ * was sent, before it is trimmed, which is what the tool's schema bounds, so the tool and the route agree. A note is then
+ * trimmed and an empty one is none. The note is untrusted text and is kept as written.
  *
  * `mail` runs once the store has answered `filed`, and a `ReportMailer` never rejects, so a failed email cannot undo a
  * filing. A repeat of a report still open answers `folded` and mails nothing (R9). Past 10 filings in a rolling day
@@ -1269,10 +1270,12 @@ export async function fileRoomReport(
   if (input.memberId !== undefined && input.cursor !== undefined) {
     return refuse("invalid", "name a member or a message, not both; name neither to report the room.");
   }
-  const note = input.note?.trim() || null;
-  if (note !== null && note.length > MAX_REPORT_NOTE_CHARS) {
+  // The bound is on the note as sent, before it is trimmed, as the tool's schema has it, so the tool and the route refuse the
+  // same notes. Trimming only shortens, so a note that passes here is within it after the trim as well.
+  if (input.note != null && input.note.length > MAX_REPORT_NOTE_CHARS) {
     return refuse("invalid", `a note is at most ${MAX_REPORT_NOTE_CHARS} characters.`);
   }
+  const note = input.note?.trim() || null;
 
   const session = await store.getSession(sessionId);
   const handles = session ? await handlesOf(store, session, actor) : [];

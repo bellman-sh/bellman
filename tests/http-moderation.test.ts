@@ -45,7 +45,7 @@ function call(key: string | null, path: string, over: { method?: string; body?: 
     method: over.method ?? "GET", headers, body: over.body === undefined ? undefined : JSON.stringify(over.body),
   }), { store, caller, panelOrigins: [PANEL], mailReport: async (r) => { mailed.push(r.id); } });
 }
-const answer =async (res: Response | undefined) => [res!.status, await res!.json().catch(() => null)];
+const answer = async (res: Response | undefined) => [res!.status, await res!.json().catch(() => null)];
 
 describe("the moderation routes", () => {
   it("leave every other path to the next module", async () => {
@@ -215,6 +215,18 @@ describe("a room's reports", () => {
       { kind: "member", member_id: HOST_MEMBER_ID }, { kind: "message", cursor: hostSaid },
     ].map((t) => JSON.stringify(t)).sort());
     expect(await store.listReports(50), "and the operators read all six").toHaveLength(6);
+  });
+
+  // Section 1C review, Minor 6. The tool bounds a note before trimming (its schema's max), so the route does too: a note of 501
+  // characters is refused whatever it trims to, and the two agree.
+  it("refuses a note over 500 characters before it is trimmed, as the tool does, and takes 500 padded", async () => {
+    const [status, body] = await answer(await report(DEV_KEY.peer, { reason: "spam", note: ` ${"x".repeat(499)} ` }));
+    expect([status, body], "501 characters that trim to 499").toMatchObject([400, { error: "invalid", error_description: expect.stringContaining("500 characters") }]);
+    expect(await store.listReports(50), "nothing was filed").toEqual([]);
+    expect(mailed).toEqual([]);
+    const taken = await report(DEV_KEY.peer, { reason: "spam", note: ` ${"x".repeat(498)} ` });
+    expect(taken!.status, "500 characters that trim to 498").toBe(201);
+    expect((await store.listReports(50)).map((r) => r.note)).toEqual(["x".repeat(498)]);
   });
 
   it("folds a repeat: 200, the first report's id, and no second email", async () => {

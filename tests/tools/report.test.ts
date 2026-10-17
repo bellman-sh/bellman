@@ -305,6 +305,8 @@ describe("fileRoomReport (R11)", () => {
       [{ reason: "rude" }, "reason must be one of spam, harassment, impersonation, illegal, other."],
       [{ reason: "spam", note: "x".repeat(501) }, "a note is at most 500 characters."],
       [{ reason: "spam", note: ` ${"x".repeat(501)} ` }, "a note is at most 500 characters."],
+      // The bound is on what was sent, as the tool's schema has it: 501 characters that trim to 499 are refused too.
+      [{ reason: "spam", note: ` ${"x".repeat(499)} ` }, "a note is at most 500 characters."],
       [{ reason: "spam", memberId: s.creatorMemberId, cursor }, "name a member or a message, not both"],
       [{ reason: "spam", memberId: "m_nobody" }, "no member with that member_id has been in this room."],
       [{ reason: "spam", cursor: 9_999 }, "no message at that cursor."],
@@ -326,7 +328,7 @@ describe("fileRoomReport (R11)", () => {
     const cursor = await say(s, "a real message");
     const made = [
       await file(s, { reason: "spam", note: "   " }),
-      await file(s, { reason: "spam", memberId: s.creatorMemberId, note: ` ${"x".repeat(500)} ` }),
+      await file(s, { reason: "spam", memberId: s.creatorMemberId, note: "x".repeat(500) }),
       await file(s, { reason: "spam", cursor, note: "  hello  " }),
     ];
     expect(made.map((r) => r.ok)).toEqual([true, true, true]);

@@ -115,7 +115,9 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most
     500 characters. The registry queues them. A creator reads those about the other
     members and messages in their rooms at `GET /rooms/:id/reports`, and an operator reads and closes
-    every one at `GET /admin/reports` and `POST /admin/reports/:id/resolve`.
+    every one at `GET /admin/reports` and `POST /admin/reports/:id/resolve`. The queue lists
+    the open reports first and then the resolved ones, newest first in each, 200 in all, so an
+    open report is never behind newer resolved ones that fill the cut.
     `src/reports.ts` holds the types, the email and the views, `src/tools/report.ts` the
     tool, and `extension/manifest.json` lists it.
 17. **Who may report a room (R11).** Anyone who holds or held a handle in it, and, while

@@ -489,7 +489,9 @@ Why the split is shaped that way:
   holds it. The report queue is there for the same reason: an operator reads every
   room's reports in one listing, and an account's 10 a day count across rooms. Its
   rows are `rp:<id>`, the report, whose id sorts in filing order so a listing of
-  the prefix is the queue; `rf:`, the open report an account filed about a target,
+  the prefix is the queue; `ro:`, a report's id while it is open, so the operator's
+  listing, which puts open reports first, reads them without reading every report;
+  `rf:`, the open report an account filed about a target,
   which a repeat folds into; `rl:`, the times of an account's filings still inside
   the day; `rc:`, a report that reaches the creator, about a member or a message and
   not about the creator's own account (`reachesCreator`), under its creator and room,

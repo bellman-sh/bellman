@@ -166,4 +166,23 @@ describe("/admin/reports and /admin/reports/:id/resolve", () => {
     expect(reports[0].at).toBe(new Date(1_000 + MAX_REPORTS_LISTED).toISOString());
     expect(reports[reports.length - 1].at, "the oldest is the one left off").toBe(new Date(1_001).toISOString());
   });
+
+  // Section 1C review, Minor 3, re-graded Important: an open report older than the newest 200 is still in the queue an operator
+  // reads. Open reports come first, then the resolved ones, newest first in each, MAX_REPORTS_LISTED in all.
+  it("lists an open report first however many newer ones are resolved, then the resolved newest first, in all at most MAX_REPORTS_LISTED", async () => {
+    const fileAt = async (i: number) => ((await store.fileReport({
+      sessionId: "qs_1", creatorId: "u_jesse", target: { kind: "room" }, subject: null, reason: "spam",
+      note: null, reporterUserId: `u_reader_${i}`, reporterLabel: `reader${i}@example.dev`,
+    }, 1_000 + i)) as { report: Report }).report;
+    const old = await fileAt(0);
+    for (let i = 1; i <= MAX_REPORTS_LISTED + 1; i++) {
+      await store.resolveReport((await fileAt(i)).id, { note: "done", by: "u_operator" }, 9_000 + i);
+    }
+    const { reports } = (await (await send("GET", "/admin/reports", await bearer(OPERATOR))).json()) as { reports: { id: string; at: string; resolved_at: string | null }[] };
+    expect(reports).toHaveLength(MAX_REPORTS_LISTED);
+    expect(reports[0], "the old open report heads the list").toMatchObject({ id: old.id, resolved_at: null });
+    expect(reports[1].at, "then the newest resolved").toBe(new Date(1_000 + MAX_REPORTS_LISTED + 1).toISOString());
+    expect(reports[reports.length - 1].at, "and the cut falls in the resolved ones").toBe(new Date(1_003).toISOString());
+    expect(reports.slice(1).every((r) => r.resolved_at !== null)).toBe(true);
+  });
 });

@@ -4423,6 +4423,34 @@ export function describeStoreContract(
         expect(await store.resolveReport("rpt_000000000000000_00000000", { note: "x", by: "u_x" }, at)).toBeUndefined();
       });
 
+      /**
+       * Section 1C review, Minor 3, re-graded Important: an open report an operator cannot find is a report never acted on.
+       * Newest first alone cut the queue at its limit with the oldest open report past it, behind however many newer ones
+       * had been resolved. Open reports come first, newest first, then resolved ones, newest first, `limit` in all.
+       */
+      it("lists the open reports first and the resolved after, newest first in each, so an old open one survives any number of newer resolved", async () => {
+        const oldOpen = (await file({ reporterUserId: "u_a", target: { kind: "message", cursor: 1 } })).report;
+        vi.advanceTimersByTime(1_000);
+        const resolved: Report[] = [];
+        for (let i = 0; i < 5; i++) {
+          const r = (await file({ reporterUserId: `u_r${i}`, target: { kind: "message", cursor: 10 + i } })).report;
+          await store.resolveReport(r.id, { note: "done", by: "u_operator" }, Date.now());
+          resolved.push(r);
+          vi.advanceTimersByTime(1_000);
+        }
+        const newOpen = (await file({ reporterUserId: "u_b", target: { kind: "message", cursor: 2 } })).report;
+        const ids = async (limit: number) => (await store.listReports(limit)).map((r) => r.id);
+        expect(await ids(10), "open first, then resolved, newest first in each")
+          .toEqual([newOpen.id, oldOpen.id, ...resolved.map((r) => r.id).reverse()]);
+        expect(await ids(3), "the old open report is inside a cut that five newer resolved ones would have filled")
+          .toEqual([newOpen.id, oldOpen.id, resolved[4].id]);
+        expect(await ids(2), "the open reports fill the cut before any resolved one").toEqual([newOpen.id, oldOpen.id]);
+        expect(await ids(1), "and the newest open one comes first").toEqual([newOpen.id]);
+        // Resolving the old one moves it among the resolved, by when it was filed: the oldest of them, last.
+        await store.resolveReport(oldOpen.id, { note: "done", by: "u_operator" }, Date.now());
+        expect(await ids(10)).toEqual([newOpen.id, ...resolved.map((r) => r.id).reverse(), oldOpen.id]);
+      });
+
       it("deletes a report 180 days after it is resolved, from every list, and keeps an open one", async () => {
         const done = (await file()).report;
         const open = (await file({ target: { kind: "message", cursor: 2 } })).report;

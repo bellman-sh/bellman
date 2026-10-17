@@ -166,7 +166,7 @@ async function liftCreatorBan(request: Request, banId: string, origin: string | 
     : problem(404, "not_found", "no such ban", origin);
 }
 
-/** A room's reports about members and messages, newest first, in the view that leaves out who filed them. */
+/** A room's reports about its other members and their messages, newest first, in the view that leaves out who filed them. */
 async function listRoomReports(request: Request, sessionId: string, origin: string | undefined, deps: ModerationDeps): Promise<Response> {
   const who = await admitCreator(request, sessionId, "read its reports", origin, deps);
   if (who instanceof Response) return who;

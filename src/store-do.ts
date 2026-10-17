@@ -2974,8 +2974,10 @@ const creatorBanKey = (creatorId: string, userId: string): string =>
 const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userId)}`;
 
 /**
- * Reports (abuse protections spec, section 3) are five kinds of row and a due row, all in the registry:
+ * Reports (abuse protections spec, section 3) are six kinds of row and a due row, all in the registry:
  * - `rp:<id>` is the report. An id sorts in filing order, so a listing of the prefix is the queue.
+ * - `ro:<id>` holds the id of a report while it is open: written when it is filed, deleted when it is resolved. The
+ *   operator's queue lists open reports first, and this is how it reads them without reading every report there is.
  * - `rf:<reporter>:<sessionId>:<targetKey>` holds the id of the open report that account filed about that target:
  *   what a repeat folds into (R9). Resolving the report deletes it.
  * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`. It only serves
@@ -2991,6 +2993,8 @@ const REPORT_PREFIX = "rp:";
 const reportKey = (id: string): string => `${REPORT_PREFIX}${id}`;
 const reportFoldKey = (reporterId: string, sessionId: string, target: string): string =>
   `rf:${encodeURIComponent(reporterId)}:${sessionId}:${target}`;
+const REPORT_OPEN_PREFIX = "ro:";
+const reportOpenKey = (id: string): string => `${REPORT_OPEN_PREFIX}${id}`;
 const REPORT_TIMES_PREFIX = "rl:";
 const reportTimesKey = (reporterId: string): string => `${REPORT_TIMES_PREFIX}${encodeURIComponent(reporterId)}`;
 const reportCreatorPrefix = (creatorId: string, sessionId: string): string =>
@@ -3844,6 +3848,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         [reportKey(report.id)]: report,
         [foldKey]: report.id,
         [timesKey]: [...kept, now],
+        [reportOpenKey(report.id)]: report.id,
         ...(reachesCreator(r) ? { [reportCreatorKey(r.creatorId, r.sessionId, report.id)]: report.id } : {}),
       });
       return { outcome: "filed", report };
@@ -3864,8 +3869,19 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
     return ids.flatMap((id) => rows.get(reportKey(id)) ?? []);
   }
 
+  /**
+   * `BellmanStore.listReports`: the open reports, from the `ro:` rows, newest first and at most `limit`, then the resolved
+   * ones to fill what is left, which is none when the open ones fill the cut. When the open reports are fewer than `limit`
+   * these are all of them, so at most that many of the newest `limit` reports are open and the rest of those are resolved:
+   * reading `limit` rows of the queue finds every resolved report the cut needs. Neither read is more than `limit` rows,
+   * however many reports the registry holds.
+   */
   async listReports(limit: number): Promise<Report[]> {
-    return [...(await this.ctx.storage.list<Report>({ prefix: REPORT_PREFIX, reverse: true, limit })).values()];
+    const openIds = [...(await this.ctx.storage.list<string>({ prefix: REPORT_OPEN_PREFIX, reverse: true, limit })).values()];
+    const rows = await getRows<Report>(this.ctx.storage, openIds.map(reportKey));
+    const open = openIds.flatMap((id) => rows.get(reportKey(id)) ?? []);
+    const newest = [...(await this.ctx.storage.list<Report>({ prefix: REPORT_PREFIX, reverse: true, limit })).values()];
+    return [...open, ...newest.filter((r) => r.resolvedAt !== null).slice(0, limit - open.length)];
   }
 
   /**
@@ -3882,7 +3898,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const done: Report = { ...report, resolvedAt: now, resolution: resolution.note, resolvedBy: resolution.by };
       const purgeAt = now + REPORT_RETENTION_MS;
       const due = await txn.get<number>(dueKey(REPORT_PURGE_HANDLER));
-      await txn.delete(reportFoldKey(report.reporterUserId, report.sessionId, targetKey(report.target)));
+      await txn.delete([reportFoldKey(report.reporterUserId, report.sessionId, targetKey(report.target)), reportOpenKey(id)]);
       await txn.put<unknown>({
         [reportKey(id)]: done,
         [reportPurgeKey(purgeAt, id)]: id,

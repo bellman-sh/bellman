@@ -1168,7 +1168,11 @@ export interface BellmanStore {
    * and this answers it whole.
    */
   roomReports(creatorId: string, sessionId: string): Promise<Report[]>;
-  /** Every report, newest first, at most `limit`: the operator's queue. */
+  /**
+   * The operator's queue, at most `limit` in all: the open reports first, newest first, then the resolved ones, newest
+   * first. Open first because an open report an operator cannot find is a report never acted on, and a queue cut at
+   * `limit` newest-first would leave the oldest open one behind however many newer ones had been resolved.
+   */
   listReports(limit: number): Promise<Report[]>;
   /**
    * Close a report with a note, as ONE operation, and answer it as it now stands. The first resolution stands: a
@@ -2137,7 +2141,8 @@ export class MemoryStore implements BellmanStore {
   }
 
   async listReports(limit: number): Promise<Report[]> {
-    return detach([...this.reports.values()].sort(newestFirst).slice(0, limit));
+    const newest = [...this.reports.values()].sort(newestFirst);
+    return detach([...newest.filter((r) => r.resolvedAt === null), ...newest.filter((r) => r.resolvedAt !== null)].slice(0, limit));
   }
 
   async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {

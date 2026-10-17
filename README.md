@@ -330,12 +330,12 @@ POST   /admin/suspensions/:userId  {note}, 1 to 500 characters
 DELETE /admin/suspensions/:userId  lift it
 ```
 
-Reports have routes of their own. `POST /rooms/:id/reports` is for anyone signed in who may report the room, with `{ member_id | cursor, reason, note }` and neither id for the room itself. It answers 201, or 200 with `folded: true` when the report repeats one still open, and past 10 a day it answers 429 `rate_limited`, with `retry_after` in the body and a `Retry-After` header. `GET /rooms/:id/reports` is the room's creator's: the reports about its other members and their messages, newest first, with the reason and the note and never who filed them. A report about the creator's own seats or messages is not in it. The last two are the operator's, behind the same bearer-only gate as the suspensions: the queue, newest first and cut at 200, with who filed each report and whom it is about, and a report closed with a note. A report already resolved is answered as it is, and the first resolution stands.
+Reports have routes of their own. `POST /rooms/:id/reports` is for anyone signed in who may report the room, with `{ member_id | cursor, reason, note }` and neither id for the room itself. It answers 201, or 200 with `folded: true` when the report repeats one still open, and past 10 a day it answers 429 `rate_limited`, with `retry_after` in the body and a `Retry-After` header. `GET /rooms/:id/reports` is the room's creator's: the reports about its other members and their messages, newest first, with the reason and the note and never who filed them. A report about the creator's own seats or messages is not in it. The last two are the operator's, behind the same bearer-only gate as the suspensions: the queue, with the open reports first and then the resolved ones, newest first in each and 200 in all, with who filed each report and whom it is about, and a report closed with a note. A report already resolved is answered as it is, and the first resolution stands.
 
 ```
 POST   /rooms/:id/reports          {member_id | cursor, reason, note}: 201, or 200 when it folds
 GET    /rooms/:id/reports          the reports about a room's other members and their messages: its creator's
-GET    /admin/reports              the queue: every report, who filed it, whom it is about
+GET    /admin/reports              the queue: open reports first, then resolved; who filed each, whom it is about
 POST   /admin/reports/:id/resolve  {note}, 1 to 500 characters
 ```
 

@@ -91,8 +91,10 @@ export type PlanStore = Pick<
   | "listReports" | "resolveReport"
 >;
 
-// ponytail: two hundred reports a read, not tuned, and no paging. The queue is newest first, so an operator more than
-// this far behind wants a cursor on it. The route takes no limit: whatever it asks the store for is this number.
+// ponytail: two hundred reports a read, not tuned, and no paging. The queue lists the open reports first and then the
+// resolved ones, newest first in each, so the cut falls among the resolved unless more than this many reports are open at
+// once: only then does an open report fall past it, and an operator that far behind wants a cursor on the queue. The route
+// takes no limit: whatever it asks the store for is this number.
 export const MAX_REPORTS_LISTED = 200;
 
 export type PlanSource = "operator" | "grant" | "default";
@@ -1416,7 +1418,7 @@ export async function handleOAuth(
     if (gate instanceof Response) return gate;
     if (method !== "GET") return new Response("Method not allowed", { status: 405, headers: { allow: "GET" } });
     if (!config.plans) return oauthError("unsupported", "this server has no plan store", 501);
-    // Every report with who filed it and whom it is about, newest first.
+    // The queue as the store orders it (open reports first, then resolved, newest first in each), with who filed each and whom it is about.
     return json({ reports: (await config.plans.listReports(MAX_REPORTS_LISTED)).map(operatorReportView) });
   }
   const resolving = ADMIN_REPORT_RESOLVE.exec(path);

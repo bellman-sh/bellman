@@ -1429,7 +1429,7 @@ covers those, and a transaction would be the stronger form: it holds even if an
 await on anything but storage were ever put between the read and the write.
 Across objects there is no transaction to widen.
 
-`seatMember` is the newest of those, and it is worth reading as the pattern.
+`seatMember` is the newest of those.
 Seating a joiner means reclaiming a stale seat if that is what it takes,
 deciding capacity, and appending the member — and as three store calls from a
 tool handler, two concurrent confirms could agree on the same free slot, both

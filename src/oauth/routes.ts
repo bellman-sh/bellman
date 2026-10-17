@@ -57,7 +57,8 @@ export interface OAuthConfig {
    *
    * This router reads it for the sign-in return alone (`panelDestination`): a sign-in started on one of these pages
    * comes back to it. It adds nothing to what `panelOrigins` grants: sessions, CORS and the CSRF check here still read
-   * the panel's list. The Worker hands the same list to the report route, the one other thing that honours it.
+   * the panel's list. The Worker hands the same list to the report route and to the suspension gate's refusal of it
+   * (`routeOrigin`), the only other things that honour it.
    */
   publicPageOrigins?: string[];
   /**

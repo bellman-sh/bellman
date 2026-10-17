@@ -6,7 +6,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { handleRoutes } from "../src/http/handles.js";
-import { moderationRoutes, type ModerationDeps } from "../src/http/moderation.js";
+import { moderationRoutes, routeOrigin, type ModerationDeps } from "../src/http/moderation.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/store.js";
 import { member, roomManifest, session } from "./helpers/fixtures.js";
@@ -90,6 +90,25 @@ describe("bellman.sh's one signed-in write (public rooms on bellman.sh spec, D7)
     for (const method of ["PUT", "DELETE"]) {
       expect(await grant(send(moderation, method, `/rooms/${ROOM}/reports`, PAGE, undefined, DEV_KEY.jesse)), method).toBeNull();
     }
+  });
+
+  // The one rule the report route answers by and the Worker's suspension gate refuses by (worker-tests/moderation-routes.test.ts),
+  // so it is asked on its own: which method and path make bellman.sh's origin a granted one.
+  it("grants bellman.sh a report's POST and preflight, slash or none, and nothing on another method or path", () => {
+    const reports = `/rooms/${ROOM}/reports`;
+    const origin = (method: string, path: string, from: string | null = PAGE) =>
+      routeOrigin(new Request(`${ISSUER}${path}`, { method, headers: from ? { origin: from } : {} }), [PANEL], [PAGE]);
+    for (const method of ["POST", "OPTIONS"]) {
+      for (const path of [reports, `${reports}/`]) expect(origin(method, path), `${method} ${path}`).toBe(PAGE);
+    }
+    for (const method of ["GET", "PUT", "DELETE"]) expect(origin(method, reports), `${method} ${reports}`).toBeUndefined();
+    for (const path of [...BAN_PATHS, `${reports}/extra`, `/rooms/${ROOM}`, "/rooms", "/account/handle", "/presets", "/operator/stats"]) {
+      for (const method of ["POST", "OPTIONS"]) expect(origin(method, path), `${method} ${path}`).toBeUndefined();
+    }
+    expect(origin("POST", reports, PANEL), "the panel's").toBe(PANEL);
+    expect(origin("DELETE", `/rooms/${ROOM}/bans/${BAN}`, PANEL), "the panel's, on a path that is only its").toBe(PANEL);
+    expect(origin("POST", reports, "https://evil.example"), "an origin on neither list").toBeUndefined();
+    expect(origin("POST", reports, null), "no Origin sent").toBeUndefined();
   });
 
   // The control for the refusals above: the same calls from the panel pass the origin check.

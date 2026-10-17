@@ -41,6 +41,18 @@ const tokenFor = (identity: Identity) => signJwt(
   SECRET, ACCESS_TOKEN_TTL_SECONDS,
 );
 const OPERATOR: Identity = { userId: "u_operator", orgId: null, plan: "free", role: "member", label: "ops@example.dev" };
+const PANEL = "https://dash.example.test";
+const PAGE = "https://bellman.sh";
+/** A panel session's cookie for `userId`, as a sign-in leaves one: what the dash and bellman.sh's room pages send. */
+const cookieFor = async (userId: string) => {
+  const now = Date.now();
+  const id = crypto.randomUUID();
+  await new AuthStore(env.AUTH as never).putSession(id, {
+    identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
+    identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+  });
+  return `${sessionCookieName(true)}=${id}`;
+};
 
 describe("the moderation routes through the Worker", () => {
   it("bans at /rooms/:id/bans, lists the ban, and lifts it at /rooms/:id/bans/:banId, over the real room", async () => {
@@ -223,16 +235,6 @@ describe("the moderation routes through the Worker", () => {
   // refusal carries CORS, so the panel can read why. The route reuses the gate's answer, so a request touches its
   // session once rather than once for the gate and again for the route.
   it("refuses a suspended account's panel cookie where the panel can read it, and touches a served session once", async () => {
-    const PANEL = "https://dash.example.test";
-    const cookieFor = async (userId: string) => {
-      const now = Date.now();
-      const id = crypto.randomUUID();
-      await new AuthStore(env.AUTH as never).putSession(id, {
-        identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
-        identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
-      });
-      return `${sessionCookieName(true)}=${id}`;
-    };
     const rooms = async (cookie: string) =>
       worker.fetch(new Request(`${ORIGIN}/rooms`, { headers: { cookie, origin: PANEL } }), oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL }), ctx);
     await store().suspend("u_wire_cookie", { note: "wire", by: OPERATOR.userId, at: Date.now() });
@@ -254,17 +256,6 @@ describe("the moderation routes through the Worker", () => {
   // then the CSRF check with the page's origin. The reader's cookie files a report from bellman.sh while the var names it
   // and files none while it does not. The creator's cookie is refused a ban from bellman.sh, and makes it from the panel.
   it("files a report from bellman.sh with the reader's session cookie, and refuses that page a ban", async () => {
-    const PANEL = "https://dash.example.test";
-    const PAGE = "https://bellman.sh";
-    const cookieFor = async (userId: string) => {
-      const now = Date.now();
-      const id = crypto.randomUUID();
-      await new AuthStore(env.AUTH as never).putSession(id, {
-        identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
-        identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
-      });
-      return `${sessionCookieName(true)}=${id}`;
-    };
     const listed = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE });
     const unlisted = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL });
     const post = (path: string, body: unknown, cookie: string, origin: string, on = listed) => worker.fetch(new Request(`${ORIGIN}${path}`, {
@@ -284,6 +275,61 @@ describe("the moderation routes through the Worker", () => {
     expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PAGE)).status).toBe(403);
     expect(await store().roomBans("qs_wire_mod")).toEqual([]);
     expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PANEL)).status, "the control: the panel bans").toBe(200);
+  });
+
+  // The gate answers ahead of the route, so what its refusal grants is the gate's to decide, and it decides as the routes do
+  // (`routeOrigin`). A suspended reader's report from bellman.sh is refused with the page's origin and credentials, so the page
+  // reads "This account is suspended."; with no grant its fetch fails with no reason. The grant is that one write's and no
+  // wider: the same account's ban and its read of a room's reports, which the page may not make, are refused with none, and the
+  // panel is granted all three. Every answer here is the gate's and never the CSRF check's, so each carries the suspension.
+  it("refuses a suspended reader's report from bellman.sh where the page can read it, and grants that page no other refusal", async () => {
+    const listed = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE });
+    const unlisted = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL });
+    await store().suspend("u_wire_page_suspended", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const reader = await cookieFor("u_wire_page_suspended");
+    /** What a browser reads of an answer: its status and body, and whether the page that asked may read it at all. */
+    const refusal = async (method: string, path: string, origin: string, on = listed) => {
+      const res = await worker.fetch(new Request(`${ORIGIN}${path}`, {
+        method, headers: { cookie: reader, origin }, body: method === "POST" ? "{}" : undefined,
+      }), on, ctx);
+      return [res.status, await res.json(), res.headers.get("access-control-allow-origin"), res.headers.get("access-control-allow-credentials")];
+    };
+    const suspended = { error: "suspended", error_description: "This account is suspended." };
+    const reports = "/rooms/qs_wire_mod/reports";
+    const bans = "/rooms/qs_wire_mod/bans";
+
+    expect(await refusal("POST", reports, PAGE)).toEqual([403, suspended, PAGE, "true"]);
+    expect(await refusal("POST", reports, PAGE, unlisted), "the control: the var unset").toEqual([403, suspended, null, null]);
+    expect(await refusal("POST", bans, PAGE), "the control: another path").toEqual([403, suspended, null, null]);
+    expect(await refusal("GET", reports, PAGE), "the control: another method").toEqual([403, suspended, null, null]);
+    for (const [method, path] of [["POST", reports], ["POST", bans], ["GET", reports]] as const) {
+      expect(await refusal(method, path, PANEL), `the panel's ${method} ${path}`).toEqual([403, suspended, PANEL, "true"]);
+    }
+  });
+
+  // The gate's other answer, for a registry that cannot say whether an account is suspended: a 500 in the routes' JSON, under
+  // the same rule. The page reads that one too, where a refusal with no grant is a failed fetch; its ban is granted nothing.
+  it("answers a failed suspension read with the page's origin for its report and with none for its ban", async () => {
+    const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended").mockRejectedValue(new Error("registry down"));
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const reader = await cookieFor("u_wire_page_unread");
+      const answer = async (path: string, origin: string) => {
+        const res = await worker.fetch(new Request(`${ORIGIN}${path}`, {
+          method: "POST", headers: { cookie: reader, origin }, body: "{}",
+        }), oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE }), ctx);
+        return [res.status, await res.json(), res.headers.get("access-control-allow-origin")];
+      };
+      const internal = { error: "internal", error_description: expect.any(String) };
+
+      expect(await answer("/rooms/qs_wire_mod/reports", PAGE)).toEqual([500, internal, PAGE]);
+      expect(await answer("/rooms/qs_wire_mod/bans", PAGE), "the control: another path").toEqual([500, internal, null]);
+      expect(await answer("/rooms/qs_wire_mod/bans", PANEL), "the control: the panel").toEqual([500, internal, PANEL]);
+      expect(read, "each answer is the gate's").toHaveBeenCalledTimes(3);
+    } finally {
+      read.mockRestore();
+      quiet.mockRestore();
+    }
   });
 
   it("asks the registry about an account once a minute, not once a request", async () => {

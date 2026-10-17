@@ -165,7 +165,7 @@ Errors: "connect token invalid or expired" — re-run bellman_connect.`,
           member_id: memberId,
           cursor: joinEvent.cursor,
           members: joined.members.map((m) => publicMember(m, connected)),
-          room: roomPreview(joined, roomRole),
+          room: roomPreview(joined, roomRole, identity.userId),
           briefs: shown.map((m) => untrusted({ memberId: m.memberId, label: m.label }, shownBriefs[m.memberId])),
           briefs_omitted: peers.length - shown.length,
           // Every item, in the writer's envelope (#129): the joiner is a member

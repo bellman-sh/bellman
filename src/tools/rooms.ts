@@ -57,7 +57,7 @@ Closed rooms, and rooms you left or were removed from, are not listed. Peer-writ
           s.connectedMembers(id),
           s.recentEvents(id, ROOM_TAIL),
         ]);
-        rooms.push(roomSummary(session, mine, connected, tail, now));
+        rooms.push(roomSummary(session, mine, connected, tail, now, identity.userId));
       }
       return ok({ rooms }, rooms.length > 0 ? UNTRUSTED_PREAMBLE : undefined);
     },

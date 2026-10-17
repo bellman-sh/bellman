@@ -241,7 +241,7 @@ Errors: "invalid manifest — ..." (a default_role or creator_role that names no
         // What the server recorded, seen from the creator's seat. Without it the
         // author of a manifest, especially one parsed from .bellman/room.yaml,
         // cannot see a preset or role that validated but is not what they meant.
-        room: roomPreview(room, manifest.creatorRole),
+        room: roomPreview(room, manifest.creatorRole, identity.userId),
         share_instructions:
           `Give the join code to whoever you want in the room. In their session (any MCP client — Claude, ChatGPT, Cursor, Gemini), they run bellman_connect with the code, review your brief, then bellman_confirm with their own. A swarm room holds as many members as you invite, up to ${ROOM_MEMBER_CEILING}; reissue a code with bellman_invite to add members later.`,
       });

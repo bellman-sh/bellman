@@ -58,6 +58,27 @@ describe("bellman_report (spec §3)", () => {
     }]);
   });
 
+  /**
+   * Review Focus 5, through the tool. The store pins that a report resolved is closed (the contract), and this pins what a caller
+   * sees: the same target reported again after the first was resolved files a new report and sends a second email, under a
+   * new id, while a repeat before that folds and sends none.
+   */
+  it("files anew and mails a second time once the first is resolved, and folds a repeat of the new one", async () => {
+    const s = await pairUp(harness());
+    const args = { session_id: s.sessionId, member_id: s.creatorMemberId, reason: "spam" };
+    const first = await s.joiner.call("bellman_report", args);
+    expect(first.data).toEqual({ report_id: expect.stringMatching(/^rpt_/), folded: false });
+    const resolved = await h.store.resolveReport(String(first.data.report_id), { note: "warned", by: "u_operator" }, Date.now());
+    expect(resolved?.resolvedAt, "the first is resolved").not.toBeNull();
+    const again = await s.joiner.call("bellman_report", args);
+    expect(again.data).toEqual({ report_id: expect.stringMatching(/^rpt_/), folded: false });
+    expect(again.data.report_id, "a new report, not the closed one").not.toBe(first.data.report_id);
+    expect(mailed.map((r) => r.id), "two emails, two ids").toEqual([first.data.report_id, again.data.report_id]);
+    const third = await s.joiner.call("bellman_report", args);
+    expect(third.data, "the new one is open, so a repeat folds into it").toEqual({ report_id: again.data.report_id, folded: true });
+    expect(mailed).toHaveLength(2);
+  });
+
   it("reports a message by its cursor, naming its sender, and the room with neither", async () => {
     const s = await pairUp(harness());
     const cursor = await say(s, "buy now");

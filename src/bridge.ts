@@ -1355,7 +1355,9 @@ export function createBridge(opts: BridgeOptions) {
    * like any other so the membership it reveals is watched. A placement the
    * server refuses, for whatever reason, is reported with the blob's id, bytes
    * and type: the bytes are stored and charged, and the caller places them again
-   * (as a file, if an image was the trouble) rather than uploading twice.
+   * (as a file, if an image was the trouble) rather than uploading twice. One
+   * refusal is not about the kind: the send limit. It keeps the kind asked for and
+   * passes `retry_after` through, because the trouble is the minute.
    */
   async function uploadAndPlace(args: Record<string, unknown>): Promise<CallToolResult> {
     const fail = (text: string): CallToolResult => ({ content: [{ type: "text", text: `Error: ${text}` }], isError: true });
@@ -1426,10 +1428,15 @@ export function createBridge(opts: BridgeOptions) {
     const placed = await (await remote()).callTool({ name: "bellman_send", arguments: sendArgs });
     observe("bellman_send", sendArgs, placed);
     if (placed.isError) {
-      return fail(
+      // A refusal for the send limit is about the minute and not the kind, so the advice keeps the kind asked
+      // for (an image placed as a file stops being one) and the structured { error, retry_after } goes through
+      // as the upstream bellman_send gave it. Any other refusal may be the kind's, and "file" is the way out.
+      const limited = (placed.structuredContent as { error?: unknown } | undefined)?.error === "rate_limited";
+      const failure = fail(
         `uploaded blob ${uploaded.blob_id} (${uploaded.bytes} bytes, stored as ${uploaded.type}) but could not place it as ${kind} "${key}": ` +
-          `${textOf(placed).replace(/^Error: /, "")} Place it with bellman_send type "surface", payload { key, kind: "file", blob: { id: "${uploaded.blob_id}" } }, rather than uploading again.`,
+          `${textOf(placed).replace(/^Error: /, "")} Place it with bellman_send type "surface", payload { key, kind: "${limited ? kind : "file"}", blob: { id: "${uploaded.blob_id}" } }, rather than uploading again.`,
       );
+      return limited ? { ...failure, structuredContent: placed.structuredContent } : failure;
     }
     const out = (placed.structuredContent ?? {}) as Record<string, unknown>;
     const result = { blob_id: uploaded.blob_id, bytes: uploaded.bytes, type: uploaded.type, kind, cursor: out.cursor, room_members: out.room_members };

@@ -270,6 +270,8 @@ describe("bellman_upload", () => {
     // upload happened, with its size and stored type, and the placement that needs no second upload.
     expect(out.text).toContain(`uploaded blob ${id} (22 bytes, stored as application/octet-stream)`);
     expect(out.text).toContain(`blob: { id: "${id}" }`);
+    // A refusal about the kind still points at "file": the item refused is not an image. Only the send limit keeps the kind.
+    expect(out.text).toContain(`payload { key, kind: "file", blob: { id: "${id}" } }`);
     expect(await fake.blobs.head(ROOM, id!)).toMatchObject({ type: "application/octet-stream" });
     expect(await fake.store.surfaceOf(ROOM)).toEqual([]);
     expect(fetches).toBe(1);
@@ -280,6 +282,29 @@ describe("bellman_upload", () => {
     })) as CallToolResult;
     expect(Boolean(placed.isError)).toBe(false);
     expect(fetches).toBe(1);
+  });
+
+  // A placement refused for the send limit has nothing wrong with its kind, so the advice keeps the kind that was
+  // asked for (an image placed as a file stops being an image), and retry_after reaches the agent as it does from
+  // bellman_send itself.
+  it("reports a placement refused for the send limit with the kind that was asked for, and its retry_after", async () => {
+    const now = Date.now();
+    for (let i = 0; i < 30; i++) expect(await fake.store.admitSend(ROOM, "m_creator", 30, now)).toEqual({ ok: true });
+    const page = "<!doctype html><title>demo</title>";
+    for (const [name, content, kind, placedAs] of [
+      ["shot.png", PNG, undefined, "image"],
+      ["demo.html", page, "html", "html"],
+    ] as const) {
+      const out = await upload({ path: file(name, content), key: "k", ...(kind ? { kind } : {}) });
+      expect(out.isError, name).toBe(true);
+      const id = /uploaded blob ([a-f0-9]{32})/.exec(out.text)?.[1];
+      expect(id, out.text).toBeDefined();
+      expect(out.text, name).toContain("rate_limited");
+      expect(out.text, name).toContain(`payload { key, kind: "${placedAs}", blob: { id: "${id}" } }`);
+      expect(out.text, name).not.toContain('kind: "file"');
+      expect(out.data, name).toEqual({ error: "rate_limited", retry_after: expect.any(Number) });
+    }
+    expect(await fake.store.surfaceOf(ROOM)).toEqual([]);
   });
 
   it("reports a refused upload with the server's status", async () => {

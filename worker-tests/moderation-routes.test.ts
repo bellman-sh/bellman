@@ -327,4 +327,97 @@ describe("the moderation routes through the Worker", () => {
       quiet.mockRestore();
     }
   });
+
+  it("files a report at /rooms/:id/reports over the real registry, mails it once through SEND_EMAIL, and the creator reads it", async () => {
+    await seed();
+    const sent: unknown[] = [];
+    const mailEnv = { ...env, SEND_EMAIL: { send: async (m: unknown) => { sent.push(m); return { messageId: "m1" }; } } } as unknown as Parameters<typeof worker.fetch>[1];
+    const filed = await call("/rooms/qs_wire_mod/reports", { method: "POST", body: JSON.stringify({ member_id: "m_peer", reason: "spam", note: "ads" }) }, mailEnv);
+    expect(filed.status, await filed.clone().text()).toBe(201);
+    expect(sent).toEqual([expect.objectContaining({ from: "reports@bellman.sh", to: "support@bellman.sh" })]);
+    const listed = (await (await call("/rooms/qs_wire_mod/reports", {}, mailEnv)).json()) as { reports: { reason: string }[] };
+    expect(listed.reports.map((r) => r.reason)).toEqual(["spam"]);
+  });
+
+  // The tool and the route mail through one binding: the Worker builds the mailer once and hands it to both.
+  it("mails a report the bellman_report tool files at /mcp through the same SEND_EMAIL binding", async () => {
+    await seed();
+    const sent: { subject: string }[] = [];
+    const mailEnv = { ...env, SEND_EMAIL: { send: async (m: { subject: string }) => { sent.push(m); return { messageId: "m1" }; } } } as unknown as Parameters<typeof worker.fetch>[1];
+    const res = await call("/mcp", {
+      method: "POST",
+      headers: { accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "tools/call",
+        params: { name: "bellman_report", arguments: { session_id: "qs_wire_mod", member_id: "m_peer", reason: "spam" } },
+      }),
+    }, mailEnv);
+    const body = (await res.json()) as { result: { isError?: boolean; structuredContent: { report_id: string } } };
+    expect(body.result.isError ?? false, JSON.stringify(body)).toBe(false);
+    expect(sent.map((m) => m.subject)).toEqual([expect.stringContaining(body.result.structuredContent.report_id)]);
+  });
+
+  it("lists the queue at /admin/reports and resolves one at /admin/reports/:id/resolve for a listed operator", async () => {
+    const filed = await store().fileReport({
+      sessionId: "qs_wire_mod", creatorId: "u_jesse", target: { kind: "room" }, subject: null, reason: "illegal",
+      note: null, reporterUserId: "u_reader", reporterLabel: "reader@x",
+    }, Date.now());
+    const id = (filed as { report: { id: string } }).report.id;
+    const auth = { authorization: `Bearer ${await tokenFor(OPERATOR)}`, "content-type": "application/json" };
+    const listed = await worker.fetch(new Request(`${ORIGIN}/admin/reports`, { headers: auth }), oauthEnv(), ctx);
+    expect(((await listed.json()) as { reports: { id: string }[] }).reports.map((r) => r.id)).toEqual([id]);
+    const resolved = await worker.fetch(new Request(`${ORIGIN}/admin/reports/${id}/resolve`, {
+      method: "POST", headers: auth, body: JSON.stringify({ note: "handled" }),
+    }), oauthEnv(), ctx);
+    expect(resolved.status, await resolved.clone().text()).toBe(200);
+    expect((await store().listReports(10))[0].resolvedAt).not.toBeNull();
+  });
+
+  // Both report routes sit under /rooms/, behind the suspension gate (R8): the POST files as the caller and the GET reads as
+  // the creator. Each account is one no earlier case read, so this isolate's cache holds no answer for it. The controls are
+  // the same requests from accounts nobody suspended, which the route serves.
+  it("refuses a suspended account at POST and GET /rooms/:id/reports with the one message, files and mails nothing, and serves another", async () => {
+    const sent: unknown[] = [];
+    const mailing = oauthEnv({ SEND_EMAIL: { send: async (m: unknown) => { sent.push(m); return { messageId: "m1" }; } } });
+    const asUser = async (userId: string, path: string, init: RequestInit = {}) => worker.fetch(new Request(`${ORIGIN}${path}`, {
+      ...init,
+      headers: { authorization: `Bearer ${await tokenFor({ userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` })}`, "content-type": "application/json" },
+    }), mailing, ctx);
+    const roomOf = (id: string, creator: string) => store().createSession(session({
+      id, createdBy: creator, manifest: roomManifest({ public: true }), members: [member({ userId: creator, label: `${creator}@example.dev` })],
+    }));
+    await seed();
+    await roomOf("qs_wire_gate_a", "u_wire_gate_creator_a");
+    await roomOf("qs_wire_gate_b", "u_wire_gate_creator_b");
+    for (const userId of ["u_wire_report_suspended", "u_wire_gate_creator_a"]) {
+      await store().suspend(userId, { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    }
+    const report = (userId: string) => asUser(userId, "/rooms/qs_wire_mod/reports", {
+      method: "POST", body: JSON.stringify({ member_id: "m_peer", reason: "spam" }),
+    });
+    const suspended = { error: "suspended", error_description: "This account is suspended." };
+
+    const refusedPost = await report("u_wire_report_suspended");
+    expect([refusedPost.status, await refusedPost.json()]).toEqual([403, suspended]);
+    const refusedGet = await asUser("u_wire_gate_creator_a", "/rooms/qs_wire_gate_a/reports");
+    expect([refusedGet.status, await refusedGet.json()]).toEqual([403, suspended]);
+    expect(await store().listReports(10), "nothing filed").toEqual([]);
+    expect(sent, "nothing mailed").toEqual([]);
+
+    const filed = await report("u_wire_report_control");
+    expect(filed.status, await filed.clone().text()).toBe(201);
+    const read = await asUser("u_wire_gate_creator_b", "/rooms/qs_wire_gate_b/reports");
+    expect([read.status, await read.json()]).toEqual([200, { reports: [] }]);
+    expect(await store().listReports(10)).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+  });
+
+  // R8 leaves /admin/* ungated, so an operator who is suspended can still work the queue and lift a suspension.
+  it("serves /admin/reports to a listed operator whose own account is suspended", async () => {
+    await store().suspend("u_wire_op_suspended", { note: "wire", by: OPERATOR.userId, at: Date.now() });
+    const operator = await tokenFor({ ...OPERATOR, userId: "u_wire_op_suspended" });
+    const listed = await worker.fetch(new Request(`${ORIGIN}/admin/reports`, { headers: { authorization: `Bearer ${operator}` } }),
+      oauthEnv({ BELLMAN_OPERATORS: "u_wire_op_suspended" }), ctx);
+    expect([listed.status, await listed.json()]).toEqual([200, { reports: [] }]);
+  });
 });

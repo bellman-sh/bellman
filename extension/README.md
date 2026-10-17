@@ -114,7 +114,7 @@ bridge over the real tool handlers and asserts the manifest names exactly what
 that bridge lists. It found the bug it was written for: the list had been
 missing `bellman_whoami` since the bridge grew it.
 
-That surface is the server's twelve tools plus the bridge's own three, and *which*
+That surface is the server's thirteen tools plus the bridge's own three, and *which*
 of its own depends on the delivery mode — `bellman_wait` exists under `hook`
 and `queue` and not under `channel`, while `bellman_whoami` and `bellman_upload`
 exist under all three. So the test asserts the declared mode as well; without that, the

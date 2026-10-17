@@ -30,6 +30,8 @@ const replies: Reply[] = [];
 const stray: string[] = [];
 /** The prompt of each model call the stub answered, in order: what the seat sent. */
 const asked: { system: string }[] = [];
+/** The body of each Messages API call the seat made, as the model was sent it. */
+const sentBodies: string[] = [];
 const modelAnswers = (text: string, status = 200) => { replies.push({ status, text }); };
 
 /** A reply the model gives only once `release` is called. `asked()` waits until the seat has called for it. */
@@ -52,6 +54,7 @@ beforeEach(() => {
     }
     reply.asked = true;
     asked.push((await req.clone().json()) as { system: string });
+    sentBodies.push(await req.text());
     while (reply.held) await new Promise((r) => setTimeout(r, 5));
     return Response.json(reply.status === 200 ? { content: [{ type: "text", text: reply.text }] } : { error: { type: "rate_limit" } },
       { status: reply.status });
@@ -62,17 +65,19 @@ afterEach(async () => {
   const unread = replies.splice(0);
   const calls = stray.splice(0);
   asked.splice(0);
+  sentBodies.length = 0;
   await reset();
   await abortAllDurableObjects();
   expect(calls, "model calls no case queued a reply for").toEqual([]);
   expect(unread, "model replies queued and never read").toEqual([]);
 });
 
-async function hostedRoom(id = "qs_hosted") {
+/** `label` is how the room's creator signed in, the fixture's by default. */
+async function hostedRoom(id = "qs_hosted", label?: string) {
   const store = new DurableObjectStore(env as never);
   const m = hosted();
   const now = Date.now();
-  const s = session({ id, manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], joinCodes: {},
+  const s = session({ id, manifest: m, members: [member({ lastSeenAt: now, ...(label ? { label } : {}) }), hostMember(m, now)], joinCodes: {},
     hostUnitsPerMonth: 10, hostUnits: { month: monthKey(now), used: 0, wakes: [] },
     // A host that has never asked is due the moment its room starts. These cases drive each tick
     // themselves (\`tick\`), so the room starts as if its host had just asked, and arms a cadence out.
@@ -161,6 +166,54 @@ it("a reply wakes the host, which answers in the thread", async () => {
   const answer = (await store.eventsAfter(id, q.cursor)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
   expect(answer).toMatchObject({ refId: String(q.cursor), payload: { kind: "answer", text: "Nice, tell us more." } });
   expect((await store.getSession(id))!.hostUnits.used).toBe(2);
+});
+
+/**
+ * The leak, seen live in a public room: the seat's answer repeated a member's email address, because
+ * its prompt named the member who replied by the label they signed in with. Over the real room and
+ * seat, the number comes from the room's own row for the label, the one a public page reads.
+ */
+it("names the member who replied as a public page does, and sends the model no part of their email address", async () => {
+  const address = "jesse@mcfearsome.dev";
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_named", address);
+  modelAnswers("What shipped?");
+  await tick(stub);
+  await seatIdle(host);
+  const q = (await store.eventsAfter(id, 0)).find((e) => e.fromMemberId === HOST_MEMBER_ID)!;
+  modelAnswers("What a sharp pivot.");
+  await store.appendEvent(id, { type: "message", fromMemberId: "m_creator", fromUserId: "u_jesse", fromLabel: address, payload: { text: "a physics sanity-checker" }, refId: String(q.cursor) });
+  await seatIdle(host);
+
+  expect(sentBodies, "the question, then the answer").toHaveLength(2);
+  const answerTurn = (JSON.parse(sentBodies[1]) as { messages: { content: string }[] }).messages[0].content;
+  expect(answerTurn).toContain('<reply from="member 1">a physics sanity-checker</reply>');
+  for (const part of [address, "jesse", "mcfearsome"]) expect(sentBodies.join("\n"), part).not.toContain(part);
+});
+
+// A reply can come from a member who has left by the time the seat answers: a failed model call is retried
+// up to 15 minutes later. The room's record keeps only the members still in it (ADR 0019), so a map built
+// from the record would call that member nobody; the room's own row for their label still holds the number
+// a public page shows.
+it("names a member who has left the room by their number, as a public page does", async () => {
+  const address = "peer@elsewhere.org";
+  const { store, id, stub, host } = await hostedRoom("qs_hosted_left");
+  await store.addMember(id, member({ memberId: "m_peer", userId: "u_peer", label: address, roomRole: "lead" }));
+  modelAnswers("What shipped?");
+  await tick(stub);
+  await seatIdle(host);
+  const [q] = await hostSaid(store, id);
+  const reply = await appendHeld(stub, {
+    type: "message", fromMemberId: "m_peer", fromUserId: "u_peer", fromLabel: address, payload: { text: "a compiler" }, refId: String(q.cursor),
+  });
+  await store.updateMember(id, "m_peer", { leftAt: Date.now() });
+  expect((await store.getSession(id))!.members.map((m) => m.memberId), "the record no longer holds them").not.toContain("m_peer");
+
+  modelAnswers("Nice.");
+  await host.wake({ sessionId: id, cause: "reply", cursor: reply.cursor }, `host:reply:${reply.cursor}`);
+  await seatIdle(host);
+  const answerTurn = (JSON.parse(sentBodies[1]) as { messages: { content: string }[] }).messages[0].content;
+  expect(answerTurn).toContain('<reply from="member 2">a compiler</reply>');
+  expect(sentBodies.join("\n")).not.toContain("elsewhere");
 });
 
 it("backs off on a 429 and asks on the retry; a redelivered wake asks nothing twice", async () => {

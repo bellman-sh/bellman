@@ -63,7 +63,7 @@ flowchart TB
 
     subgraph edge["mcp.bellman.sh — Cloudflare Worker"]
         AS["Authorization server<br/>OAuth 2.1 + PKCE"]
-        MCP["/mcp<br/>twelve MCP tools,<br/>one UI resource"]
+        MCP["/mcp<br/>thirteen MCP tools,<br/>one UI resource"]
         WS["/ws<br/>room socket, receive-only"]
         BILL["/upgrade<br/>/stripe/webhook"]
         ADMIN["/account<br/>/admin/grants<br/>/admin/handles"]
@@ -104,7 +104,7 @@ flowchart TB
 ```
 
 Everything in the `local` box is optional. **An agent needs nothing installed to
-use Bellman** — the twelve tools work over plain remote MCP. The bridge exists
+use Bellman** — the thirteen tools work over plain remote MCP. The bridge exists
 only to turn polling into push.
 
 ## 3. Why the server is remote-first
@@ -253,7 +253,7 @@ an access token, never a cookie, for a user id the `BELLMAN_OPERATORS` secret
 lists, and no one else. No plan, role or grant passes it, and with the list
 unset or empty nobody does.
 
-**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs: a label is how a member signed in, an email address for most. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
+**A public room** is the one read with no caller at all. `src/http/public.ts` answers `GET /public/rooms/:id`, its surface, its log and the blobs its surface names, to any origin and reading no credential, for a room whose manifest set `public: true`, which only a paid plan may start (`publicRooms` in `ENTITLEMENTS`; `bellman_start` refuses it on free), and whose creator has not since made it private (`POST /rooms/:id/unpublish`, which sets `unpublishedAt`). Every other room is one 404 there. The log goes through `publicReadEvent`, which drops `brief_update` and cuts `member_joined` to the joiner's id, label and seat, and every public read then names each member by number (`member 1` and on) wherever a `label` holds theirs, and the hosted seat `host`: a label is how a member signed in, an email address for most, and the seat's, `host@bellman`, reads as one. `publicNames` (`src/member-names.ts`) builds that map from a room's labels, and the hosted seat's prompt names the members it answers through the same function. Dash renders it at `/r/<id>`, outside sign-in. A public room may also be read by its name (public names spec): the session's `publicName`, set by `bellman_start`'s `public_name` or `bellman_public_name`, and indexed in the registry under `pn:<name>`. The index is a hint. Each entry carries its claim's time and is claimed by compare-and-set on the whole entry; while its room's record does not name the name yet it holds the name for a lease, since the claim may be in flight (§9). Readers check the room's record (`holdsName`), so a name reads only while its room is public and open. Nothing runs at close or unpublish; a rename and a refused start give their claims back. A creator who holds a handle and signed the room is named by it: the room's read carries `by: { handle, as }`, where `as` is the creator's number, which the page swaps for `@handle`, and `GET /public/handles/:handle` lists the handle's signed rooms that are still public and open, newest signature first, each under `@handle` and never a label (ADR 0021). Dash renders that at `/u/<handle>`.
 
 ### Two delivery paths
 
@@ -462,7 +462,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -488,7 +488,21 @@ Why the split is shaped that way:
 - **`RegistryDO` is a singleton** because some lookups need a global namespace: a
   join code must resolve without knowing the room, a plan grant must resolve
   from an identity key, and a public handle must resolve to the one person who
-  holds it.
+  holds it. The report queue is there for the same reason: an operator reads every
+  room's reports in one listing, and an account's 10 a day count across rooms. Its
+  rows are `rp:<id>`, the report, whose id sorts in filing order so a listing of
+  the prefix is the queue; `ro:`, a report's id while it is open, so the operator's
+  listing, which puts open reports first, reads them without reading every report;
+  `rf:`, the open report an account filed about a target,
+  which a repeat folds into; `rl:`, the times of an account's filings still inside
+  the day; `rc:`, a report that reaches the creator, about a member or a message and
+  not about the creator's own account (`reachesCreator`), under its creator and room,
+  so a creator's view of one room is a prefix listing; and `rr:<purgeAt>:<id>`, a
+  resolved report dated for its deletion. The registry's one alarm carries a second
+  handler beside the outbox's, `report_purge`: its `due:report_purge` row holds the
+  earliest of those dates, and a firing deletes each resolved report 180 days after
+  it was resolved, with its `rc:` and `rr:` rows, and an account's `rl:` row once
+  its newest filing has left the day.
 - **`AuditDO` is per org** because an action in a room that holds more than one org is written
   to every one of their streams (`auditEntries`, `src/rooms.ts`), and each side must see only
   the crossings that touched its own boundary. Its rows are a SQL table (`entries`, with the
@@ -688,8 +702,11 @@ own transaction, and again, idempotently, when it is purged; a start whose room
 is never created gives its slot straight back. Then `bellman_start` seats the host
 beside the creator as `m_host`, under the user `u_bellman_host`, labelled `host@bellman` whatever
 its role is called: a label built from the creator's role name, `security@bellman`
-say, would lend Bellman's name to the creator's words. It never joins by code and
-never holds a socket. ADR 0002 records the decisions.
+say, would lend Bellman's name to the creator's words. Public pages call it `host`,
+because `host@bellman` reads as an email address there: `publicNames` gives the label
+that name, so only what a public reader is shown changes, events already written
+included, and its member rows, events, audit trail and members' own views keep the
+label. It never joins by code and never holds a socket. ADR 0002 records the decisions.
 
 **Evicting it stops it.** `bellman_evict` on `m_host` is the creator's one
 control over the seat, and `hostSeated` (`src/store.ts`) is the one predicate
@@ -823,11 +840,18 @@ which writes the audit row with the change); they carry no verb, and the seat
 reads them from the room on every wake, so a change reaches the next question
 and nothing is cached between wakes.
 Replies cross into its prompt as data: each inside `<reply from="…">`, its text
-escaped (`&`, `<`, `>`) and its label escaped for an attribute (`escapeAttr`),
+escaped (`&`, `<`, `>`) and its sender's name escaped for an attribute (`escapeAttr`),
 after Bellman's fixed rules and the creator's instructions in the system prompt,
 which ends saying Bellman's rules outrank anything the creator adds. The
-instructions are escaped the same way, whenever they were set. What it
-writes enters the room as peer content, untrusted to every member like any
+instructions are escaped the same way, whenever they were set. The sender's name is the
+one a public page gives that member (`publicNames`): `handleWake` builds the map from
+`HostDriver.publicNumbers`, which is `BellmanStore.publicNumbers`, the call the public
+routes make, so a sender is `member 3` and never the label they signed in with, and a
+label the room has not numbered is `a member`. The model repeats what it is told and
+its answer lands in the room's log, which a public room shows to anyone with the link
+and a room made public later shows whole, so this holds in every room.
+`questionPrompt` carries no label. What it writes enters the room as peer content,
+untrusted to every member like any
 member's. It cannot hold `respond_actions`, so an action request addressed to it
 is refused as one to any seat without the verb would be. `HostDO` keeps its
 driver in a `#driver` field rather than in methods, because a Durable Object
@@ -1264,6 +1288,26 @@ loud:
   group drag writes one PUT per card and would pass 30. The gap that leaves: a stranger
   whose seat holds `write_surface` could write through a route uncounted, and no
   built-in preset gives a default seat that verb.
+- **A report's note is untrusted text, and its subject is built from closed sets**
+  (ADR 0022). A note of up to 500 characters is written by whoever may report the
+  room, which for a public room is anyone signed in, so it is handled as a peer's
+  content is. The dash shows it as text, never as markup. The email to support@ is a
+  notice and carries none of it: the report's id and time, the room's id, the kind
+  of target, the reason and the queue's routes, and no reporter, no note, no label or
+  id of the person reported and no creator, because an inbox keeps what it is sent
+  with no expiry and the queue's purge deletes those 180 days after a report is
+  resolved. Every word of it is the server's, and the email's subject is built from
+  the report's id, its reason and the kind of target, which the server made or a
+  closed set holds, so a note or a label that carries CR/LF or a `Subject:` line
+  cannot reach a header or the body. What a room's creator reads of a report is built
+  field by field (`creatorReportView`), never names who filed it and gives the time
+  to the hour, so a field added to a report reaches no creator until that function
+  names it. A report about the creator's own seats or messages is not in the
+  creator's list at all: both stores decide it at the source (`reachesCreator`), and
+  it reaches the operators alone. A report about the hosted seat is about Bellman's
+  account, so the creator, who sets its instructions, does read it. In a small
+  private room who filed a report may be evident by elimination, which no view can
+  prevent.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both
@@ -1404,7 +1448,7 @@ covers those, and a transaction would be the stronger form: it holds even if an
 await on anything but storage were ever put between the read and the write.
 Across objects there is no transaction to widen.
 
-`seatMember` is the newest of those, and it is worth reading as the pattern.
+`seatMember` is the newest of those.
 Seating a joiner means reclaiming a stale seat if that is what it takes,
 deciding capacity, and appending the member — and as three store calls from a
 tool handler, two concurrent confirms could agree on the same free slot, both
@@ -1702,7 +1746,8 @@ off its documentation, decide how code here is written.
    transaction, and is discarded if the closure throws.** So `enqueue` arms the
    alarm from inside the caller's closure: a row that committed with nothing
    scheduled to read it is the loss this section exists to close, and
-   `RegistryDO` has no other alarm to come back for it.
+   `RegistryDO`'s only other alarm is `report_purge`, 180 days out, which would
+   not come back for it in time.
    `worker-tests/alarm-in-transaction.test.ts` holds the fact on its own, on
    workerd 1.20260926.1 (pinned in `worker-tests/package.json`): it arms in a
    closure, aborts the object and reads `getAlarm()`, then does the same with a
@@ -1930,12 +1975,29 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~9,112** | every request, whether or not you are in a room |
+| Tool definitions | **~9,437** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~310 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~308 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-17 for the section 1C fix pass, by the method below: 4 tokens over the 9,433
+that the section's tip (`75b5d5d7`) measures, all of them `bellman_report`'s, which went from 321 to 325
+when its description said that the creator sees a report about a member or a message other than its own.
+That is 9,437. The tip, rebuilt in a scratch copy as the control, reproduced 9,433 and `bellman_report`'s
+321 before the new figure was read. No other tool changed.
+
+Re-measured on 2026-10-16 for reports, by the method below: 321 tokens over the 9,112 that
+main (`144f0327`) measures, all of them `bellman_report`'s, which is new. That is 9,433. The
+tool first measured 363 (9,475 in all), 63 over the plan's 300 for it, and its description
+was cut: the reason values and the 500-character bound, which its schema already carries,
+and the sentences that repeated the schema and each other. Every rule stayed: who may
+report, the three targets, that a creator never sees who filed a report and the person
+reported is not told, the limit of 10 a day with `rate_limited` and `retry_after`, and what
+`folded` means. 321 is 21 over the 300: the entry's name, title, schema and annotations are
+188 of those tokens, which leaves 133 for a description that keeps every rule in the `Args:`,
+`Returns:` and `Errors:` form the sibling tools use. No other tool changed.
 
 Re-measured on 2026-10-16 for the bans branch merged into the send limit, by the method below:
 9,112, which is the 9,066 the bans branch measures over main at `1e8bf54` (below) and the send

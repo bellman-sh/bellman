@@ -179,3 +179,17 @@ hour at least. A host that has never asked is now due at that first seat, and th
 alarm fires as the room is created, with its creator there to be asked. After
 that the host asks a cadence after each question, as decision 5 says. The first
 question spends one of the month's units at creation.
+
+## Amended 2026-10-17
+
+The seat's prompt named each reply's sender by the label that member signed in
+with, for most people an email address, and the model repeated one into a public
+room's log. A reply is now wrapped as `<reply from="member 3">`, the name a
+public page gives that member (`publicNames`, `src/member-names.ts`, from the
+room's own numbering), or `a member` for a label the room has not numbered. It
+does so in every room, since a room made public later shows its whole log.
+
+The seat's own label stays `host@bellman` in member rows, events, the audit
+trail and members' own views (decision 1). Public pages call it `host`, because
+`host@bellman` reads as an email address there, and they do so for events
+already written. An answer already posted is not rewritten.

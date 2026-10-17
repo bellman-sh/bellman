@@ -34,6 +34,8 @@ preset: review          # pair | swarm | review | social
 
 `social` declares a hosted seat, so `bellman_start` refuses it with `hosted seats are not available yet` for as long as hosted seats are unavailable.
 
+A hosted seat is a member Bellman runs. Its label is `host@bellman`, whatever its role is called, and public pages call it `host`. When it answers replies, its prompt names each sender as a public page names members, `member 3` and so on, and never by the label they signed in with.
+
 A hosted seat takes `host.instructions` in its manifest block: your words on what it should ask, at most 300 characters. They add to Bellman's own rules for the host and cannot outrank them, and `null` leaves the host with those rules alone. You can change them after the room has started. The room's creator sends `PUT /rooms/:id/host` with `{ "instructions": "…" }`, or `{ "instructions": null }` to clear them; the host reads them on every wake, so its next question is built from the new text. The text is trimmed and an empty one is stored as `null`. A room whose manifest has no host answers `409`, and so does a closed room.
 
 ## Write the roles

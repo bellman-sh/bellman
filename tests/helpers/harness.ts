@@ -12,6 +12,7 @@ import { resolveIdentity } from "../../src/auth.js";
 import { buildServer } from "../../src/server.js";
 import { MemoryStore, type BellmanStore } from "../../src/store.js";
 import { MemoryBlobStore, type BlobStore } from "../../src/blobs.js";
+import type { ReportMailer } from "../../src/reports.js";
 import type { Identity } from "../../src/types.js";
 
 export interface Outcome {
@@ -68,16 +69,19 @@ export class Harness {
   readonly blobs: BlobStore;
   /** The hosted seat's switch (BELLMAN_HOSTED_SEAT) as the servers this builds see it. On, so the tests that start hosted rooms are unchanged. */
   private readonly hostedSeat: boolean;
+  /** What a report's email goes through (`bellman_report`); a test passes one that records, and none means the server's own default. */
+  private readonly mailReport: ReportMailer | undefined;
   private readonly peers: Peer[] = [];
 
   constructor(
     store: BellmanStore = new MemoryStore(),
     blobs: BlobStore = new MemoryBlobStore(),
-    opts: { hostedSeat?: boolean } = {},
+    opts: { hostedSeat?: boolean; mailReport?: ReportMailer } = {},
   ) {
     this.store = store;
     this.blobs = blobs;
     this.hostedSeat = opts.hostedSeat ?? true;
+    this.mailReport = opts.mailReport;
   }
 
   /** Connect a new client bound to a dev bearer key. */
@@ -89,7 +93,7 @@ export class Harness {
 
   /** Connect a client bound to an arbitrary identity (for plan-matrix tests). */
   async connectAs(identity: Identity): Promise<Peer> {
-    const server = buildServer(identity, this.store, this.blobs, { hostedSeat: this.hostedSeat });
+    const server = buildServer(identity, this.store, this.blobs, { hostedSeat: this.hostedSeat, mailReport: this.mailReport });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: `test-${identity.userId}`, version: "0.0.1" });
     await Promise.all([

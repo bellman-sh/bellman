@@ -115,6 +115,10 @@
     {
       "name": "bellman_public_name",
       "description": "Check or set the name in a public room's link."
+    },
+    {
+      "name": "bellman_report",
+      "description": "Report a room, a member or a message to Bellman."
     }
   ],
   "compatibility": {

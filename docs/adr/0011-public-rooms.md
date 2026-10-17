@@ -33,12 +33,15 @@ speak. A member's label is how they signed in, an email address for most.
    `src/public-event.ts` leaves out `brief_update` and cuts `member_joined` to the
    joiner's id, label and seat. A blob downloads only while an item on the surface
    names it. A closed public room reads until its purge.
-5. **Members are named by number.** `publicNames` calls them `member 1`, `member
-   2` and on, in the order they joined, keyed by label, so one person's handles
-   share a number; the hosted seat keeps `host@bellman` (ADR 0002). `byNumber`
-   swaps every property named `label` that holds a member's label, at any depth,
-   in every public answer. Spec D4 showed labels; #233's review replaced them
-   before merge.
+5. **Members are named by number.** `publicNames` (`src/member-names.ts`) calls
+   them `member 1`, `member 2` and on, in the order they joined, keyed by label,
+   so one person's handles share a number. It calls the hosted seat `host`,
+   because its stored label, `host@bellman` (ADR 0002), reads as an email
+   address, and the seat's prompt names the members it answers through the same
+   function. `byNumber` swaps every property named `label` that holds a member's
+   label, at any depth, in every public answer. Spec D4 showed labels; #233's
+   review replaced them before merge. The seat was `host@bellman` here until
+   2026-10-17.
 6. **Joining still takes a code, and joiners are told first.** The preview's
    trusted spine carries `public` (`roomPreview`), `bellman_start` and
    `bellman_connect` say what it means, and the MCP App's join screen says "Anyone

@@ -67,8 +67,11 @@ class FlakyStore extends MemoryStore {
 
 afterEach(() => { vi.restoreAllMocks(); });
 
-/** With `deliver: false` the store's wakes are kept in `woken`, for the test to deliver itself. */
-async function hostedStore(replies: Reply[], { deliver = true, enabled = true } = {}) {
+/**
+ * With `deliver: false` the store's wakes are kept in `woken`, for the test to deliver itself. `label` is
+ * how the room's creator signed in, the fixture's by default.
+ */
+async function hostedStore(replies: Reply[], { deliver = true, enabled = true, label }: { deliver?: boolean; enabled?: boolean; label?: string } = {}) {
   const { f, calls } = fakeModel(replies);
   let host!: MemoryHost;
   const woken: HostWake[] = [];
@@ -76,7 +79,7 @@ async function hostedStore(replies: Reply[], { deliver = true, enabled = true } 
   host = new MemoryHost(store, { modelUrl: "http://fake", fetch: f, retryMs: [5, 5, 5], enabled });
   const m = hosted();
   const now = Date.now();
-  const s = session({ manifest: m, members: [member({ lastSeenAt: now }), hostMember(m, now)], hostUnitsPerMonth: 10,
+  const s = session({ manifest: m, members: [member({ lastSeenAt: now, ...(label ? { label } : {}) }), hostMember(m, now)], hostUnitsPerMonth: 10,
     hostUnits: { month: monthKey(now), used: 0, wakes: [] } });
   await store.createSession(s);
   return { store, host, id: s.id, calls, replies, woken };
@@ -145,6 +148,32 @@ describe("MemoryHost", () => {
     await ask();
     expect(system(2)).not.toContain("The room's creator adds:");
     expect(calls).toHaveLength(3);
+  });
+
+  /**
+   * The leak, seen live in a public room: the seat's answer repeated a member's email address, because
+   * the prompt named the member who replied by the label they signed in with. The turn end to end over
+   * the fake model: the creator signed in with an email address, the seat asks, the creator replies, and
+   * neither request the model is sent holds any part of the address. The answer's prompt names the
+   * replier as a public page does.
+   */
+  it("names the member who replied as a public page does, and sends the model no part of their email address", async () => {
+    const address = "jesse@mcfearsome.dev";
+    const { store, host, id, calls } = await hostedStore(
+      [{ status: 200, text: "What shipped?" }, { status: 200, text: "What a sharp pivot." }], { label: address });
+    await store.appendEvent(id, heartbeat);
+    await host.settled();
+    const [q] = await hostSaid(store, id);
+    await store.appendEvent(id, { ...replyTo(q.cursor), fromLabel: address, payload: { text: "a physics sanity-checker" } });
+    await host.settled();
+
+    expect(calls, "the question, then the answer").toHaveLength(2);
+    const userTurns = calls.map((c) => (c as { messages: { content: string }[] }).messages[0].content);
+    expect(userTurns[1]).toContain('<reply from="member 1">a physics sanity-checker</reply>');
+    for (const part of [address, "jesse", "mcfearsome"]) expect(JSON.stringify(calls), part).not.toContain(part);
+    expect((await hostSaid(store, id, q.cursor)).map((e) => e.payload), "the model's answer reached the thread").toEqual([
+      { kind: "answer", text: "What a sharp pivot." },
+    ]);
   });
 
   /**

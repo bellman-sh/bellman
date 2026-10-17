@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
 import { MemoryBlobStore } from "../src/blobs.js";
+import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID, hostMember } from "../src/host.js";
 import { publicRoutes } from "../src/http/public.js";
 import { MAX_EVENTS_READ, roomRoutes, type RoomRouteDeps } from "../src/http/rooms.js";
 import { storedMember } from "../src/projections.js";
@@ -245,6 +246,79 @@ describe("members' names on a public read", () => {
     ]);
     expect(events[3].data.payload).toEqual({ label: "member 2" });
     expect(events[4].data.payload).toEqual({ members: [{ member_id: "m_peer", label: "member 2" }], about: { origin: { label: "member 1" } } });
+  });
+});
+
+// The hosted seat's label is `host@bellman`, which reads as an email address on a public page. The
+// room's rows, events and audit trail keep it; a reader outside the room is shown `host`, in every
+// public read, old events included.
+describe("the hosted seat on a public read", () => {
+  const HOSTED = "qs_public_hosted";
+  const seat = { memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: HOST_LABEL };
+
+  beforeEach(async () => {
+    const m = roomManifest({
+      public: true, room: "Open social", purpose: "Read along", mode: "swarm", preset: null, heartbeatOnMs: 3_600_000,
+      roles: { lead: { can: ["send", "invite"], description: null, reports: false }, host: { can: ["send"], description: null, reports: false } },
+      defaultRole: "lead", creatorRole: "lead", host: { role: "host", model: "haiku", instructions: null },
+    });
+    // The creator is member 1, the seat has no number, and the peer is member 2.
+    await store.createSession(session({ id: HOSTED, manifest: m, members: [member(), hostMember(m, Date.now()), peer()] }));
+  });
+
+  const sayIn = async (from: { memberId: string; userId: string; label: string }, type: EventType, payload: unknown, extras?: Parameters<MemoryStore["appendEvent"]>[2]) => {
+    const e = await store.appendEvent(HOSTED, { type, fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload, refId: null }, extras);
+    expect(e).not.toBeNull();
+    return e!;
+  };
+  /** The log of a room whose seat has joined, asked, and written to the surface, and whose members have answered. */
+  const hostedLog = async () => {
+    await sayIn(member(), "message", { text: "hello" });
+    await sayIn(seat, "member_joined", { member: { member_id: HOST_MEMBER_ID, label: HOST_LABEL, room_role: "host" } });
+    await sayIn(seat, "message", { kind: "question", text: "What shipped?", tick: 1 });
+    await sayIn(peer(), "message", { text: "a parser" });
+    await sayIn(seat, "surface", { key: "note" }, {
+      surface: { key: "note", item: { key: "note", kind: "text", title: "Notes", body: "hello", ends: null, placement: null, blob: null, shape: null } },
+    });
+    await sayIn({ memberId: "system", userId: "system", label: "bellman" }, "heartbeat", {
+      members: [{ member_id: HOST_MEMBER_ID, label: HOST_LABEL }, { member_id: "m_peer", label: "peer@codenerd" }],
+    });
+  };
+
+  it("names the seat 'host' as the sender and the origin of its events, in the join that seated it, and wherever a payload names it", async () => {
+    await hostedLog();
+    const { events } = (await bodyOf(await read(`/public/rooms/${HOSTED}/events`))) as unknown as {
+      events: { origin: { memberId: string; label: string }; data: { type: string; from: { label: string }; payload: unknown } }[];
+    };
+    expect(events.map((e) => [e.data.type, e.origin.label, e.data.from.label])).toEqual([
+      ["message", "member 1", "member 1"],
+      ["member_joined", "host", "host"],
+      ["message", "host", "host"],
+      ["message", "member 2", "member 2"],
+      ["surface", "host", "host"],
+      ["heartbeat", "bellman", "bellman"],
+    ]);
+    expect(events[2].origin.memberId).toBe(HOST_MEMBER_ID);
+    expect(events[1].data.payload).toEqual({ member: { member_id: HOST_MEMBER_ID, label: "host", room_role: "host" } });
+    expect(events[5].data.payload).toEqual({ members: [{ member_id: HOST_MEMBER_ID, label: "host" }, { member_id: "m_peer", label: "member 2" }] });
+  });
+
+  it("names the seat 'host' as the writer of a surface item", async () => {
+    await hostedLog();
+    const { items } = (await bodyOf(await read(`/public/rooms/${HOSTED}/surface`))) as unknown as { items: { origin: unknown }[] };
+    expect(items.map((i) => i.origin)).toEqual([{ memberId: HOST_MEMBER_ID, label: "host" }]);
+  });
+
+  it("shows no public response the seat's label, which the room itself still stores", async () => {
+    await hostedLog();
+    for (const sub of ["", "/surface", "/events"]) {
+      const body = JSON.stringify(await bodyOf(await read(`/public/rooms/${HOSTED}${sub}`)));
+      expect(body, sub).not.toContain(HOST_LABEL);
+      expect(body, sub).not.toMatch(/@codenerd/);
+    }
+    // The control: the label is what the room stores, so the reads above had something to hide.
+    expect((await store.eventsAfter(HOSTED, 0)).filter((e) => e.fromLabel === HOST_LABEL)).toHaveLength(3);
+    expect((await store.getSession(HOSTED))!.members.map((m) => m.label)).toContain(HOST_LABEL);
   });
 });
 

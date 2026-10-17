@@ -8,7 +8,7 @@
 import { afterEach } from "vitest";
 import { env, reset, abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { R2BlobStore } from "../src/blobs-r2.js";
-import { DurableObjectStore, type SessionDO } from "../src/store-do.js";
+import { DurableObjectStore, type RegistryDO, type SessionDO } from "../src/store-do.js";
 import { describeStoreContract } from "../tests/helpers/store-contract.js";
 
 /**
@@ -47,6 +47,9 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   blobsFor: () => new R2BlobStore((env as unknown as { BLOBS: R2Bucket }).BLOBS),
   advance: (id) =>
     runInDurableObject(env.SESSION.get(env.SESSION.idFromName(id)), (instance: SessionDO) => instance.alarm()),
+  // The registry's alarm, for the same reason: `sweep` is a no-op here, and a resolved report is deleted by `report_purge`.
+  advanceRegistry: () =>
+    runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), (instance: RegistryDO) => instance.alarm()),
   // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
   // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
   forgetMemory: () => abortAllDurableObjects(),

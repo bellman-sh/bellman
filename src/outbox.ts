@@ -245,8 +245,9 @@ export class OutboxDriver {
     //
     // This is the one write this method performs rather than returns, and it
     // has to be: a row that commits with nothing scheduled to read it is the
-    // window this module exists to close. RegistryDO has no other alarm, so
-    // nothing would ever come back for it. setAlarm called inside a
+    // window this module exists to close. RegistryDO's only other alarm is
+    // `report_purge`, a date 180 days out, so nothing would come back for it
+    // in time. setAlarm called inside a
     // transaction closure commits with that transaction, and rolls back with
     // it — probed against workerd.
     //

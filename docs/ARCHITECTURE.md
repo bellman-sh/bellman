@@ -460,7 +460,7 @@ flowchart LR
 
     subgraph objects["Durable Objects"]
         SDO["SessionDO — one per room<br/>session record, event log,<br/>member, surface and brief rows,<br/>bans, one alarm for abandonment,<br/>sweep and purge, freeze flag"]
-        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions"]
+        RDO["RegistryDO — singleton<br/>join codes, connect tokens,<br/>plan grants and org index,<br/>create counts, creator index,<br/>joined-rooms and org-rooms indexes,<br/>saved presets, hosted-room slots,<br/>handles and signatures,<br/>creator-wide bans, suspensions,<br/>the report queue, one alarm for<br/>deleting resolved reports"]
         ADO["AuditDO — one per org<br/>append-only entries"]
         AUTH["AuthDO<br/>clients, codes, refresh tokens,<br/>Stripe billing ledger"]
         HDO["HostDO — one per hosted seat<br/>the seat's record, its wake queue,<br/>its retry alarm"]
@@ -1694,7 +1694,8 @@ off its documentation, decide how code here is written.
    transaction, and is discarded if the closure throws.** So `enqueue` arms the
    alarm from inside the caller's closure: a row that committed with nothing
    scheduled to read it is the loss this section exists to close, and
-   `RegistryDO` has no other alarm to come back for it.
+   `RegistryDO`'s only other alarm is `report_purge`, 180 days out, which would
+   not come back for it in time.
    `worker-tests/alarm-in-transaction.test.ts` holds the fact on its own, on
    workerd 1.20260926.1 (pinned in `worker-tests/package.json`): it arms in a
    closure, aborts the object and reads `getAlarm()`, then does the same with a

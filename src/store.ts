@@ -22,6 +22,9 @@ import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
+  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, type FiledReport, type NewReport, type Report,
+} from "./reports.js";
+import {
   auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
 } from "./audit.js";
 export type { AuditIntent } from "./grant-audit.js";
@@ -1146,6 +1149,32 @@ export interface BellmanStore {
   /** One read. The Worker keeps the answer a minute per isolate (`SuspensionCache`); the Node server asks each time. */
   isSuspended(userId: string): Promise<boolean>;
   /**
+   * File a report (abuse protections spec, section 3), as ONE operation: the fold, the limit and the write are one
+   * step, so two filings cannot both pass the limit's count or both miss each other's fold. A repeat of a target the
+   * account already has open (R9) answers `folded` with that report, and writes nothing: no new row, and no place in
+   * the limit's count. Once the first is resolved a repeat files anew. At 10 filings in the last rolling 24 hours
+   * (R10) the answer is `limited`, with how long until the oldest leaves the window, and nothing is written.
+   * Otherwise the report is stored and answered `filed`, which is the answer a caller sends its email on.
+   *
+   * The registry keeps reports. They are about the platform and not about a room, so a room's purge leaves them.
+   */
+  fileReport(r: NewReport, now: number): Promise<FiledReport>;
+  /**
+   * A room's reports about members and messages, for its creator (spec section 3), newest first. None about the
+   * room itself, none from another room, and none for a creator who did not make it. What reaches a creator is a
+   * view that leaves out who filed the report: the store keeps the reporter, and this answers it whole.
+   */
+  roomReports(creatorId: string, sessionId: string): Promise<Report[]>;
+  /** Every report, newest first, at most `limit`: the operator's queue. */
+  listReports(limit: number): Promise<Report[]>;
+  /**
+   * Close a report with a note, as ONE operation, and answer it as it now stands. The first resolution stands: a
+   * resolved report is answered as it is, and the second note is not kept. An unknown id answers undefined. It also
+   * ends the fold (R9) and schedules the report's deletion 180 days on (R15). `MemoryStore` deletes in `sweep` and
+   * the Durable Objects store on the registry's alarm, under the handler `report_purge`.
+   */
+  resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined>;
+  /**
    * The members of this room that a live socket vouches for right now (#146).
    * Presence reads it beside `lastSeenAt`: a member fed by the local bus or by
    * the room's WebSocket never calls `bellman_sync`, so it never says anything
@@ -1643,9 +1672,10 @@ export interface BellmanStore {
   /**
    * Housekeeping that cannot wait for a read: closes the rooms nobody has been in for 90 days
    * (#18), purges the closed rooms whose window has run out or whose delete was asked for (#65),
-   * sweeps the unnamed objects of a closed room whose close it did not see (#65), and drops
-   * expired connect tokens. MemoryStore does all of it here; the Durable Objects store does
-   * none, because each room's alarm does its room's.
+   * sweeps the unnamed objects of a closed room whose close it did not see (#65), drops
+   * expired connect tokens, and deletes the reports resolved 180 days ago (R15). MemoryStore does
+   * all of it here; the Durable Objects store does none, because each room's alarm does its
+   * room's and the registry's alarm does the reports'.
    */
   sweep(now: number): Promise<void>;
 }
@@ -1653,6 +1683,13 @@ export interface BellmanStore {
 function detach<T>(value: T): T {
   return structuredClone(value);
 }
+
+/** What makes two reports the same to a fold (R9): one account, one room, one target. JSON, so no field runs into the next. */
+const foldKeyOf = (r: Pick<NewReport, "reporterUserId" | "sessionId" | "target">): string =>
+  JSON.stringify([r.reporterUserId, r.sessionId, targetKey(r.target)]);
+
+/** By id, which is the time filed and then a random suffix: the order the Durable Objects store's key listing gives. */
+const newestFirst = (a: Report, b: Report): number => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
 export class MemoryStore implements BellmanStore {
   /**
@@ -1702,6 +1739,12 @@ export class MemoryStore implements BellmanStore {
   private creatorBanned = new Map<string, CreatorBan[]>();
   /** Suspended accounts, by user id (spec section 1): about an account and not a room, so the purge leaves them. */
   private suspensions = new Map<string, Suspension>();
+  /** Reports, by id (spec section 3): about the platform and not a room, so a room's purge leaves them. */
+  private reports = new Map<string, Report>();
+  /** The open report each account has filed about a target, by `foldKeyOf` (R9). Resolving a report drops its entry. */
+  private folds = new Map<string, string>();
+  /** When each account filed its reports, oldest first, by user id: what the day's count reads (R10). */
+  private filings = new Map<string, number[]>();
   /** Recent sends, by session then by count key (`sendKeyFor`, spec D5): beside the record for `roomBanned`'s reason, and gone with the room at the purge. */
   private sends = new Map<string, Map<string, number[]>>();
   /**
@@ -2067,6 +2110,42 @@ export class MemoryStore implements BellmanStore {
 
   async isSuspended(userId: string): Promise<boolean> {
     return this.suspensions.has(userId);
+  }
+
+  async fileReport(r: NewReport, now: number): Promise<FiledReport> {
+    // No await from the fold's read to the write, as `admitSend` has none: two filings cannot both pass the count.
+    const fold = foldKeyOf(r);
+    const openId = this.folds.get(fold);
+    const open = openId === undefined ? undefined : this.reports.get(openId);
+    if (open?.resolvedAt === null) return { outcome: "folded", report: detach(open) };
+    const kept = (this.filings.get(r.reporterUserId) ?? []).filter((t) => now - t < REPORT_WINDOW_MS);
+    if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
+    const report: Report = { ...detach(r), id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
+    this.reports.set(report.id, report);
+    this.folds.set(fold, report.id);
+    this.filings.set(r.reporterUserId, [...kept, now]);
+    return { outcome: "filed", report: detach(report) };
+  }
+
+  async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
+    const mine = [...this.reports.values()]
+      .filter((r) => r.creatorId === creatorId && r.sessionId === sessionId && r.target.kind !== "room");
+    return detach(mine.sort(newestFirst));
+  }
+
+  async listReports(limit: number): Promise<Report[]> {
+    return detach([...this.reports.values()].sort(newestFirst).slice(0, limit));
+  }
+
+  async resolveReport(id: string, resolution: { note: string; by: string }, now: number): Promise<Report | undefined> {
+    const report = this.reports.get(id);
+    if (!report) return undefined;
+    if (report.resolvedAt !== null) return detach(report);
+    report.resolvedAt = now;
+    report.resolution = resolution.note;
+    report.resolvedBy = resolution.by;
+    this.folds.delete(foldKeyOf(report));
+    return detach(report);
   }
 
   /**
@@ -2944,6 +3023,10 @@ export class MemoryStore implements BellmanStore {
     }
     for (const [token, p] of this.pending) {
       if (now > p.expiresAt) this.pending.delete(token);
+    }
+    // A resolved report goes 180 days on (R15); the Durable Objects store does this on the registry's alarm.
+    for (const [id, r] of this.reports) {
+      if (r.resolvedAt !== null && r.resolvedAt + REPORT_RETENTION_MS <= now) this.reports.delete(id);
     }
   }
 

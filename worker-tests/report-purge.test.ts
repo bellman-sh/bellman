@@ -103,6 +103,23 @@ it("deletes the due row once no resolved report is left, so nothing is due for t
   expect(await store.listReports(10)).toEqual([]);
 });
 
+it("logs a report purge that throws, naming the handler, and rethrows it so the runtime retries", async () => {
+  // The runtime retries a throwing alarm a few times and then leaves it unarmed, and says nothing of which handler it
+  // gave up on, so the log line is the only record. A report row that lost its target makes the purge throw.
+  await runInDurableObject(registry(), async (instance: RegistryDO, ctx) => {
+    await ctx.storage.put({ [DUE]: 1, "rr:000000000000001:rpt_broken": "rpt_broken", "rp:rpt_broken": { id: "rpt_broken" } });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(instance.alarm(), "the alarm still fails, for the runtime to retry").rejects.toThrow(TypeError);
+      expect(logged).toHaveBeenCalledTimes(1);
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('alarm handler "report_purge" failed for the registry'), expect.any(TypeError));
+    } finally {
+      logged.mockRestore();
+    }
+    expect(await ctx.storage.get(DUE), "the purge is still owed: the failed transaction left its due row").toBe(1);
+  });
+});
+
 /**
  * The most keys one `get`, `put` or `delete` takes, on this object's storage or in a transaction it opens, from now on.
  *

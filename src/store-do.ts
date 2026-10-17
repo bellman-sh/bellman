@@ -3149,7 +3149,8 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
    * `report_purge` (R15) is the other name a `due:` row carries here. Every name the driver can report needs a
    * branch below: a name with none is never consumed, and the closing reArm() points the alarm straight back at
    * its due time, so the alarm fires back to back for good. `now` is read once, as SessionDO.alarm reads it, so the
-   * handlers due and the reports purged are judged on one clock.
+   * handlers due and the reports purged are judged on one clock. A handler that throws is logged by name and
+   * rethrown, as SessionDO.alarm does, so the runtime retries and one line says which handler failed.
    *
    * The closing reArm() is the safety net SessionDO.alarm has too: a fired alarm is
    * consumed, so whatever is still due must have one scheduled before this returns.
@@ -3160,8 +3161,16 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
   async alarm(): Promise<void> {
     const now = Date.now();
     for (const name of await this.driver.dueNow(now)) {
-      if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
-      if (name === REPORT_PURGE_HANDLER) await this.#purgeReports(now);
+      try {
+        if (name === OUTBOX_HANDLER) await this.driver.deliverNow();
+        if (name === REPORT_PURGE_HANDLER) await this.#purgeReports(now);
+      } catch (error) {
+        // The runtime retries a throwing alarm a few times and then leaves it with nothing armed (the next
+        // `resolveReport`, or the next intent queued, arms it again), and it says nothing of which handler it gave up
+        // on. This line is the one record. Rethrown, so the runtime still retries, as SessionDO.alarm does.
+        console.error(`alarm handler "${name}" failed for the registry:`, error);
+        throw error;
+      }
     }
     await this.driver.reArm();
   }

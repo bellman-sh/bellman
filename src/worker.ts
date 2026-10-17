@@ -9,6 +9,7 @@ import { presetRoutes } from "./http/presets.js";
 import { publicRoutes } from "./http/public.js";
 import { problem, roomRoutes, type RoomCaller } from "./http/rooms.js";
 import { statsRoutes } from "./http/stats.js";
+import { reportMailer } from "./reports.js";
 import { buildServer } from "./server.js";
 import { SUSPENDED, SuspensionCache } from "./suspension.js";
 import type { Identity } from "./types.js";
@@ -44,6 +45,11 @@ export interface WorkerEnv extends BellmanEnv {
   AUTH: DurableObjectNamespace<AuthDO>;
   /** The room blob store (#183): one private bucket, keyed by room. */
   BLOBS: R2Bucket;
+  /**
+   * The `send_email` binding (wrangler.toml `[[send_email]]`) a report's email goes through. Absent, in a deploy whose
+   * Email Routing is not set up, a report is stored and the log says no email went.
+   */
+  SEND_EMAIL?: SendEmail;
   /** Signs access tokens. Absent means OAuth sign-in is switched off. */
   BELLMAN_TOKEN_SECRET?: string;
   GITHUB_CLIENT_ID?: string;
@@ -206,6 +212,8 @@ export default {
     const store = new DurableObjectStore(env);
     const oauth = oauthConfig(request, env, store);
     const blobs = new R2BlobStore(env.BLOBS);
+    // What mails a filed report, for the `bellman_report` tool and the report route alike.
+    const mailReport = reportMailer(env.SEND_EMAIL);
     const suspended = (userId: string) => suspensions.check(userId, () => store.isSuspended(userId));
 
     // A route module's caller, resolved once per request however often it is asked, so a cookie caller's
@@ -251,8 +259,9 @@ export default {
     // The room routes (#183, #184), ahead of the OAuth routes: /rooms/ is that
     // module's prefix, and /rooms with no slash is the list. The fail-closed
     // guard /ws has covers them all — a deploy with neither a key map nor OAuth
-    // serves no room. The bans routes are asked first: they answer the paths
-    // under /rooms/:id/bans, and leave every other path to the room routes.
+    // serves no room. The moderation routes are asked first: they answer the paths
+    // under /rooms/:id/bans and /rooms/:id/reports, and leave every other path to
+    // the room routes. Both report routes are behind the suspension gate here.
     if (url.pathname === "/rooms" || url.pathname.startsWith("/rooms/")) {
       const blocked = unconfigured(env, oauth) ?? (await routeGate());
       if (blocked) return blocked;
@@ -262,7 +271,7 @@ export default {
         caller: who,
         panelOrigins: oauth?.panelOrigins ?? [],
       };
-      const handled = (await moderationRoutes(request, deps)) ?? (await roomRoutes(request, deps));
+      const handled = (await moderationRoutes(request, { ...deps, mailReport })) ?? (await roomRoutes(request, deps));
       if (handled) return handled;
     }
 
@@ -463,7 +472,10 @@ export default {
       if (await suspended(identity.userId)) {
         return Response.json({ jsonrpc: "2.0", error: { code: -32003, message: SUSPENDED }, id: null }, { status: 403 });
       }
-      const server = buildServer(identity, store, blobs, { hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS) });
+      const server = buildServer(identity, store, blobs, {
+        hostedSeat: hostedSeatFor(identity.userId, env.BELLMAN_HOSTED_SEAT, env.BELLMAN_HOSTED_SEAT_USERS),
+        mailReport,
+      });
       const transport = new WebStandardStreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
         enableJsonResponse: true,

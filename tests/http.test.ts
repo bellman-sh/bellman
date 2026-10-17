@@ -86,6 +86,29 @@ describe("HTTP surface", () => {
     expect(Array.isArray(((await account.json()) as { bans: unknown }).bans)).toBe(true);
   });
 
+  // This server has no send_email binding, so a report is stored and the log says no email went. The route's own cases are in
+  // tests/http-moderation.test.ts.
+  it("serves the report routes beside the room routes, and says in the log that this server sends no email", async () => {
+    await store.createSession(session({
+      id: "qs_http_reports",
+      members: [member(), member({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd", roomRole: "peer_b" })],
+    }));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const filed = await fetch(`${base}/rooms/qs_http_reports/reports`, {
+        method: "POST", headers: { authorization: "Bearer qk_dev_peer", "content-type": "application/json" },
+        body: JSON.stringify({ member_id: "m_creator", reason: "spam" }),
+      });
+      expect(filed.status).toBe(201);
+      const { report_id } = (await filed.json()) as { report_id: string };
+      expect(logged.mock.calls.flat().join(" ")).toContain(`report ${report_id}: no send_email binding`);
+      const listed = await fetch(`${base}/rooms/qs_http_reports/reports`, { headers: { authorization: "Bearer qk_dev_jesse" } });
+      expect(((await listed.json()) as { reports: { id: string }[] }).reports.map((r) => r.id)).toEqual([report_id]);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.
   // It mounts the stats with no operators, so even the team admin is refused. The route's own cases are in tests/stats.test.ts.
   it("serves /operator/stats to no one, the dev team admin included", async () => {

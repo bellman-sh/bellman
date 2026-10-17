@@ -42,6 +42,39 @@ describe("the report's email (spec §3)", () => {
     logged.mockRestore();
   });
 
+  // A failed send is diagnosed from the log alone: the binding's own code (E_SENDER_DOMAIN_NOT_AVAILABLE, E_SENDER_NOT_VERIFIED)
+  // and its message sit in the line beside the report's id, and the note, which is untrusted text, does not.
+  it("logs a failed send with the report's id and the binding's code and message, and never the note", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const refused = Object.assign(new Error("Domain not onboarded to Email Service"), { code: "E_SENDER_DOMAIN_NOT_AVAILABLE" });
+      await reportMailer({ send: async () => { throw refused; } })(report);
+      const line = logged.mock.calls.flat().join(" ");
+      expect(line).toContain(report.id);
+      expect(line).toContain("E_SENDER_DOMAIN_NOT_AVAILABLE");
+      expect(line).toContain("Domain not onboarded to Email Service");
+      for (const fromTheNote of ["line one", "forged", "<b>bold</b>"]) expect(line, fromTheNote).not.toContain(fromTheNote);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("logs a binding's failure whatever it threw, and still never rejects", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const thrown = ["quota exceeded", null, undefined, { code: "E_RATE_LIMIT_EXCEEDED" }, new Error("only a message")];
+      for (const t of thrown) await expect(reportMailer({ send: async () => { throw t; } })(report)).resolves.toBeUndefined();
+      const lines = logged.mock.calls.map((call) => call.join(" "));
+      expect(lines).toHaveLength(thrown.length);
+      for (const line of lines) expect(line).toContain(report.id);
+      expect(lines[0]).toContain("quota exceeded");
+      expect(lines[3]).toContain("E_RATE_LIMIT_EXCEEDED");
+      expect(lines[4]).toContain("only a message");
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it("writes the body in the order the support inbox is read, for each kind of target", () => {
     const lines = (r: Report) => reportMail(r).text.split("\n");
     const member: Report = { ...report, target: { kind: "member", memberId: "m_peer" }, reason: "spam" };

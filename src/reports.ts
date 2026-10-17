@@ -125,7 +125,7 @@ export type ReportMailer = (r: Report) => Promise<void>;
  * Sends one message to support@. A missing binding (the Node server, or a Worker whose binding is not set up yet)
  * and a failed send are each logged once and swallowed: the report is stored before this runs and the queue is the
  * record, so an email that did not go must not fail the call that filed the report. The log names the report and
- * never carries its note.
+ * the binding's own answer (`whyNotSent`), and never carries the note.
  */
 export function reportMailer(binding: MailBinding | undefined): ReportMailer {
   return async (r) => {
@@ -136,9 +136,21 @@ export function reportMailer(binding: MailBinding | undefined): ReportMailer {
     try {
       await binding.send({ from: REPORT_FROM, to: REPORT_TO, ...reportMail(r) });
     } catch (err) {
-      console.error(`report ${r.id}: the email was not sent; the queue holds it`, err);
+      console.error(`report ${r.id}: the email was not sent (${whyNotSent(err)}); the queue holds it`);
     }
   };
+}
+
+/**
+ * What a failed send says, in the log line itself: the binding's `code` (`E_SENDER_DOMAIN_NOT_AVAILABLE` for a domain not
+ * onboarded to Email Service, `E_SENDER_NOT_VERIFIED`, and the rest) and its `message`, whichever it gave. A deployment
+ * whose email does not go is then diagnosed from this one line, with no stack to fetch. A thrown value with neither, a
+ * string or `null` say, is named as it is. The report is not read here: the note is untrusted text and stays out of the log.
+ */
+function whyNotSent(err: unknown): string {
+  const { code, message } = (err ?? {}) as { code?: unknown; message?: unknown };
+  const given = [code, message].filter((part): part is string => typeof part === "string" && part !== "");
+  return given.length > 0 ? given.join(": ") : String(err);
 }
 
 /** A target as a view writes it. */

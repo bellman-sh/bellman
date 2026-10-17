@@ -61,6 +61,12 @@ class_name = "HostDO"
 binding = "BLOBS"
 bucket_name = "bellman-blobs"
 
+# Reports email support@ (abuse protections spec §3). Email Routing on bellman.sh, with support@ a verified
+# destination, comes first: a send_email binding sends only to verified destinations.
+[[send_email]]
+name = "SEND_EMAIL"
+destination_address = "support@bellman.sh"
+
 # SQLite-backed Durable Objects. Required on the Workers Free plan, and the
 # storage API is identical to the KV-backed flavour.
 [[migrations]]

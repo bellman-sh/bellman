@@ -170,6 +170,13 @@ export type World = {
   statuses: (string | undefined)[];
   opened: PaneOpenArgs[];
   closed: string[];
+  /**
+   * In the order they reached the hooks beneath the mod: each `ui.open` and `ui.close`, and each write of the mod's
+   * state as `state.set <key>`. The kit cannot tell an asked `ui.open` from an unasked one, which the engine reads
+   * from where in the press the call is made (L13), so a test reads the order: a press that opens the pane before its
+   * first await shows its `ui.open` ahead of the writes it goes on to make.
+   */
+  trail: string[];
   clock: MockClock;
   /** The rows appended to the conversation. */
   readonly rows: readonly SessionAppendInput[];
@@ -206,7 +213,7 @@ function isDeclineBody(body: unknown): boolean {
  * door, `{ second }` for two bridges from the start. Set later, `w.door` is a bridge that restarted:
  * its old socket refuses from then on.
  */
-export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state" | "seed">> = {}): Promise<World> {
+export async function world($: Engine, on: On, over: Partial<Omit<World, "clock" | "rows" | "state" | "seed" | "trail">> = {}): Promise<World> {
   const clock = mock.clock(on, { now: NOW });
   const session = mock.session(on);
   const w: World = {
@@ -231,6 +238,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     statuses: [],
     opened: [],
     closed: [],
+    trail: [],
     clock,
     get rows() {
       return session.appended();
@@ -250,6 +258,7 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
 
   // Beneath the mod and above the kit's own store: a write that landed is the value a read would get.
   on("state.set", async ($, e, next) => {
+    if (e.plugin === "bellman-mod") w.trail.push(`state.set ${e.key}`);
     const set = await next(e);
     if (e.plugin === "bellman-mod" && set.value?.isSet) (w.state as Record<string, unknown>)[e.key] = e.value;
     return set;
@@ -369,10 +378,12 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     return { value: undefined };
   });
   on("ui.open", ($, e) => {
+    w.trail.push("ui.open");
     w.opened.push(e);
     return { value: { isPlaced: true } };
   });
   on("ui.close", ($, e) => {
+    w.trail.push("ui.close");
     w.closed.push(e.id);
     return { value: undefined };
   });

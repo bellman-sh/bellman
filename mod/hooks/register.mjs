@@ -758,8 +758,7 @@ function statusLine(list) {
 }
 async function openPane($, to) {
   refused = false;
-  await update4($, tab, () => to);
-  await $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+  await Promise.all([$.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }), update4($, tab, () => to)]);
   if (to === "canvas") await readCanvas($);
 }
 async function viewTick($, list) {
@@ -830,8 +829,14 @@ function pieces($, ui, s) {
     personActed();
     void update4($, room, () => value);
   };
+  const close = () => {
+    personActed();
+    refused = true;
+    $.ui.close({ id: PANE_ID }).catch((error) => $.ui.log(`bellman-mod: ${message2(error)}`, { to: "debug" }));
+  };
   return {
     connection: /* @__PURE__ */ h(Text, { color: s.retrying ? "warning" : "success", wrap: "truncate-end" }, s.retrying ? "\u25CC Reconnecting" : "\u25CF Connected"),
+    close: /* @__PURE__ */ h(Button, { key: "close", label: "\xD7", onPress: close }),
     picker: s.options.length > 1 ? /* @__PURE__ */ h(Select, { key: "room", options: s.options, value: s.picked, onSelect: pick }) : /* @__PURE__ */ h(Text, { wrap: "truncate-end" }, s.label),
     about: s.about !== "" && /* @__PURE__ */ h(Text, { dimColor: true, wrap: "truncate-end" }, s.about),
     buttons: [
@@ -884,7 +889,7 @@ function startView(on) {
     markDrawn();
     const p = pieces($, ui, s);
     if (wide2) return drawPane($, ui, { bodyRows: e.props.scroll.bodyRows, placement: e.props.placement }, s, p);
-    return /* @__PURE__ */ h(Box, { flexDirection: "column" }, p.bell, p.connection, p.picker, p.about, p.peers, p.unread, p.waiting, p.paused, p.buttons);
+    return /* @__PURE__ */ h(Box, { flexDirection: "column" }, p.bell, /* @__PURE__ */ h(Box, { columnGap: 1 }, p.connection, p.close), p.picker, p.about, p.peers, p.unread, p.waiting, p.paused, p.buttons);
   });
 }
 

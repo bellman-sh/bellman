@@ -42,7 +42,7 @@ export function declinedText(sessionId: string, cursor: number): string {
   return `Your human declined Bellman action request ${cursor} in room ${sessionId}, and the room has been answered. Do not carry it out.`;
 }
 
-const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+export const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
  * Approve: the gate passes Claude's `approved: true` answer for this request and no other, and Claude is told: by a

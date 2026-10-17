@@ -1,6 +1,6 @@
 import { expect, test } from "claude-code/testing";
-import { PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS } from "../hooks/register.mjs";
-import { ENGINE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, shown, tick, world } from "./harness";
+import { PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT } from "../hooks/register.mjs";
+import { ENGINE, NOW, ROOMS, SHOWN, STATUS, band, pane, peerEvent, shown, tick, world } from "./harness";
 
 /** A C0 or C1 control character, DEL included: what a cleaned string never holds. */
 const CONTROL = /[\u{0}-\u{1f}\u{7f}-\u{9f}]/u;
@@ -59,6 +59,22 @@ test("pressing the bell opens the room pane at its full width", async ($, on) =>
   expect(w.opened.at(-1)).toEqual({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
 });
 
+test("a press that opens the pane calls ui.open before it writes the tab, so the open answers the press", async ($, on) => {
+  // L13: the engine reads an `$.ui.open` made inside the press as the person's, and one made after an await as unasked.
+  // The kit cannot tell them apart, so this reads the order the calls reached the world in.
+  const w = await world($, on);
+  const twoMinutesAgo = new Date(NOW - 2 * 60_000).toISOString();
+  w.log.qs_room1 = { events: [peerEvent({ cursor: 5, type: "action_request", at: twoMinutesAgo, payload: { text: "run the migration" } })], cursor: 5 };
+  await tick(w);
+  const top = await band($);
+  // Each press turns the pane to another tab than the last, so each writes the tab.
+  for (const key of ["open-canvas", "bell-0", "open-approve", "open-log"]) {
+    w.trail.length = 0;
+    await top.press({ key });
+    expect(w.trail.filter((step) => step === "ui.open" || step === "state.set tab"), key).toEqual(["ui.open", "state.set tab"]);
+  }
+});
+
 test("fullscreen with a seat opens the sidebar unasked, and closes it when the last seat goes", async ($, on) => {
   const w = await world($, on);
   await band($, "terminal", true);
@@ -73,6 +89,51 @@ test("fullscreen with a seat opens the sidebar unasked, and closes it when the l
   w.status.seats = structuredClone(STATUS.seats);
   await tick(w);
   expect(w.opened).toHaveLength(2);
+});
+
+test("the sidebar's × closes the pane as the person's: no tick opens it unasked again until the bell does", async ($, on) => {
+  // L12: the docked sidebar had no close. The mod's own `$.ui.close` is raised with origin `plugin`, which the `ui.close`
+  // hook does not count as the person's, so the press itself has to keep the sidebar from opening again (R4).
+  const w = await world($, on);
+  await band($, "terminal", true);
+  await tick(w);
+  expect(w.opened).toEqual([{ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS }]);
+  w.panes = [SHOWN];
+  const sidebar = await pane($, SIDEBAR_COLUMNS);
+  await sidebar.press({ key: "close" });
+  expect(w.closed).toEqual([PANE_ID]);
+  // The engine closed it. Ten ticks later none has opened it again.
+  w.panes = [];
+  for (let i = 0; i < 10; i++) await tick(w);
+  expect(w.opened).toHaveLength(1);
+  // The bell opens it, wide; and once it has, a pane that goes away is the sidebar's to open again.
+  await (await band($, "terminal", true)).press({ key: "bell-0" });
+  expect(w.opened.at(-1)).toEqual({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+  expect(w.opened).toHaveLength(2);
+  await tick(w);
+  expect(w.opened.at(-1)).toEqual({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS });
+  expect(w.opened).toHaveLength(3);
+});
+
+test("a press on the sidebar's × counts as the person, so waking resumes", async ($, on) => {
+  const w = await world($, on);
+  await tick(w);
+  const sidebar = await pane($, SIDEBAR_COLUMNS);
+  const wakes = () => w.submitted.filter((text) => text === WAKE_TEXT).length;
+  const batch = async () => {
+    w.status.waiting = [{ session_id: "qs_room1", interrupting: 1, ambient: 0 }];
+    await tick(w);
+    w.status.waiting = [];
+    await tick(w);
+  };
+  // Three wakes without the person, and waking pauses.
+  for (let i = 0; i < 4; i++) await batch();
+  const paused = wakes();
+  await batch();
+  expect(wakes()).toBe(paused);
+  await sidebar.press({ key: "close" });
+  await batch();
+  expect(wakes()).toBe(paused + 1);
 });
 
 test("a peer's message raises one toast; one's own and an ambient one do not", async ($, on) => {

@@ -29,14 +29,15 @@ import {
 import type { DoorSeat, DoorView, RoomView, Tab } from "../types";
 import { readCanvas } from "./doors";
 import { markDrawn, markPaneWide, shownTab } from "./drawn";
-import { drawPane } from "./pane";
+import { drawPane, message } from "./pane";
 import { personActed } from "./person";
 import { doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
 
 /** Whether the terminal docks a pane, as the band last drawn saw it (`RenderViewport.isFullscreen`). */
 let isFullscreen: boolean | undefined;
 /**
- * The person closed the pane by hand and has not opened it since, so no sidebar opens unasked (R4).
+ * The person closed the pane by hand and has not opened it since, so no sidebar opens unasked (R4). Set by the engine's
+ * close mark or key (the `ui.close` hook below) and by the sidebar's `×` (`pieces`); cleared by `openPane`.
  * ponytail: a module variable, so a reload forgets it and the sidebar may open once more; `$.state` if that shows.
  */
 let refused = false;
@@ -67,11 +68,15 @@ function statusLine(list: readonly DoorView[]): string | undefined {
   return undefined;
 }
 
-/** Opens the room pane on `to`, wide. The person's press is behind every call, so it is placed at any width. */
+/**
+ * Opens the room pane on `to`, wide. The person's press is behind every call, so it is placed at any width, but only
+ * while the engine reads the open as the press's: an `$.ui.open` made after an await is unasked (L13), and a pane the
+ * person has docked then ignores it. So the open is called before the first await, the tab is written while it is
+ * under way (the pane's drawing reads the tab, so it redraws when the write lands), and both are awaited together.
+ */
 export async function openPane($: EngineInterface, to: Tab): Promise<void> {
   refused = false;
-  await update($, tab, () => to);
-  await $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+  await Promise.all([$.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS }), update($, tab, () => to)]);
   if (to === "canvas") await readCanvas($);
 }
 
@@ -170,12 +175,21 @@ function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
     personActed();
     void update($, room, () => value);
   };
+  // The sidebar's `×`. The mod's own `$.ui.close` is raised with origin `plugin`, which the `ui.close` hook does not
+  // count as the person's, so the press sets `refused` itself (R4). Like every press that opens or closes the pane, it
+  // calls the engine before any await.
+  const close = () => {
+    personActed();
+    refused = true;
+    $.ui.close({ id: PANE_ID }).catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
+  };
   return {
     connection: (
       <Text color={s.retrying ? "warning" : "success"} wrap="truncate-end">
         {s.retrying ? "◌ Reconnecting" : "● Connected"}
       </Text>
     ),
+    close: <Button key="close" label="×" onPress={close} />,
     picker:
       s.options.length > 1 ? (
         <Select key="room" options={s.options} value={s.picked} onSelect={pick} />
@@ -275,7 +289,10 @@ export function startView(on: On): void {
     return (
       <Box flexDirection="column">
         {p.bell}
-        {p.connection}
+        <Box columnGap={1}>
+          {p.connection}
+          {p.close}
+        </Box>
         {p.picker}
         {p.about}
         {p.peers}

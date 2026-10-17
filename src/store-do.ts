@@ -36,7 +36,7 @@ import {
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
-  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, withinWindow,
+  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -2980,8 +2980,8 @@ const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userI
  *   what a repeat folds into (R9). Resolving the report deletes it.
  * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`. It only serves
  *   that limit, so the purge deletes it once its newest time has left the day.
- * - `rc:<creator>:<sessionId>:<id>` holds the id of a report about a member or a message, so a creator's view of
- *   one room is a listing of a prefix.
+ * - `rc:<creator>:<sessionId>:<id>` holds the id of a report that reaches the creator (`reachesCreator`: about a member
+ *   or a message, and not about the creator's own account), so a creator's view of one room is a listing of a prefix.
  * - `rr:<purgeAt>:<id>` holds the id of a resolved report, dated for its deletion, the time padded to 15 digits so
  *   string order is time order. `due:report_purge` is the earliest of those dates.
  * The reporter and the creator are percent-encoded, as `cb:`'s segments are: an operator-issued user id may hold a
@@ -3844,7 +3844,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         [reportKey(report.id)]: report,
         [foldKey]: report.id,
         [timesKey]: [...kept, now],
-        ...(r.target.kind === "room" ? {} : { [reportCreatorKey(r.creatorId, r.sessionId, report.id)]: report.id }),
+        ...(reachesCreator(r) ? { [reportCreatorKey(r.creatorId, r.sessionId, report.id)]: report.id } : {}),
       });
       return { outcome: "filed", report };
     });

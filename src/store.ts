@@ -22,7 +22,7 @@ import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
-  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, withinWindow,
+  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reachesCreator, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import {
@@ -1162,8 +1162,10 @@ export interface BellmanStore {
   fileReport(r: NewReport, now: number): Promise<FiledReport>;
   /**
    * A room's reports about members and messages, for its creator (spec section 3), newest first. None about the
-   * room itself, none from another room, and none for a creator who did not make it. What reaches a creator is a
-   * view that leaves out who filed the report: the store keeps the reporter, and this answers it whole.
+   * room itself, none from another room, and none for a creator who did not make it. None about the creator's own
+   * seats or messages either (`reachesCreator`): a creator is not told that one was filed about them, and those reach the
+   * operators alone. What reaches a creator is a view that leaves out who filed the report: the store keeps the reporter,
+   * and this answers it whole.
    */
   roomReports(creatorId: string, sessionId: string): Promise<Report[]>;
   /** Every report, newest first, at most `limit`: the operator's queue. */
@@ -2130,7 +2132,7 @@ export class MemoryStore implements BellmanStore {
 
   async roomReports(creatorId: string, sessionId: string): Promise<Report[]> {
     const mine = [...this.reports.values()]
-      .filter((r) => r.creatorId === creatorId && r.sessionId === sessionId && r.target.kind !== "room");
+      .filter((r) => r.creatorId === creatorId && r.sessionId === sessionId && reachesCreator(r));
     return detach(mine.sort(newestFirst));
   }
 

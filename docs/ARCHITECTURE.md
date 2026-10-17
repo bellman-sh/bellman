@@ -491,7 +491,8 @@ Why the split is shaped that way:
   rows are `rp:<id>`, the report, whose id sorts in filing order so a listing of
   the prefix is the queue; `rf:`, the open report an account filed about a target,
   which a repeat folds into; `rl:`, the times of an account's filings still inside
-  the day; `rc:`, a report about a member or a message under its creator and room,
+  the day; `rc:`, a report that reaches the creator, about a member or a message and
+  not about the creator's own account (`reachesCreator`), under its creator and room,
   so a creator's view of one room is a prefix listing; and `rr:<purgeAt>:<id>`, a
   resolved report dated for its deletion. The registry's one alarm carries a second
   handler beside the outbox's, `report_purge`: its `due:report_purge` row holds the
@@ -1277,7 +1278,11 @@ loud:
   carries CR/LF or a `Subject:` line cannot reach a header. What a room's creator
   reads of a report is built field by field (`creatorReportView`) and never names
   who filed it, so a field added to a report reaches no creator until that function
-  names it.
+  names it. A report about the creator's own seats or messages is not in the creator's
+  list at all: both stores decide it at the source (`reachesCreator`), and it reaches
+  the operators alone. A report about the hosted seat is about Bellman's account, so
+  the creator, who sets its instructions, does read it. In a small private room who
+  filed a report may be evident by elimination, which no view can prevent.
 - **An `html` or `diagram` item never runs on a Bellman origin.** The API host
   serves an `html` blob as a download (`application/octet-stream`, `attachment`,
   `nosniff`, a `sandbox` policy) and never as a page, and the panel renders both

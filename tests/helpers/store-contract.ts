@@ -4380,6 +4380,40 @@ export function describeStoreContract(
         expect(await store.roomReports("u_someone_else", "qs_test")).toEqual([]);
       });
 
+      /**
+       * Section 1C review, Critical 1. A creator who read a report about themself learned one had been filed, and in a small
+       * room which of the others filed it. A report about the creator's own seats and messages reaches the operators alone.
+       * It is told by the account, so every seat the creator holds and every message it sent is covered, a second handle
+       * included.
+       */
+      it("leaves out of a creator's list every report about the creator's own seats and messages, and keeps it in the queue", async () => {
+        const creator = { memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd" };
+        const own = [
+          (await file({ target: { kind: "member", memberId: "m_creator" }, subject: creator })).report,
+          (await file({ target: { kind: "member", memberId: "m_creator_2" }, subject: { ...creator, memberId: "m_creator_2" } })).report,
+          (await file({ target: { kind: "message", cursor: 5 }, subject: creator })).report,
+        ];
+        vi.advanceTimersByTime(1_000);
+        const aboutPeer = (await file()).report;
+        vi.advanceTimersByTime(1_000);
+        const aboutPeersMessage = (await file({ target: { kind: "message", cursor: 6 } })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id), "the creator reads the others' alone")
+          .toEqual([aboutPeersMessage.id, aboutPeer.id]);
+        expect((await store.listReports(10)).map((r) => r.id).sort(), "the operators read all five")
+          .toEqual([...own, aboutPeer, aboutPeersMessage].map((r) => r.id).sort());
+      });
+
+      /**
+       * The hosted seat is Bellman's account and not the creator's, and the creator is who sets its instructions, so a report
+       * about what it said is the creator's to read. The rule above is the account's and covers it not at all.
+       */
+      it("lists for a creator a report about the hosted seat, which is not the creator's account", async () => {
+        const host = { memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: "host@bellman" };
+        const seat = (await file({ target: { kind: "member", memberId: HOST_MEMBER_ID }, subject: host })).report;
+        const said = (await file({ target: { kind: "message", cursor: 7 }, subject: host })).report;
+        expect((await store.roomReports("u_jesse", "qs_test")).map((r) => r.id).sort()).toEqual([seat.id, said.id].sort());
+      });
+
       it("resolves once with a note, keeps the first resolution, and answers nothing for an unknown id", async () => {
         const { report } = await file();
         const at = Date.now();

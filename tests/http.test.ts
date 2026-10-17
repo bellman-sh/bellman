@@ -95,15 +95,21 @@ describe("HTTP surface", () => {
     }));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      const filed = await fetch(`${base}/rooms/qs_http_reports/reports`, {
-        method: "POST", headers: { authorization: "Bearer qk_dev_peer", "content-type": "application/json" },
-        body: JSON.stringify({ member_id: "m_creator", reason: "spam" }),
-      });
-      expect(filed.status).toBe(201);
-      const { report_id } = (await filed.json()) as { report_id: string };
-      expect(logged.mock.calls.flat().join(" ")).toContain(`report ${report_id}: no send_email binding`);
+      const file = async (key: string, memberId: string) => {
+        const res = await fetch(`${base}/rooms/qs_http_reports/reports`, {
+          method: "POST", headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ member_id: memberId, reason: "spam" }),
+        });
+        expect(res.status).toBe(201);
+        return ((await res.json()) as { report_id: string }).report_id;
+      };
+      // The peer reports the creator, and the creator reports the peer. The creator's list holds the second alone: a report
+      // about the creator reaches the operators, not the creator.
+      const aboutCreator = await file("qk_dev_peer", "m_creator");
+      const aboutPeer = await file("qk_dev_jesse", "m_peer");
+      expect(logged.mock.calls.flat().join(" ")).toContain(`report ${aboutCreator}: no send_email binding`);
       const listed = await fetch(`${base}/rooms/qs_http_reports/reports`, { headers: { authorization: "Bearer qk_dev_jesse" } });
-      expect(((await listed.json()) as { reports: { id: string }[] }).reports.map((r) => r.id)).toEqual([report_id]);
+      expect(((await listed.json()) as { reports: { id: string }[] }).reports.map((r) => r.id)).toEqual([aboutPeer]);
     } finally {
       logged.mockRestore();
     }

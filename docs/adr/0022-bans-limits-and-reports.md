@@ -113,8 +113,8 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 16. **Reports (D6).** A member files one with `bellman_report`, and a signed-in reader of
     a public room through the dash, which posts to `POST /rooms/:id/reports`. The reason
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most
-    500 characters. The registry queues them. A creator reads those about members and
-    messages in their rooms at `GET /rooms/:id/reports`, and an operator reads and closes
+    500 characters. The registry queues them. A creator reads those about the other
+    members and messages in their rooms at `GET /rooms/:id/reports`, and an operator reads and closes
     every one at `GET /admin/reports` and `POST /admin/reports/:id/resolve`.
     `src/reports.ts` holds the types, the email and the views, `src/tools/report.ts` the
     tool, and `extension/manifest.json` lists it.
@@ -126,7 +126,13 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 18. **A report keeps whom it is about (R12).** The member id, user id and label
     (`subject`), so an operator can suspend the account. A creator's view carries the
     member id and label only, and never who filed the report. The reported person is not
-    told.
+    told. A report about the creator's own account, a seat they hold or a message they
+    sent, is not in the creator's list at all (`reachesCreator`, decided at the source by
+    both stores): it reaches the operators alone. The hosted seat is Bellman's account
+    (`u_bellman_host`), so a report about it reaches the creator, who sets its
+    instructions. In a small private room who filed a report may be evident by
+    elimination: the creator reads a report about one member, did not file it, and the
+    room holds few others.
 19. **Limits on filing (D6, R9, R10).** An account files 10 reports a day, over a rolling
     24 hours. A repeat of the same target by the same account folds into the first, but
     only into an open one: the fold writes nothing, sends no email and does not count

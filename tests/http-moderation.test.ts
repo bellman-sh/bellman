@@ -4,6 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveIdentity } from "../src/auth.js";
+import { HOST_MEMBER_ID, HOST_USER_ID } from "../src/host.js";
 import { MAX_BAN_BYTES, MAX_REPORT_BYTES, moderationRoutes } from "../src/http/moderation.js";
 import type { RoomCaller } from "../src/http/rooms.js";
 import { MemoryStore } from "../src/store.js";
@@ -185,6 +186,35 @@ describe("a room's reports", () => {
       reason: "harassment", note: "<b>not markup</b>", at: expect.any(String), resolved: false,
     }] });
     expect(JSON.stringify(body)).not.toContain("outsider");
+  });
+
+  // Section 1C review, Critical 1. The creator reads the reports about the room's other people. One about their own seat or a
+  // message they sent reaches the operators alone, and the hosted seat's, which is Bellman's account and not theirs, reaches them.
+  it("keeps a report about the creator's own seat or message out of the creator's list, and gives them the hosted seat's", async () => {
+    const host = member({ memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: "host@bellman", roomRole: "peer_b" });
+    await store.createSession(session({ id: "qs_mod_host", manifest: roomManifest({ public: true }), members: [member(), peer(), host] }));
+    const say = async (from: { memberId: string; userId: string; label: string }) => (await store.appendEvent("qs_mod_host", {
+      type: "message", fromMemberId: from.memberId, fromUserId: from.userId, fromLabel: from.label, payload: { text: "hello" }, refId: null,
+    }))!.cursor;
+    const creatorSaid = await say({ memberId: "m_creator", userId: "u_jesse", label: "jesse@codenerd" });
+    const peerSaid = await say({ memberId: "m_peer", userId: "u_peer", label: "peer@codenerd" });
+    const hostSaid = await say({ memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: "host@bellman" });
+    const bodies = [
+      { member_id: "m_creator" }, { cursor: creatorSaid }, { member_id: "m_peer" }, { cursor: peerSaid },
+      { member_id: HOST_MEMBER_ID }, { cursor: hostSaid },
+    ];
+    for (const b of bodies) {
+      const filed = await call(DEV_KEY.outsider, "/rooms/qs_mod_host/reports", { method: "POST", body: { ...b, reason: "spam" } });
+      expect(filed!.status, JSON.stringify(b)).toBe(201);
+    }
+    const [status, body] = await answer(await call(DEV_KEY.jesse, "/rooms/qs_mod_host/reports"));
+    expect(status).toBe(200);
+    const seen = (body as { reports: { target: unknown }[] }).reports.map((r) => JSON.stringify(r.target)).sort();
+    expect(seen, "the creator reads four of the six: not their own seat, not their own message").toEqual([
+      { kind: "member", member_id: "m_peer" }, { kind: "message", cursor: peerSaid },
+      { kind: "member", member_id: HOST_MEMBER_ID }, { kind: "message", cursor: hostSaid },
+    ].map((t) => JSON.stringify(t)).sort());
+    expect(await store.listReports(50), "and the operators read all six").toHaveLength(6);
   });
 
   it("folds a repeat: 200, the first report's id, and no second email", async () => {

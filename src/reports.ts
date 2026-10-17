@@ -59,6 +59,19 @@ export type FiledReport = { outcome: "filed" | "folded"; report: Report } | { ou
 export const withinWindow = (times: readonly number[], now: number): number[] =>
   times.filter((t) => now - t < REPORT_WINDOW_MS);
 
+/**
+ * Whether a report belongs in its room's creator's list (section 1C review, Critical 1): it is about a member or a message,
+ * and not about the creator's own account. A report about the room has no subject. One about a seat the creator holds or a
+ * message it sent names the creator's own user id, and a creator who read it would learn that a report was filed about them
+ * and, in a small room, which of the others filed it. It reaches the operators alone. The hosted seat is Bellman's account
+ * (`u_bellman_host`), so a report about it passes: the creator is who sets its instructions.
+ *
+ * Both stores ask this one question at the source: the Durable Objects store before it writes the creator's row, and
+ * `MemoryStore` when it lists, so the two cannot answer differently.
+ */
+export const reachesCreator = (r: Pick<NewReport, "creatorId" | "subject">): boolean =>
+  r.subject !== null && r.subject.userId !== r.creatorId;
+
 /** "room", "member:<id>" or "message:<cursor>": what makes two reports of one target the same. */
 export function targetKey(t: ReportTarget): string {
   switch (t.kind) {

@@ -132,8 +132,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     removal (its cut, #113), and in a public room, whose log anyone may read, no one is cut.
 18. **A report keeps whom it is about (R12).** The member id, user id and label
     (`subject`), so an operator can suspend the account. A creator's view carries the
-    member id and label only, and never who filed the report. The reported person is not
-    told. A report about the creator's own account, a seat they hold or a message they
+    member id and label only, and never who filed the report. Its time is to the hour (the
+    minutes, seconds and milliseconds zeroed), so a creator cannot match a report to one
+    member's activity in the room; the operator's view keeps the exact time. The reported
+    person is not told. A report about the creator's own account, a seat they hold or a message they
     sent, is not in the creator's list at all (`reachesCreator`, decided at the source by
     both stores): it reaches the operators alone. The hosted seat is Bellman's account
     (`u_bellman_host`), so a report about it reaches the creator, who sets its

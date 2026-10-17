@@ -183,7 +183,7 @@ describe("a room's reports", () => {
     expect(listed).toBe(200);
     expect(body).toEqual({ reports: [{
       id: expect.stringMatching(/^rpt_/), target: { kind: "member", member_id: "m_peer" }, about: { member_id: "m_peer", label: "peer@codenerd" },
-      reason: "harassment", note: "<b>not markup</b>", at: expect.any(String), resolved: false,
+      reason: "harassment", note: "<b>not markup</b>", at: expect.stringMatching(/T\d\d:00:00\.000Z$/), resolved: false,
     }] });
     expect(JSON.stringify(body)).not.toContain("outsider");
   });

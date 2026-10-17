@@ -1282,9 +1282,9 @@ loud:
   the report's id, its reason and the kind of target, which the server made or a
   closed set holds, so a note or a label that carries CR/LF or a `Subject:` line
   cannot reach a header or the body. What a room's creator
-  reads of a report is built field by field (`creatorReportView`) and never names
-  who filed it, so a field added to a report reaches no creator until that function
-  names it. A report about the creator's own seats or messages is not in the creator's
+  reads of a report is built field by field (`creatorReportView`), never names
+  who filed it and gives the time to the hour, so a field added to a report reaches no
+  creator until that function names it. A report about the creator's own seats or messages is not in the creator's
   list at all: both stores decide it at the source (`reachesCreator`), and it reaches
   the operators alone. A report about the hosted seat is about Bellman's account, so
   the creator, who sets its instructions, does read it. In a small private room who

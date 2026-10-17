@@ -117,7 +117,7 @@ describe("the two views of a report (spec §3)", () => {
   it("shows a creator what a report is about and never who filed it", () => {
     expect(creatorReportView(filed)).toEqual({
       id: filed.id, target: { kind: "member", member_id: "m_peer" }, about: { member_id: "m_peer", label: "peer@codenerd" },
-      reason: "harassment", note: "<b>not markup</b>", at: "2026-10-15T12:30:00.000Z", resolved: false,
+      reason: "harassment", note: "<b>not markup</b>", at: "2026-10-15T12:00:00.000Z", resolved: false,
     });
     expect(creatorReportView(closed).resolved).toBe(true);
     expect(creatorReportView(message)).toMatchObject({ target: { kind: "message", cursor: 12 }, about: { member_id: "m_peer", label: "peer@codenerd" } });
@@ -127,6 +127,27 @@ describe("the two views of a report (spec §3)", () => {
     for (const hidden of ["u_reader", "reader@example.dev", "u_peer", "u_operator", "warned them", "qs_1", "u_jesse"]) {
       expect(seen, hidden).not.toContain(hidden);
     }
+  });
+
+  /**
+   * Section 1C review, declined 5, ruled into the pass. A creator who could read when a report was filed to the millisecond
+   * could match it to one member's activity in the room. The creator's view gives the hour, as ISO 8601 with the minutes,
+   * seconds and milliseconds zeroed; the operator's view keeps the exact time.
+   */
+  it("gives a creator the hour a report was filed and an operator the exact time", () => {
+    const at = (ms: number): Report => ({ ...filed, at: ms });
+    const times: [number, string, string][] = [
+      [Date.UTC(2026, 9, 15, 12, 59, 59, 999), "2026-10-15T12:00:00.000Z", "2026-10-15T12:59:59.999Z"],
+      [Date.UTC(2026, 9, 15, 13, 0, 0, 0), "2026-10-15T13:00:00.000Z", "2026-10-15T13:00:00.000Z"],
+      [Date.UTC(2026, 9, 15, 13, 0, 0, 1), "2026-10-15T13:00:00.000Z", "2026-10-15T13:00:00.001Z"],
+      [Date.UTC(2026, 11, 31, 23, 30, 5, 7), "2026-12-31T23:00:00.000Z", "2026-12-31T23:30:05.007Z"],
+    ];
+    for (const [ms, forCreator, forOperator] of times) {
+      expect(creatorReportView(at(ms)).at, `creator, ${forOperator}`).toBe(forCreator);
+      expect(operatorReportView(at(ms)).at, `operator, ${forOperator}`).toBe(forOperator);
+    }
+    // Only `at` is coarsened: a report that was resolved still says so, and the operator's resolved_at is exact.
+    expect(operatorReportView({ ...closed, resolvedAt: Date.UTC(2026, 9, 16, 1, 2, 3, 4) }).resolved_at).toBe("2026-10-16T01:02:03.004Z");
   });
 
   it("shows an operator everything, with times as ISO 8601 or null", () => {

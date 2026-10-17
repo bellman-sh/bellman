@@ -167,7 +167,7 @@ function whyNotSent(err: unknown): string {
 /** A target as a view writes it. */
 export type ReportTargetView = { kind: "room" } | { kind: "member"; member_id: string } | { kind: "message"; cursor: number };
 
-/** What a room's creator reads about a report: what it is about and why, and never who filed it (R12). */
+/** What a room's creator reads about a report: what it is about and why, and never who filed it (R12), nor when to the minute. */
 export interface CreatorReportView {
   id: string;
   target: ReportTargetView;
@@ -175,7 +175,7 @@ export interface CreatorReportView {
   about: { member_id: string; label: string } | null;
   reason: ReportReason;
   note: string | null;
-  /** ISO 8601. */
+  /** ISO 8601, to the hour: the minutes, seconds and milliseconds are zero. A creator cannot match a report to one member's activity. */
   at: string;
   resolved: boolean;
 }
@@ -205,6 +205,13 @@ const targetView = (t: ReportTarget): ReportTargetView =>
 
 const isoOrNull = (ms: number | null): string | null => (ms === null ? null : new Date(ms).toISOString());
 
+/** A time to the hour, as ISO 8601: the minutes, seconds and milliseconds zeroed (section 1C review, declined 5). */
+function toTheHour(ms: number): string {
+  const hour = new Date(ms);
+  hour.setUTCMinutes(0, 0, 0);
+  return hour.toISOString();
+}
+
 /** Built field by field, never by spreading the report: a field added to `Report` reaches no creator until it is named here. */
 export function creatorReportView(r: Report): CreatorReportView {
   return {
@@ -213,7 +220,7 @@ export function creatorReportView(r: Report): CreatorReportView {
     about: r.subject ? { member_id: r.subject.memberId, label: r.subject.label } : null,
     reason: r.reason,
     note: r.note,
-    at: new Date(r.at).toISOString(),
+    at: toTheHour(r.at),
     resolved: r.resolvedAt !== null,
   };
 }

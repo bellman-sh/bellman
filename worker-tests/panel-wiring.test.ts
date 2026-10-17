@@ -80,3 +80,43 @@ describe("the Worker reads BELLMAN_PANEL_ORIGINS", () => {
     expect((await signin("not-a-url, javascript:x")).status).toBe(503);
   });
 });
+
+describe("the Worker reads BELLMAN_PUBLIC_PAGE_ORIGINS", () => {
+  const PAGE = "https://bellman.sh";
+  const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
+  type WorkerEnv = ReturnType<typeof withPanel>;
+  const withPage = (page: string | undefined) => ({ ...withPanel(PANEL), BELLMAN_PUBLIC_PAGE_ORIGINS: page }) as WorkerEnv;
+  /** The origin a preflight from `origin` is granted on `path`, or null: what the Worker's whole route table answers. */
+  const grant = async (env: WorkerEnv, path: string, origin: string) => (await worker.fetch(new Request(`${ISSUER}${path}`, {
+    method: "OPTIONS", headers: { origin, "access-control-request-method": "POST" },
+  }), env, ctx)).headers.get("access-control-allow-origin");
+
+  // Public rooms on bellman.sh, D7: the Worker hands BELLMAN_PUBLIC_PAGE_ORIGINS to the report route and the sign-in.
+  it("grants bellman.sh the report route's preflight while the var names it, and not without it", async () => {
+    expect(await grant(withPage(PAGE), "/rooms/qs_any/reports", PAGE)).toBe(PAGE);
+    expect(await grant(withPanel(PANEL), "/rooms/qs_any/reports", PAGE)).toBeNull();
+  });
+
+  it("seals a sign-in's return to a public room's page while the var names it, and to the panel without it", async () => {
+    const sealed = async (env: WorkerEnv) => {
+      const chooser = await worker.fetch(new Request(`${ISSUER}/auth/signin?return_to=${encodeURIComponent("https://bellman.sh/r/open-review")}`), env, ctx);
+      const state = decodeURIComponent(/href="\/authorize\/github\?req=([^"]+)"/.exec(await chooser.text())![1]).split(".")[1];
+      return JSON.parse(atob(state.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(state.length / 4) * 4, "="))).bellman.return_to;
+    };
+    expect(await sealed(withPage(PAGE))).toBe("https://bellman.sh/r/open-review");
+    expect(await sealed(withPanel(PANEL))).toBe(PANEL);
+  });
+
+  // The var is the public page's list and not a second panel list: the Worker hands it to the report route and the
+  // sign-in return alone, so every other route's preflight still carries no grant for bellman.sh, and the panel's own is served.
+  it("grants bellman.sh no preflight on any other route while the var names it, and still serves the panel", async () => {
+    const withVar = withPage(PAGE);
+    for (const path of [
+      "/rooms/qs_any/bans", "/rooms/qs_any", "/account/handle", "/account/bans", "/presets", "/audit/org_any", "/operator/stats", "/auth/session",
+    ]) {
+      expect(await grant(withVar, path, PAGE), `${path} from bellman.sh`).toBeNull();
+      expect(await grant(withVar, path, PANEL), `${path} from the panel`).toBe(PANEL);
+    }
+    expect(await grant(withVar, "/rooms/qs_any/reports", PANEL)).toBe(PANEL);
+  });
+});

@@ -134,6 +134,14 @@ describe("HTTP surface", () => {
     }
   });
 
+  // The Node server passes no public page origin (src/app.ts): a script on bellman.sh is granted nothing here, as a stranger is not.
+  it("grants the report route's preflight to no origin, bellman.sh included", async () => {
+    const res = await fetch(`${base}/rooms/qs_http_reports/reports`, {
+      method: "OPTIONS", headers: { origin: "https://bellman.sh", "access-control-request-method": "POST" },
+    });
+    expect([res.status, res.headers.get("access-control-allow-origin")]).toEqual([204, null]);
+  });
+
   // The dev keys are valid callers here, and an operator gate that admitted one would make this server the loose one.
   // It mounts the stats with no operators, so even the team admin is refused. The route's own cases are in tests/stats.test.ts.
   it("serves /operator/stats to no one, the dev team admin included", async () => {

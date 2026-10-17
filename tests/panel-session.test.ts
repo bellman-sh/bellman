@@ -831,6 +831,27 @@ describe("signing in to the panel", () => {
     expect((await signIn("//evil.example/steal")).headers.get("location")).toBe(PANEL);
   });
 
+  // Public rooms on bellman.sh, D7: "Sign in to report" on a room's page comes back to the room.
+  it("returns a sign-in started on a public room's page to the room, and nowhere but the panel without the list", async () => {
+    cfg.publicPageOrigins = ["https://bellman.sh"];
+    expect((await signIn("https://bellman.sh/r/open-review")).headers.get("location")).toBe("https://bellman.sh/r/open-review");
+    expect((await signIn()).headers.get("location")).toBe(PANEL);
+    cfg.publicPageOrigins = [];
+    expect((await signIn("https://bellman.sh/r/open-review")).headers.get("location")).toBe(PANEL);
+  });
+
+  // The list admits its origins exactly, as the panel's does: with it set, the panel still returns and nothing else does.
+  it("admits the listed origin exactly: the panel still returns, and a foreign or look-alike origin falls back to the panel", async () => {
+    cfg.publicPageOrigins = ["https://bellman.sh"];
+    expect((await signIn(`${PANEL}/rooms`)).headers.get("location")).toBe(`${PANEL}/rooms`);
+    for (const stray of [
+      "https://evil.example/steal", "https://bellman.sh.evil.example/r/x", "https://evil.bellman.sh/r/x",
+      "http://bellman.sh/r/x", "https://bellman.sh:8443/r/x",
+    ]) {
+      expect((await signIn(stray)).headers.get("location"), stray).toBe(PANEL);
+    }
+  });
+
   it("refuses to start a sign-in with no panel configured", async () => {
     cfg.panelOrigins = [];
 

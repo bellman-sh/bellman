@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { MemoryAuthStore, SESSION_TTL_MS, type PanelSession } from "../../src/oauth/storage.js";
 import { MemoryStore } from "../../src/store.js";
 import { handleOAuth, type OAuthConfig } from "../../src/oauth/routes.js";
@@ -25,6 +26,17 @@ export const BYSTANDER: Identity = Object.freeze({
   userId: "u_github_9999", orgId: null, plan: "pro", role: "member",
   label: "sam@example.dev",
 });
+
+/**
+ * A var as `wrangler.toml` sets it for production, so a test pins what is deployed and not what a fixture says. It
+ * matches the `NAME = "value"` line from the start of a line, which a comment never is, and throws when there is none.
+ */
+export function productionVar(name: string): string {
+  const toml = readFileSync(new URL("../../wrangler.toml", import.meta.url), "utf8");
+  const found = new RegExp(`^${name} = "([^"]*)"$`, "m").exec(toml);
+  if (!found) throw new Error(`wrangler.toml sets no ${name}`);
+  return found[1];
+}
 
 /** GitHub stubbed at the fetch boundary; everything else is the real thing. */
 export const fakeFetch = (async (input: RequestInfo | URL) => {

@@ -287,6 +287,42 @@ describe("the moderation routes through the Worker", () => {
     }
   });
 
+  // Public rooms on bellman.sh, D7, the whole path: the cookie a sign-in set, read by the authorization server's `caller`,
+  // then the CSRF check with the page's origin. The reader's cookie files a report from bellman.sh while the var names it
+  // and files none while it does not. The creator's cookie is refused a ban from bellman.sh, and makes it from the panel.
+  it("files a report from bellman.sh with the reader's session cookie, and refuses that page a ban", async () => {
+    const PANEL = "https://dash.example.test";
+    const PAGE = "https://bellman.sh";
+    const cookieFor = async (userId: string) => {
+      const now = Date.now();
+      const id = crypto.randomUUID();
+      await new AuthStore(env.AUTH as never).putSession(id, {
+        identity: { userId, orgId: null, plan: "free", role: "member", label: `${userId}@example.dev` }, plan_source: "default",
+        identity_keys: [], created_at: now, last_used_at: now, replanned_at: now, expires_at: now + SESSION_TTL_MS,
+      });
+      return `${sessionCookieName(true)}=${id}`;
+    };
+    const listed = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL, BELLMAN_PUBLIC_PAGE_ORIGINS: PAGE });
+    const unlisted = oauthEnv({ BELLMAN_PANEL_ORIGINS: PANEL });
+    const post = (path: string, body: unknown, cookie: string, origin: string, on = listed) => worker.fetch(new Request(`${ORIGIN}${path}`, {
+      method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body),
+    }), on, ctx);
+    await seed();
+
+    const reader = await cookieFor("u_wire_reader");
+    const filed = await post("/rooms/qs_wire_mod/reports", { reason: "spam" }, reader, PAGE);
+    expect([filed.status, filed.headers.get("access-control-allow-origin")], await filed.clone().text()).toEqual([201, PAGE]);
+    const refused = await post("/rooms/qs_wire_mod/reports", { reason: "harassment" }, reader, PAGE, unlisted);
+    expect([refused.status, refused.headers.get("access-control-allow-origin")], "the control: the var unset").toEqual([403, null]);
+    expect((await store().listReports(10)).map((r) => r.reporterUserId)).toEqual(["u_wire_reader"]);
+
+    const creator = await cookieFor("u_jesse");
+    const ban = { member_id: "m_peer", scope: "room" };
+    expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PAGE)).status).toBe(403);
+    expect(await store().roomBans("qs_wire_mod")).toEqual([]);
+    expect((await post("/rooms/qs_wire_mod/bans", ban, creator, PANEL)).status, "the control: the panel bans").toBe(200);
+  });
+
   it("asks the registry about an account once a minute, not once a request", async () => {
     const read = vi.spyOn(DurableObjectStore.prototype, "isSuspended");
     try {

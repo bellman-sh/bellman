@@ -110,9 +110,12 @@ const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
  * without one is not a browser we have any reason to serve.
  *
  * SameSite=Lax is not sufficient on its own, which is why this exists: SameSite
- * is evaluated on the registrable domain, so bellman.sh is same-site with
- * mcp.bellman.sh. An XSS on the marketing site could otherwise POST here with
- * the session cookie attached, and Lax would allow it.
+ * is evaluated on the registrable domain, so every bellman.sh host is same-site
+ * with mcp.bellman.sh, and Lax lets a POST from any of them carry the session
+ * cookie. This admits only the origins its caller passes: the panel's for every
+ * write, and, for a report alone, the public room page's (BELLMAN_PUBLIC_PAGE_ORIGINS,
+ * https://bellman.sh). A script on a bellman.sh page can therefore file a report
+ * as its reader, and pass this check for nothing else.
  *
  * Bearer callers are exempt entirely. curl sends no Origin and needs none, and
  * a browser cannot attach a bearer token cross-site without JavaScript that
@@ -155,6 +158,10 @@ export function csrfRefusal(
  * should cost one origin, not the whole allowlist — and an unparseable entry left
  * in place would throw from inside allowedOrigin on every request.
  *
+ * `name` is the variable being read, for that log line: BELLMAN_PUBLIC_PAGE_ORIGINS
+ * goes through here too, and a log naming the panel's would send an operator to
+ * the wrong one.
+ *
  * `trim()` is right here where it is wrong in cookies.ts, though the two sit
  * one import apart. This reads a deploy-time
  * configuration string an operator wrote; trimOws reads a header an attacker
@@ -162,7 +169,7 @@ export function csrfRefusal(
  * protected one. Being generous about whitespace costs nothing when the writer is
  * trusted, and refusing a space somebody pasted in would only be unhelpful.
  */
-export function parsePanelOrigins(raw: string | undefined): string[] {
+export function parsePanelOrigins(raw: string | undefined, name = "BELLMAN_PANEL_ORIGINS"): string[] {
   if (!raw) return [];
   const origins: string[] = [];
   for (const entry of raw.split(",")) {
@@ -172,11 +179,11 @@ export function parsePanelOrigins(raw: string | undefined): string[] {
     try {
       parsed = new URL(trimmed);
     } catch {
-      console.error(`BELLMAN_PANEL_ORIGINS: ignoring "${trimmed}" — not an absolute URL`);
+      console.error(`${name}: ignoring "${trimmed}" — not an absolute URL`);
       continue;
     }
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-      console.error(`BELLMAN_PANEL_ORIGINS: ignoring "${trimmed}" — only http and https`);
+      console.error(`${name}: ignoring "${trimmed}" — only http and https`);
       continue;
     }
     if (!origins.includes(parsed.origin)) origins.push(parsed.origin);

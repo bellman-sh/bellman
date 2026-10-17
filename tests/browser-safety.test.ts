@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   clearedSessionCookie, readSessionCookie, serializeSessionCookie, sessionCookieName,
 } from "../src/oauth/cookies.js";
@@ -528,6 +528,29 @@ describe("parsing BELLMAN_PANELS", () => {
     expect(allowedOrigin(from("https://dash.bellman.sh"), origins)).toBe("https://dash.bellman.sh");
     expect(allowedOrigin(from("https://other.example"), origins)).toBe("https://other.example");
   });
+
+  // BELLMAN_PUBLIC_PAGE_ORIGINS reads through the same parser. A mistyped entry in it logs under its own name, so the
+  // operator is not sent to the panel's variable; with no name given the line is the panel's, as it always was.
+  it("logs a dropped entry under the variable it was asked to read", () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(parsePanelOrigins("bellman.sh, ftp://x.example", "BELLMAN_PUBLIC_PAGE_ORIGINS")).toEqual([]);
+      expect(parsePanelOrigins("bellman.sh")).toEqual([]);
+      expect(log.mock.calls.map(([line]) => String(line).replace(/ [^\x00-\x7f] .*$/, ""))).toEqual([
+        'BELLMAN_PUBLIC_PAGE_ORIGINS: ignoring "bellman.sh"',
+        'BELLMAN_PUBLIC_PAGE_ORIGINS: ignoring "ftp://x.example"',
+        'BELLMAN_PANEL_ORIGINS: ignoring "bellman.sh"',
+      ]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  // Public rooms on bellman.sh, D7: bellman.sh is not a panel origin, and the list it is on holds it alone.
+  it("deploys the dash alone as the panel, and bellman.sh alone as the public room page's origin", () => {
+    expect(parsePanelOrigins(productionVar("BELLMAN_PANEL_ORIGINS"))).toEqual(["https://dash.bellman.sh"]);
+    expect(parsePanelOrigins(productionVar("BELLMAN_PUBLIC_PAGE_ORIGINS"))).toEqual(["https://bellman.sh"]);
+  });
 });
 
 
@@ -537,7 +560,7 @@ import { beforeEach } from "vitest";
 import { handleOAuth, type OAuthConfig } from "../src/oauth/routes.js";
 import { ACCESS_TOKEN_TTL_SECONDS, signJwt } from "../src/oauth/tokens.js";
 import {
-  BYSTANDER, COOKIE, IDENTITY, ISSUER, panelConfig, routeWith, seedBystander, seedSession,
+  BYSTANDER, COOKIE, IDENTITY, ISSUER, panelConfig, productionVar, routeWith, seedBystander, seedSession,
 } from "./helpers/panel.js";
 
 

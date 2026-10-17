@@ -54,6 +54,41 @@ export type DoorLog = { events: DoorEvent[]; cursor: number };
  */
 export type DoorView = { server: string; socketPath: string | null; status: DoorStatus | null; error: string | null };
 
+/** A member of a room as `bellman_rooms` lists it (`roomSummary` in src/projections.ts): the fields the mod reads. */
+export type RoomMember = {
+  member_id: string;
+  label: string;
+  room_role: string;
+  presence: "present" | "stale" | "departed";
+  /** `note` is peer prose in an untrusted envelope. */
+  beat: { asked: boolean; last_report_at: string | null; silent_for_seconds: number | null; silent: boolean; note: unknown };
+};
+
+/**
+ * A room the session holds a seat in, as `bellman_rooms` lists it (`roomSummary` in src/projections.ts), with the
+ * fields the mod reads, and `server`: the bridge whose door lists the seat, which is the one asked.
+ */
+export type RoomView = {
+  server: string;
+  session_id: string;
+  status: string;
+  max_members: number;
+  active_members: number;
+  your_member_id: string;
+  room: { preset: string | null; public_name: string | null; your_role: string | null; your_verbs: string[] };
+  members: RoomMember[];
+  last_event: { cursor: number; type: string; at: string } | null;
+};
+
+/** An action request waiting on the person: `PendingRequest` in src/mod/view.ts. */
+export type PendingRequest = { session_id: string; cursor: number; from_label: string; text: string; expires_at: number };
+
+/** Where the room shows: the docked sidebar, or the band above the prompt (`Layout` in src/mod/view.ts). */
+export type Layout = "sidebar" | "band";
+
+/** The room pane's tab. */
+export type Tab = "log" | "canvas" | "members" | "approve";
+
 /**
  * Everything bellman-mod keeps in `$.state`, one key each. The keys are written here, inside the interface:
  * `claude plugin validate` reads them from it and follows no alias, so a key named only in a type this
@@ -63,6 +98,20 @@ declare module "claude-code" {
   interface PluginState {
     "bellman-mod": {
       doors: DoorView[];
+      /** The rooms of the doors' seats, read by the rooms poll. */
+      rooms: RoomView[];
+      /** The room the band, the sidebar and the pane show: one of the seats' rooms, or null with none. */
+      room: string | null;
+      /** By room, the newest cursor a tick has looked at for a toast, toasted or not. */
+      seen: Record<string, number>;
+      /** By room, the newest cursor the person has seen in its Log: what unread counts from. */
+      openedThrough: Record<string, number>;
+      layout: Layout;
+      tab: Tab;
+      /** Whether waking is paused, waiting on the person (written by the wake). */
+      wake: { paused: boolean };
+      /** By room, the action requests waiting on the person (written by the room pane). */
+      pending: Record<string, PendingRequest[]>;
     };
   }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DoorEvent } from "../src/door-protocol.js";
-import { BELL_COLUMNS, BELL_ROWS, bellRows, chooseLayout, pendingRequests, roomLabel, safeLinks, toastFor, unreadCount } from "../src/mod/view.js";
+import { BELL_COLUMNS, BELL_ROWS, bellRows, chooseLayout, pendingRequests, roomLabel, safeLinks, sidebarMove, toastFor, unreadCount } from "../src/mod/view.js";
 
 const seats = [{ session_id: "qs_room1", member_id: "m-me" }];
 const ev = (over: Partial<DoorEvent>): DoorEvent => ({
@@ -255,5 +255,38 @@ describe("safeLinks, every shape of a link", () => {
   it("does not stall on a flood of unterminated links", () => {
     // Slow here means a regex that backtracks badly; the test's own timeout is what fails.
     for (const flood of ["[a](", "](", "[", "<a@", "[a]:", "[\n"]) expect(typeof safeLinks(flood.repeat(2_000))).toBe("string");
+  });
+});
+
+describe("sidebarMove", () => {
+  const seat = { session_id: "qs_room1", member_id: "m-me", retrying: false };
+  const read = (seats = [seat]) => ({ status: { seats }, error: null });
+  const unread = { status: null, error: "connect ECONNREFUSED" };
+  const older = { status: null, error: null };
+  const fullscreen = { isFullscreen: true, doors: [read()], open: false, refused: false };
+  const open = { ...fullscreen, open: true };
+
+  it("opens the sidebar unasked in fullscreen while a door lists a seat and the pane is not open", () => {
+    expect(sidebarMove(fullscreen)).toBe("open");
+    expect(sidebarMove({ ...fullscreen, doors: [unread, read()] })).toBe("open");
+    for (const q of [{ isFullscreen: false }, { isFullscreen: undefined }, { doors: [read([])] }, { doors: [unread] }, { doors: [] }]) {
+      expect(sidebarMove({ ...fullscreen, ...q })).toBeNull();
+    }
+    expect(sidebarMove({ ...open, doors: [read()] })).toBeNull();
+  });
+
+  it("opens nothing after the person's own close until they open the pane themselves (R4)", () => {
+    expect(sidebarMove({ ...fullscreen, refused: true })).toBeNull();
+    expect(sidebarMove({ ...fullscreen, refused: false })).toBe("open");
+  });
+
+  it("closes it only on a live answer that no door lists a seat, never while a door cannot be read (R4)", () => {
+    expect(sidebarMove({ ...open, doors: [read([])] })).toBe("close");
+    expect(sidebarMove({ ...open, isFullscreen: false, doors: [read([])] })).toBe("close");
+    // A bridge older than the door has no door to read: it says nothing either way.
+    expect(sidebarMove({ ...open, doors: [read([]), older] })).toBe("close");
+    // A door that cannot be read may hold the seat the person is reading: a bridge restarting.
+    for (const doors of [[unread], [read([]), unread], [unread, read([])], [older], []]) expect(sidebarMove({ ...open, doors })).toBeNull();
+    expect(sidebarMove({ ...open, refused: true, doors: [read([])] })).toBe("close");
   });
 });

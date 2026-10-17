@@ -10,7 +10,7 @@
  * that file and one constant from `action-state.ts`, which itself imports only a type.
  */
 import { ACTION_REQUEST_TTL_MS } from "../action-state.js";
-import { cleanText, eventLine, type DoorEvent } from "../door-protocol.js";
+import { cleanText, eventLine, type DoorEvent, type DoorStatus } from "../door-protocol.js";
 
 /** Columns the sidebar asks for when the pane docks. */
 export const SIDEBAR_COLUMNS = 22;
@@ -43,6 +43,30 @@ export function chooseLayout(p: { isFullscreen: boolean | undefined; sidebarPlac
   return p.isFullscreen === true && p.sidebarPlaced && p.sidebarShown ? "sidebar" : "band";
 }
 
+/** One bridge's door as the sidebar's decision reads it: what its status said, or why it could not be read. */
+export interface DoorRead {
+  status: Pick<DoorStatus, "seats"> | null;
+  error: string | null;
+}
+
+/**
+ * What a door tick does with the sidebar, the pane the mod opens on its own: "open" it, "close" it, or leave it
+ * (null).
+ *
+ * It opens while the terminal is fullscreen (an unasked pane docks there), some door lists a seat, and the pane
+ * is not open, unless the person closed it by hand and has not opened it since (`refused`): reopening it every
+ * tick would fight them. It closes only on a live answer that the session holds no seat: a door was read, none
+ * failed, and none lists one. A door that could not be read says nothing about its seats, so a bridge that
+ * restarts leaves a pane the person is reading where it is. A bridge older than the door (no door, no error)
+ * says nothing either way.
+ */
+export function sidebarMove(p: { isFullscreen: boolean | undefined; doors: readonly DoorRead[]; open: boolean; refused: boolean }): "open" | "close" | null {
+  const seated = p.doors.some((d) => (d.status?.seats.length ?? 0) > 0);
+  if (!p.open) return p.isFullscreen === true && seated && !p.refused ? "open" : null;
+  const seatless = !seated && p.doors.some((d) => d.status !== null) && p.doors.every((d) => d.error === null);
+  return seatless ? "close" : null;
+}
+
 // ---------------------------------------------------------------------------
 // Events: toasts, unread, pending requests
 // ---------------------------------------------------------------------------
@@ -67,7 +91,7 @@ function later(a: DoorEvent, b: DoorEvent): boolean {
 }
 
 /** Longest a sender's label or a room's name runs in a line: the server's limit on a public name (`PUBLIC_NAME` in `src/public-names.ts`). */
-const NAME_MAX = 40;
+export const NAME_MAX = 40;
 /** The toast's whole line. */
 const TOAST_MAX = 120;
 

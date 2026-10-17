@@ -1,0 +1,277 @@
+/**
+ * What the person sees of the session's rooms in the terminal (spec D2 to D6): the band above the prompt with the
+ * bell floating over it, or, while the terminal is fullscreen and the pane docks beside it, the sidebar instead;
+ * a toast for a peer's message; and, while the session holds no seat, the status line alone.
+ *
+ * Every string a peer controls reaches the screen through src/mod/view.ts (`roomLabel`, `toastFor`) or
+ * `cleanText`. The render hooks draw on the terminal and answer `next(e)` on every other surface (spec D11).
+ */
+import { read, update } from "claude-code";
+import type { Elements, EngineInterface, On } from "claude-code";
+import { cleanText } from "../../src/door-protocol.js";
+import {
+  BELL_COLUMNS,
+  BELL_ROWS,
+  COMPACT_BELOW,
+  NAME_MAX,
+  PANE_COLUMNS,
+  PANE_ID,
+  SIDEBAR_COLUMNS,
+  bellRows,
+  chooseLayout,
+  roomLabel,
+  sidebarMove,
+  toastFor,
+  unreadCount,
+} from "../../src/mod/view.js";
+import type { DoorSeat, DoorView, RoomView, Tab } from "../types";
+import { markDrawn } from "./drawn";
+import { personActed } from "./person";
+import { doors, layout, openedThrough, pending, room, rooms, seen, tab, wake } from "./state";
+
+/** Whether the terminal docks a pane, as the band last drawn saw it (`RenderViewport.isFullscreen`). */
+let isFullscreen: boolean | undefined;
+/** Whether the pane last drew as the room pane, wide, rather than as the sidebar. */
+let paneWide = false;
+/**
+ * The person closed the pane by hand and has not opened it since, so no sidebar opens unasked (R4).
+ * ponytail: a module variable, so a reload forgets it and the sidebar may open once more; `$.state` if that shows.
+ */
+let refused = false;
+/** The status line as last set: null before the first tick, so that tick sets it whatever it says. */
+let statusShown: string | null | undefined = null;
+
+const seatsOf = (list: readonly DoorView[]): DoorSeat[] => list.flatMap((d) => d.status?.seats ?? []);
+
+/** A room's name in the picker, a toast or the pane, from its `bellman_rooms` entry when the poll has one. */
+function labelOf(id: string, views: readonly RoomView[]): string {
+  const view = views.find((r) => r.session_id === id);
+  return roomLabel({ session_id: id, preset: view?.room.preset, public_name: view?.room.public_name });
+}
+
+/** The status line while the session holds no seat (spec D4); none with a seat, or with no Bellman bridge at all. */
+function statusLine(list: readonly DoorView[]): string | undefined {
+  if (list.length === 0 || seatsOf(list).length > 0) return undefined;
+  if (list.some((d) => d.socketPath === null && d.error === null)) return "Bellman: update the bridge to see your rooms here";
+  if (list.some((d) => d.error !== null)) return "Bellman: cannot reach the bridge";
+  if (list.some((d) => d.status?.signed_in === false)) return "Bellman: the bridge is not signed in";
+  return "Bellman: not in a room";
+}
+
+/** Opens the room pane on `to`, wide. The person's press is behind every call, so it is placed at any width. */
+export async function openPane($: EngineInterface, to: Tab): Promise<void> {
+  refused = false;
+  await update($, tab, () => to);
+  await $.ui.open({ id: PANE_ID, title: "Bellman", columns: PANE_COLUMNS });
+}
+
+/** After each door tick: the sidebar, the layout, the room shown, a toast, and the status line. */
+export async function viewTick($: EngineInterface, list: DoorView[]): Promise<void> {
+  let pane = (await $.ui.panes()).find((p) => p.id === PANE_ID);
+  const move = sidebarMove({ isFullscreen, doors: list, open: pane !== undefined, refused });
+  // Unasked: below 144 columns the engine holds it undrawn, and the band covers the gap.
+  if (move === "open") await $.ui.open({ id: PANE_ID, title: "Bellman", columns: SIDEBAR_COLUMNS });
+  if (move === "close") {
+    await $.ui.close({ id: PANE_ID });
+    pane = undefined;
+  }
+  await update($, layout, () =>
+    chooseLayout({ isFullscreen, sidebarPlaced: pane?.isPlaced === true, sidebarShown: pane?.isShown === true }),
+  );
+
+  // The room shown stays while it is a seat's; otherwise the seat whose room spoke last, else the first.
+  const seats = seatsOf(list);
+  const ids = [...new Set(seats.map((s) => s.session_id))];
+  const views = await read($, rooms);
+  const latest = views
+    .filter((r) => ids.includes(r.session_id) && r.last_event !== null)
+    .sort((a, b) => Date.parse(b.last_event!.at) - Date.parse(a.last_event!.at))[0]?.session_id;
+  const shown = await update($, room, (current) => (current !== null && ids.includes(current) ? current : (latest ?? ids[0] ?? null)));
+
+  // A toast for the newest peer event worth one; then each room's events count as seen, toasted or not.
+  const events = list.flatMap((d) => d.status?.recent ?? []);
+  const logOpenFor = pane?.isPlaced && pane.isShown && paneWide && (await read($, tab)) === "log" ? shown : null;
+  const labels = new Map(ids.map((id) => [id, labelOf(id, views)]));
+  const toast = toastFor(events, { seats, seen: new Map(Object.entries(await read($, seen))), logOpenFor, labels });
+  if (toast) $.ui.toast(toast.text);
+  await update($, seen, (was) => {
+    const now = { ...was };
+    for (const e of events) now[e.session_id] = Math.max(now[e.session_id] ?? -1, e.cursor);
+    return now;
+  });
+
+  const line = statusLine(list);
+  if (line !== statusShown) {
+    statusShown = line;
+    $.ui.status(line);
+  }
+}
+
+/** What the band and the sidebar both show of the room in view. Every string in it is cleaned. */
+type Shown = {
+  retrying: boolean;
+  options: { value: string; label: string }[];
+  picked: string;
+  label: string;
+  /** The preset and the member count, as far as `bellman_rooms` has said. */
+  about: string;
+  peers: string[];
+  unread: number;
+  approve: number;
+  paused: boolean;
+};
+
+async function shownOf($: EngineInterface, list: readonly DoorView[], seats: readonly DoorSeat[]): Promise<Shown> {
+  const views = await read($, rooms);
+  const ids = [...new Set(seats.map((s) => s.session_id))];
+  const current = await read($, room);
+  const picked = current !== null && ids.includes(current) ? current : ids[0]!;
+  const view = views.find((r) => r.session_id === picked);
+  const mine = seats.filter((s) => s.session_id === picked);
+  const preset = view?.room.preset ? cleanText(view.room.preset, NAME_MAX) : "";
+  return {
+    retrying: seats.some((s) => s.retrying),
+    options: ids.map((id) => ({ value: id, label: labelOf(id, views) })),
+    picked,
+    label: labelOf(picked, views),
+    about: [preset, view ? `${view.active_members} of ${view.max_members}` : ""].filter(Boolean).join(" · "),
+    // Peers: every member but the session's own seats.
+    peers: (view?.members ?? [])
+      .filter((m) => !mine.some((s) => s.member_id === m.member_id))
+      .map((m) => `${m.presence === "present" ? "●" : "◌"} ${cleanText(m.label, NAME_MAX)} ${m.presence === "present" ? cleanText(m.room_role, NAME_MAX) : "stale"}`),
+    unread: unreadCount(
+      list.flatMap((d) => d.status?.recent ?? []),
+      { sessionId: picked, seatMemberId: mine[0]!.member_id, openedThrough: (await read($, openedThrough))[picked] ?? -1 },
+    ),
+    approve: (await read($, pending))[picked]?.length ?? 0,
+    paused: (await read($, wake)).paused,
+  };
+}
+
+/** The pieces the band and the sidebar lay out differently. Every press is the person's, so each says so first. */
+function pieces($: EngineInterface, ui: Elements["terminal"], s: Shown) {
+  const { Button, Select, Text } = ui;
+  const press = (to: Tab) => () => {
+    personActed();
+    void openPane($, to);
+  };
+  const pick = (value: string) => {
+    personActed();
+    void update($, room, () => value);
+  };
+  return {
+    connection: (
+      <Text color={s.retrying ? "warning" : "success"} wrap="truncate-end">
+        {s.retrying ? "◌ Reconnecting" : "● Connected"}
+      </Text>
+    ),
+    picker:
+      s.options.length > 1 ? (
+        <Select key="room" options={s.options} value={s.picked} onSelect={pick} />
+      ) : (
+        <Text wrap="truncate-end">{s.label}</Text>
+      ),
+    about: s.about !== "" && (
+      <Text dimColor wrap="truncate-end">
+        {s.about}
+      </Text>
+    ),
+    buttons: [
+      <Button key="open-log" label="Log" onPress={press("log")} />,
+      <Button key="open-canvas" label="Canvas" onPress={press("canvas")} />,
+      s.approve > 0 && <Button key="open-approve" label={`Approve ${s.approve}`} onPress={press("approve")} />,
+    ],
+    peers: s.peers.map((peer) => <Text wrap="truncate-end">{peer}</Text>),
+    unread: s.unread > 0 && <Text color="claude">{`${s.unread} new`}</Text>,
+    waiting: s.approve > 0 && <Text color="warning">{`${s.approve} to approve`}</Text>,
+    paused: s.paused && <Text color="warning">paused</Text>,
+    // The bell: each row a Button of half-block cells, the upper pixel the color and the lower the ground.
+    bell: bellRows().map((row, i) => (
+      <Button key={`bell-${i}`} plain hotkey={i === 0 ? "b" : undefined} onPress={press("log")}>
+        {row.map((cell) => (
+          <Text color={cell.top} backgroundColor={cell.bottom}>
+            ▀
+          </Text>
+        ))}
+      </Button>
+    )),
+  };
+}
+
+/** Draws the band, the bell and the pane; `viewTick` keeps them in step with the doors. */
+export function startView(on: On): void {
+  on("ui.close", { id: PANE_ID }, ($, e, next) => {
+    // The person's own close, from the engine's close mark or key. The kit cannot raise one, so the person's
+    // look checks this line: closed by hand, the sidebar stays closed until the bell is pressed.
+    if (e.origin.kind === "person") refused = true;
+    return next(e);
+  });
+
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (e.surface !== "terminal") return next(e);
+    isFullscreen = e.viewport?.isFullscreen;
+    if (e.props.hasSurvey) return next(e);
+    const list = await read($, doors);
+    const seats = seatsOf(list);
+    if (seats.length === 0 || (await read($, layout)) === "sidebar") return next(e);
+    const ui = $.ui.resolve(e);
+    const { Box } = ui;
+    const s = await shownOf($, list, seats);
+    const p = pieces($, ui, s);
+    markDrawn();
+    return (
+      <Box flexDirection="column">
+        <Box columnGap={1}>
+          {p.connection}
+          {p.picker}
+          {p.about}
+          {p.buttons}
+        </Box>
+        <Box columnGap={2}>
+          {p.peers}
+          {p.unread}
+          {p.paused}
+        </Box>
+        <Box position="absolute" top={-(BELL_ROWS + 1)} left={e.props.bodyColumns - BELL_COLUMNS} flexDirection="column">
+          {p.bell}
+        </Box>
+      </Box>
+    );
+  });
+
+  on("ui.render", { component: "Pane", requestId: PANE_ID }, async ($, e, next) => {
+    if (e.surface !== "terminal") return next(e);
+    paneWide = e.props.bodyColumns >= COMPACT_BELOW;
+    const list = await read($, doors);
+    const seats = seatsOf(list);
+    const ui = $.ui.resolve(e);
+    const { Box, Text } = ui;
+    if (seats.length === 0) {
+      markDrawn();
+      return (
+        <Text dimColor wrap="truncate-end">
+          {statusLine(list) ?? "Bellman: cannot reach the bridge"}
+        </Text>
+      );
+    }
+    const s = await shownOf($, list, seats);
+    markDrawn();
+    if (paneWide) {
+      return <Text wrap="truncate-end">{`${s.retrying ? "◌ Reconnecting" : "● Connected"} · ${s.label}`}</Text>;
+    }
+    const p = pieces($, ui, s);
+    return (
+      <Box flexDirection="column">
+        {p.bell}
+        {p.connection}
+        {p.picker}
+        {p.about}
+        {p.peers}
+        {p.unread}
+        {p.waiting}
+        {p.paused}
+        {p.buttons}
+      </Box>
+    );
+  });
+}

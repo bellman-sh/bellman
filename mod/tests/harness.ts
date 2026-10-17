@@ -12,14 +12,69 @@
  * A test reads the mod's `$.state` as `w.state`: the kit's `$` has no `state` noun, and it refuses a
  * test's own `$.state.get`, so the world keeps each value the kit stored for the mod.
  */
-import type { On, PaneOpenArgs, PluginState, RenderSurface, SessionAppendInput, UiPane } from "claude-code";
+import type { On, PaneOpenArgs, PluginState, RenderElement, RenderPropsOf, RenderSurface, SessionAppendInput, UiPane } from "claude-code";
 import { mock } from "claude-code/testing";
 import type { Engine, MockClock } from "claude-code/testing";
-import { DOOR_POLL_MS, ROOMS_POLL_MS } from "../hooks/register.mjs";
+import { DOOR_POLL_MS, PANE_ID, ROOMS_POLL_MS } from "../hooks/register.mjs";
 import type { DoorEvent, DoorLog, DoorStatus } from "../types";
 
 /** Where the mocked clock starts, and when the fixtures' events happened. */
 export const NOW = Date.parse("2026-10-16T12:00:00.000Z");
+
+/** What the engine draws wherever the mod answers `next(e)`: the world's stand-in beneath every plugin. */
+export const ENGINE = { type: "Text", children: ["the engine's own"] };
+
+/** The band above the prompt, nothing holding it, 95 cells across. */
+export const BAND: RenderPropsOf["AbovePrompt"] = {
+  hasSurvey: false,
+  isWorking: false,
+  maxRows: 12,
+  bodyColumns: 95,
+  scroll: { offset: 0, bodyRows: 11 },
+  view: {},
+};
+
+/** The mod's pane, docked: `bodyColumns` is what a test sets. */
+export const PANE: RenderPropsOf["Pane"] = {
+  title: "Bellman",
+  isFocused: false,
+  bodyColumns: 22,
+  placement: "dock",
+  scroll: { offset: 0, bodyRows: 40 },
+  view: {},
+};
+
+/** The mod's pane as `$.ui.panes()` lists it: open, placed and shown. */
+export const SHOWN: UiPane = { id: PANE_ID, title: "Bellman", isShown: true, isFocused: false, isPlaced: true };
+
+/** The band on `surface`: on the terminal's main screen, unless `isFullscreen`. */
+export const band = ($: Engine, surface: "terminal" | "desktop" = "terminal", isFullscreen = false) =>
+  $.ui.mount({ plugin: "bellman-mod", surface, component: "AbovePrompt", props: BAND, viewport: { columns: 100, rows: 40, isFullscreen } });
+
+/** The mod's pane on `surface`, `bodyColumns` across, docked beside a fullscreen transcript. */
+export const pane = ($: Engine, bodyColumns: number, surface: "terminal" | "desktop" = "terminal") =>
+  $.ui.mount({
+    plugin: "bellman-mod",
+    surface,
+    component: "Pane",
+    requestId: PANE_ID,
+    props: { ...PANE, bodyColumns },
+    viewport: { columns: 160, rows: 40, isFullscreen: true },
+  });
+
+/** Every text a tree shows, in order: its strings, each Button's label, each Select option's label. */
+function texts(node: unknown, out: string[] = []): string[] {
+  if (typeof node === "string") out.push(node);
+  if (node === null || typeof node !== "object") return out;
+  const { props, children } = node as { props?: { label?: unknown; options?: { value: string; label?: string }[] }; children?: unknown[] };
+  if (typeof props?.label === "string") out.push(props.label);
+  for (const option of props?.options ?? []) out.push(option.label ?? option.value);
+  for (const child of children ?? []) texts(child, out);
+  return out;
+}
+
+/** What a mounted drawing shows, as one string. */
+export const shown = async (ui: { drawn: () => Promise<unknown> }): Promise<string> => texts(await ui.drawn()).join(" ");
 
 /** The door of a bridge in hook delivery, signed in, with one seat, nothing waiting and nothing recent. */
 export const STATUS: DoorStatus = {
@@ -231,6 +286,11 @@ export async function world($: Engine, on: On, over: Partial<Omit<World, "clock"
     return { value: undefined };
   });
   on("ui.panes", () => ({ value: w.panes }));
+  // Beneath every plugin, as the engine's own drawing is: the kit refuses a mount that nothing answers.
+  on("ui.render", ($, e) => {
+    const { Text } = $.ui.resolve(e);
+    return h(Text, null, ...ENGINE.children) as RenderElement;
+  });
 
   await $.session.start({ cwd: "/work", surface: w.surfaces[0] ?? null, isInteractive: true });
   return w;

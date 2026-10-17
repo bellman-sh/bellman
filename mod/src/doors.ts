@@ -9,12 +9,15 @@
  * Every tick reads every door. A door that fails loses its socket, and the next tick asks its bridge again:
  * a bridge that restarted has a new pid, so a new socket. The bridges are listed on every tick too, since one
  * may connect after the session starts.
+ *
+ * The rooms the seats are in come from each bridge's `bellman_rooms`, every `ROOMS_POLL_MS` and on any tick
+ * whose seats changed, so a room Claude just joined shows within a tick.
  */
 import { read, update } from "claude-code";
-import type { EngineInterface, On } from "claude-code";
-import { DOOR_POLL_MS } from "../../src/mod/view.js";
-import type { DoorStatus, DoorView } from "../types";
-import { doors } from "./state";
+import type { EngineInterface } from "claude-code";
+import { DOOR_POLL_MS, ROOMS_POLL_MS } from "../../src/mod/view.js";
+import type { DoorStatus, DoorView, RoomView } from "../types";
+import { doors, rooms } from "./state";
 
 /** `bellman_whoami` under any server's name: `mcp__<server>__bellman_whoami`. */
 const WHOAMI = /^mcp__(.+)__bellman_whoami$/;
@@ -63,9 +66,48 @@ export async function pollDoors($: EngineInterface, list: readonly DoorView[]): 
   );
 }
 
+/**
+ * The rooms the doors' seats are in, each from its own bridge's `bellman_rooms`: a read that moves nobody's
+ * `lastSeenAt`. Only a door that lists a seat is asked; a bridge whose call fails keeps the rooms it had.
+ */
+export async function readRooms($: EngineInterface, list: readonly DoorView[], known: readonly RoomView[]): Promise<RoomView[]> {
+  const each = await Promise.all(
+    list.map(async (door): Promise<RoomView[]> => {
+      const seated = new Set(door.status?.seats.map((s) => s.session_id));
+      if (seated.size === 0) return [];
+      try {
+        const result = await $.mcp.call(door.server, "bellman_rooms");
+        if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_rooms failed");
+        // ponytail: read as roomSummary's shape unchecked; it is our own server's answer.
+        const listed = (result.structuredContent as { rooms?: Omit<RoomView, "server">[] } | undefined)?.rooms ?? [];
+        return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
+      } catch (error) {
+        $.ui.log(`bellman-mod: bellman_rooms on ${door.server}: ${message(error)}`, { to: "debug" });
+        return known.filter((r) => r.server === door.server && seated.has(r.session_id));
+      }
+    }),
+  );
+  return each.flat();
+}
+
+/** Which seats the doors list, as one string: what the last rooms read was for. */
+const seatsKey = (list: readonly DoorView[]): string =>
+  JSON.stringify(list.flatMap((d) => (d.status?.seats ?? []).map((s) => [d.server, s.session_id])).sort());
+let roomsFor: string | null = null;
+
+async function refreshRooms($: EngineInterface, list: readonly DoorView[]): Promise<void> {
+  roomsFor = seatsKey(list);
+  const fresh = await readRooms($, list, await read($, rooms));
+  await update($, rooms, () => fresh);
+}
+
 const subscribers: ((list: DoorView[]) => Promise<void>)[] = [];
 
-/** Runs `fn` after every door tick, with the doors as that tick left them in `doors`. */
+/**
+ * Runs `fn` after every door tick, with the doors as that tick left them in `doors`. `claude plugin validate`
+ * refuses a `$` handed to a function it cannot follow, as a subscriber is: one that needs `$` subscribes from
+ * `session.start` (register.tsx), in a closure over that hook's `$`.
+ */
 export function onTick(fn: (list: DoorView[]) => Promise<void>): void {
   subscribers.push(fn);
 }
@@ -79,6 +121,7 @@ async function tick($: EngineInterface): Promise<void> {
   try {
     const list = await pollDoors($, await discover($, await read($, doors)));
     await update($, doors, () => list);
+    if (seatsKey(list) !== roomsFor) await refreshRooms($, list);
     for (const fn of subscribers) {
       // Each on its own: one that throws stops none of the others.
       try {
@@ -92,12 +135,17 @@ async function tick($: EngineInterface): Promise<void> {
   }
 }
 
-/** On `session.start`: finds the doors, then reads them every `DOOR_POLL_MS` for the session's life. */
-export function startDoors(on: On): void {
-  on("session.start", async ($, e, next) => {
-    const found = await discover($);
-    await update($, doors, () => found);
-    $.clock.every(DOOR_POLL_MS, () => void tick($));
-    return next(e);
+/**
+ * From `session.start` (register.tsx): finds the doors, then reads them every `DOOR_POLL_MS` and their rooms every
+ * `ROOMS_POLL_MS`, for the session's life.
+ */
+export async function startDoors($: EngineInterface): Promise<void> {
+  const found = await discover($);
+  await update($, doors, () => found);
+  $.clock.every(DOOR_POLL_MS, () => void tick($));
+  $.clock.every(ROOMS_POLL_MS, () => {
+    read($, doors)
+      .then((list) => refreshRooms($, list))
+      .catch((error: unknown) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
   });
 }

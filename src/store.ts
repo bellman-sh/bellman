@@ -22,7 +22,8 @@ import { applySurfaceWrite, type SurfaceWrite } from "./surface.js";
 import { admitAt, type SendAdmission } from "./send-limit.js";
 import type { Suspension } from "./suspension.js";
 import {
-  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, type FiledReport, type NewReport, type Report,
+  REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, withinWindow,
+  type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import {
   auditRows, facetsOf, pageOf, partiesOf, type AuditActor, type AuditFacets, type AuditPage, type AuditQuery, type SeqEntry,
@@ -2118,7 +2119,7 @@ export class MemoryStore implements BellmanStore {
     const openId = this.folds.get(fold);
     const open = openId === undefined ? undefined : this.reports.get(openId);
     if (open?.resolvedAt === null) return { outcome: "folded", report: detach(open) };
-    const kept = (this.filings.get(r.reporterUserId) ?? []).filter((t) => now - t < REPORT_WINDOW_MS);
+    const kept = withinWindow(this.filings.get(r.reporterUserId) ?? [], now);
     if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
     const report: Report = { ...detach(r), id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
     this.reports.set(report.id, report);
@@ -3027,6 +3028,11 @@ export class MemoryStore implements BellmanStore {
     // A resolved report goes 180 days on (R15); the Durable Objects store does this on the registry's alarm.
     for (const [id, r] of this.reports) {
       if (r.resolvedAt !== null && r.resolvedAt + REPORT_RETENTION_MS <= now) this.reports.delete(id);
+    }
+    // A reporter's filing times only serve the day's limit, so a row whose times have all left the day goes too, and
+    // an account is not kept for good.
+    for (const [reporter, times] of this.filings) {
+      if (withinWindow(times, now).length === 0) this.filings.delete(reporter);
     }
   }
 

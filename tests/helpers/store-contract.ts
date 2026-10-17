@@ -91,6 +91,13 @@ export interface StoreContractHarness {
    */
   advanceRegistry?: () => Promise<void>;
   /**
+   * The accounts whose filing times the store still holds: what `fileReport` counts the day's limit from. The
+   * harness reads it because `BellmanStore` cannot show it, since a row whose times have all left the day counts
+   * as no row. The purge deletes such a row, which only serves the limit, because the privacy page promises a
+   * reporter's account is kept 180 days after resolution and not for good.
+   */
+  reporterRows: () => Promise<string[]>;
+  /**
    * Drops what the store's room objects hold in memory and keeps what they have stored: an idle Durable
    * Object is evicted after about 30 seconds, and a count kept only in memory is gone with it. A store with
    * nothing that can leave memory passes none, and the case that calls it then pins the count alone.
@@ -4459,6 +4466,33 @@ export function describeStoreContract(
         vi.advanceTimersByTime(1);
         await sweepRegistry();
         expect(await store.listReports(10)).toEqual([]);
+      });
+
+      /**
+       * R10's rows only serve the day's count. u_old filed long ago, u_edge a day before the purge to the millisecond, and
+       * u_late twice, the first just over a day before it and the second an hour before: its row holds both times, so the
+       * newest is the one that keeps it.
+       */
+      it("forgets a reporter's filing times at the purge once the newest is a day old, and keeps them while one is inside the day", async () => {
+        const hour = 3_600_000;
+        const day = 24 * hour;
+        const old = (await file({ reporterUserId: "u_old" })).report;
+        await store.resolveReport(old.id, { note: "warned", by: "u_operator" }, Date.now());
+        const purgeAt = Date.now() + 180 * day;
+        vi.advanceTimersByTime(179 * day - 10 * 60_000);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 3 } });
+        vi.advanceTimersByTime(10 * 60_000);
+        await file({ reporterUserId: "u_edge", target: { kind: "message", cursor: 2 } });
+        vi.advanceTimersByTime(day - hour);
+        await file({ reporterUserId: "u_late", target: { kind: "message", cursor: 4 } });
+        expect((await harness.reporterRows()).sort(), "before the purge").toEqual(["u_edge", "u_late", "u_old"]);
+        vi.advanceTimersByTime(hour);
+        expect(Date.now()).toBe(purgeAt);
+        await sweepRegistry();
+        const left = (await store.listReports(10)).map((r) => r.id);
+        expect(left, "the purge ran and deleted u_old's report").not.toContain(old.id);
+        expect(left, "and left the three open ones").toHaveLength(3);
+        expect((await harness.reporterRows()).sort(), "u_edge's time is a day old exactly, u_late's newest an hour").toEqual(["u_late"]);
       });
     });
 

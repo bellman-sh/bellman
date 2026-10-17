@@ -50,6 +50,10 @@ describeStoreContract("DurableObjectStore", () => new DurableObjectStore(env as 
   // The registry's alarm, for the same reason: `sweep` is a no-op here, and a resolved report is deleted by `report_purge`.
   advanceRegistry: () =>
     runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), (instance: RegistryDO) => instance.alarm()),
+  // The registry's `rl:<reporter>` rows, which `BellmanStore` cannot show: a row of times that have all left the day counts as no row.
+  reporterRows: () =>
+    runInDurableObject(env.REGISTRY.get(env.REGISTRY.idFromName("registry")), async (_i: RegistryDO, ctx) =>
+      [...(await ctx.storage.list({ prefix: "rl:" })).keys()].map((key) => decodeURIComponent(key.slice("rl:".length)))),
   // Every instance goes and the storage stays, as when an idle object is evicted. abortAllDurableObjects and not
   // evictAllDurableObjects, which hibernates the sockets and drains long polls: the point is that memory is gone.
   forgetMemory: () => abortAllDurableObjects(),

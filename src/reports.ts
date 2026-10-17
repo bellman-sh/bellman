@@ -52,6 +52,13 @@ export interface Report extends NewReport {
  */
 export type FiledReport = { outcome: "filed" | "folded"; report: Report } | { outcome: "limited"; retryAfterMs: number };
 
+/**
+ * The filing times still inside the rolling day at `now` (R10). A time stops counting exactly `REPORT_WINDOW_MS` after
+ * it was made. Both stores' limit and the purge's forgetting of a spent row ask this one question.
+ */
+export const withinWindow = (times: readonly number[], now: number): number[] =>
+  times.filter((t) => now - t < REPORT_WINDOW_MS);
+
 /** "room", "member:<id>" or "message:<cursor>": what makes two reports of one target the same. */
 export function targetKey(t: ReportTarget): string {
   switch (t.kind) {

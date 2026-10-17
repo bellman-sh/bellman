@@ -139,7 +139,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     it as text.
 21. **A resolved report is deleted by a named handler (R15).** `report_purge`, on the
     registry's one alarm, deletes a report 180 days after it was resolved. Unresolved
-    reports stay. `MemoryStore` deletes in `sweep`.
+    reports stay. The same firing deletes each reporter's filing-times row
+    (`rl:<reporter>`) once its newest time has left the 24 hours of decision 19's limit,
+    because that row serves nothing else and the privacy page promises a reporter's
+    account is kept 180 days after resolution. `MemoryStore` does both in `sweep`.
 22. **An eviction no longer retires a public room's permanent code.** This supersedes ADR
     0020, decision 5, on that point. An expiring code is still retired, as ADR 0010,
     decision 4, has it. Retiring the permanent code closed the link for every newcomer,
@@ -169,6 +172,10 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 - A ban keeps the account's user id and label, which for most people is an email address,
   and when it was made. A suspension keeps the operator's note, which operator wrote it and
   when. A report keeps its reporter's account and note for 180 days after it is resolved.
+  A reporter's filing times go with the first purge after the newest is a day old. A
+  purge runs when a resolved report's 180 days are up, so a spent row can wait for one,
+  and only while the report behind its newest time is still in the queue, which keeps
+  the account anyway.
 - `creator_ban` is a new outbox kind and `report_purge` a new handler name on the
   registry's alarm. A build rolled back past `creator_ban` throws `outbox: unknown kind`,
   and the queue holds every row behind it (ADR 0006), so deployments roll forward.

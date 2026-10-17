@@ -36,7 +36,7 @@ import {
 import { grantAuditEntries, revokeAuditEntries, type AuditIntent } from "./grant-audit.js";
 import { OUTBOX_HANDLER, OUTBOX_PREFIX, OutboxDriver, dueKey, type OutboxIntent, type OutboxRow } from "./outbox.js";
 import {
-  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey,
+  REPORT_PURGE_HANDLER, REPORT_RETENTION_MS, REPORT_WINDOW_MS, REPORTS_PER_DAY, reportId, targetKey, withinWindow,
   type FiledReport, type NewReport, type Report,
 } from "./reports.js";
 import { R2BlobStore } from "./blobs-r2.js";
@@ -2978,7 +2978,8 @@ const suspensionKey = (userId: string): string => `su:${encodeURIComponent(userI
  * - `rp:<id>` is the report. An id sorts in filing order, so a listing of the prefix is the queue.
  * - `rf:<reporter>:<sessionId>:<targetKey>` holds the id of the open report that account filed about that target:
  *   what a repeat folds into (R9). Resolving the report deletes it.
- * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`.
+ * - `rl:<reporter>` holds the times of the account's filings still inside the day (R10), a `number[]`. It only serves
+ *   that limit, so the purge deletes it once its newest time has left the day.
  * - `rc:<creator>:<sessionId>:<id>` holds the id of a report about a member or a message, so a creator's view of
  *   one room is a listing of a prefix.
  * - `rr:<purgeAt>:<id>` holds the id of a resolved report, dated for its deletion, the time padded to 15 digits so
@@ -2990,7 +2991,8 @@ const REPORT_PREFIX = "rp:";
 const reportKey = (id: string): string => `${REPORT_PREFIX}${id}`;
 const reportFoldKey = (reporterId: string, sessionId: string, target: string): string =>
   `rf:${encodeURIComponent(reporterId)}:${sessionId}:${target}`;
-const reportTimesKey = (reporterId: string): string => `rl:${encodeURIComponent(reporterId)}`;
+const REPORT_TIMES_PREFIX = "rl:";
+const reportTimesKey = (reporterId: string): string => `${REPORT_TIMES_PREFIX}${encodeURIComponent(reporterId)}`;
 const reportCreatorPrefix = (creatorId: string, sessionId: string): string =>
   `rc:${encodeURIComponent(creatorId)}:${sessionId}:`;
 const reportCreatorKey = (creatorId: string, sessionId: string, id: string): string =>
@@ -3166,9 +3168,10 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
 
   /**
    * `report_purge` (R15): in one transaction, delete every resolved report whose 180 days are up, with its creator
-   * row and its `rr:` row, then point the due row at the next `rr:` row, or delete it when none is left. Without
-   * that last step the name stays due and the alarm fires back to back. Listed up to `now` and not the whole
-   * prefix, because the prefix holds every report resolved in the last 180 days and a firing needs the due ones.
+   * row and its `rr:` row, and every reporter's filing-times row whose times have all left the day, then point the
+   * due row at the next `rr:` row, or delete it when none is left. Without that last step the name stays due and the
+   * alarm fires back to back. The reports are listed up to `now` and not the whole prefix, because the prefix holds
+   * every report resolved in the last 180 days and a firing needs the due ones.
    *
    * `#private`, for the reason `#deliver` gives: it deletes reports, and a method on a Durable Object's class is
    * reachable by anything holding the REGISTRY binding.
@@ -3186,6 +3189,12 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
         if (report === undefined) continue;
         keys.push(reportKey(id));
         if (report.target.kind !== "room") keys.push(reportCreatorKey(report.creatorId, report.sessionId, id));
+      }
+      // A reporter's filing times only serve the day's limit (R10), so a row whose times have all left the day goes too,
+      // and an account is not kept for good. Listed whole: the rows are those of whoever filed in the last day, and of
+      // whoever filed since the last purge.
+      for (const [key, times] of await txn.list<number[]>({ prefix: REPORT_TIMES_PREFIX })) {
+        if (withinWindow(times, now).length === 0) keys.push(key);
       }
       // A delete takes at most KEYS_PER_CALL keys.
       for (let i = 0; i < keys.length; i += KEYS_PER_CALL) await txn.delete(keys.slice(i, i + KEYS_PER_CALL));
@@ -3819,7 +3828,7 @@ export class RegistryDO extends DurableObject<BellmanEnv> {
       const open = foldedId === undefined ? undefined : await txn.get<Report>(reportKey(foldedId));
       if (open?.resolvedAt === null) return { outcome: "folded", report: open };
       const timesKey = reportTimesKey(r.reporterUserId);
-      const kept = ((await txn.get<number[]>(timesKey)) ?? []).filter((t) => now - t < REPORT_WINDOW_MS);
+      const kept = withinWindow((await txn.get<number[]>(timesKey)) ?? [], now);
       if (kept.length >= REPORTS_PER_DAY) return { outcome: "limited", retryAfterMs: kept[0] + REPORT_WINDOW_MS - now };
       const report: Report = { ...r, id: reportId(now), at: now, resolvedAt: null, resolution: null, resolvedBy: null };
       await txn.put<unknown>({

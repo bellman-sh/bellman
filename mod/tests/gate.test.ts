@@ -40,18 +40,17 @@ test("passes a message, and an answer in a room the pane does not show", async (
   expect(await send($, { session_id: "qs_other" })).toMatchObject(RAN);
 });
 
-test("passes the answer the person gave, and only that one", async ($, on) => {
+test("passes the approval the person gave, only that one, and no decline of Claude's", async ($, on) => {
   const w = await world($, on);
-  // The person approved request 5 and declined request 7: the keys a press leaves.
+  // The person approved request 5: the key the press leaves.
   w.seed.approved = [approvalKey("qs_room1", "5")];
-  w.seed.denying = [approvalKey("qs_room1", "7")];
   await tick(w);
   await band($);
   expect(await send($)).toMatchObject(RAN);
   expect(await send($, { ref_id: "6" })).toEqual(REFUSED);
+  // The person's Deny answers the room through the bridge's door, never through Claude, so no decline passes.
   expect(await send($, { payload: { approved: false } })).toEqual(REFUSED);
-  expect(await send($, { ref_id: "7", payload: { approved: false } })).toMatchObject(RAN);
-  expect(await send($, { ref_id: "7" })).toEqual(REFUSED);
+  expect(await send($, { ref_id: "7", payload: { approved: false } })).toEqual(REFUSED);
 });
 
 test("gates the rooms of every bridge's door", async ($, on) => {

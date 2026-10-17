@@ -40,6 +40,17 @@ test("the sidebar holds the connection, the room, its peers and the buttons", as
   expect(text).not.toContain("you");
 });
 
+test("the room, its members and their labels come from the door's /rooms", async ($, on) => {
+  const w = await world($, on);
+  w.rooms[0]!.room.preset = "pair";
+  w.rooms[0]!.members[1]!.label = "grace";
+  await tick(w);
+  expect(w.fetched).toContainEqual({ socket: w.door, method: "GET", path: "/rooms" });
+  const text = await shown(await band($));
+  for (const part of ["pair _room1", "4 of 8", "grace", "rook"]) expect(text).toContain(part);
+  expect(w.calls.filter((c) => c.tool !== "bellman_whoami")).toEqual([]);
+});
+
 test("pressing the bell opens the room pane at its full width", async ($, on) => {
   const w = await world($, on);
   await tick(w);

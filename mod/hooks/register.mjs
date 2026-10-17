@@ -13,7 +13,7 @@ function parsed(text) {
     return null;
   }
 }
-var OWN_TOOL = /^mcp__.+__bellman_(whoami|rooms|surface|send)$/;
+var OWN_TOOL = /^mcp__.+__bellman_whoami$/;
 var isOwnCall = (tool, origin) => OWN_TOOL.test(tool) && origin?.plugin === "bellman-mod";
 
 // mod/src/doors.ts
@@ -168,7 +168,6 @@ var tab = atom({ plugin: "bellman-mod", key: "tab" }, "log");
 var wake = atom({ plugin: "bellman-mod", key: "wake" }, { paused: false });
 var pending = atom({ plugin: "bellman-mod", key: "pending" }, {});
 var approved = atom({ plugin: "bellman-mod", key: "approved" }, []);
-var denying = atom({ plugin: "bellman-mod", key: "denying" }, []);
 var logs = atom({ plugin: "bellman-mod", key: "logs" }, {});
 var canvas = atom({ plugin: "bellman-mod", key: "canvas" }, {});
 
@@ -203,18 +202,30 @@ async function ask($, server) {
     return { server, socketPath: null, status: null, error: message(error) };
   }
 }
-async function discover($, known = []) {
-  const servers = (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
-  return Promise.all(servers.map((server) => known.find((d) => d.server === server && d.socketPath !== null) ?? ask($, server)));
+async function bridges($) {
+  return (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
+}
+async function findDoors($) {
+  const known = await read2($, doors);
+  const unasked = (await bridges($)).filter((server) => !known.some((d) => d.server === server && d.error === null));
+  if (unasked.length === 0) return;
+  const asked = await Promise.all(unasked.map((server) => ask($, server)));
+  await update($, doors, (current) => [
+    ...current.map((d) => d.socketPath === null ? asked.find((a) => a.server === d.server) ?? d : d),
+    ...asked.filter((a) => !current.some((d) => d.server === a.server))
+  ]);
+}
+async function fromDoor($, socketPath, path, init = {}) {
+  const res = await $.http.fetch(`http://door${path}`, { ...init, socketPath });
+  if (!res.ok) throw new Error(`the door answered ${res.status} for ${path}`);
+  return JSON.parse(res.text);
 }
 async function pollDoors($, list) {
   return Promise.all(
     list.map(async (door) => {
       if (door.socketPath === null) return door;
       try {
-        const res = await $.http.fetch("http://door/status", { socketPath: door.socketPath });
-        if (!res.ok) throw new Error(`the door answered ${res.status}`);
-        return { ...door, status: JSON.parse(res.text), error: null };
+        return { ...door, status: await fromDoor($, door.socketPath, "/status"), error: null };
       } catch (error) {
         return { ...door, socketPath: null, status: null, error: message(error) };
       }
@@ -225,14 +236,12 @@ async function readRooms($, list, known) {
   const each = await Promise.all(
     list.map(async (door) => {
       const seated = new Set(door.status?.seats.map((s) => s.session_id));
-      if (seated.size === 0) return [];
+      if (seated.size === 0 || door.socketPath === null) return [];
       try {
-        const result = await $.mcp.call(door.server, "bellman_rooms");
-        if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_rooms failed");
-        const listed = resultData(result)?.rooms ?? [];
+        const listed = (await fromDoor($, door.socketPath, "/rooms")).rooms;
         return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
       } catch (error) {
-        $.ui.log(`bellman-mod: bellman_rooms on ${door.server}: ${message(error)}`, { to: "debug" });
+        $.ui.log(`bellman-mod: the rooms through ${door.server}'s door: ${message(error)}`, { to: "debug" });
         return known.filter((r) => r.server === door.server && seated.has(r.session_id));
       }
     })
@@ -259,9 +268,7 @@ var seatIn = (list, sessionId) => seatedRooms(list).get(sessionId);
 var LOG_KEPT = 500;
 async function fetchLog($, socketPath, sessionId, after) {
   const page = after === void 0 ? "" : `?after=${after}`;
-  const res = await $.http.fetch(`http://door/rooms/${encodeURIComponent(sessionId)}/events${page}`, { socketPath });
-  if (!res.ok) throw new Error(`the door answered ${res.status} for a room's log`);
-  return JSON.parse(res.text).events;
+  return (await fromDoor($, socketPath, `/rooms/${encodeURIComponent(sessionId)}/events${page}`)).events;
 }
 function merged(was, fresh) {
   const byCursor = new Map(was.map((e) => [e.cursor, e]));
@@ -326,15 +333,21 @@ async function readShownLog($, list) {
 }
 async function readCanvas($) {
   const id = await read2($, room);
-  const at = id === null ? void 0 : seatIn(await read2($, doors), id);
-  if (id === null || !at) return;
+  const socketPath = id === null ? null : seatIn(await read2($, doors), id)?.door.socketPath ?? null;
+  if (id === null || socketPath === null) return;
   try {
-    const result = await $.mcp.call(at.door.server, "bellman_surface", { session_id: id });
-    if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_surface failed");
-    await update($, canvas, (was) => ({ ...was, [id]: resultData(result) }));
+    const surface = await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`);
+    await update($, canvas, (was) => ({ ...was, [id]: surface }));
   } catch (error) {
-    $.ui.log(`bellman-mod: bellman_surface on ${at.door.server}: ${message(error)}`, { to: "debug" });
+    $.ui.log(`bellman-mod: the canvas through the door: ${message(error)}`, { to: "debug" });
   }
+}
+async function decline($, socketPath, sessionId, cursor) {
+  await fromDoor($, socketPath, `/rooms/${encodeURIComponent(sessionId)}/decline`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ref_id: String(cursor) })
+  });
 }
 var subscribers = [];
 function onTick(fn) {
@@ -345,8 +358,15 @@ async function tick($) {
   if (ticking) return;
   ticking = true;
   try {
-    const list = await pollDoors($, await discover($, await read2($, doors)));
-    await update($, doors, () => list);
+    const listed = await bridges($);
+    const before = (await read2($, doors)).filter((d) => listed.includes(d.server));
+    const after = await pollDoors($, before);
+    const bySocket = new Map(before.map((d, i) => [d.socketPath, after[i]]));
+    const list = await update(
+      $,
+      doors,
+      (current) => current.filter((d) => listed.includes(d.server)).map((d) => d.socketPath === null ? d : bySocket.get(d.socketPath) ?? d)
+    );
     if (seatsKey(list) !== roomsFor) await refreshRooms($, list);
     for (const fn of subscribers) {
       try {
@@ -360,8 +380,7 @@ async function tick($) {
   }
 }
 async function startDoors($) {
-  const found = await discover($);
-  await update($, doors, () => found);
+  await findDoors($);
   $.clock.every(DOOR_POLL_MS, () => void tick($));
   $.clock.every(ROOMS_POLL_MS, () => {
     read2($, doors).then((list) => refreshRooms($, list)).catch((error) => $.ui.log(`bellman-mod: ${message(error)}`, { to: "debug" }));
@@ -389,9 +408,8 @@ var GATE_REASON = "Only the person answers a Bellman action request in this room
 function judgeSend(call, ctx) {
   const gated = ctx.shut && call.type === "action_response" && ctx.paneRooms.has(call.session_id);
   if (!gated) return { allow: true };
-  if (call.ref_id !== null && call.approved !== void 0) {
-    const given = call.approved ? ctx.approved : ctx.denying;
-    if (given.has(approvalKey(call.session_id, call.ref_id))) return { allow: true };
+  if (call.ref_id !== null && call.approved === true && ctx.approved.has(approvalKey(call.session_id, call.ref_id))) {
+    return { allow: true };
   }
   return { allow: false, reason: GATE_REASON };
 }
@@ -408,8 +426,7 @@ async function judge($, call) {
   return judgeSend(call, {
     shut: await gateShut($),
     paneRooms: await paneRooms($),
-    approved: new Set(await read3($, approved)),
-    denying: new Set(await read3($, denying))
+    approved: new Set(await read3($, approved))
   });
 }
 function registerGate(on) {
@@ -480,19 +497,16 @@ var isTurnRunning = () => turnRunning;
 var person = () => {
   state = stepWake(state, { kind: "person" }).state;
 };
-function registerWake(on) {
-  on("turn.start", ($, e, next) => {
-    if (e.agentId === void 0) turnRunning = true;
-    return next(e);
-  });
-  on("turn.complete", ($, e, next) => {
-    if (e.agentId === void 0) turnRunning = false;
-    return next(e);
-  });
-  on("prompt.submit", ($, e, next) => {
-    if (e.origin.kind === "composer") person();
-    return next(e);
-  });
+function turnStarted(e) {
+  if (e.agentId === void 0) turnRunning = true;
+}
+function turnEnded(e) {
+  if (e.agentId === void 0) turnRunning = false;
+}
+function promptSubmitted(e) {
+  if (e.origin.kind === "composer") person();
+}
+function registerWake() {
   onPerson(person);
 }
 async function wakeTick($, list) {
@@ -542,24 +556,14 @@ async function approve($, r) {
 }
 async function deny($, r) {
   const text = declinedText(r.session_id, r.cursor);
-  const key = approvalKey(r.session_id, String(r.cursor));
-  const at = seatIn(await read4($, doors), r.session_id);
+  const socketPath = seatIn(await read4($, doors), r.session_id)?.door.socketPath ?? null;
   let answered = false;
-  if (at) {
-    await update3($, denying, (keys) => [...keys.filter((k) => k !== key), key]);
+  if (socketPath !== null) {
     try {
-      const result = await $.mcp.call(at.door.server, "bellman_send", {
-        session_id: r.session_id,
-        member_id: at.seat.member_id,
-        type: "action_response",
-        ref_id: String(r.cursor),
-        payload: { approved: false }
-      });
-      answered = resultData(result) !== null;
+      await decline($, socketPath, r.session_id, r.cursor);
+      answered = true;
     } catch (error) {
       $.ui.log(`bellman-mod: Deny: ${message2(error)}`, { to: "debug" });
-    } finally {
-      await update3($, denying, (keys) => keys.filter((k) => k !== key));
     }
   }
   if (!answered) {
@@ -841,10 +845,25 @@ function register(on) {
     await startDoors($);
     return next(e);
   });
+  on("turn.start", async ($, e, next) => {
+    turnStarted(e);
+    await findDoors($);
+    return next(e);
+  });
+  on("turn.complete", async ($, e, next) => {
+    turnEnded(e);
+    await findDoors($);
+    return next(e);
+  });
+  on("prompt.submit", async ($, e, next) => {
+    promptSubmitted(e);
+    await findDoors($);
+    return next(e);
+  });
   on("tool.check", ($, e, next) => isOwnCall(e.tool, next.origin) ? { decision: "allow", reason: "bellman-mod's own call" } : next(e));
   startView(on);
   registerGate(on);
-  registerWake(on);
+  registerWake();
 }
 export {
   APPROVALS_SECTION,

@@ -11,13 +11,12 @@
 import { read, update } from "claude-code";
 import type { Elements, EngineInterface, RenderElement } from "claude-code";
 import { cleanBlock, cleanText, eventLine } from "../../src/door-protocol.js";
-import { resultData } from "../../src/mod/calls.js";
 import { approvalKey } from "../../src/mod/gate.js";
 import { NAME_MAX, PANE_ID, SIDEBAR_COLUMNS, bellRows, safeLinks } from "../../src/mod/view.js";
 import type { DoorEvent, PendingRequest, RoomView, Tab } from "../types";
-import { readCanvas, seatIn } from "./doors";
+import { decline, readCanvas, seatIn } from "./doors";
 import { personActed } from "./person";
-import { approved, canvas, denying, doors, logs, pending, rooms, tab } from "./state";
+import { approved, canvas, doors, logs, pending, rooms, tab } from "./state";
 import type { Pieces, Shown } from "./view";
 import { isTurnRunning } from "./waking";
 
@@ -64,33 +63,20 @@ async function approve($: EngineInterface, r: PendingRequest): Promise<void> {
 }
 
 /**
- * Deny: the mod answers the room itself, `approved: false`, through the bridge whose door lists the seat. The gate
- * passes that answer only while its key is in `denying`, so the key goes in before the call and comes out once the
- * call settled. (A call the mod makes from a press skips the mod's own `mcp.call` hook in this build, so its gate
- * never sees it; the order holds for the build where it does.) Claude is told only once the room has been answered,
- * and the person is told when it was not.
+ * Deny: the mod answers the room itself, `approved: false`, through the door of the bridge that lists the seat
+ * (`decline`, doors.ts): no tool call of Claude Code's, which would be refused from a press, and none the gate sees.
+ * Claude is told only once the room has been answered, and the person is told when it was not.
  */
 async function deny($: EngineInterface, r: PendingRequest): Promise<void> {
   const text = declinedText(r.session_id, r.cursor);
-  const key = approvalKey(r.session_id, String(r.cursor));
-  const at = seatIn(await read($, doors), r.session_id);
+  const socketPath = seatIn(await read($, doors), r.session_id)?.door.socketPath ?? null;
   let answered = false;
-  if (at) {
-    await update($, denying, (keys) => [...keys.filter((k) => k !== key), key]);
+  if (socketPath !== null) {
     try {
-      const result = await $.mcp.call(at.door.server, "bellman_send", {
-        session_id: r.session_id,
-        member_id: at.seat.member_id,
-        type: "action_response",
-        ref_id: String(r.cursor),
-        payload: { approved: false },
-      });
-      // Answered once the bridge says so: a result that holds the send's own answer, and no error.
-      answered = resultData(result) !== null;
+      await decline($, socketPath, r.session_id, r.cursor);
+      answered = true;
     } catch (error) {
       $.ui.log(`bellman-mod: Deny: ${message(error)}`, { to: "debug" });
-    } finally {
-      await update($, denying, (keys) => keys.filter((k) => k !== key));
     }
   }
   if (!answered) {
@@ -145,7 +131,7 @@ const size = (bytes: number): string =>
 /** The fields of a canvas item the pane reads. A peer wrote them all, so each is checked where it is drawn. */
 type CanvasItem = { kind?: unknown; title?: unknown; body?: unknown; blob?: unknown };
 
-/** The items of a `bellman_surface` result (`surfaceItem` in src/projections.ts), each out of its envelope. */
+/** The items of the door's canvas answer, `bellman_surface`'s (`surfaceItem` in src/projections.ts), each out of its envelope. */
 function canvasItems(result: unknown): CanvasItem[] {
   const items = (result as { surface?: { items?: unknown } } | null)?.surface?.items;
   if (!Array.isArray(items)) return [];

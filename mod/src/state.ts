@@ -7,7 +7,7 @@ import type { DoorEvent, DoorView, Layout, PendingRequest, RoomView, Tab } from 
 
 /** Every local bridge in the session and what its door said, written by each door tick. */
 export const doors = atom({ plugin: "bellman-mod", key: "doors" } as const, [] as DoorView[]);
-/** The rooms of the doors' seats, written by the rooms poll (doors.ts). */
+/** The rooms of the doors' seats, as each door's `/rooms` serves them, written by the rooms poll (doors.ts). */
 export const rooms = atom({ plugin: "bellman-mod", key: "rooms" } as const, [] as RoomView[]);
 /** The room shown, picked each tick or by the person (view.tsx). */
 export const room = atom({ plugin: "bellman-mod", key: "room" } as const, null as string | null);
@@ -23,9 +23,7 @@ export const wake = atom({ plugin: "bellman-mod", key: "wake" } as const, { paus
 export const pending = atom({ plugin: "bellman-mod", key: "pending" } as const, {} as Record<string, PendingRequest[]>);
 /** `approvalKey`s of the action requests the person approved, written by the room pane: the gate passes Claude's `approved: true` answer for exactly these. */
 export const approved = atom({ plugin: "bellman-mod", key: "approved" } as const, [] as string[]);
-/** `approvalKey`s of the requests the person declined while the mod's own `approved: false` answer is in flight, written by the room pane: the gate passes that answer and no other. */
-export const denying = atom({ plugin: "bellman-mod", key: "denying" } as const, [] as string[]);
 /** By room, the newest events of its log, written by the log reads (doors.ts). */
 export const logs = atom({ plugin: "bellman-mod", key: "logs" } as const, {} as Record<string, DoorEvent[]>);
-/** By room, `bellman_surface`'s result, written while the pane shows the Canvas (doors.ts). */
+/** By room, its door's `/rooms/<id>/surface` answer (`bellman_surface`'s), written while the pane shows the Canvas (doors.ts). */
 export const canvas = atom({ plugin: "bellman-mod", key: "canvas" } as const, {} as Record<string, unknown>);

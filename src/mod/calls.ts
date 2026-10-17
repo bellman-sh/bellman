@@ -5,7 +5,7 @@
  * for a tool that declares an output schema, and no Bellman tool does, so the JSON is in the first text block: the
  * bridge's `bellman_whoami` compact, a server tool's as `ok` writes it (src/tools/kit.ts), an optional preamble, a
  * blank line, then the JSON. The engine also checks a plugin's call as it checks the model's, and in auto mode
- * refuses it unasked, so the mod allows its own calls of its four tools, and nothing else.
+ * refuses it unasked, so the mod allows its own call of `bellman_whoami`, the one tool it calls, and nothing else.
  *
  * Runtime-free on purpose, like `door-protocol.ts`: esbuild bundles it into the mod.
  */
@@ -38,12 +38,16 @@ function parsed(text: string | undefined): unknown {
   }
 }
 
-/** The tools the mod calls, under any server's name: doors.ts's reads and the room pane's Deny. */
-const OWN_TOOL = /^mcp__.+__bellman_(whoami|rooms|surface|send)$/;
+/**
+ * The one tool the mod calls, under any server's name: `bellman_whoami`, from inside its own hooks (`findDoors` in
+ * mod/src/doors.ts). Claude Code refuses a plugin's own call from its timers and presses whatever this allows, so the
+ * rooms, the canvas and Deny go through the bridge's door instead, and none of them is the mod's to allow here.
+ */
+const OWN_TOOL = /^mcp__.+__bellman_whoami$/;
 
 /**
- * Whether a permission check is of the mod's own call: one of its four tools, raised by the mod (`next.origin`). The
- * model's own call of them reads the engine as its origin and another plugin's its own name, and both keep their check.
+ * Whether a permission check is of the mod's own call of `bellman_whoami`, raised by the mod (`next.origin`). The
+ * model's own call of it reads the engine as its origin and another plugin's its own name, and both keep their check.
  */
 export const isOwnCall = (tool: string, origin: { plugin: string; tier: string } | undefined): boolean =>
   OWN_TOOL.test(tool) && origin?.plugin === "bellman-mod";

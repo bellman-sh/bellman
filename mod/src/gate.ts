@@ -1,7 +1,8 @@
 /**
  * The gate (spec D8): while a terminal draws the mod, only the person answers an action request in a room the pane
- * shows. Claude's `bellman_send` of an `action_response` there passes only as the answer the person gave by pressing
- * Approve or Deny (`judgeSend`, src/mod/gate.ts); every other `bellman_send` and every other tool is none of its business.
+ * shows. Claude's `bellman_send` of an `action_response` there passes only as the approval the person gave by pressing
+ * Approve (`judgeSend`, src/mod/gate.ts): their Deny goes through the bridge's door, never through here, so no decline
+ * of Claude's passes. Every other `bellman_send` and every other tool is none of its business.
  *
  * Two hooks stand at the two doors a `bellman_send` can come through: `tool.call`, the model's own tool call on any
  * server (the bridge's, a registered one, the connector's), and `mcp.call`, another plugin calling through the engine's
@@ -16,7 +17,7 @@ import type { EngineInterface, On } from "claude-code";
 import { GATE_REASON, judgeSend, sendCallOf } from "../../src/mod/gate.js";
 import type { GateVerdict, SendCall } from "../../src/mod/gate.js";
 import { hasDrawn } from "./drawn";
-import { approved, denying, doors } from "./state";
+import { approved, doors } from "./state";
 
 /**
  * What the model is told while the gate is shut, as a section of its system prompt, since the instructions the bridge
@@ -43,7 +44,6 @@ async function judge($: EngineInterface, call: SendCall): Promise<GateVerdict> {
     shut: await gateShut($),
     paneRooms: await paneRooms($),
     approved: new Set(await read($, approved)),
-    denying: new Set(await read($, denying)),
   });
 }
 

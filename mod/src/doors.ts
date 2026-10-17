@@ -3,21 +3,23 @@
  *
  * A bridge is any MCP server that lists `bellman_whoami`, whatever it is registered as (the plugin's, or one
  * the person added); the claude.ai connector lists none, so its rooms are not the mod's (spec D1). The tool's
- * result names the bridge's door (`describeSelf` in src/bridge.ts), and the door answers `GET /status`
- * (src/door.ts).
+ * result names the bridge's door (`describeSelf` in src/bridge.ts), and the door serves the rest (src/door.ts).
  *
- * Every tick reads every door. A door that fails loses its socket, and the next tick asks its bridge again:
- * a bridge that restarted has a new pid, so a new socket. The bridges are listed on every tick too, since one
- * may connect after the session starts.
+ * `bellman_whoami` is the one Claude Code tool the mod calls, and only from inside its own hooks: Claude Code
+ * refuses a mod's own tool call from its timers and presses, and allows it inside one of the mod's hooks (R15). So
+ * the bridges are asked at `session.start`, and at each `turn.start`, `turn.complete` and `prompt.submit` after it
+ * when one is listed that the mod has not asked or a tick found its door failed (`findDoors`, called from
+ * register.tsx): a bridge that restarted has a new pid, so a new socket, found at the person's next prompt or the
+ * turn's next start or end. Everything else goes over a door's socket, which asks no permission.
  *
- * The rooms the seats are in come from each bridge's `bellman_rooms`, every `ROOMS_POLL_MS` and on any tick
- * whose seats changed, so a room Claude just joined shows within a tick. Each room's log comes through its door at
- * the same moments, and on every tick while the room pane shows that room's Log; its canvas through the bridge's
- * `bellman_surface`, only while the pane shows the Canvas. Nothing here calls `bellman_sync` or takes from an
- * inbox: those belong to Claude.
+ * Every tick reads every door, and lists the bridges, since one may connect after the session starts. The rooms the
+ * seats are in come from each door's `/rooms`, every `ROOMS_POLL_MS` and on any tick whose seats changed, so a room
+ * Claude just joined shows within a tick. Each room's log comes through its door at the same moments, and on every
+ * tick while the room pane shows that room's Log; its canvas through the door as well, only while the pane shows the
+ * Canvas. Nothing here calls `bellman_sync` or takes from an inbox: those belong to Claude.
  */
 import { read, update } from "claude-code";
-import type { EngineInterface } from "claude-code";
+import type { EngineInterface, HttpInit } from "claude-code";
 import { resultData } from "../../src/mod/calls.js";
 import { DOOR_POLL_MS, ROOMS_POLL_MS, pendingRequests } from "../../src/mod/view.js";
 import type { DoorEvent, DoorLog, DoorSeat, DoorStatus, DoorView, PendingRequest, RoomView } from "../types";
@@ -41,29 +43,48 @@ async function ask($: EngineInterface, server: string): Promise<DoorView> {
   }
 }
 
-/**
- * Every local bridge in the session, by the servers listing `bellman_whoami` now, with its door. A door already
- * `known` with its socket is kept as it is; every other bridge is asked.
- */
-export async function discover($: EngineInterface, known: readonly DoorView[] = []): Promise<DoorView[]> {
-  const servers = (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
-  return Promise.all(servers.map((server) => known.find((d) => d.server === server && d.socketPath !== null) ?? ask($, server)));
+/** The servers listing `bellman_whoami` now: the session's local bridges. */
+async function bridges($: EngineInterface): Promise<string[]> {
+  return (await $.tool.list()).flatMap((tool) => WHOAMI.exec(tool.name)?.[1] ?? []);
 }
 
 /**
- * Each door's status, read over its socket. A door that cannot be read (refused, gone, or answering anything
- * but a 2xx) gets the error and loses its socket and its status, so the next tick asks its bridge again. A
- * door with no socket is not read.
+ * From inside one of the mod's own hooks, where Claude Code allows the mod's call (register.tsx: `session.start`, and
+ * `turn.start`, `turn.complete` and `prompt.submit`): each bridge listed now that the mod has not asked, or whose door
+ * failed, is asked for its door. A tick cannot ask, so a door it finds failing keeps its error until the next of these.
+ * ponytail: a bridge older than the door is asked once, so one updated mid-session shows at the next session's start.
  */
-export async function pollDoors($: EngineInterface, list: readonly DoorView[]): Promise<DoorView[]> {
+export async function findDoors($: EngineInterface): Promise<void> {
+  const known = await read($, doors);
+  const unasked = (await bridges($)).filter((server) => !known.some((d) => d.server === server && d.error === null));
+  if (unasked.length === 0) return;
+  const asked = await Promise.all(unasked.map((server) => ask($, server)));
+  // Over the doors as they are by now, since a tick may have written while the bridges answered: only a door that
+  // still has no socket takes its bridge's answer.
+  await update($, doors, (current) => [
+    ...current.map((d) => (d.socketPath === null ? (asked.find((a) => a.server === d.server) ?? d) : d)),
+    ...asked.filter((a) => !current.some((d) => d.server === a.server)),
+  ]);
+}
+
+/** A door's JSON answer to `path`, or a throw: the socket refused, is gone, or answered anything but a 2xx. */
+async function fromDoor($: EngineInterface, socketPath: string, path: string, init: Omit<HttpInit, "socketPath"> = {}): Promise<unknown> {
+  const res = await $.http.fetch(`http://door${path}`, { ...init, socketPath });
+  if (!res.ok) throw new Error(`the door answered ${res.status} for ${path}`);
+  return JSON.parse(res.text);
+}
+
+/**
+ * Each door's status, read over its socket, in the order given. A door that cannot be read gets the error and loses
+ * its socket and its status, and the mod's next hook asks its bridge again. A door with no socket is not read.
+ */
+async function pollDoors($: EngineInterface, list: readonly DoorView[]): Promise<DoorView[]> {
   return Promise.all(
     list.map(async (door): Promise<DoorView> => {
       if (door.socketPath === null) return door;
       try {
-        const res = await $.http.fetch("http://door/status", { socketPath: door.socketPath });
-        if (!res.ok) throw new Error(`the door answered ${res.status}`);
         // ponytail: read as DoorStatus version 1 unchecked; check `version` the day the door has a second.
-        return { ...door, status: JSON.parse(res.text) as DoorStatus, error: null };
+        return { ...door, status: (await fromDoor($, door.socketPath, "/status")) as DoorStatus, error: null };
       } catch (error) {
         return { ...door, socketPath: null, status: null, error: message(error) };
       }
@@ -72,22 +93,21 @@ export async function pollDoors($: EngineInterface, list: readonly DoorView[]): 
 }
 
 /**
- * The rooms the doors' seats are in, each from its own bridge's `bellman_rooms`: a read that moves nobody's
- * `lastSeenAt`. Only a door that lists a seat is asked; a bridge whose call fails keeps the rooms it had.
+ * The rooms the doors' seats are in, each from its own door's `/rooms`: `bellman_rooms`' rooms, cut by the bridge to
+ * its own seats, a read that moves nobody's `lastSeenAt`. Only a door that lists a seat is asked; a door that cannot
+ * answer keeps the rooms it had.
  */
-export async function readRooms($: EngineInterface, list: readonly DoorView[], known: readonly RoomView[]): Promise<RoomView[]> {
+async function readRooms($: EngineInterface, list: readonly DoorView[], known: readonly RoomView[]): Promise<RoomView[]> {
   const each = await Promise.all(
     list.map(async (door): Promise<RoomView[]> => {
       const seated = new Set(door.status?.seats.map((s) => s.session_id));
-      if (seated.size === 0) return [];
+      if (seated.size === 0 || door.socketPath === null) return [];
       try {
-        const result = await $.mcp.call(door.server, "bellman_rooms");
-        if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_rooms failed");
-        // ponytail: read as roomSummary's shape unchecked; it is our own server's answer.
-        const listed = (resultData(result) as { rooms?: Omit<RoomView, "server">[] } | null)?.rooms ?? [];
+        // ponytail: read as roomSummary's shape unchecked; it is our own bridge's answer.
+        const listed = ((await fromDoor($, door.socketPath, "/rooms")) as { rooms: Omit<RoomView, "server">[] }).rooms;
         return listed.filter((r) => seated.has(r.session_id)).map((r) => ({ ...r, server: door.server }));
       } catch (error) {
-        $.ui.log(`bellman-mod: bellman_rooms on ${door.server}: ${message(error)}`, { to: "debug" });
+        $.ui.log(`bellman-mod: the rooms through ${door.server}'s door: ${message(error)}`, { to: "debug" });
         return known.filter((r) => r.server === door.server && seated.has(r.session_id));
       }
     }),
@@ -129,10 +149,8 @@ const LOG_KEPT = 500;
 /** A page of a room's log through a door: the newest page, or the page past `after`. */
 async function fetchLog($: EngineInterface, socketPath: string, sessionId: string, after: number | undefined): Promise<DoorEvent[]> {
   const page = after === undefined ? "" : `?after=${after}`;
-  const res = await $.http.fetch(`http://door/rooms/${encodeURIComponent(sessionId)}/events${page}`, { socketPath });
-  if (!res.ok) throw new Error(`the door answered ${res.status} for a room's log`);
   // ponytail: read as DoorLog unchecked, as the status is; it is our own bridge's answer.
-  return (JSON.parse(res.text) as DoorLog).events;
+  return ((await fromDoor($, socketPath, `/rooms/${encodeURIComponent(sessionId)}/events${page}`)) as DoorLog).events;
 }
 
 /** `was` and `fresh` as one log, each cursor once, oldest first, the newest `LOG_KEPT` kept. */
@@ -209,20 +227,33 @@ export async function readShownLog($: EngineInterface, list: readonly DoorView[]
 }
 
 /**
- * The canvas of the room the pane shows, through the bridge whose door lists its seat: `bellman_surface`, a read
- * that keeps no seat alive. Called while the pane shows the Canvas, and when the person turns to it.
+ * The canvas of the room the pane shows, through the door that lists its seat: `/rooms/<id>/surface`, which is
+ * `bellman_surface`'s answer, a read that keeps no seat alive. Called while the pane shows the Canvas, and when the
+ * person turns to it.
  */
 export async function readCanvas($: EngineInterface): Promise<void> {
   const id = await read($, room);
-  const at = id === null ? undefined : seatIn(await read($, doors), id);
-  if (id === null || !at) return;
+  const socketPath = id === null ? null : (seatIn(await read($, doors), id)?.door.socketPath ?? null);
+  if (id === null || socketPath === null) return;
   try {
-    const result = await $.mcp.call(at.door.server, "bellman_surface", { session_id: id });
-    if (result.isError) throw new Error(result.content.map((c) => c.text ?? "").join(" ") || "bellman_surface failed");
-    await update($, canvas, (was) => ({ ...was, [id]: resultData(result) }));
+    const surface = await fromDoor($, socketPath, `/rooms/${encodeURIComponent(id)}/surface`);
+    await update($, canvas, (was) => ({ ...was, [id]: surface }));
   } catch (error) {
-    $.ui.log(`bellman-mod: bellman_surface on ${at.door.server}: ${message(error)}`, { to: "debug" });
+    $.ui.log(`bellman-mod: the canvas through the door: ${message(error)}`, { to: "debug" });
   }
+}
+
+/**
+ * The person's Deny of the action request at `cursor`, through the door at `socketPath`: its one write, which answers
+ * the request `approved: false` as the bridge's seat in the room and sends nothing else (`decline` in src/door.ts).
+ * Resolves once the door says the room was answered, and throws otherwise.
+ */
+export async function decline($: EngineInterface, socketPath: string, sessionId: string, cursor: number): Promise<void> {
+  await fromDoor($, socketPath, `/rooms/${encodeURIComponent(sessionId)}/decline`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ref_id: String(cursor) }),
+  });
 }
 
 const subscribers: ((list: DoorView[]) => Promise<void>)[] = [];
@@ -243,8 +274,15 @@ async function tick($: EngineInterface): Promise<void> {
   if (ticking) return;
   ticking = true;
   try {
-    const list = await pollDoors($, await discover($, await read($, doors)));
-    await update($, doors, () => list);
+    const listed = await bridges($);
+    const before = (await read($, doors)).filter((d) => listed.includes(d.server));
+    const after = await pollDoors($, before);
+    const bySocket = new Map(before.map((d, i) => [d.socketPath, after[i]!]));
+    // Over the doors as they are by now, each by the socket this tick read: a door `findDoors` named a socket for
+    // while this tick read keeps the one it named.
+    const list = await update($, doors, (current) =>
+      current.filter((d) => listed.includes(d.server)).map((d) => (d.socketPath === null ? d : (bySocket.get(d.socketPath) ?? d))),
+    );
     if (seatsKey(list) !== roomsFor) await refreshRooms($, list);
     for (const fn of subscribers) {
       // Each on its own: one that throws stops none of the others.
@@ -264,8 +302,7 @@ async function tick($: EngineInterface): Promise<void> {
  * `ROOMS_POLL_MS`, for the session's life.
  */
 export async function startDoors($: EngineInterface): Promise<void> {
-  const found = await discover($);
-  await update($, doors, () => found);
+  await findDoors($);
   $.clock.every(DOOR_POLL_MS, () => void tick($));
   $.clock.every(ROOMS_POLL_MS, () => {
     read($, doors)

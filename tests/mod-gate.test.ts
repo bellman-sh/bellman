@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { GATE_REASON, judgeSend, sendCallOf, type GateContext, type SendCall } from "../src/mod/gate.js";
 
 const ctx = (over: Partial<GateContext> = {}): GateContext => ({
-  shut: true, paneRooms: new Set(["qs_room1"]), approved: new Set(), denying: new Set(), ...over,
+  shut: true, paneRooms: new Set(["qs_room1"]), approved: new Set(), ...over,
 });
 const answer = (over: Partial<SendCall> = {}): SendCall => ({
   type: "action_response", session_id: "qs_room1", ref_id: "41", approved: true, ...over,
@@ -29,8 +29,7 @@ describe("judgeSend", () => {
     ["a room the pane does not show passes", answer({ session_id: "qs_other" }), ctx(), true],
     ["an approval the person pressed passes", answer(), ctx({ approved: new Set(["qs_room1#41"]) }), true],
     ["an approval the person did not press is refused", answer(), ctx(), false],
-    ["the mod's own decline passes", answer({ approved: false }), ctx({ denying: new Set(["qs_room1#41"]) }), true],
-    ["Claude's decline is refused", answer({ approved: false }), ctx(), false],
+    ["Claude's decline is refused: the person's goes through the bridge's door", answer({ approved: false }), ctx(), false],
     ["an answer without approved is refused", answer({ approved: undefined }), ctx(), false],
     ["an answer without ref_id is refused", answer({ ref_id: null }), ctx(), false],
   ] as const)("%s", (_, call, context, allowed) => {
@@ -39,12 +38,11 @@ describe("judgeSend", () => {
     if (!verdict.allow) expect(verdict.reason).toBe(GATE_REASON);
   });
 
-  // The person's answer is the one they pressed: each press lets through its own answer only.
+  // The person's Approve lets through its own answer only: the approval of that request.
   const pressed = new Set(["qs_room1#41"]);
   it.each([
-    ["a pressed Deny does not let an approval through", answer(), ctx({ denying: pressed })],
     ["a pressed Approve does not let a decline through", answer({ approved: false }), ctx({ approved: pressed })],
-    ["an answer without approved is refused whatever was pressed", answer({ approved: undefined }), ctx({ approved: pressed, denying: pressed })],
+    ["an answer without approved is refused whatever was pressed", answer({ approved: undefined }), ctx({ approved: pressed })],
   ] as const)("%s", (_, call, context) => {
     expect(judgeSend(call, context)).toEqual({ allow: false, reason: GATE_REASON });
   });

@@ -3,9 +3,10 @@
  *
  * Claude can answer an action request with `bellman_send` itself, though the request says
  * the answering member's human approves it, not its agent. In the rooms the mod's pane
- * shows, an `action_response` passes only as the answer the person gave by pressing
- * Approve or Deny. This file is that decision and nothing else: the hooks that ask it, and
- * the state they pass in, belong to the mod.
+ * shows, an `action_response` passes only as the approval the person gave by pressing
+ * Approve. Their Deny is answered by the mod through the bridge's door, never as a tool
+ * call, so no decline passes. This file is that decision and nothing else: the hooks that
+ * ask it, and the state they pass in, belong to the mod.
  *
  * Runtime-free on purpose, like `door-protocol.ts`: esbuild bundles it into the mod, so it
  * imports nothing and cannot reach `claude-code`, Node or the network.
@@ -58,8 +59,6 @@ export interface GateContext {
   paneRooms: ReadonlySet<string>;
   /** `approvalKey`s of the requests the person approved. */
   approved: ReadonlySet<string>;
-  /** `approvalKey`s of the requests the person declined, whose `approved: false` answer the mod sends itself. */
-  denying: ReadonlySet<string>;
 }
 
 export type GateVerdict = { allow: true } | { allow: false; reason: string };
@@ -71,11 +70,10 @@ export const GATE_REASON =
 export function judgeSend(call: SendCall, ctx: GateContext): GateVerdict {
   const gated = ctx.shut && call.type === "action_response" && ctx.paneRooms.has(call.session_id);
   if (!gated) return { allow: true };
-  // Only the exact answer the person gave: an approval after Approve, a decline after Deny. The
-  // keys live in separate sets, so a pressed Deny never lets an approval through, nor the reverse.
-  if (call.ref_id !== null && call.approved !== undefined) {
-    const given = call.approved ? ctx.approved : ctx.denying;
-    if (given.has(approvalKey(call.session_id, call.ref_id))) return { allow: true };
+  // Only the approval the person gave, of the request they approved: a decline of Claude's never,
+  // since the person's own goes through the bridge's door.
+  if (call.ref_id !== null && call.approved === true && ctx.approved.has(approvalKey(call.session_id, call.ref_id))) {
+    return { allow: true };
   }
   return { allow: false, reason: GATE_REASON };
 }

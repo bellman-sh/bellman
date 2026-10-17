@@ -1,12 +1,14 @@
 import { expect, test } from "claude-code/testing";
 import type { Engine } from "claude-code/testing";
-import { GATE_REASON, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvalKey, approvedText, declinedText } from "../hooks/register.mjs";
+import { GATE_REASON, PANE_COLUMNS, PANE_ID, SIDEBAR_COLUMNS, WAKE_TEXT, approvedText, declinedText } from "../hooks/register.mjs";
 import type { RoomMember } from "../types";
 import { NOW, PANE, ROOMS, SHOWN, STATUS, band, pane, peerEvent, roomsTick, shown, tick, world } from "./harness";
 import type { World } from "./harness";
 
 /** A C0 or C1 control character, DEL included: what a cleaned string never holds. */
 const CONTROL = /[\u{0}-\u{1f}\u{7f}-\u{9f}]/u;
+/** The same, less the line break: what cleaned Markdown never holds. */
+const BLOCK_CONTROL = /[\u{0}-\u{9}\u{b}-\u{1f}\u{7f}-\u{9f}]/u;
 const TWO_MINUTES_AGO = new Date(NOW - 2 * 60_000).toISOString();
 
 /** ada's action request at cursor 5, two minutes old, after a message of hers. */
@@ -37,7 +39,7 @@ async function opened($: Engine, w: World) {
   return pane($, PANE_COLUMNS);
 }
 
-/** An item of the room's surface as `bellman_surface` returns it, in the writer's envelope. */
+/** An item of the room's surface as the door serves it (`bellman_surface`'s, as the bridge relays it), in the writer's envelope. */
 const item = (data: Record<string, unknown>) => ({
   trust: "untrusted",
   origin: { memberId: "m-ada", label: "ada" },
@@ -66,7 +68,7 @@ const SURFACE = {
   },
 };
 
-const surfaceReads = (w: World) => w.calls.filter((c) => c.tool === "bellman_surface").length;
+const surfaceReads = (w: World) => w.fetched.filter((f) => f.path === "/rooms/qs_room1/surface").length;
 
 test("the bell opens the pane on Log, and the approval count opens it on Approve", async ($, on) => {
   const w = await world($, on);
@@ -118,29 +120,34 @@ test("Approve while a turn runs appends the approval instead", async ($, on) => 
   expect(await answer($)).toMatchObject(RAN);
 });
 
-test("Deny answers the room without a turn and tells Claude it was declined", async ($, on) => {
+test("Deny answers the room through the door, with no tool call and no turn, and tells Claude it was declined", async ($, on) => {
   const w = await world($, on);
   w.log.qs_room1 = structuredClone(LOG);
   const room = await opened($, w);
   await room.press({ key: "deny-5" });
-  expect(w.calls.filter((c) => c.tool === "bellman_send")).toEqual([
-    {
-      server: "bellman",
-      tool: "bellman_send",
-      args: { session_id: "qs_room1", member_id: "m-me", type: "action_response", ref_id: "5", payload: { approved: false } },
-    },
-  ]);
-  // While the answer was in flight its key was in `denying`, the one answer the gate passes for it. The mod's own
-  // call from a press skips the mod's own gate in the kit, so this is what holds the order should it ever pass it.
-  expect(w.denyingAtSend).toEqual([[approvalKey("qs_room1", "5")]]);
+  // The door's one write, on the socket of the bridge that holds the seat: the request's cursor and nothing else.
+  expect(w.declined).toEqual([{ socket: w.door, room: "qs_room1", body: { ref_id: "5" } }]);
+  expect(w.calls.filter((c) => c.tool !== "bellman_whoami")).toEqual([]);
   expect(w.submitted).toEqual([]);
   expect(w.rows).toHaveLength(1);
   expect(w.rows[0]?.message).toMatchObject({ type: "user", content: [{ type: "text", text: declinedText("qs_room1", 5) }] });
-  // Once the answer settled the key is gone: a decline of Claude's own is the person's to give again.
-  expect(w.state.denying).toEqual([]);
+  // The person's decline went through the door, so no decline of Claude's passes the gate.
   expect(await answer($, { payload: { approved: false } })).toEqual(REFUSED);
   // The request waits on nobody now.
   expect(await room.find({ key: "deny-5" })).toBeUndefined();
+});
+
+test("a Deny the room refuses tells Claude nothing, and the request still waits", async ($, on) => {
+  // The server keeps a request's first answer: a decline after it is refused (422).
+  const w = await world($, on, { declineStatus: 422 });
+  w.log.qs_room1 = structuredClone(LOG);
+  const room = await opened($, w);
+  await room.press({ key: "deny-5" });
+  expect(w.declined).toHaveLength(1);
+  expect(w.rows).toEqual([]);
+  expect(w.submitted).toEqual([]);
+  expect(w.toasts.at(-1)).toBe("Bellman: the Deny did not go through, so the request still waits.");
+  expect(await room.find({ key: "deny-5" })).toBeDefined();
 });
 
 test("a Deny that does not reach the room tells Claude nothing", async ($, on) => {
@@ -159,26 +166,35 @@ test("a Deny that does not reach the room tells Claude nothing", async ($, on) =
   // The bridge whose seat it is goes away before the press reaches it.
   w.second = undefined;
   await room.press({ key: "deny-5" });
+  expect(w.declined).toEqual([]);
   expect(w.rows).toEqual([]);
   expect(w.submitted).toEqual([]);
-  expect(w.state.denying).toEqual([]);
   expect(w.toasts.at(-1)).toBe("Bellman: the Deny did not go through, so the request still waits.");
 });
 
-test("the pane never reads bellman_sync", async ($, on) => {
+test("a whole session calls no tool but bellman_whoami: the rooms, the canvas and Deny go through the door", async ($, on) => {
   const w = await world($, on);
-  w.log.qs_room1 = structuredClone(LOG);
+  const deploy = peerEvent({ cursor: 6, type: "action_request", at: TWO_MINUTES_AGO, payload: { text: "deploy" } });
+  w.log.qs_room1 = { events: [...structuredClone(LOG).events, deploy], cursor: 6 };
   w.surface.qs_room1 = structuredClone(SURFACE);
-  const room = await opened($, w);
-  for (const key of ["tab-canvas", "tab-members", "tab-approve", "tab-log", "tab-canvas"]) {
+  await tick(w);
+  const top = await band($);
+  for (const key of ["open-log", "open-canvas"]) await top.press({ key });
+  w.panes = [SHOWN];
+  const room = await pane($, PANE_COLUMNS);
+  const presses = ["tab-canvas", "tab-members", "tab-approve", "approve-5", "deny-6", "tab-log", "tab-canvas", "narrow"];
+  for (const key of presses) {
     await room.press({ key });
     await tick(w);
   }
+  for (let i = presses.length + 1; i < 10; i++) await tick(w);
   await roomsTick(w);
-  // The calls were recorded: the rooms and the canvas went through MCP, and none of them was a sync.
-  expect(w.calls.map((c) => c.tool)).toContain("bellman_rooms");
-  expect(w.calls.map((c) => c.tool)).toContain("bellman_surface");
-  expect(w.calls.filter((c) => c.tool === "bellman_sync")).toEqual([]);
+  // Bellman's tools are Claude's: never a sync, a rooms read, a canvas read or a send of the mod's own.
+  expect(w.calls.filter((c) => c.tool !== "bellman_whoami")).toEqual([]);
+  const read = new Set(w.fetched.map((f) => `${f.method} ${f.path}`));
+  for (const route of ["GET /status", "GET /rooms", "GET /rooms/qs_room1/events", "GET /rooms/qs_room1/surface", "POST /rooms/qs_room1/decline"]) {
+    expect(read.has(route), route).toBe(true);
+  }
 });
 
 test("canvas items draw by kind, and a file: link draws as its text", async ($, on) => {
@@ -190,8 +206,7 @@ test("canvas items draw by kind, and a file: link draws as its text", async ($, 
   expect(surfaceReads(w)).toBe(0);
 
   await room.press({ key: "tab-canvas" });
-  expect(surfaceReads(w)).toBe(1);
-  expect(w.calls.find((c) => c.tool === "bellman_surface")).toEqual({ server: "bellman", tool: "bellman_surface", args: { session_id: "qs_room1" } });
+  expect(w.fetched.filter((f) => f.path.endsWith("/surface"))).toEqual([{ socket: w.door, method: "GET", path: "/rooms/qs_room1/surface" }]);
   // The text items: no link but the web's, and the escape gone with the link it carried.
   expect((await room.findAll({ type: "Markdown" })).map((m) => m.props.text)).toEqual(["see x", "or file:///etc/hosts", "trap"]);
   const links = await room.findAll({ type: "Link" });
@@ -212,6 +227,34 @@ test("canvas items draw by kind, and a file: link draws as its text", async ($, 
   await roomsTick(w);
   await roomsTick(w);
   expect(surfaceReads(w)).toBe(2);
+});
+
+test("a hostile canvas is cleaned wherever it is drawn", async ($, on) => {
+  // Review Focus 4, for what the door serves of the canvas.
+  const hostile = "\u{1b}[2Jevil\n\u{7}";
+  const blob = (id: string, type: string) => ({ id: id.repeat(32), bytes: 10, type, name: hostile });
+  const w = await world($, on);
+  w.surface.qs_room1 = {
+    session_id: "qs_room1",
+    surface: {
+      cursor: 5,
+      items: [
+        item({ key: "t", kind: "text", title: hostile, body: hostile }),
+        item({ key: "l", kind: "link", title: hostile, body: `${hostile}https://bellman.sh` }),
+        item({ key: "d", kind: "diagram", title: hostile, body: hostile }),
+        item({ key: "f", kind: "file", title: hostile, blob: blob("c", "text/plain") }),
+        item({ key: "i", kind: "image", title: hostile, blob: blob("d", "image/png") }),
+      ],
+    },
+  };
+  const room = await opened($, w);
+  await room.press({ key: "tab-canvas" });
+  const text = await shown(room);
+  expect(text.match(/evil/g)).toHaveLength(8);
+  expect(text).not.toMatch(CONTROL);
+  // Markdown and a diagram keep a line break, and no other control.
+  expect((await room.findAll({ type: "Markdown" })).map((m) => m.props.text)).toEqual(["evil\n"]);
+  expect((await room.find({ type: "Code" }))?.props.source).not.toMatch(BLOCK_CONTROL);
 });
 
 test("members show role and presence", async ($, on) => {

@@ -5,14 +5,16 @@
  * session never hears its room. Each door tick tells this file how many interrupting events wait (the door's counts,
  * which take nothing from the inbox), and `stepWake` (src/mod/wake.ts) decides: submit a prompt to start a turn in an
  * idle session, append a row to the turn that is running, or leave it alone. Three wakes in a row with nothing from
- * the person pause waking until they type in the composer or press one of the mod's buttons.
+ * the person pause waking until they type in the composer or press one of the mod's buttons. When a turn runs and
+ * when the person types, this file learns from the hooks register.tsx owns (they look for the doors as well), which
+ * call `turnStarted`, `turnEnded` and `promptSubmitted`.
  *
  * What the model is handed is `WAKE_TEXT` and nothing else. Nothing a peer wrote reaches `$.prompt.submit` or
  * `$.session.append`: not a label, a room's name or a message. The model reads the events through the bridge's own
  * tools, which wrap them as untrusted.
  */
 import { update } from "claude-code";
-import type { EngineInterface, On } from "claude-code";
+import type { EngineInterface } from "claude-code";
 import { IDLE_WAKE, WAKE_TEXT, isPaused, stepWake } from "../../src/mod/wake.js";
 import type { WakeState } from "../../src/mod/wake.js";
 import type { DoorView } from "../types";
@@ -35,23 +37,26 @@ const person = (): void => {
   state = stepWake(state, { kind: "person" }).state;
 };
 
-/** The hooks that learn what the wake needs and the engine can say: when a turn runs, and when the person types. */
-export function registerWake(on: On): void {
-  on("turn.start", ($, e, next) => {
-    if (e.agentId === undefined) turnRunning = true;
-    return next(e);
-  });
-  on("turn.complete", ($, e, next) => {
-    if (e.agentId === undefined) turnRunning = false;
-    return next(e);
-  });
-  on("prompt.submit", ($, e, next) => {
-    // Only the person's own Enter in the composer: a peer's message, another plugin's prompt (the wake's own
-    // included) and a task's notification are prompts, but not input from the person.
-    if (e.origin.kind === "composer") person();
-    return next(e);
-  });
-  // A press on one of the mod's buttons or a pick in its room picker.
+/** At `turn.start`: the session's own turn is running. */
+export function turnStarted(e: { agentId?: string }): void {
+  if (e.agentId === undefined) turnRunning = true;
+}
+
+/** At `turn.complete`: the session's own turn has ended. */
+export function turnEnded(e: { agentId?: string }): void {
+  if (e.agentId === undefined) turnRunning = false;
+}
+
+/**
+ * At `prompt.submit`: only the person's own Enter in the composer is the person. A peer's message, another plugin's
+ * prompt (the wake's own included) and a task's notification are prompts, but not input from the person.
+ */
+export function promptSubmitted(e: { origin: { kind: string } }): void {
+  if (e.origin.kind === "composer") person();
+}
+
+/** A press on one of the mod's buttons or a pick in its room picker is the person too. */
+export function registerWake(): void {
   onPerson(person);
 }
 

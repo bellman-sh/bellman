@@ -54,7 +54,7 @@ export type DoorLog = { events: DoorEvent[]; cursor: number };
  */
 export type DoorView = { server: string; socketPath: string | null; status: DoorStatus | null; error: string | null };
 
-/** A member of a room as `bellman_rooms` lists it (`roomSummary` in src/projections.ts): the fields the mod reads. */
+/** A member of a room as the door's `/rooms` lists it (`bellman_rooms`', `roomSummary` in src/projections.ts): the fields the mod reads. */
 export type RoomMember = {
   member_id: string;
   label: string;
@@ -65,8 +65,8 @@ export type RoomMember = {
 };
 
 /**
- * A room the session holds a seat in, as `bellman_rooms` lists it (`roomSummary` in src/projections.ts), with the
- * fields the mod reads, and `server`: the bridge whose door lists the seat, which is the one asked.
+ * A room the session holds a seat in, as the door's `/rooms` lists it (`bellman_rooms`', `roomSummary` in
+ * src/projections.ts), with the fields the mod reads, and `server`: the bridge whose door lists the seat and served it.
  */
 export type RoomView = {
   server: string;
@@ -114,11 +114,9 @@ declare module "claude-code" {
       pending: Record<string, PendingRequest[]>;
       /** `approvalKey`s (src/mod/gate.ts) of the requests the person approved: the gate passes Claude's `approved: true` answer for these (written by the room pane). */
       approved: string[];
-      /** `approvalKey`s of the requests the person declined, while the mod's own `approved: false` answer is in flight: the gate passes that answer (written by the room pane). */
-      denying: string[];
       /** By room, the newest events of its log as its door serves them, oldest first (written by the log reads). */
       logs: Record<string, DoorEvent[]>;
-      /** By room, `bellman_surface`'s structured result as last read, while the pane showed its Canvas: peer content, read with care. */
+      /** By room, its door's `/rooms/<id>/surface` answer (`bellman_surface`'s) as last read, while the pane showed its Canvas: peer content, read with care. */
       canvas: Record<string, unknown>;
     };
   }

@@ -1229,9 +1229,16 @@ loud:
   admits a member 30 sends in a rolling minute, and 6 to a stranger: a member who joined
   a public room through its permanent code, which the member row records as
   `via: "permanent"`. The creator, and anyone who joined with a code that expires, is
-  never one. The count is per member and per room, and lives in the room object's memory
-  (`BellmanStore.admitSend`), so it costs no write and a room object that sleeps forgets
-  it. The hosted seat is exempt, because its writes never ask. The count is its own
+  never one. The count is per room, under a key `sendKeyFor` names. A stranger's is the
+  account's (`user:<userId>`), so a second handle taken through the code, or a leave and
+  a rejoin, does not start it again; a member's is the seat's, so one account's several
+  agents in a busy swarm do not share a single 30. A stranger's times are a row of the
+  room object's storage (`sn:<key>`, written by `BellmanStore.admitSend` on each admission
+  and holding only the sends still inside the minute): at most 6 small writes a minute per
+  stranger, and the count survives an idle object's eviction, about 30 seconds on. A
+  member's live in the object's memory, which costs no write; a room object that sleeps
+  forgets them, so a member can send up to a second 30 across one. The hosted seat is
+  exempt, because its writes never ask. The count is its own
   call, made after every check that can refuse the send and before the append: a send
   refused for another reason spends no place, a send the count refuses writes nothing,
   and a send that fails after it, on a key conflict or a freeze that lands in the gap,
@@ -1892,12 +1899,19 @@ treat these as plus or minus ten percent:
 
 | | Tokens | When |
 |---|---|---|
-| Tool definitions | **~8,940** | every request, whether or not you are in a room |
+| Tool definitions | **~8,959** | every request, whether or not you are in a room |
 | Creating a room | ~430 | once |
 | Joining a room | ~1,300 | once — `connect` 563 plus `confirm` 730 |
 | Receiving a message | ~220 | each |
 | `bellman_rooms` definition | ~252 | every request, as every tool is; inside the total above |
 | `bellman_surface` definition | ~283 | every request, as every tool is; inside the total above |
+
+Re-measured on 2026-10-16 for the send limit's review fixes, by the method below: 19 tokens
+over the 8,940 the send limit measured before them, which the script reproduced on the tip
+before the edit. `bellman_send` is up 19, to 1,444, all of it two parentheticals in the same
+`Errors:` sentence: a member's 30 are "counted per seat, in memory", and a stranger's 6
+"counted per account in the room, and stored". No other tool changed and none was added.
+That is 8,959.
 
 Re-measured on 2026-10-16 for the send limit, by the method below: 46 tokens over the
 8,894 the branch measured before it, which is main's 8,694 and bans' 200. `bellman_send`

@@ -59,8 +59,8 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
    `isBannedByCreator(session.createdBy, userId)` there too, and `bellman_confirm` asks
    again, because a preview holds a 10-minute token.
 8. **State is split by scope, so each check reads one object (D2, ADR 0006).** A room's
-   bans, two rows each (`bn:<banId>` and `bu:<user>`), and its send counts live in its
-   `SessionDO`. Creator-wide bans (`cb:<creator>:<user>`), suspensions (`su:<user>`) and
+   bans, two rows each (`bn:<banId>` and `bu:<user>`), and its send counts (a stranger's
+   as `sn:<key>` rows, a member's in the instance) live in its `SessionDO`. Creator-wide bans (`cb:<creator>:<user>`), suspensions (`su:<user>`) and
    the report queue live in `RegistryDO`. On the Durable Objects store, an eviction that
    asks for `"all"` reaches the registry through the room's outbox, as a `creator_ban` row.
 9. **Platform-wide powers take a named operator (D3).** Suspension, the report queue and
@@ -83,13 +83,20 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     1 to 500 characters, and `:userId` must have the shape `isLinkableUserId` accepts.
     `DELETE` answers 404 when nothing was suspended. There is no listing route, because
     the spec names none. Both are in `src/oauth/routes.ts`, behind `operatorGate`.
-13. **The send limit (D5).** 30 sends a minute for a member and 6 for a stranger, counted
-    per member, per room, over a rolling minute, in the room object's memory. A stranger
-    is a member who joined a public room through its permanent code, recorded as `via:
-    "permanent"` on the member row; the creator, and anyone who joined with a 15-minute
-    code, is never one. The hosted seat is exempt. A refusal is `rate_limited` with
-    `retry_after` in seconds and writes nothing to the log. `src/send-limit.ts` holds the
-    numbers and the window.
+13. **The send limit (D5).** 30 sends a minute for a member and 6 for a stranger, per room,
+    over a rolling minute. A member's are counted per seat, in the room object's memory. A
+    stranger's are counted per account in the room, under `user:<userId>`, and stored. The
+    spec kept the count in memory, by member, for everyone; the section's review amended
+    both for strangers. Counted by handle, a script that joins the permanent code again and
+    again gets a fresh 6 with each handle, and again after a leave and a rejoin. Counted in
+    memory, a stranger could send 6, pause until the idle room object is evicted, about 30
+    seconds on, and send 6 more. A member keeps the seat's count, so a creator's several
+    agents in a busy swarm do not share one 30, and keeps it in memory, which keeps a write
+    off every send of the busiest senders. A stranger is a member who joined a public room
+    through its permanent code, recorded as `via: "permanent"` on the member row; the
+    creator, and anyone who joined with a 15-minute code, is never one. The hosted seat is
+    exempt. A refusal is `rate_limited` with `retry_after` in seconds and writes nothing to
+    the log. `src/send-limit.ts` holds the numbers, the window and the key.
 14. **Only `bellman_send` counts (R6).** That includes its `surface` kind and a keyed
     retry. The HTTP surface routes are not counted, because the dash's group drag writes
     one PUT per card and would pass 30.
@@ -97,7 +104,12 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
     before its append, so a send that fails after admission, such as one with a key
     conflict or one to a room that froze in the gap, still used its place. A send to a room
     that was already frozen is refused by the frozen check first and spends none. Both
-    append methods keep their return types.
+    append methods keep their return types. The call takes a `key` and not a member id:
+    `sendKeyFor` gives a stranger's `user:<userId>` and anyone else's the member id. A
+    store with storage keeps a stranger's key (`isStrangerKey`) as a row of the room
+    object, `sn:<key>`, written on each admission and holding only the sends still inside
+    the minute, so it never holds more than the limit and a refusal writes nothing: at most
+    6 small writes a minute per stranger. Every other key is the instance's memory.
 16. **Reports (D6).** A member files one with `bellman_report`, and a signed-in reader of
     a public room through the dash, which posts to `POST /rooms/:id/reports`. The reason
     is `spam`, `harassment`, `impersonation`, `illegal` or `other`, and a note is at most
@@ -160,8 +172,11 @@ Each entry names the spec's decision (D) or the plan's ruling (R) it records.
 - `creator_ban` is a new outbox kind and `report_purge` a new handler name on the
   registry's alarm. A build rolled back past `creator_ban` throws `outbox: unknown kind`,
   and the queue holds every row behind it (ADR 0006), so deployments roll forward.
-- Send counts are forgotten when a room's object sleeps after a quiet spell, which a
-  one-minute window tolerates.
+- A member's send count is forgotten when a room's object sleeps after a quiet spell, so
+  a member can send up to a second 30 across one, which a one-minute window tolerates.
+  A stranger's is stored and is not. Its row stays until the room is purged, one for each
+  account that has sent as a stranger and holding at most 6 times, and nothing sweeps a
+  row whose times have all left the window.
 - The panel's surface writes are not counted (R6). A stranger whose seat holds
   `write_surface` could write through the route uncounted, and no built-in preset gives a
   default seat that verb.

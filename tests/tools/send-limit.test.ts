@@ -184,6 +184,15 @@ describe("whose minute a send is counted in (spec \u{A7}2)", () => {
     expect((await send(first, "eight")).data, "and on the first").toMatchObject({ error: "rate_limited" });
   });
 
+  // What the agent is told is the artifact: a stranger's agent that reads "6 a minute" and takes another handle
+  // would spend its minute finding out the count is the account's.
+  it("tells the agent whose minute a send is counted in, and where the count is kept", async () => {
+    const { tools } = await (await h.connect(DEV_KEY.jesse)).listTools();
+    const doc = tools.find((t) => t.name === "bellman_send")!.description!;
+    expect(doc).toContain("(counted per seat, in memory)");
+    expect(doc).toContain("(counted per account in the room, and stored)");
+  });
+
   it("counts two strangers' accounts apart: one account's 6 leave the other's untouched", async () => {
     const room = await publicRoom(h);
     const [a, b] = [await h.connect(DEV_KEY.peer), await h.connect(DEV_KEY.outsider)];

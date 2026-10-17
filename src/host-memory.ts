@@ -67,6 +67,7 @@ export class MemoryHost {
         sent: (key) => store.hostEventFor(id, key),
       }),
       callModel: (body) => callMessages(fetcher, opts.modelUrl, opts.apiKey, body),
+      publicNumbers: (id, labels) => store.publicNumbers(id, labels),
       write: (id, e, units, now, key) => store.appendHostEvent(id, e, units, now, key),
       load: async (id) => this.#records.get(id) ?? emptyHostRecord(),
       save: async (id, record) => { this.#records.set(id, record); },

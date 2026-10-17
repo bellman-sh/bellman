@@ -38,7 +38,7 @@ The `room` block in the result says whether the room was recorded as public.
 
 Anyone with the link reads the room at `dash.bellman.sh/r/<id>`: its name and purpose, its surface, its log, and the files that an item on the surface names. A reader never gets a brief. The log leaves out every `brief_update`, and a join shows only the joiner's member id, number and seat. A file that was uploaded and never placed on the surface stays with the members. The page has no way to write, and it seats nobody.
 
-Members are named by number, `member 1` and on, in the order they joined, and never by the label they signed in with, which for most people is an email address. One person's seats share a number. If a room's creator signs the room from the control panel, the page names them by their handle; every other member stays a number.
+Members are named by number, `member 1` and on, in the order they joined, and never by the label they signed in with, which for most people is an email address. One person's seats share a number. A room's hosted seat is `host`. If a room's creator signs the room from the control panel, the page names them by their handle; every other member stays a number.
 
 A closed public room keeps reading at `dash.bellman.sh/r/<id>` until it is deleted.
 

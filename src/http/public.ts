@@ -13,12 +13,14 @@
  *
  * What a reader is shown is what a member is, less every brief (`publicReadEvent`), and with every
  * member named by number rather than by label (`byNumber`): a label is how a member signed in, an
- * email address for most, and a reader with the link is not owed it. Runtime-free, like rooms.ts
- * beside it: a web Request in, a Response out, for both servers and the tests.
+ * email address for most, and a reader with the link is not owed it. The hosted seat is `host`
+ * there, its own label, `host@bellman`, reading as an address too (`publicNames`). Runtime-free,
+ * like rooms.ts beside it: a web Request in, a Response out, for both servers and the tests.
  */
 import { isBlobId, type BlobStore } from "../blobs.js";
 import { publicRoomUrl } from "../codes.js";
 import { handleFromSegment } from "../handles.js";
+import { publicNames } from "../member-names.js";
 import { retentionOf, untrusted } from "../projections.js";
 import { publicReadEvent } from "../public-event.js";
 import { PUBLIC_NAME, roomNamed } from "../public-names.js";
@@ -77,20 +79,12 @@ function labelsIn(value: unknown, into = new Set<string>()): Set<string> {
 }
 
 /**
- * The name a public reader is shown for each member's label on a page: "member 1", "member 2", in
- * the order the labels first sat. The store numbers a label when it first seats it, and every later
- * seat with that label reads the number back (ADR 0019, D6), so a number never changes and a room
- * reads only the numbers of the labels the page names. The hosted seat keeps its own label, which
- * names no person and has no number. One person's handles share a label, and so share a number.
+ * `page` with every member's label as the name a reader is shown (`byNumber`), from the names
+ * `publicNames` gives the labels the page holds. The page's own reads and the hosted seat's prompt
+ * name members through that one function, so a member is called the same thing in both.
  */
-async function publicNames(store: BellmanStore, sessionId: string, page: unknown): Promise<Map<string, string>> {
-  const numbers = await store.publicNumbers(sessionId, [...labelsIn(page)]);
-  return new Map(Object.entries(numbers).map(([label, n]) => [label, `member ${n}`]));
-}
-
-/** `page` with every member's label as its number (`byNumber`), from the numbers the room gave them. */
 const numbered = async (store: BellmanStore, sessionId: string, page: unknown): Promise<unknown> =>
-  byNumber(page, await publicNames(store, sessionId, page));
+  byNumber(page, await publicNames(store, sessionId, labelsIn(page)));
 
 /**
  * `value` with every property named `label` that holds a member's label replaced by that member's
@@ -188,7 +182,7 @@ export async function publicRoutes(request: Request, deps: PublicRouteDeps): Pro
     // number byNumber gives the creator, which the page swaps for @handle wherever it appears. The
     // names are read off the room's own labels, as `numbered` reads them, and serve both.
     const [names, handle] = await Promise.all([
-      publicNames(deps.store, id, room),
+      publicNames(deps.store, id, labelsIn(room)),
       deps.store.bylineFor(session.createdBy, id),
     ]);
     const as = names.get(creator.label);

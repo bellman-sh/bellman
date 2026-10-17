@@ -10,6 +10,7 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { env, reset, abortAllDurableObjects } from "cloudflare:test";
+import { HOST_LABEL, HOST_MEMBER_ID, HOST_USER_ID } from "../src/host.js";
 import { DurableObjectStore } from "../src/store-do.js";
 import worker from "../src/worker.js";
 import { member, roomManifest, session } from "../tests/helpers/fixtures.js";
@@ -46,6 +47,32 @@ describe("public rooms through the Worker", () => {
     const byName = await call("/public/rooms/worker-room");
     expect(byName.status, await byName.clone().text()).toBe(200);
     expect((await call("/public/rooms/no-such-name")).status).toBe(404);
+  });
+
+  // The seat's stored label is host@bellman, which reads as an email address; a public reader is shown `host`.
+  it("names the hosted seat 'host' in a public room's log, and answers no read with its stored label", async () => {
+    const store = new DurableObjectStore(env as never);
+    // The seat's identity without a `host` block in the manifest: a hosted room's alarm would wake the real
+    // HostDO mid-test, and this program has no stub for the model here. The public read does not look at the block.
+    const seat = member({ memberId: HOST_MEMBER_ID, userId: HOST_USER_ID, label: HOST_LABEL, orgId: null, roomRole: "host" });
+    await store.createSession(session({ id: ROOM, manifest: roomManifest({ public: true }), members: [member(), seat] }));
+    const fromSeat = { fromMemberId: HOST_MEMBER_ID, fromUserId: HOST_USER_ID, fromLabel: HOST_LABEL, refId: null };
+    await store.appendEvent(ROOM, { ...fromSeat, type: "member_joined", payload: { member: { member_id: HOST_MEMBER_ID, label: HOST_LABEL, room_role: "host" } } });
+    await store.appendEvent(ROOM, { ...fromSeat, type: "message", payload: { kind: "question", text: "What shipped?", tick: 1 } });
+    for (const sub of ["", "/surface", "/events"]) {
+      const res = await call(`/public/rooms/${ROOM}${sub}`);
+      expect(res.status, sub).toBe(200);
+      expect(await res.text(), sub).not.toContain(HOST_LABEL);
+    }
+    const { events } = (await (await call(`/public/rooms/${ROOM}/events`)).json()) as {
+      events: { origin: { memberId: string; label: string }; data: { from: { label: string }; payload: unknown } }[];
+    };
+    expect(events.map((e) => [e.origin.memberId, e.origin.label, e.data.from.label])).toEqual([
+      [HOST_MEMBER_ID, "host", "host"], [HOST_MEMBER_ID, "host", "host"],
+    ]);
+    expect(events[0].data.payload).toEqual({ member: { member_id: HOST_MEMBER_ID, label: "host", room_role: "host" } });
+    // The control: the room still stores the label, so the reads above had something to hide.
+    expect((await store.eventsAfter(ROOM, 0)).map((e) => e.fromLabel)).toEqual([HOST_LABEL, HOST_LABEL]);
   });
 });
 
